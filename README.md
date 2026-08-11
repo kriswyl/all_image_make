@@ -34,7 +34,7 @@ npm run tauri:package:portable
 
 - 多渠道、多模型 ID 配置
 - OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task 和 Generic JSON 适配器
-- 文生图与单张参考图图生图，支持 PNG、JPEG、WebP（最大 10 MB）
+- 文生图与最多 8 张参考图图生图，支持 PNG、JPEG、WebP（单张最大 10 MB）
 - 文生图官方风格参数与高级 JSON 参数
 - Midjourney 异步任务轮询、取消和失败重试
 - URL/Base64 结果下载并保存到本地
@@ -42,7 +42,7 @@ npm run tauri:package:portable
 - API Key 仅从环境变量读取或保存在当前服务内存中
 - 默认阻止本地和内网目标地址，可按渠道显式放开
 
-当前版本支持文生图和单张参考图图生图。蒙版编辑、多参考图、模型能力识别和参数是否实际生效的判断仍不在当前范围内。
+当前版本支持文生图和最多 8 张参考图图生图。蒙版编辑、模型能力识别和参数是否实际生效的判断仍不在当前范围内。
 
 ## 运行要求
 

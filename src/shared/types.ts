@@ -49,6 +49,8 @@ export interface GenerationInput {
   channelId: string;
   model: string;
   prompt: string;
+  referenceImages?: ReferenceImageInput[];
+  /** @deprecated Kept for retrying tasks created before multi-image support. */
   referenceImage?: ReferenceImageInput;
   negativePrompt?: string;
   size?: string;

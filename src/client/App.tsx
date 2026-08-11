@@ -1,22 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
-import type { AdapterType, Channel, ChannelInput, Diagnostic, ReferenceImageInput, Task, TaskStatus } from "../shared/types";
+import type { AdapterType, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "channels" | "history";
 type Toast = { kind: "success" | "error"; message: string };
-type ReferenceImageState = ReferenceImageInput & { previewUrl: string; byteSize: number };
+type ReferenceImageState = { file: File; previewUrl: string };
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_REFERENCE_IMAGES = 8;
 const openAiSizeGroups = [
-  { label: "方形", sizes: ["256x256", "512x512", "768x768", "1024x1024", "2048x2048"] },
-  { label: "横向", sizes: ["1280x720", "1536x1024", "1792x1024", "2048x1152"] },
-  { label: "纵向", sizes: ["720x1280", "1024x1536", "1024x1792", "1152x2048"] },
+  { label: "方形", sizes: ["1024x1024", "2048x2048"] },
+  { label: "横向", sizes: ["1280x720", "1536x1024", "1600x1200", "2048x1152", "3840x2160"] },
+  { label: "纵向", sizes: ["720x1280", "1024x1536", "1200x1600", "1152x2048", "2160x3840"] },
 ] as const;
 
 const adapterLabels: Record<AdapterType, string> = {
@@ -210,32 +211,57 @@ function GenerateView(props: {
   const [weirdness, setWeirdness] = useState("");
   const [count, setCount] = useState(1);
   const [raw, setRaw] = useState("{}");
-  const [referenceImage, setReferenceImage] = useState<ReferenceImageState | null>(null);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
   const [readingImage, setReadingImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const referenceUrls = useRef(new Set<string>());
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const showAspectRatio = adapterType === "gemini-content" || adapterType === "midjourney-task";
   const showCount = adapterType !== "midjourney-task";
 
+  useEffect(() => () => {
+    referenceUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    referenceUrls.current.clear();
+  }, []);
+
   async function selectReferenceImage(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
-    if (!file) return;
-    const mimeType = referenceImageMimeType(file);
-    if (!mimeType) return props.onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图");
-    if (file.size > MAX_REFERENCE_IMAGE_BYTES) return props.onToast("error", "参考图不能超过 10 MB");
+    if (!files.length) return;
+    const remaining = MAX_REFERENCE_IMAGES - referenceImages.length;
+    if (files.length > remaining) return props.onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`);
+    const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
+    if (prepared.some((item) => !item.mimeType)) return props.onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图");
+    if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) return props.onToast("error", "单张参考图不能超过 10 MB");
     setReadingImage(true);
     try {
-      const previewUrl = await readFileAsDataUrl(file);
-      const base64 = previewUrl.slice(previewUrl.indexOf(",") + 1);
-      setReferenceImage({ base64, mimeType, fileName: file.name, previewUrl, byteSize: file.size });
+      const nextImages = prepared.map(({ file, mimeType }) => {
+        const previewUrl = URL.createObjectURL(file);
+        referenceUrls.current.add(previewUrl);
+        return { file, previewUrl };
+      });
+      setReferenceImages((current) => [...current, ...nextImages]);
     } catch {
       props.onToast("error", "无法读取参考图");
     } finally {
       setReadingImage(false);
     }
+  }
+
+  function removeReferenceImage(previewUrl: string) {
+    URL.revokeObjectURL(previewUrl);
+    referenceUrls.current.delete(previewUrl);
+    setReferenceImages((current) => current.filter((item) => item.previewUrl !== previewUrl));
+  }
+
+  function clearReferenceImages() {
+    referenceImages.forEach((item) => {
+      URL.revokeObjectURL(item.previewUrl);
+      referenceUrls.current.delete(item.previewUrl);
+    });
+    setReferenceImages([]);
   }
 
   async function generate() {
@@ -244,10 +270,8 @@ function GenerateView(props: {
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
     let requestedSize = size === "auto" ? undefined : size;
     if (size === "custom") {
-      const width = customDimension(customWidth);
-      const height = customDimension(customHeight);
-      if (width === undefined || height === undefined) return props.onToast("error", "自定义宽高必须是 64 到 8192 之间的整数");
-      requestedSize = `${width}x${height}`;
+      requestedSize = customSize(customWidth, customHeight);
+      if (!requestedSize) return props.onToast("error", "自定义尺寸须为 16 的倍数，最长边不超过 3840，比例不超过 3:1，总像素为 655360 到 8294400");
     }
     let rawParameters: Record<string, unknown>;
     try {
@@ -261,11 +285,6 @@ function GenerateView(props: {
     try {
       const task = await api.generate({
         channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(), negativePrompt: negativePrompt.trim() || undefined,
-        referenceImage: referenceImage ? {
-          base64: referenceImage.base64,
-          mimeType: referenceImage.mimeType,
-          fileName: referenceImage.fileName,
-        } : undefined,
         size: requestedSize,
         aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
         count,
@@ -289,7 +308,7 @@ function GenerateView(props: {
         chaos: adapterType === "midjourney-task" ? optionalNumber(chaos) : undefined,
         weirdness: adapterType === "midjourney-task" ? optionalNumber(weirdness) : undefined,
         rawParameters,
-      });
+      }, referenceImages.map((item) => item.file));
       props.onTask(task);
       props.onToast("success", "任务已提交");
     } catch (error) { props.onToast("error", error instanceof Error ? error.message : "提交失败"); }
@@ -299,7 +318,7 @@ function GenerateView(props: {
   return (
     <div className="page generate-page">
       <div className="page-header">
-        <div><h1>生成工作台</h1><span className="page-kicker">{referenceImage ? "IMAGE TO IMAGE" : "TEXT TO IMAGE"}</span></div>
+        <div><h1>生成工作台</h1><span className="page-kicker">{referenceImages.length ? "IMAGE TO IMAGE" : "TEXT TO IMAGE"}</span></div>
         <div className="header-selects">
           <label><span>渠道</span><select value={props.selectedChannelId} onChange={(event) => props.onChannelChange(event.target.value)}>
             <option value="">选择渠道</option>{props.channels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -320,20 +339,22 @@ function GenerateView(props: {
             <div className="reference-block">
               <div className="reference-heading">
                 <div><ImagePlus size={16} /><span>参考图</span></div>
-                {referenceImage ? <button type="button" className="icon-button compact" title="移除参考图" onClick={() => setReferenceImage(null)}><X size={15} /></button> : null}
+                <span className="reference-count">{referenceImages.length}/{MAX_REFERENCE_IMAGES}</span>
+                {referenceImages.length ? <button type="button" className="icon-button compact" title="移除全部参考图" onClick={clearReferenceImages}><X size={15} /></button> : null}
               </div>
-              <label className={`reference-picker ${referenceImage ? "has-image" : ""}`}>
-                <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={selectReferenceImage} disabled={readingImage || submitting} />
-                {referenceImage ? <>
-                  <img src={referenceImage.previewUrl} alt="参考图预览" />
-                  <span className="reference-file"><strong>{referenceImage.fileName}</strong><small>{formatFileSize(referenceImage.byteSize)}</small></span>
-                  <Upload size={17} />
-                </> : <>
+              <div className={`reference-picker ${referenceImages.length ? "has-image" : ""}`}>
+                <label className="reference-add-tile" title="添加参考图">
+                  <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={selectReferenceImage} disabled={readingImage || submitting || referenceImages.length >= MAX_REFERENCE_IMAGES} />
                   <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                  <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 最大 10 MB</small></span>
+                  <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 单张最大 10 MB</small></span>
                   <Upload size={17} />
-                </>}
-              </label>
+                </label>
+                {referenceImages.map((item, index) => <div className="reference-thumb" key={item.previewUrl}>
+                  <img src={item.previewUrl} alt={`参考图 ${index + 1}`} />
+                  <button type="button" className="reference-remove" title={`移除参考图 ${index + 1}`} onClick={() => removeReferenceImage(item.previewUrl)}><X size={13} /></button>
+                  <span>{item.file.name}</span>
+                </div>)}
+              </div>
             </div>
             <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
 
@@ -345,9 +366,9 @@ function GenerateView(props: {
                 <option value="custom">自定义</option>
               </select></label> : null}
               {isOpenAi && size === "custom" ? <div className="custom-size-fields wide-field" aria-label="自定义尺寸">
-                <label><span>宽度</span><input type="number" min={64} max={8192} step={1} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
+                <label><span>宽度</span><input type="number" min={64} max={3840} step={16} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
                 <span aria-hidden="true">x</span>
-                <label><span>高度</span><input type="number" min={64} max={8192} step={1} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
+                <label><span>高度</span><input type="number" min={64} max={3840} step={16} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
               </div> : null}
               {showAspectRatio ? <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label> : null}
               {isOpenAi ? <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label> : null}
@@ -575,30 +596,22 @@ function optionalNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function customDimension(value: string) {
-  if (!/^\d+$/.test(value.trim())) return undefined;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 64 && parsed <= 8192 ? parsed : undefined;
+function customSize(widthValue: string, heightValue: string) {
+  if (!/^\d+$/.test(widthValue.trim()) || !/^\d+$/.test(heightValue.trim())) return undefined;
+  const width = Number(widthValue);
+  const height = Number(heightValue);
+  const pixels = width * height;
+  const ratio = Math.max(width, height) / Math.min(width, height);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64 || width > 3840 || height > 3840) return undefined;
+  if (width % 16 !== 0 || height % 16 !== 0 || ratio > 3 || pixels < 655360 || pixels > 8294400) return undefined;
+  return `${width}x${height}`;
 }
 
-function referenceImageMimeType(file: File): ReferenceImageInput["mimeType"] | null {
+function referenceImageMimeType(file: File): "image/png" | "image/jpeg" | "image/webp" | null {
   if (file.type === "image/png" || file.type === "image/jpeg" || file.type === "image/webp") return file.type;
   const extension = file.name.split(".").pop()?.toLowerCase();
   if (extension === "png") return "image/png";
   if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
   if (extension === "webp") return "image/webp";
   return null;
-}
-
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("invalid result"));
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function formatFileSize(bytes: number) {
-  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

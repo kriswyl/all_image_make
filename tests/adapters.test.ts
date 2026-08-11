@@ -13,6 +13,7 @@ const referenceImage = {
   mimeType: "image/png" as const,
   fileName: "source.png",
 };
+const referenceImage2 = { ...referenceImage, fileName: "source-2.png" };
 
 describe("adapter request building", () => {
   it("maps common image parameters and preserves raw parameters", () => {
@@ -33,7 +34,7 @@ describe("adapter request building", () => {
 
   it("builds an OpenAI multipart edit request without exposing image data", () => {
     const request = buildGenerationRequest(channel, {
-      channelId: channel.id, model: "image-model", prompt: "restyle", referenceImage,
+      channelId: channel.id, model: "image-model", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
       size: "1024x1024", count: 1, rawParameters: { quality: "high" },
     }, "secret");
     expect(request.url).toBe("https://relay.example.com/v1/images/edits");
@@ -41,26 +42,42 @@ describe("adapter request building", () => {
     expect(request.formData?.get("model")).toBe("image-model");
     expect(request.formData?.get("prompt")).toBe("restyle");
     expect(request.formData?.get("quality")).toBe("high");
-    expect(request.formData?.get("image")).toBeInstanceOf(Blob);
+    expect(request.formData?.getAll("image[]")).toHaveLength(2);
     const diagnostic = requestForDiagnostic(request);
-    expect(diagnostic.body).toMatchObject({ image: { fileName: "source.png", mimeType: "image/png" } });
+    expect(diagnostic.body).toMatchObject({ "image[]": [{ fileName: "source.png" }, { fileName: "source-2.png" }] });
+    expect(JSON.stringify(diagnostic)).not.toContain(referenceImage.base64);
+  });
+
+  it("redacts raw image fields in multipart diagnostics", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
+      rawParameters: { "image[]": [referenceImage.base64, referenceImage2.base64], quality: "high" },
+    }, "secret");
+    const diagnostic = requestForDiagnostic(request);
+    const diagnosticBody = diagnostic.body as Record<string, unknown>;
+    expect(diagnosticBody["image[]"]).toEqual([
+      `[IMAGE_DATA ${Buffer.byteLength(referenceImage.base64, "base64")} bytes]`,
+      `[IMAGE_DATA ${Buffer.byteLength(referenceImage2.base64, "base64")} bytes]`,
+    ]);
     expect(JSON.stringify(diagnostic)).not.toContain(referenceImage.base64);
   });
 
   it("maps reference images for JSON adapters and lets raw parameters override defaults", () => {
     const chat = buildGenerationRequest({ ...channel, adapterType: "openai-chat-image", endpoint: "/v1/chat/completions" }, {
-      channelId: channel.id, model: "chat-image", prompt: "restyle", referenceImage,
+      channelId: channel.id, model: "chat-image", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
     }, "secret");
     expect(chat.body?.messages).toMatchObject([{ content: [
       { type: "text", text: "restyle" },
       { type: "image_url", image_url: { url: expect.stringContaining("data:image/png;base64,") } },
+      { type: "image_url", image_url: { url: expect.stringContaining("data:image/png;base64,") } },
     ] }]);
 
     const gemini = buildGenerationRequest({ ...channel, adapterType: "gemini-content", endpoint: "/v1beta/models/{model}:generateContent" }, {
-      channelId: channel.id, model: "gemini-image", prompt: "restyle", referenceImage,
+      channelId: channel.id, model: "gemini-image", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
     }, "secret");
     expect(gemini.body?.contents).toMatchObject([{ parts: [
       { inlineData: { mimeType: "image/png", data: referenceImage.base64 } },
+      { inlineData: { mimeType: "image/png", data: referenceImage2.base64 } },
       { text: "restyle" },
     ] }]);
 
@@ -71,9 +88,12 @@ describe("adapter request building", () => {
     expect(midjourney.body?.base64Array).toEqual(["relay-override"]);
 
     const generic = buildGenerationRequest({ ...channel, adapterType: "generic-json" }, {
-      channelId: channel.id, model: "generic", prompt: "restyle", referenceImage,
+      channelId: channel.id, model: "generic", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
     }, "secret");
-    expect(generic.body?.image).toBe(`data:image/png;base64,${referenceImage.base64}`);
+    expect(generic.body?.images).toEqual([
+      `data:image/png;base64,${referenceImage.base64}`,
+      `data:image/png;base64,${referenceImage2.base64}`,
+    ]);
   });
 
   it("builds Gemini content shape", () => {

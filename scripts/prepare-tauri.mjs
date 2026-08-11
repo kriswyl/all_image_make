@@ -7,7 +7,7 @@ const serverTarget = path.join(projectDir, "src-tauri", "resources", "server");
 const binaryDir = path.join(projectDir, "src-tauri", "binaries");
 const packageJsonPath = path.join(projectDir, "package.json");
 const packageLockPath = path.join(projectDir, "package-lock.json");
-const serverDependencies = ["express", "zod"];
+const serverDependencies = ["express", "multer", "zod"];
 const targetTriple = process.env.TAURI_ENV_TARGET_TRIPLE || "x86_64-pc-windows-msvc";
 const nodeTarget = path.join(binaryDir, `node-${targetTriple}.exe`);
 

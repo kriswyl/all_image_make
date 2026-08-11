@@ -1,10 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
 import fs from "node:fs";
+import multer from "multer";
 import { z } from "zod";
 import type { Channel, ChannelInput, GenerationInput } from "../shared/types.js";
 import { AppDatabase, type DbChannel } from "./db.js";
-import { AppError, TaskRunner, normalizeError } from "./tasks.js";
+import { AppError, TaskRunner, normalizeError, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, redact } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
 
@@ -12,6 +13,14 @@ const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "m
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
+const MAX_REFERENCE_IMAGES = 8;
+const referenceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: MAX_REFERENCE_IMAGES, fields: 1 },
+  fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
+    ? callback(null, true)
+    : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 参考图", 400)),
+});
 
 const channelSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -37,6 +46,11 @@ const generationSchema = z.object({
     mimeType: z.enum(referenceImageMimeTypes),
     fileName: z.string().trim().min(1).max(200),
   }).optional(),
+  referenceImages: z.array(z.object({
+    base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    mimeType: z.enum(referenceImageMimeTypes),
+    fileName: z.string().trim().min(1).max(200),
+  })).max(MAX_REFERENCE_IMAGES).optional(),
   negativePrompt: z.string().max(10000).optional(),
   size: z.string().max(60).optional(),
   aspectRatio: z.string().max(20).optional(),
@@ -154,9 +168,23 @@ export function createApp(options: { dataDir?: string } = {}) {
     }
   }));
 
-  app.post("/api/generations", asyncHandler(async (req, res) => {
-      const input = generationSchema.parse(req.body) as GenerationInput;
-      const task = await runner.create(input);
+  app.post("/api/generations", referenceUpload.array("referenceImages", MAX_REFERENCE_IMAGES), asyncHandler(async (req, res) => {
+      const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+      let body = req.body;
+      if (typeof req.body.payload === "string") {
+        try { body = JSON.parse(req.body.payload); }
+        catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
+      }
+      const uploadedImages: ReferenceImageUpload[] = uploadedFiles.map((file) => ({
+        bytes: file.buffer,
+        mimeType: file.mimetype as ReferenceImageUpload["mimeType"],
+        fileName: file.originalname,
+      }));
+      const input = generationSchema.parse({
+        ...body,
+        ...(uploadedImages.length ? { referenceImages: undefined, referenceImage: undefined } : {}),
+      }) as GenerationInput;
+      const task = await runner.create(input, uploadedImages);
       res.status(202).json(ok(task));
   }));
 
@@ -202,6 +230,10 @@ export function createApp(options: { dataDir?: string } = {}) {
 
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const requestId = crypto.randomUUID();
+    if (error instanceof multer.MulterError) {
+      const message = error.code === "LIMIT_FILE_SIZE" ? "单张参考图不能超过 10 MB" : "参考图最多上传 8 张";
+      return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
+    }
     if (error instanceof z.ZodError) {
       return res.status(400).json(fail("INVALID_INPUT", "输入数据无效", requestId, error.issues));
     }

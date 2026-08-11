@@ -18,7 +18,7 @@
 
 - 多渠道和多模型 ID。
 - OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task、Generic JSON 适配器。
-- 单张参考图图生图；上传支持 PNG、JPEG、WebP，最大 10 MB。
+- 最多 8 张参考图图生图；上传支持 PNG、JPEG、WebP，单张最大 10 MB。
 - 文生图基础参数、高级 JSON 参数透传。
 - OpenAI、Gemini、Midjourney 的常用官方参数。
 - Midjourney 异步轮询、取消和失败重试。

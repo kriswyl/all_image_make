@@ -89,10 +89,12 @@ describe("generation API", () => {
       authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "", models: ["mock-image"],
       allowPrivateNetwork: true, enabled: true,
     }).expect(201);
-    const createResponse = await request(app).post("/api/generations").send({
-      channelId: channelResponse.body.data.id, model: "mock-image", prompt: "edit image",
-      referenceImage: { base64: pngBase64, mimeType: "image/png", fileName: "source.png" },
-    }).expect(202);
+    const pngBytes = Buffer.from(pngBase64, "base64");
+    const createResponse = await request(app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId: channelResponse.body.data.id, model: "mock-image", prompt: "edit image" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("referenceImages", pngBytes, "source-2.png")
+      .expect(202);
     const taskId = createResponse.body.data.id as string;
     let task = createResponse.body.data;
     for (let index = 0; index < 30 && task.status !== "succeeded"; index += 1) {
@@ -102,16 +104,18 @@ describe("generation API", () => {
 
     expect(task.status).toBe("succeeded");
     expect(receivedContentType).toContain("multipart/form-data; boundary=");
-    expect(receivedBody).toContain('name="image"; filename="source.png"');
+    expect(receivedBody).toContain('name="image[]"; filename="source.png"');
+    expect(receivedBody).toContain('name="image[]"; filename="source-2.png"');
     expect(receivedBody).toContain('name="prompt"');
     expect(receivedBody).toContain("edit image");
     const storedInput = context.db.getTaskRow(taskId)?.inputJson ?? "";
     expect(storedInput).not.toContain(pngBase64);
-    expect(JSON.parse(storedInput).referenceImage).toMatchObject({ mimeType: "image/png", byteSize: 68 });
-    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(1);
+    expect(JSON.parse(storedInput).referenceImages).toHaveLength(2);
+    expect(JSON.parse(storedInput).referenceImages[0]).toMatchObject({ mimeType: "image/png", byteSize: 68 });
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(2);
     const diagnostics = (await request(app).get(`/api/generations/${taskId}/diagnostics`).expect(200)).body.data;
     expect(JSON.stringify(diagnostics[0].request)).not.toContain(pngBase64);
-    expect(diagnostics[0].request.body.image).toMatchObject({ fileName: "source.png", mimeType: "image/png", byteSize: 68 });
+    expect(diagnostics[0].request.body["image[]"]).toMatchObject([{ fileName: "source.png" }, { fileName: "source-2.png" }]);
 
     const retryResponse = await request(app).post(`/api/generations/${taskId}/retry`).expect(202);
     const retryTaskId = retryResponse.body.data.id as string;
@@ -122,6 +126,6 @@ describe("generation API", () => {
     }
     expect(retryTask.status).toBe("succeeded");
     expect(context.db.getTaskRow(retryTaskId)?.inputJson).not.toContain(pngBase64);
-    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(2);
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(4);
   });
 });

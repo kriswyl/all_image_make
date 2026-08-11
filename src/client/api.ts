@@ -10,9 +10,10 @@ function apiUrl(url: string) {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(apiUrl(url), {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: isFormData ? { ...(init?.headers ?? {}) } : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   const payload = await response.json() as ApiResponse<T>;
   if (!response.ok || !payload.ok || payload.data === undefined) {
@@ -29,7 +30,14 @@ export const api = {
   }),
   deleteChannel: (id: string) => request<{ deleted: true }>(`/api/channels/${id}`, { method: "DELETE" }),
   testChannel: (id: string) => request<{ reachable: boolean; httpStatus: number; durationMs?: number; message?: string }>(`/api/channels/${id}/test`, { method: "POST" }),
-  generate: (input: GenerationInput) => request<Task>("/api/generations", { method: "POST", body: JSON.stringify(input) }),
+  generate: (input: GenerationInput, referenceFiles: File[] = []) => {
+    if (!referenceFiles.length) return request<Task>("/api/generations", { method: "POST", body: JSON.stringify(input) });
+    const formData = new FormData();
+    const payload = { ...input, referenceImages: undefined, referenceImage: undefined };
+    formData.append("payload", JSON.stringify(payload));
+    referenceFiles.forEach((file) => formData.append("referenceImages", file, file.name));
+    return request<Task>("/api/generations", { method: "POST", body: formData });
+  },
   task: (id: string) => request<Task>(`/api/generations/${id}`),
   tasks: () => request<Task[]>("/api/generations"),
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),

@@ -51,6 +51,10 @@ function imageDataUrl(input: NonNullable<GenerationInput["referenceImage"]>) {
   return `data:${input.mimeType};base64,${input.base64}`;
 }
 
+function referenceImages(input: GenerationInput) {
+  return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
+}
+
 function imageSummary(input: NonNullable<GenerationInput["referenceImage"]>) {
   return { fileName: input.fileName, mimeType: input.mimeType, byteSize: Buffer.byteLength(input.base64, "base64") };
 }
@@ -68,6 +72,9 @@ function summarizeImageData(value: unknown): unknown {
   if (typeof value === "string" && /^data:image\/[^;]+;base64,/i.test(value)) {
     const base64 = value.slice(value.indexOf(",") + 1);
     return `[IMAGE_DATA ${Buffer.byteLength(base64, "base64")} bytes]`;
+  }
+  if (typeof value === "string" && /^[A-Za-z0-9+/]{64,}={0,2}$/.test(value)) {
+    return `[IMAGE_DATA ${Buffer.byteLength(value, "base64")} bytes]`;
   }
   if (Array.isArray(value)) return value.map(summarizeImageData);
   if (!isRecord(value)) return value;
@@ -134,8 +141,9 @@ function applyAuth(url: string, headers: Record<string, string>, channel: DbChan
 }
 
 export function buildGenerationRequest(channel: DbChannel, input: GenerationInput, key: string): PreparedRequest {
+  const references = referenceImages(input);
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
-  if (input.referenceImage && channel.adapterType === "openai-images"
+  if (references.length && channel.adapterType === "openai-images"
     && (!channel.endpoint || channel.endpoint === defaultEndpoint(channel.adapterType))) {
     endpoint = "/v1/images/edits";
   }
@@ -147,7 +155,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   let diagnosticBody: Record<string, unknown> | undefined;
   const raw = input.rawParameters ?? {};
 
-  if (channel.adapterType === "openai-images" && input.referenceImage) {
+  if (channel.adapterType === "openai-images" && references.length) {
     const fields = compact({
       model: input.model,
       prompt: input.prompt,
@@ -156,21 +164,28 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     });
     formData = new FormData();
     for (const [field, value] of Object.entries(fields)) {
-      if (field !== "image") appendFormValue(formData, field, value);
+      if (field !== "image" && field !== "image[]") appendFormValue(formData, field, value);
     }
-    if (Object.hasOwn(fields, "image")) {
-      appendFormValue(formData, "image", fields.image);
+    if (Object.hasOwn(fields, "image") || Object.hasOwn(fields, "image[]")) {
+      if (Object.hasOwn(fields, "image")) appendFormValue(formData, "image", fields.image);
+      else appendFormValue(formData, "image[]", fields["image[]"]);
     } else {
-      const bytes = Buffer.from(input.referenceImage.base64, "base64");
-      formData.append("image", new Blob([Uint8Array.from(bytes)], { type: input.referenceImage.mimeType }), input.referenceImage.fileName);
+      const fieldName = references.length > 1 ? "image[]" : "image";
+      for (const reference of references) {
+        const bytes = Buffer.from(reference.base64, "base64");
+        formData.append(fieldName, new Blob([Uint8Array.from(bytes)], { type: reference.mimeType }), reference.fileName);
+      }
     }
-    diagnosticBody = { ...fields, image: Object.hasOwn(fields, "image") ? summarizeImageData(fields.image) : imageSummary(input.referenceImage) };
+    const rawImageField = Object.hasOwn(fields, "image") ? "image" : Object.hasOwn(fields, "image[]") ? "image[]" : undefined;
+    const rawImage = rawImageField ? summarizeImageData(fields[rawImageField]) : undefined;
+    const diagnosticFields = Object.fromEntries(Object.entries(fields).filter(([field]) => field !== "image" && field !== "image[]"));
+    diagnosticBody = {
+      ...diagnosticFields,
+      ...(rawImageField ? { [rawImageField]: rawImage } : references.length > 1 ? { "image[]": references.map(imageSummary) } : { image: imageSummary(references[0]) }),
+    };
   } else if (channel.adapterType === "openai-chat-image") {
-    const content = input.referenceImage
-      ? [
-          { type: "text", text: input.prompt },
-          { type: "image_url", image_url: { url: imageDataUrl(input.referenceImage) } },
-        ]
+    const content = references.length
+      ? [{ type: "text", text: input.prompt }, ...references.map((reference) => ({ type: "image_url", image_url: { url: imageDataUrl(reference) } }))]
       : input.prompt;
     body = {
       model: input.model,
@@ -181,8 +196,8 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   } else if (channel.adapterType === "gemini-content") {
     const text = input.negativePrompt ? `${input.prompt}\n\nNegative prompt: ${input.negativePrompt}` : input.prompt;
     const { generationConfig: _rawGenerationConfig, ...rawBody } = raw;
-    const parts: Array<Record<string, unknown>> = input.referenceImage
-      ? [{ inlineData: { mimeType: input.referenceImage.mimeType, data: input.referenceImage.base64 } }, { text }]
+    const parts: Array<Record<string, unknown>> = references.length
+      ? [...references.map((reference) => ({ inlineData: { mimeType: reference.mimeType, data: reference.base64 } })), { text }]
       : [{ text }];
     body = {
       contents: [{ role: "user", parts }],
@@ -202,15 +217,16 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       chaos: input.chaos,
       weirdness: input.weirdness,
       seed: input.seed,
-      base64Array: input.referenceImage ? [imageDataUrl(input.referenceImage)] : undefined,
+      base64Array: references.length ? references.map(imageDataUrl) : undefined,
       ...raw,
     });
   } else {
+    const referencePayload = references.length === 1 ? { image: imageDataUrl(references[0]) } : references.length > 1 ? { images: references.map(imageDataUrl) } : {};
     body = compact({
       model: input.model,
       prompt: input.prompt,
       ...openAiImageParameters(input),
-      image: input.referenceImage ? imageDataUrl(input.referenceImage) : undefined,
+      ...referencePayload,
       ...raw,
     });
   }
