@@ -14,6 +14,22 @@ afterEach(async () => {
 });
 
 describe("generation API", () => {
+  it("seeds the bundled VectorEngine channels for a fresh data directory", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-defaults-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const bootstrap = (await request(app).get("/api/bootstrap").expect(200)).body.data;
+    expect(bootstrap.channels).toHaveLength(4);
+    expect(bootstrap.channels.map((channel: { name: string }) => channel.name)).toEqual([
+      "向量引擎-gpt-image-2-c",
+      "向量引擎-香蕉生图",
+      "向量引擎-mj",
+      "向量引擎-gpt-image-2",
+    ]);
+    expect(bootstrap.channels.every((channel: { secretEnv: string; apiKey?: string }) => channel.secretEnv === "VECTORENGINE_API_KEY" && !("apiKey" in channel))).toBe(true);
+  });
+
   it("persists a channel, generates an image and records diagnostics", async () => {
     const mockServer = http.createServer((req, res) => {
       if (req.url === "/v1/images/generations" && req.method === "POST") {

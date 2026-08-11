@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import multer from "multer";
 import { z } from "zod";
+import { APP_VERSION } from "../shared/app-config.js";
 import type { Channel, ChannelInput, GenerationInput } from "../shared/types.js";
 import { AppDatabase, type DbChannel } from "./db.js";
 import { AppError, TaskRunner, normalizeError, type ReferenceImageUpload } from "./tasks.js";
@@ -109,13 +110,13 @@ export function createApp(options: { dataDir?: string } = {}) {
     next();
   });
 
-  app.get("/api/health", (_req, res) => res.json(ok({ status: "ok", version: "0.1.0" })));
+  app.get("/api/health", (_req, res) => res.json(ok({ status: "ok", version: APP_VERSION })));
 
   app.get("/api/bootstrap", (_req, res) => {
     res.json(ok({
       channels: db.listChannels().map((channel) => publicChannel(channel, sessionKeys)),
       tasks: db.listTaskViews(40),
-      service: { version: "0.1.0", dataPath: db.filePath },
+      service: { version: APP_VERSION, dataPath: db.filePath },
     }));
   });
 

@@ -5,6 +5,7 @@ import {
   Sparkles, Square, Trash2, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
+import { APP_VERSION, VECTORENGINE_KEY_ENV, VECTORENGINE_KEY_PLACEHOLDER } from "../shared/app-config";
 import type { AdapterType, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "channels" | "history";
@@ -121,9 +122,10 @@ export function App() {
           <span>Image Relay</span>
         </button>
         <div className="topbar-status">
+          <span className="support-label">向量引擎支持</span>
           <span className="status-dot" />
           <span>本地服务</span>
-          <span className="version">v0.1</span>
+          <span className="version">v{APP_VERSION}</span>
         </div>
       </header>
 
@@ -150,6 +152,7 @@ export function App() {
             onChannelChange={selectChannel}
             onModelChange={setSelectedModel}
             onAddChannel={() => setEditorChannel(null)}
+            onConfigureChannel={(channel) => setEditorChannel(channel)}
             onTask={(task) => {
               setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
               setActiveTaskId(task.id);
@@ -181,7 +184,7 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
 
 function GenerateView(props: {
   channels: Channel[]; selectedChannelId: string; selectedModel: string; activeTask: Task | null;
-  onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void;
+  onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void; onConfigureChannel: (channel: Channel) => void;
   onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
 }) {
   const [prompt, setPrompt] = useState("");
@@ -413,7 +416,7 @@ function GenerateView(props: {
               <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} />
             </details>
             <div className="submit-row">
-              {channel && !channel.hasKey ? <span className="key-warning"><KeyRound size={15} />未配置密钥</span> : <span />}
+              {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : <span />}
               <button className="primary-button generate-button" onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel}>
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />}生成图片
               </button>
@@ -512,7 +515,7 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel | null;
   const [form, setForm] = useState(() => ({
     name: channel?.name ?? "", baseUrl: channel?.baseUrl ?? "", adapterType: channel?.adapterType ?? "openai-images" as AdapterType,
     authType: channel?.authType ?? "bearer" as ChannelInput["authType"], authHeaderName: channel?.authHeaderName ?? "",
-    secretEnv: channel?.secretEnv ?? "VECTORENGINE_API_KEY", endpoint: channel?.endpoint ?? "", statusEndpoint: channel?.statusEndpoint ?? "",
+    secretEnv: channel?.secretEnv ?? VECTORENGINE_KEY_ENV, endpoint: channel?.endpoint ?? "", statusEndpoint: channel?.statusEndpoint ?? "",
     modelsText: channel?.models.join("\n") ?? "", apiKey: "", allowPrivateNetwork: channel?.allowPrivateNetwork ?? false, enabled: channel?.enabled ?? true,
   }));
   const [saving, setSaving] = useState(false);
@@ -548,7 +551,7 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel | null;
           <label><span>Base URL</span><input required type="url" value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://relay.example.com" /></label>
           <div className="form-grid two"><label><span>生成路径</span><input value={form.endpoint} onChange={(event) => update("endpoint", event.target.value)} placeholder={defaults.endpoint} /></label>{form.adapterType === "midjourney-task" ? <label><span>状态路径</span><input value={form.statusEndpoint} onChange={(event) => update("statusEndpoint", event.target.value)} placeholder={defaults.statusEndpoint} /></label> : <label><span>鉴权方式</span><select value={form.authType} onChange={(event) => update("authType", event.target.value as ChannelInput["authType"])}><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom-header">自定义 Header</option><option value="query">Query 参数</option><option value="none">无需鉴权</option></select></label>}</div>
           {form.adapterType === "midjourney-task" ? <label><span>鉴权方式</span><select value={form.authType} onChange={(event) => update("authType", event.target.value as ChannelInput["authType"])}><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom-header">自定义 Header</option><option value="query">Query 参数</option><option value="none">无需鉴权</option></select></label> : null}
-          {form.authType !== "none" ? <div className="form-grid two"><label><span>环境变量</span><input value={form.secretEnv} onChange={(event) => update("secretEnv", event.target.value)} placeholder="RELAY_API_KEY" /></label><label><span>API Key</span><input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} placeholder={channel?.hasKey ? "已配置，留空不修改" : "仅保存在本次服务会话"} /></label></div> : null}
+          {form.authType !== "none" ? <div className="form-grid two"><label><span>环境变量</span><input value={form.secretEnv} onChange={(event) => update("secretEnv", event.target.value)} placeholder={VECTORENGINE_KEY_ENV} /></label><label><span>API Key</span><input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} placeholder={channel?.hasKey ? "已配置，留空不修改" : form.baseUrl.includes("vectorengine.cn") ? VECTORENGINE_KEY_PLACEHOLDER : "仅保存在本次服务会话"} /></label></div> : null}
           {form.authType === "custom-header" || form.authType === "query" ? <label><span>{form.authType === "query" ? "参数名" : "Header 名称"}</span><input value={form.authHeaderName} onChange={(event) => update("authHeaderName", event.target.value)} placeholder={form.authType === "query" ? "key" : "x-api-key"} /></label> : null}
           <label><span>模型 ID</span><textarea required className="models-input" value={form.modelsText} onChange={(event) => update("modelsText", event.target.value)} placeholder={"每行一个模型，例如：\ngpt-image-2\ngemini-image"} /></label>
           <div className="toggle-row"><Toggle checked={form.enabled} onChange={(value) => update("enabled", value)} label="启用渠道" /><Toggle checked={form.allowPrivateNetwork} onChange={(value) => update("allowPrivateNetwork", value)} label="允许本地/内网地址" /></div>

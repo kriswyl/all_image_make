@@ -3,10 +3,13 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectDir = process.cwd();
+const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
+const version = String(packageJson.version);
 const releaseDir = path.join(projectDir, "src-tauri", "target", "release");
 const artifactDir = path.join(projectDir, "artifacts");
-const portableDir = path.join(artifactDir, "Image-Relay-Studio-portable-win-x64");
-const zipPath = path.join(artifactDir, "Image-Relay-Studio-portable-win-x64.zip");
+const artifactName = `Image-Relay-Studio-v${version}-portable-win-x64`;
+const portableDir = path.join(artifactDir, artifactName);
+const zipPath = path.join(artifactDir, `${artifactName}.zip`);
 
 const requiredPaths = [
   path.join(releaseDir, "image_relay_studio.exe"),
@@ -33,10 +36,11 @@ fs.cpSync(path.join(releaseDir, "resources"), path.join(portableDir, "resources"
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [
-    "Image Relay Studio portable Windows build",
+    `Image Relay Studio v${version} portable Windows build`,
     "",
     "Run image_relay_studio.exe. Keep node.exe and resources\\ next to it.",
-    "Configure the relay API key inside the app or through RELAY_API_KEY.",
+    "Configure the VectorEngine API key inside the app or through VECTORENGINE_API_KEY.",
+    "The app includes default VectorEngine channels; replace {向量引擎key} with your own key.",
     "User data: %APPDATA%\\com.imagerelay.studio\\data",
     "",
   ].join("\r\n"),

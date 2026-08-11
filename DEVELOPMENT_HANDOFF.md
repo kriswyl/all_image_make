@@ -17,6 +17,7 @@
 ## 已实现能力
 
 - 多渠道和多模型 ID。
+- 新建数据目录自动内置 4 个向量引擎默认渠道；已有数据目录不覆盖。
 - OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task、Generic JSON 适配器。
 - 最多 8 张参考图图生图；上传支持 PNG、JPEG、WebP，单张最大 10 MB。
 - 文生图基础参数、高级 JSON 参数透传。
@@ -29,7 +30,7 @@
 
 ## API Key 规则
 
-渠道的 Base URL、适配器、模型和 API Key 在应用中配置。API Key 可以通过环境变量 `RELAY_API_KEY` 提供，也可以在渠道界面临时输入。临时输入的密钥只在当前 Node 进程内存中使用，不要提交到 GitHub，也不要写入交接文档。
+渠道的 Base URL、适配器、模型和 API Key 在应用中配置。内置向量引擎渠道默认读取 `VECTORENGINE_API_KEY`，其他渠道也可以使用自定义环境变量，或在渠道界面临时输入。临时输入的密钥只在当前 Node 进程内存中使用，不要提交到 GitHub，也不要写入交接文档。
 
 换电脑后需要重新配置密钥：
 
@@ -70,6 +71,8 @@ npm run dev
 
 ## Windows release 构建
 
+首个发布版本和版本号同步流程见 `PACKAGING.md`。
+
 先关闭正在运行的 Tauri 程序，再执行：
 
 ```powershell
@@ -89,7 +92,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/Image-Relay-Studio-portable-win-x64/` 和 `artifacts/Image-Relay-Studio-portable-win-x64.zip`。
+输出位于 `artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64/` 和 `artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64.zip`。
 
 生成用于换电脑继续开发的源码包：
 
@@ -97,7 +100,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/Image-Relay-Studio-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/Image-Relay-Studio-v1.0.0-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 

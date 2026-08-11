@@ -1,6 +1,6 @@
 {
   "name": "image-relay-studio",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,11 @@
     "tauri:prepare": "node scripts/prepare-tauri.mjs",
     "tauri:build:exe": "tauri build --no-bundle --ci",
     "tauri:package:portable": "node scripts/package-portable.mjs",
+    "tauri:package:installer": "node scripts/package-installer.mjs",
     "tauri:package:source": "node scripts/package-source.mjs",
+    "version:set": "node scripts/set-version.mjs",
+    "release:portable": "npm test && npm run tauri:build:exe && npm run tauri:package:portable",
+    "release:installer": "npm test && npm run tauri:build && npm run tauri:package:installer",
     "tauri:build": "tauri build",
     "start": "node dist/server/server/index.js",
     "test": "vitest run --config vitest.config.ts"

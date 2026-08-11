@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import { DEFAULT_CHANNELS } from "../shared/app-config.js";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset } from "../shared/types.js";
 
 export interface DbChannel {
@@ -106,6 +107,13 @@ export class AppDatabase {
         created_at TEXT NOT NULL
       );
     `);
+    this.seedDefaultChannels();
+  }
+
+  private seedDefaultChannels() {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM channels").get() as { count: number };
+    if (Number(row.count) > 0) return;
+    for (const channel of DEFAULT_CHANNELS) this.saveChannel(channel.input, channel.id);
   }
 
   close() {

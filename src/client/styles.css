@@ -70,6 +70,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 }
 
 .topbar-status { display: flex; align-items: center; gap: 8px; color: #cdd4ce; font-size: 12px; }
+.support-label { color: #b9e3c5; font-weight: 700; }
 .status-dot { width: 7px; height: 7px; background: #4ecb80; border-radius: 50%; box-shadow: 0 0 0 3px rgba(78, 203, 128, 0.12); }
 .version { padding-left: 8px; color: #919b93; border-left: 1px solid #4a514b; }
 
@@ -191,7 +192,8 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .advanced-panel[open] .details-chevron { transform: rotate(90deg); }
 .json-input { min-height: 108px; margin-bottom: 14px; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; line-height: 1.55; }
 .submit-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 20px; }
-.key-warning { display: inline-flex; align-items: center; gap: 6px; color: var(--warning); font-size: 12px; }
+.key-warning { display: inline-flex; align-items: center; gap: 6px; padding: 0; color: var(--warning); background: transparent; border: 0; font-size: 12px; }
+.key-warning:hover { color: #6d4706; text-decoration: underline; }
 
 .primary-button, .secondary-button {
   display: inline-flex;
@@ -365,7 +367,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
   .form-grid.two { grid-template-columns: 1fr; }
   .modal-backdrop { padding: 0; align-items: end; }
   .modal { width: 100%; max-height: 92vh; border-radius: 7px 7px 0 0; }
-  .topbar-status span:not(.status-dot) { display: none; }
+  .topbar-status span:not(.status-dot):not(.support-label) { display: none; }
 }
 
 @media (max-width: 420px) {

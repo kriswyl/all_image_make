@@ -1,5 +1,7 @@
 # Image Relay Studio
 
+当前发布版本为 `1.0.0`。完整打包步骤、版本更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)。
+
 ## Tauri 桌面版
 
 桌面版保留现有 React 界面，并由 Tauri 启动内置 Node.js sidecar 提供本地 API。开发模式：
@@ -24,7 +26,7 @@ npm run tauri:build:exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/Image-Relay-Studio-portable-win-x64.zip`。
+输出位于 `artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成图片默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。
 
@@ -33,6 +35,7 @@ npm run tauri:package:portable
 ## 当前功能
 
 - 多渠道、多模型 ID 配置
+- 新建数据目录自动内置 4 个向量引擎默认渠道
 - OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task 和 Generic JSON 适配器
 - 文生图与最多 8 张参考图图生图，支持 PNG、JPEG、WebP（单张最大 10 MB）
 - 文生图官方风格参数与高级 JSON 参数
@@ -74,9 +77,12 @@ npm start
 ```dotenv
 PORT=17891
 RELAY_API_KEY=replace-me
+VECTORENGINE_API_KEY=replace-me
 ```
 
 添加渠道时，将“环境变量”填写为 `RELAY_API_KEY`。也可以直接在渠道弹窗输入 API Key，但它只存在于当前 Node.js 进程内存中，服务重启后需要重新输入。密钥不会写入 SQLite，也不会显示在诊断记录中。
+
+内置向量引擎渠道默认使用 `VECTORENGINE_API_KEY`，并在未配置时显示 `{向量引擎key}` 作为输入提示。
 
 服务也会读取项目上一级目录的 `.env`。可用 `DATA_DIR` 环境变量修改 SQLite、参考图与生成图片目录，默认使用项目内的 `data/`。
 
