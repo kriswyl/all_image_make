@@ -1,0 +1,45 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Image Relay Studio",
+  "version": "0.1.0",
+  "identifier": "com.imagerelay.studio",
+  "build": {
+    "frontendDist": "../dist/client",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": "node scripts/tauri-dev.mjs",
+    "beforeBuildCommand": "node scripts/tauri-build.mjs"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Image Relay Studio",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:17892; img-src 'self' data: blob: http://127.0.0.1:17892; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/node"],
+    "resources": ["resources/server/**/*"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}
