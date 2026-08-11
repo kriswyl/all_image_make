@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { APP_VERSION, VECTORENGINE_KEY_ENV, VECTORENGINE_KEY_PLACEHOLDER } from "../shared/app-config";
-import type { AdapterType, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
+import type { AdapterType, Asset, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "channels" | "history";
 type Toast = { kind: "success" | "error"; message: string };
@@ -432,6 +432,7 @@ function GenerateView(props: {
 
 function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | null; onDiagnostics: (task: Task) => void; onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void }) {
   const busy = task && !terminalStatuses.includes(task.status);
+  const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   async function cancel() {
     if (!task) return;
     try { onTask(await api.cancel(task.id)); } catch (error) { onToast("error", error instanceof Error ? error.message : "取消失败"); }
@@ -439,6 +440,17 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
   async function retry() {
     if (!task) return;
     try { onTask(await api.retry(task.id)); } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
+  }
+  async function download(asset: Asset) {
+    setDownloadingAssetId(asset.id);
+    try {
+      await api.downloadAsset(asset);
+      onToast("success", "图片已下载");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "下载失败");
+    } finally {
+      setDownloadingAssetId(null);
+    }
   }
   return (
     <section className="result-panel">
@@ -454,7 +466,7 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
         {!task ? <EmptyResult /> : null}
         {busy ? <div className="task-progress"><LoaderCircle className="spin" size={30} /><strong>{statusLabels[task.status]}</strong>{task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}<span>{task.model}</span></div> : null}
         {task && task.status === "failed" ? <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div> : null}
-        {task?.assets.map((asset) => <figure key={asset.id} className="result-image"><img src={api.assetUrl(asset.url)} alt="生成结果" /><a className="image-download" href={api.assetUrl(asset.url)} download={asset.fileName} title="下载图片"><Download size={17} /></a></figure>)}
+        {task?.assets.map((asset) => <figure key={asset.id} className="result-image"><img src={api.assetUrl(asset.url)} alt="生成结果" /><button type="button" className="image-download" title="下载图片" aria-label="下载图片" disabled={downloadingAssetId === asset.id} onClick={() => void download(asset)}>{downloadingAssetId === asset.id ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}</button></figure>)}
       </div>
       {task ? <div className="result-meta"><span>{task.channelName}</span><span>{task.model}</span><span>{formatTime(task.createdAt)}</span></div> : null}
     </section>

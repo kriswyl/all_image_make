@@ -1,6 +1,6 @@
 # Image Relay Studio 打包文档
 
-当前首个发布版本为 `1.0.0`。发布包不包含真实 API Key；首次启动后，在默认向量引擎渠道的“API Key”输入框填入自己的密钥，或在启动前设置 `VECTORENGINE_API_KEY` 环境变量。
+当前发布版本为 `1.0.1`。发布包不包含真实 API Key；首次启动后，在默认向量引擎渠道的“API Key”输入框填入自己的密钥，或在启动前设置 `VECTORENGINE_API_KEY` 环境变量。
 
 ## 环境准备
 
@@ -29,8 +29,8 @@ npm run release:portable
 命令会依次运行测试、前端和 Node 服务端构建、Tauri sidecar 准备以及压缩。输出位置：
 
 ```text
-artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64/
-artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64.zip
+artifacts/Image-Relay-Studio-v1.0.1-portable-win-x64/
+artifacts/Image-Relay-Studio-v1.0.1-portable-win-x64.zip
 ```
 
 便携目录中的 `image_relay_studio.exe`、`node.exe` 和 `resources/` 必须保持同级关系，直接运行 `image_relay_studio.exe` 即可。
@@ -46,7 +46,7 @@ npm run release:installer
 便于分发的安装程序输出为：
 
 ```text
-artifacts/Image-Relay-Studio-v1.0.0-win-x64-setup.exe
+artifacts/Image-Relay-Studio-v1.0.1-win-x64-setup.exe
 ```
 
 Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`。
@@ -60,7 +60,7 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：
 
 ```powershell
-npm run version:set -- 1.0.1
+npm run version:set -- 1.0.2
 ```
 
 然后重新运行测试和对应的发布命令。发布前检查：

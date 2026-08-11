@@ -220,6 +220,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!asset) return res.status(404).json(fail("ASSET_NOT_FOUND", "图片不存在"));
     const absolutePath = path.resolve(db.assetsDir, asset.relativePath);
     if (!absolutePath.startsWith(path.resolve(db.assetsDir) + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
+    if (req.query.download === "1") return res.download(absolutePath, asset.fileName);
     res.type(asset.mimeType).sendFile(absolutePath);
   });
 

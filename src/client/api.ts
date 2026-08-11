@@ -1,4 +1,4 @@
-import type { ApiResponse, BootstrapData, Channel, ChannelInput, Diagnostic, GenerationInput, Task } from "../shared/types";
+import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, Diagnostic, GenerationInput, Task } from "../shared/types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && (window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -44,4 +44,18 @@ export const api = {
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   assetUrl: (url: string) => apiUrl(url),
+  downloadAsset: async (asset: Asset) => {
+    const separator = asset.url.includes("?") ? "&" : "?";
+    const response = await fetch(apiUrl(`${asset.url}${separator}download=1`));
+    if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = asset.fileName;
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+  },
 };

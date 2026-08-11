@@ -68,6 +68,10 @@ describe("generation API", () => {
     expect(task.channelName).toBe("Local Mock");
     const imageResponse = await request(app).get(task.assets[0].url).expect(200);
     expect(imageResponse.headers["content-type"]).toContain("image/png");
+    expect(imageResponse.headers["content-disposition"]).toBeUndefined();
+    const downloadResponse = await request(app).get(`${task.assets[0].url}?download=1`).expect(200);
+    expect(downloadResponse.headers["content-disposition"]).toContain("attachment");
+    expect(downloadResponse.headers["content-disposition"]).toContain(task.assets[0].fileName);
     const diagnostics = (await request(app).get(`/api/generations/${taskId}/diagnostics`).expect(200)).body.data;
     expect(diagnostics).toHaveLength(1);
     expect(JSON.stringify(diagnostics)).not.toContain("Authorization");

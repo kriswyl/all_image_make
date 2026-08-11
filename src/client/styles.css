@@ -156,12 +156,13 @@ input::placeholder, textarea::placeholder { color: #a1aaa3; }
   grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
   gap: 8px;
 }
+.reference-picker:not(.has-image) { grid-template-columns: minmax(0, 1fr); }
 .reference-picker.has-image { padding: 10px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
 .reference-add-tile { position: relative; display: grid; min-height: 86px; grid-template-columns: 42px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 10px 12px; color: #647067; background: #fafbf9; border: 1px dashed #bfc9c0; border-radius: 5px; cursor: pointer; }
-.reference-picker:not(.has-image) .reference-add-tile { min-height: 72px; }
+.reference-picker:not(.has-image) .reference-add-tile { min-height: 96px; padding: 14px 16px; }
 .reference-add-tile:hover { color: var(--green-dark); background: #f5f8f5; border-color: #79a48a; }
 .reference-thumb { position: relative; min-width: 0; overflow: hidden; background: #fff; border: 1px solid #d6ddd7; border-radius: 5px; }
-.reference-thumb img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.reference-thumb img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #f1f3f0; }
 .reference-thumb > span { display: block; padding: 5px 6px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .reference-remove { position: absolute; top: 5px; right: 5px; display: grid; width: 24px; height: 24px; place-items: center; padding: 0; color: #fff; background: rgba(27,32,28,.78); border: 0; border-radius: 4px; }
 .reference-remove:hover { background: var(--coral); }
@@ -259,8 +260,8 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .progress-track span { display: block; height: 100%; background: var(--green); }
 .result-image { position: relative; width: 100%; margin: 0; overflow: hidden; background: #fff; border: 1px solid #d8ddd8; border-radius: 5px; }
 .result-image img { display: block; width: 100%; height: auto; max-height: 620px; object-fit: contain; }
-.image-download { position: absolute; right: 8px; bottom: 8px; display: grid; width: 34px; height: 34px; place-items: center; color: #fff; background: rgba(27,32,28,.82); border-radius: 5px; }
-.image-download:hover { background: var(--green); }
+.image-download { position: absolute; right: 8px; bottom: 8px; display: grid; width: 34px; height: 34px; place-items: center; padding: 0; color: #fff; background: rgba(27,32,28,.82); border: 0; border-radius: 5px; }
+.image-download:hover:not(:disabled) { background: var(--green); }
 .result-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
 .result-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta span + span::before { content: "·"; margin-right: 8px; color: #a6ada7; }

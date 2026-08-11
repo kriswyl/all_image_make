@@ -1,6 +1,6 @@
 # Image Relay Studio
 
-当前发布版本为 `1.0.0`。完整打包步骤、版本更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)。
+当前发布版本为 `1.0.1`。完整打包步骤、版本更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)。
 
 ## Tauri 桌面版
 
@@ -26,7 +26,7 @@ npm run tauri:build:exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/Image-Relay-Studio-v1.0.0-portable-win-x64.zip`。
+输出位于 `artifacts/Image-Relay-Studio-v1.0.1-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成图片默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。
 

@@ -9,6 +9,8 @@ if (!/^\d+\.\d+\.\d+$/.test(version ?? "")) {
 const projectDir = process.cwd();
 const packageSource = fs.readFileSync(path.join(projectDir, "package.json"), "utf8");
 const currentVersion = JSON.parse(packageSource).version;
+const [major, minor, patch] = version.split(".").map(Number);
+const nextPatchVersion = `${major}.${minor}.${patch + 1}`;
 
 function replaceFirst(relativePath, pattern, replacement) {
   const filePath = path.join(projectDir, relativePath);
@@ -29,7 +31,10 @@ replaceFirst("src/shared/app-config.ts", /(export const APP_VERSION = ")\d+\.\d+
 for (const relativePath of ["README.md", "PACKAGING.md", "DEVELOPMENT_HANDOFF.md"]) {
   const filePath = path.join(projectDir, relativePath);
   const source = fs.readFileSync(filePath, "utf8");
-  fs.writeFileSync(filePath, source.replaceAll(currentVersion, version), "utf8");
+  const updated = source
+    .replaceAll(currentVersion, version)
+    .replace(/npm run version:set -- \d+\.\d+\.\d+/, `npm run version:set -- ${nextPatchVersion}`);
+  fs.writeFileSync(filePath, updated, "utf8");
 }
 
 console.log(`Updated project version to ${version}`);
