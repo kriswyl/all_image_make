@@ -1,12 +1,27 @@
 import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, Diagnostic, GenerationInput, Task } from "../shared/types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
-  || (typeof window !== "undefined" && (window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
+  || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
     ? "http://127.0.0.1:17892"
     : "");
 
 function apiUrl(url: string) {
   return `${apiBase}${url}`;
+}
+
+function isTauriRuntime() {
+  return typeof window !== "undefined"
+    && ("__TAURI_INTERNALS__" in window
+      || window.location.protocol === "tauri:"
+      || window.location.hostname === "tauri.localhost");
+}
+
+function imageExtension(asset: Asset) {
+  const fileExtension = asset.fileName.split(".").pop()?.toLowerCase();
+  if (fileExtension && /^[a-z0-9]+$/.test(fileExtension)) return fileExtension;
+  if (asset.mimeType === "image/jpeg") return "jpg";
+  if (asset.mimeType === "image/webp") return "webp";
+  return "png";
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -46,6 +61,26 @@ export const api = {
   assetUrl: (url: string) => apiUrl(url),
   downloadAsset: async (asset: Asset) => {
     const separator = asset.url.includes("?") ? "&" : "?";
+
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"),
+        import("@tauri-apps/plugin-fs"),
+      ]);
+      const extension = imageExtension(asset);
+      const destination = await save({
+        title: "保存图片",
+        defaultPath: asset.fileName,
+        filters: [{ name: "图片", extensions: [extension] }],
+      });
+      if (!destination) return false;
+
+      const response = await fetch(apiUrl(`${asset.url}${separator}download=1`));
+      if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
+      await writeFile(destination, new Uint8Array(await response.arrayBuffer()));
+      return true;
+    }
+
     const response = await fetch(apiUrl(`${asset.url}${separator}download=1`));
     if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
     const objectUrl = URL.createObjectURL(await response.blob());
@@ -57,5 +92,6 @@ export const api = {
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+    return true;
   },
 };

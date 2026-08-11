@@ -89,6 +89,8 @@ pub fn run_app() {
         .level(log::LevelFilter::Info)
         .build(),
     )
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_shell::init())
     .manage(BackendState(Mutex::new(None)))
     .setup(|app| {

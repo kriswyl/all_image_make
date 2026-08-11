@@ -6,7 +6,7 @@ const projectDir = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
 const version = String(packageJson.version);
 const artifactDir = path.join(projectDir, "artifacts");
-const zipPath = path.join(artifactDir, `Image-Relay-Studio-v${version}-source-with-handoff.zip`);
+const zipPath = path.join(artifactDir, `向量生图-v${version}-source-with-handoff.zip`);
 
 fs.mkdirSync(artifactDir, { recursive: true });
 fs.rmSync(zipPath, { force: true });

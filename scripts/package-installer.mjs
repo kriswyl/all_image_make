@@ -11,10 +11,10 @@ const source = path.join(
   "release",
   "bundle",
   "nsis",
-  `Image Relay Studio_${version}_x64-setup.exe`,
+  `向量生图_${version}_x64-setup.exe`,
 );
 const artifactDir = path.join(projectDir, "artifacts");
-const target = path.join(artifactDir, `Image-Relay-Studio-v${version}-win-x64-setup.exe`);
+const target = path.join(artifactDir, `向量生图-v${version}-win-x64-setup.exe`);
 
 if (!fs.existsSync(source)) throw new Error(`Missing installer: ${source}. Run npm run tauri:build first.`);
 fs.mkdirSync(artifactDir, { recursive: true });

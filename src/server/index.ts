@@ -9,7 +9,7 @@ const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path
 const { app, context } = createApp({ dataDir });
 
 const server = app.listen(port, "127.0.0.1", () => {
-  console.log(`Image Relay Studio API: http://127.0.0.1:${port}`);
+  console.log(`向量生图 API: http://127.0.0.1:${port}`);
   context.runner.resume();
 });
 

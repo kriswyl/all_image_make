@@ -64,10 +64,11 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   width: 30px;
   height: 30px;
   place-items: center;
-  color: #fff;
-  background: var(--coral);
+  overflow: hidden;
+  background: #fff;
   border-radius: 5px;
 }
+.brand-mark img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
 .topbar-status { display: flex; align-items: center; gap: 8px; color: #cdd4ce; font-size: 12px; }
 .support-label { color: #b9e3c5; font-weight: 700; }
@@ -259,9 +260,14 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .progress-track { width: min(260px, 70%); height: 5px; overflow: hidden; background: #d8ded8; border-radius: 3px; }
 .progress-track span { display: block; height: 100%; background: var(--green); }
 .result-image { position: relative; width: 100%; margin: 0; overflow: hidden; background: #fff; border: 1px solid #d8ddd8; border-radius: 5px; }
-.result-image img { display: block; width: 100%; height: auto; max-height: 620px; object-fit: contain; }
+.result-image img { display: block; width: 100%; height: auto; max-height: 620px; object-fit: contain; cursor: zoom-in; }
 .image-download { position: absolute; right: 8px; bottom: 8px; display: grid; width: 34px; height: 34px; place-items: center; padding: 0; color: #fff; background: rgba(27,32,28,.82); border: 0; border-radius: 5px; }
 .image-download:hover:not(:disabled) { background: var(--green); }
+.image-preview-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; padding: 32px; place-items: center; background: rgba(15, 18, 16, .88); }
+.image-preview { position: relative; display: grid; max-width: 100%; max-height: 100%; place-items: center; }
+.image-preview img { display: block; max-width: calc(100vw - 64px); max-height: calc(100vh - 64px); object-fit: contain; cursor: default; box-shadow: 0 12px 48px rgba(0, 0, 0, .42); }
+.image-preview-close { position: fixed; top: 18px; right: 18px; display: grid; width: 40px; height: 40px; place-items: center; padding: 0; color: #fff; background: rgba(24, 29, 25, .86); border: 1px solid rgba(255, 255, 255, .3); border-radius: 5px; }
+.image-preview-close:hover { background: var(--green); border-color: var(--green); }
 .result-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
 .result-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta span + span::before { content: "·"; margin-right: 8px; color: #a6ada7; }
@@ -363,6 +369,8 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
   .parameter-grid { grid-template-columns: 1fr 1fr; }
   .result-canvas { grid-template-columns: 1fr; }
   .result-image { grid-column: 1; }
+  .image-preview-backdrop { padding: 16px; }
+  .image-preview img { max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); }
   .data-table-wrap { overflow-x: auto; }
   .data-table { min-width: 760px; }
   .form-grid.two { grid-template-columns: 1fr; }

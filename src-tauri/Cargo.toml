@@ -1,8 +1,8 @@
 [package]
 name = "image_relay_studio"
-version = "1.0.1"
+version = "1.0.2"
 description = "Local image generation relay desktop client"
-authors = ["Image Relay Studio"]
+authors = ["向量生图"]
 license = ""
 repository = ""
 edition = "2021"
@@ -24,3 +24,5 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"

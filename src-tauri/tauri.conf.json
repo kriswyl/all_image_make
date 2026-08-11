@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Image Relay Studio",
-  "version": "1.0.1",
+  "productName": "向量生图",
+  "version": "1.0.2",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Image Relay Studio",
+        "title": "向量生图",
         "width": 1280,
         "height": 820,
         "minWidth": 980,

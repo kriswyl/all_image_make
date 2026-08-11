@@ -1,6 +1,6 @@
 {
   "name": "image-relay-studio",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -22,6 +22,8 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-fs": "^2.5.1",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "multer": "^2.2.0",

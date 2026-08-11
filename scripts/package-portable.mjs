@@ -7,7 +7,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.js
 const version = String(packageJson.version);
 const releaseDir = path.join(projectDir, "src-tauri", "target", "release");
 const artifactDir = path.join(projectDir, "artifacts");
-const artifactName = `Image-Relay-Studio-v${version}-portable-win-x64`;
+const artifactName = `向量生图-v${version}-portable-win-x64`;
 const portableDir = path.join(artifactDir, artifactName);
 const zipPath = path.join(artifactDir, `${artifactName}.zip`);
 
@@ -36,7 +36,7 @@ fs.cpSync(path.join(releaseDir, "resources"), path.join(portableDir, "resources"
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [
-    `Image Relay Studio v${version} portable Windows build`,
+    `向量生图 v${version} portable Windows build`,
     "",
     "Run image_relay_studio.exe. Keep node.exe and resources\\ next to it.",
     "Configure the VectorEngine API key inside the app or through VECTORENGINE_API_KEY.",

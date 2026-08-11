@@ -15,6 +15,7 @@ type ReferenceImageState = { file: File; previewUrl: string };
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_REFERENCE_IMAGES = 8;
+const DRAFT_STORAGE_PREFIX = "vector-image:generation-draft:";
 const openAiSizeGroups = [
   { label: "方形", sizes: ["1024x1024", "2048x2048"] },
   { label: "横向", sizes: ["1280x720", "1536x1024", "1600x1200", "2048x1152", "3840x2160"] },
@@ -34,13 +35,30 @@ const statusLabels: Record<TaskStatus, string> = {
   failed: "失败", cancelled: "已取消", expired: "已超时",
 };
 
+function usePersistentState<T>(key: string, initialValue: T) {
+  const storageKey = `${DRAFT_STORAGE_PREFIX}${key}`;
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      return stored === null ? initialValue : JSON.parse(stored) as T;
+    } catch {
+      return initialValue;
+    }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(storageKey, JSON.stringify(value)); }
+    catch { /* The form still works when storage is unavailable. */ }
+  }, [storageKey, value]);
+  return [value, setValue] as const;
+}
+
 export function App() {
   const [view, setView] = useState<View>("generate");
   const [channels, setChannels] = useState<Channel[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedChannelId, setSelectedChannelId] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedChannelId, setSelectedChannelId] = usePersistentState("channelId", "");
+  const [selectedModel, setSelectedModel] = usePersistentState("model", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
@@ -54,10 +72,12 @@ export function App() {
       .then((data) => {
         setChannels(data.channels);
         setTasks(data.tasks);
-        const first = data.channels.find((item) => item.enabled) ?? data.channels[0];
+        const first = data.channels.find((item) => item.id === selectedChannelId && item.enabled)
+          ?? data.channels.find((item) => item.enabled)
+          ?? data.channels[0];
         if (first) {
           setSelectedChannelId(first.id);
-          setSelectedModel(first.models[0] ?? "");
+          setSelectedModel(first.models.includes(selectedModel) ? selectedModel : first.models[0] ?? "");
         }
         const latest = data.tasks.find((task) => task.status === "succeeded") ?? data.tasks[0];
         if (latest) setActiveTaskId(latest.id);
@@ -117,9 +137,9 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setView("generate")} aria-label="Image Relay Studio">
-          <span className="brand-mark"><Sparkles size={18} /></span>
-          <span>Image Relay</span>
+        <button className="brand" onClick={() => setView("generate")} aria-label="向量生图">
+          <span className="brand-mark"><img src="/app-logo.png" alt="" /></span>
+          <span>向量生图</span>
         </button>
         <div className="topbar-status">
           <span className="support-label">向量引擎支持</span>
@@ -187,33 +207,33 @@ function GenerateView(props: {
   onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void; onConfigureChannel: (channel: Channel) => void;
   onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
 }) {
-  const [prompt, setPrompt] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [size, setSize] = useState("1024x1024");
-  const [customWidth, setCustomWidth] = useState("1024");
-  const [customHeight, setCustomHeight] = useState("1024");
-  const [aspectRatio, setAspectRatio] = useState("auto");
-  const [quality, setQuality] = useState("auto");
-  const [background, setBackground] = useState<"auto" | "opaque" | "transparent">("auto");
-  const [outputFormat, setOutputFormat] = useState<"png" | "jpeg" | "webp">("png");
-  const [moderation, setModeration] = useState<"auto" | "low">("auto");
-  const [style, setStyle] = useState<"auto" | "vivid" | "natural">("auto");
-  const [responseFormat, setResponseFormat] = useState<"auto" | "url" | "b64_json">("auto");
-  const [stream, setStream] = useState(false);
-  const [imageSize, setImageSize] = useState("auto");
-  const [temperature, setTemperature] = useState("");
-  const [topP, setTopP] = useState("");
-  const [topK, setTopK] = useState("");
-  const [maxOutputTokens, setMaxOutputTokens] = useState("");
-  const [responseModalities, setResponseModalities] = useState<"IMAGE" | "TEXT,IMAGE">("IMAGE");
-  const [seed, setSeed] = useState("");
-  const [mjVersion, setMjVersion] = useState("");
-  const [processMode, setProcessMode] = useState<"auto" | "fast" | "relax" | "turbo">("auto");
-  const [stylize, setStylize] = useState("");
-  const [chaos, setChaos] = useState("");
-  const [weirdness, setWeirdness] = useState("");
-  const [count, setCount] = useState(1);
-  const [raw, setRaw] = useState("{}");
+  const [prompt, setPrompt] = usePersistentState("prompt", "");
+  const [negativePrompt, setNegativePrompt] = usePersistentState("negativePrompt", "");
+  const [size, setSize] = usePersistentState("size", "1024x1024");
+  const [customWidth, setCustomWidth] = usePersistentState("customWidth", "1024");
+  const [customHeight, setCustomHeight] = usePersistentState("customHeight", "1024");
+  const [aspectRatio, setAspectRatio] = usePersistentState("aspectRatio", "auto");
+  const [quality, setQuality] = usePersistentState("quality", "auto");
+  const [background, setBackground] = usePersistentState<"auto" | "opaque" | "transparent">("background", "auto");
+  const [outputFormat, setOutputFormat] = usePersistentState<"png" | "jpeg" | "webp">("outputFormat", "png");
+  const [moderation, setModeration] = usePersistentState<"auto" | "low">("moderation", "auto");
+  const [style, setStyle] = usePersistentState<"auto" | "vivid" | "natural">("style", "auto");
+  const [responseFormat, setResponseFormat] = usePersistentState<"auto" | "url" | "b64_json">("responseFormat", "auto");
+  const [stream, setStream] = usePersistentState("stream", false);
+  const [imageSize, setImageSize] = usePersistentState("imageSize", "auto");
+  const [temperature, setTemperature] = usePersistentState("temperature", "");
+  const [topP, setTopP] = usePersistentState("topP", "");
+  const [topK, setTopK] = usePersistentState("topK", "");
+  const [maxOutputTokens, setMaxOutputTokens] = usePersistentState("maxOutputTokens", "");
+  const [responseModalities, setResponseModalities] = usePersistentState<"IMAGE" | "TEXT,IMAGE">("responseModalities", "IMAGE");
+  const [seed, setSeed] = usePersistentState("seed", "");
+  const [mjVersion, setMjVersion] = usePersistentState("mjVersion", "");
+  const [processMode, setProcessMode] = usePersistentState<"auto" | "fast" | "relax" | "turbo">("processMode", "auto");
+  const [stylize, setStylize] = usePersistentState("stylize", "");
+  const [chaos, setChaos] = usePersistentState("chaos", "");
+  const [weirdness, setWeirdness] = usePersistentState("weirdness", "");
+  const [count, setCount] = usePersistentState("count", 1);
+  const [raw, setRaw] = usePersistentState("raw", "{}");
   const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
   const [readingImage, setReadingImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -433,6 +453,15 @@ function GenerateView(props: {
 function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | null; onDiagnostics: (task: Task) => void; onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void }) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
+  const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
+  useEffect(() => {
+    if (!previewAsset) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewAsset(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [previewAsset]);
   async function cancel() {
     if (!task) return;
     try { onTask(await api.cancel(task.id)); } catch (error) { onToast("error", error instanceof Error ? error.message : "取消失败"); }
@@ -444,8 +473,8 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
   async function download(asset: Asset) {
     setDownloadingAssetId(asset.id);
     try {
-      await api.downloadAsset(asset);
-      onToast("success", "图片已下载");
+      const saved = await api.downloadAsset(asset);
+      if (saved) onToast("success", "图片已保存");
     } catch (error) {
       onToast("error", error instanceof Error ? error.message : "下载失败");
     } finally {
@@ -466,9 +495,10 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
         {!task ? <EmptyResult /> : null}
         {busy ? <div className="task-progress"><LoaderCircle className="spin" size={30} /><strong>{statusLabels[task.status]}</strong>{task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}<span>{task.model}</span></div> : null}
         {task && task.status === "failed" ? <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div> : null}
-        {task?.assets.map((asset) => <figure key={asset.id} className="result-image"><img src={api.assetUrl(asset.url)} alt="生成结果" /><button type="button" className="image-download" title="下载图片" aria-label="下载图片" disabled={downloadingAssetId === asset.id} onClick={() => void download(asset)}>{downloadingAssetId === asset.id ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}</button></figure>)}
+        {task?.assets.map((asset) => <figure key={asset.id} className="result-image"><img src={api.assetUrl(asset.url)} alt="生成结果" title="双击放大" onDoubleClick={() => setPreviewAsset(asset)} /><button type="button" className="image-download" title="下载图片" aria-label="下载图片" disabled={downloadingAssetId === asset.id} onClick={() => void download(asset)}>{downloadingAssetId === asset.id ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}</button></figure>)}
       </div>
       {task ? <div className="result-meta"><span>{task.channelName}</span><span>{task.model}</span><span>{formatTime(task.createdAt)}</span></div> : null}
+      {previewAsset ? <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewAsset(null); }}><div className="image-preview"><img src={api.assetUrl(previewAsset.url)} alt="生成结果放大预览" /><button type="button" className="image-preview-close" title="关闭预览" aria-label="关闭预览" onClick={() => setPreviewAsset(null)}><X size={21} /></button></div></div> : null}
     </section>
   );
 }

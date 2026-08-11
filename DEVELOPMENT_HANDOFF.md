@@ -1,4 +1,4 @@
-# Image Relay Studio 开发交接背景
+# 向量生图开发交接背景
 
 ## 项目目标
 
@@ -27,6 +27,9 @@
 - SSRF 防护和 API Key 环境变量支持。
 - 高级 JSON 对同名基础字段拥有最高优先级，不维护渠道能力矩阵。
 - 参考图保存在数据目录的 `inputs/`，任务 JSON 和诊断记录不会保存上传 Base64；OpenAI Images 默认使用 `/v1/images/edits` multipart 请求。
+- 生成表单会在本机自动保存提示词、渠道、模型和全部参数，页面切换或应用重启后继续保留。
+- 结果图支持双击放大；桌面版下载使用原生保存对话框，可选择目录和文件名。
+- 产品显示名为“向量生图”，桌面图标和界面 Logo 来自 `src-tauri/icons/` 与 `src/client/public/app-logo.png`。
 
 ## API Key 规则
 
@@ -92,7 +95,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/Image-Relay-Studio-v1.0.1-portable-win-x64/` 和 `artifacts/Image-Relay-Studio-v1.0.1-portable-win-x64.zip`。
+输出位于 `artifacts/向量生图-v1.0.2-portable-win-x64/` 和 `artifacts/向量生图-v1.0.2-portable-win-x64.zip`。
 
 生成用于换电脑继续开发的源码包：
 
@@ -100,7 +103,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/Image-Relay-Studio-v1.0.1-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/向量生图-v1.0.2-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 
@@ -122,5 +125,5 @@ Tauri 版本默认使用：
 ## 给下一次 Codex 对话的提示词
 
 ```text
-继续开发 Image Relay Studio。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录和 Tauri sidecar 能力。
+继续开发向量生图。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录和 Tauri sidecar 能力。
 ```
