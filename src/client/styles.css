@@ -178,6 +178,8 @@ input::placeholder, textarea::placeholder { color: #a1aaa3; }
 .parameters-title { margin: 24px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); }
 .parameter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 12px; }
 .parameter-grid .wide-field { grid-column: 1 / -1; }
+.custom-size-fields { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); align-items: end; gap: 8px; }
+.custom-size-fields > span { display: grid; height: 38px; place-items: center; color: var(--muted); font-size: 12px; font-weight: 700; }
 .parameter-subtitle { margin: 20px 0 10px; padding-top: 15px; color: #4f5851; border-top: 1px solid var(--line); font-size: 11px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 .parameter-toggles { padding-top: 10px; }
 label small { color: var(--muted); font-size: 10px; font-weight: 500; }

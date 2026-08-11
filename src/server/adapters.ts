@@ -36,13 +36,10 @@ function openAiImageParameters(input: GenerationInput) {
     quality: input.quality,
     output_format: input.outputFormat,
     background: input.background,
-    output_compression: input.outputCompression,
     moderation: input.moderation,
     style: input.style,
     response_format: input.responseFormat,
     stream: input.stream,
-    partial_images: input.partialImages,
-    user: input.user,
   });
 }
 

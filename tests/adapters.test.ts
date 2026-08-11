@@ -17,17 +17,17 @@ const referenceImage = {
 describe("adapter request building", () => {
   it("maps common image parameters and preserves raw parameters", () => {
     const request = buildGenerationRequest(channel, {
-      channelId: channel.id, model: "image-model", prompt: "city", size: "1024x1024", count: 1,
-      quality: "high", outputFormat: "webp", background: "transparent", outputCompression: 80,
-      moderation: "low", style: "natural", responseFormat: "b64_json", stream: true, partialImages: 2,
-      user: "test-user", rawParameters: { seed: 42 },
+      channelId: channel.id, model: "image-model", prompt: "city", size: "1280x720", count: 1,
+      quality: "high", outputFormat: "webp", background: "transparent",
+      moderation: "low", style: "natural", responseFormat: "b64_json", stream: true,
+      rawParameters: { seed: 42 },
     }, "secret");
     expect(request.url).toBe("https://relay.example.com/v1/images/generations");
     expect(request.headers.Authorization).toBe("Bearer secret");
     expect(request.body).toMatchObject({
-      model: "image-model", prompt: "city", size: "1024x1024", n: 1, quality: "high", output_format: "webp",
-      background: "transparent", output_compression: 80, moderation: "low", style: "natural",
-      response_format: "b64_json", stream: true, partial_images: 2, user: "test-user", seed: 42,
+      model: "image-model", prompt: "city", size: "1280x720", n: 1, quality: "high", output_format: "webp",
+      background: "transparent", moderation: "low", style: "natural",
+      response_format: "b64_json", stream: true, seed: 42,
     });
   });
 

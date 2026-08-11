@@ -13,6 +13,11 @@ type ReferenceImageState = ReferenceImageInput & { previewUrl: string; byteSize:
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const openAiSizeGroups = [
+  { label: "方形", sizes: ["256x256", "512x512", "768x768", "1024x1024", "2048x2048"] },
+  { label: "横向", sizes: ["1280x720", "1536x1024", "1792x1024", "2048x1152"] },
+  { label: "纵向", sizes: ["720x1280", "1024x1536", "1024x1792", "1152x2048"] },
+] as const;
 
 const adapterLabels: Record<AdapterType, string> = {
   "openai-images": "OpenAI Images",
@@ -181,17 +186,16 @@ function GenerateView(props: {
   const [prompt, setPrompt] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [size, setSize] = useState("1024x1024");
+  const [customWidth, setCustomWidth] = useState("1024");
+  const [customHeight, setCustomHeight] = useState("1024");
   const [aspectRatio, setAspectRatio] = useState("auto");
   const [quality, setQuality] = useState("auto");
   const [background, setBackground] = useState<"auto" | "opaque" | "transparent">("auto");
   const [outputFormat, setOutputFormat] = useState<"png" | "jpeg" | "webp">("png");
-  const [outputCompression, setOutputCompression] = useState("");
   const [moderation, setModeration] = useState<"auto" | "low">("auto");
   const [style, setStyle] = useState<"auto" | "vivid" | "natural">("auto");
   const [responseFormat, setResponseFormat] = useState<"auto" | "url" | "b64_json">("auto");
   const [stream, setStream] = useState(false);
-  const [partialImages, setPartialImages] = useState(0);
-  const [user, setUser] = useState("");
   const [imageSize, setImageSize] = useState("auto");
   const [temperature, setTemperature] = useState("");
   const [topP, setTopP] = useState("");
@@ -238,6 +242,13 @@ function GenerateView(props: {
     if (!channel) return props.onToast("error", "请先添加渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
+    let requestedSize = size === "auto" ? undefined : size;
+    if (size === "custom") {
+      const width = customDimension(customWidth);
+      const height = customDimension(customHeight);
+      if (width === undefined || height === undefined) return props.onToast("error", "自定义宽高必须是 64 到 8192 之间的整数");
+      requestedSize = `${width}x${height}`;
+    }
     let rawParameters: Record<string, unknown>;
     try {
       const parsed = JSON.parse(raw);
@@ -255,19 +266,16 @@ function GenerateView(props: {
           mimeType: referenceImage.mimeType,
           fileName: referenceImage.fileName,
         } : undefined,
-        size: size === "auto" ? undefined : size,
+        size: requestedSize,
         aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
         count,
         quality: quality === "auto" ? undefined : quality,
         outputFormat,
         background: background === "auto" ? undefined : background,
-        outputCompression: outputFormat === "png" ? undefined : optionalNumber(outputCompression),
         moderation: isOpenAi && moderation !== "auto" ? moderation : undefined,
         style: isOpenAi && style !== "auto" ? style : undefined,
         responseFormat: isOpenAi && responseFormat !== "auto" ? responseFormat : undefined,
         stream: isOpenAi && stream ? true : undefined,
-        partialImages: isOpenAi && partialImages > 0 ? partialImages : undefined,
-        user: isOpenAi ? user.trim() || undefined : undefined,
         imageSize: adapterType === "gemini-content" && imageSize !== "auto" ? imageSize : undefined,
         temperature: adapterType === "gemini-content" ? optionalNumber(temperature) : undefined,
         topP: adapterType === "gemini-content" ? optionalNumber(topP) : undefined,
@@ -331,12 +339,20 @@ function GenerateView(props: {
 
             <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>参数</h2></div></div>
             <div className="parameter-grid">
-              {isOpenAi ? <label><span>尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}><option>1024x1024</option><option>1536x1024</option><option>1024x1536</option><option>auto</option></select></label> : null}
+              {isOpenAi ? <label><span>尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>
+                <option value="auto">自动</option>
+                {openAiSizeGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.sizes.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup>)}
+                <option value="custom">自定义</option>
+              </select></label> : null}
+              {isOpenAi && size === "custom" ? <div className="custom-size-fields wide-field" aria-label="自定义尺寸">
+                <label><span>宽度</span><input type="number" min={64} max={8192} step={1} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
+                <span aria-hidden="true">x</span>
+                <label><span>高度</span><input type="number" min={64} max={8192} step={1} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
+              </div> : null}
               {showAspectRatio ? <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label> : null}
               {isOpenAi ? <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label> : null}
               {isOpenAi ? <label><span>背景</span><select value={background} onChange={(event) => setBackground(event.target.value as typeof background)}><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label> : null}
               {isOpenAi ? <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label> : null}
-              {isOpenAi ? <label><span>压缩质量 <small>(JPEG/WebP)</small></span><input type="number" min={0} max={100} value={outputCompression} onChange={(event) => setOutputCompression(event.target.value)} placeholder="0 - 100" disabled={outputFormat === "png"} /></label> : null}
               {showCount ? <label><span>{adapterType === "gemini-content" ? "候选数量" : "数量"}</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label> : null}
             </div>
             {isOpenAi ? <>
@@ -345,8 +361,6 @@ function GenerateView(props: {
                 <label><span>内容审核</span><select value={moderation} onChange={(event) => setModeration(event.target.value as typeof moderation)}><option value="auto">自动</option><option value="low">低限制</option></select></label>
                 <label><span>风格</span><select value={style} onChange={(event) => setStyle(event.target.value as typeof style)}><option value="auto">自动</option><option value="vivid">Vivid</option><option value="natural">Natural</option></select></label>
                 <label><span>响应格式</span><select value={responseFormat} onChange={(event) => setResponseFormat(event.target.value as typeof responseFormat)}><option value="auto">自动</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>
-                <label><span>局部图数量</span><select value={partialImages} onChange={(event) => setPartialImages(Number(event.target.value))}><option value={0}>关闭</option><option value={1}>1</option><option value={2}>2</option><option value={3}>3</option></select></label>
-                <label className="wide-field"><span>用户标识</span><input value={user} onChange={(event) => setUser(event.target.value)} maxLength={256} placeholder="可选，用于审计或限流" /></label>
               </div>
               <div className="toggle-row parameter-toggles"><Toggle checked={stream} onChange={setStream} label="流式输出" /></div>
             </> : null}
@@ -559,6 +573,12 @@ function optionalNumber(value: string) {
   if (!value.trim()) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function customDimension(value: string) {
+  if (!/^\d+$/.test(value.trim())) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 64 && parsed <= 8192 ? parsed : undefined;
 }
 
 function referenceImageMimeType(file: File): ReferenceImageInput["mimeType"] | null {

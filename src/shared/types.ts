@@ -57,13 +57,10 @@ export interface GenerationInput {
   quality?: string;
   outputFormat?: "png" | "jpeg" | "webp";
   background?: "auto" | "opaque" | "transparent";
-  outputCompression?: number;
   moderation?: "auto" | "low";
   style?: "auto" | "vivid" | "natural";
   responseFormat?: "auto" | "url" | "b64_json";
   stream?: boolean;
-  partialImages?: number;
-  user?: string;
   imageSize?: string;
   temperature?: number;
   topP?: number;
