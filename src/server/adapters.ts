@@ -7,6 +7,8 @@ export interface PreparedRequest {
   method: "GET" | "POST";
   headers: Record<string, string>;
   body?: Record<string, unknown>;
+  formData?: FormData;
+  diagnosticBody?: Record<string, unknown>;
   allowPrivateNetwork: boolean;
 }
 
@@ -46,6 +48,40 @@ function openAiImageParameters(input: GenerationInput) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function imageDataUrl(input: NonNullable<GenerationInput["referenceImage"]>) {
+  return `data:${input.mimeType};base64,${input.base64}`;
+}
+
+function imageSummary(input: NonNullable<GenerationInput["referenceImage"]>) {
+  return { fileName: input.fileName, mimeType: input.mimeType, byteSize: Buffer.byteLength(input.base64, "base64") };
+}
+
+function appendFormValue(formData: FormData, key: string, value: unknown) {
+  if (value === undefined || value === "") return;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    formData.append(key, String(value));
+    return;
+  }
+  formData.append(key, JSON.stringify(value));
+}
+
+function summarizeImageData(value: unknown): unknown {
+  if (typeof value === "string" && /^data:image\/[^;]+;base64,/i.test(value)) {
+    const base64 = value.slice(value.indexOf(",") + 1);
+    return `[IMAGE_DATA ${Buffer.byteLength(base64, "base64")} bytes]`;
+  }
+  if (Array.isArray(value)) return value.map(summarizeImageData);
+  if (!isRecord(value)) return value;
+  const output: Record<string, unknown> = {};
+  const containsInlineImage = typeof value.mimeType === "string" && value.mimeType.startsWith("image/") && typeof value.data === "string";
+  for (const [key, item] of Object.entries(value)) {
+    output[key] = containsInlineImage && key === "data"
+      ? `[IMAGE_DATA ${Buffer.byteLength(String(item), "base64")} bytes]`
+      : summarizeImageData(item);
+  }
+  return output;
 }
 
 function geminiGenerationConfig(input: GenerationInput, raw: Record<string, unknown>) {
@@ -102,24 +138,57 @@ function applyAuth(url: string, headers: Record<string, string>, channel: DbChan
 
 export function buildGenerationRequest(channel: DbChannel, input: GenerationInput, key: string): PreparedRequest {
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
+  if (input.referenceImage && channel.adapterType === "openai-images"
+    && (!channel.endpoint || channel.endpoint === defaultEndpoint(channel.adapterType))) {
+    endpoint = "/v1/images/edits";
+  }
   endpoint = endpoint.replaceAll("{model}", encodeURIComponent(input.model));
   assertEndpoint(endpoint);
-  const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json" };
-  let body: Record<string, unknown>;
+  const headers: Record<string, string> = { Accept: "application/json" };
+  let body: Record<string, unknown> | undefined;
+  let formData: FormData | undefined;
+  let diagnosticBody: Record<string, unknown> | undefined;
   const raw = input.rawParameters ?? {};
 
-  if (channel.adapterType === "openai-chat-image") {
+  if (channel.adapterType === "openai-images" && input.referenceImage) {
+    const fields = compact({
+      model: input.model,
+      prompt: input.prompt,
+      ...openAiImageParameters(input),
+      ...raw,
+    });
+    formData = new FormData();
+    for (const [field, value] of Object.entries(fields)) {
+      if (field !== "image") appendFormValue(formData, field, value);
+    }
+    if (Object.hasOwn(fields, "image")) {
+      appendFormValue(formData, "image", fields.image);
+    } else {
+      const bytes = Buffer.from(input.referenceImage.base64, "base64");
+      formData.append("image", new Blob([Uint8Array.from(bytes)], { type: input.referenceImage.mimeType }), input.referenceImage.fileName);
+    }
+    diagnosticBody = { ...fields, image: Object.hasOwn(fields, "image") ? summarizeImageData(fields.image) : imageSummary(input.referenceImage) };
+  } else if (channel.adapterType === "openai-chat-image") {
+    const content = input.referenceImage
+      ? [
+          { type: "text", text: input.prompt },
+          { type: "image_url", image_url: { url: imageDataUrl(input.referenceImage) } },
+        ]
+      : input.prompt;
     body = {
       model: input.model,
-      messages: [{ role: "user", content: input.prompt }],
+      messages: [{ role: "user", content }],
       ...openAiImageParameters(input),
       ...raw,
     };
   } else if (channel.adapterType === "gemini-content") {
     const text = input.negativePrompt ? `${input.prompt}\n\nNegative prompt: ${input.negativePrompt}` : input.prompt;
     const { generationConfig: _rawGenerationConfig, ...rawBody } = raw;
+    const parts: Array<Record<string, unknown>> = input.referenceImage
+      ? [{ inlineData: { mimeType: input.referenceImage.mimeType, data: input.referenceImage.base64 } }, { text }]
+      : [{ text }];
     body = {
-      contents: [{ role: "user", parts: [{ text }] }],
+      contents: [{ role: "user", parts }],
       generationConfig: geminiGenerationConfig(input, raw),
       ...rawBody,
     };
@@ -136,6 +205,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       chaos: input.chaos,
       weirdness: input.weirdness,
       seed: input.seed,
+      base64Array: input.referenceImage ? [imageDataUrl(input.referenceImage)] : undefined,
       ...raw,
     });
   } else {
@@ -143,13 +213,15 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       model: input.model,
       prompt: input.prompt,
       ...openAiImageParameters(input),
+      image: input.referenceImage ? imageDataUrl(input.referenceImage) : undefined,
       ...raw,
     });
   }
 
+  if (body) headers["Content-Type"] = "application/json";
   let url = joinEndpoint(channel.baseUrl, endpoint);
   url = applyAuth(url, headers, channel, key);
-  return { url, method: "POST", headers, body, allowPrivateNetwork: channel.allowPrivateNetwork };
+  return { url, method: "POST", headers, body, formData, diagnosticBody, allowPrivateNetwork: channel.allowPrivateNetwork };
 }
 
 export function buildStatusRequest(channel: DbChannel, remoteTaskId: string, key: string): PreparedRequest {
@@ -177,7 +249,7 @@ export function requestForDiagnostic(request: PreparedRequest) {
     url: parsed.toString(),
     method: request.method,
     headers: redactHeaders(request.headers),
-    body: request.body ?? null,
+    body: request.diagnosticBody ?? summarizeImageData(request.body ?? null),
   };
 }
 
@@ -186,7 +258,7 @@ export async function sendPreparedRequest(request: PreparedRequest) {
   const response = await safeFetch(request.url, {
     method: request.method,
     headers: request.headers,
-    body: request.body ? JSON.stringify(request.body) : undefined,
+    body: request.formData ?? (request.body ? JSON.stringify(request.body) : undefined),
   }, { allowPrivateNetwork: request.allowPrivateNetwork });
   const contentType = response.headers.get("content-type") ?? "";
   let payload: unknown;

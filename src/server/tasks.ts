@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { GenerationInput, Task } from "../shared/types.js";
+import type { GenerationInput, ReferenceImageInput, Task } from "../shared/types.js";
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
   RemoteApiError,
@@ -17,13 +17,23 @@ import {
 import { redact, safeFetch, safeFileName } from "./security.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+
+interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
+  relativePath: string;
+  byteSize: number;
+}
+
+interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage"> {
+  referenceImage?: StoredReferenceImage;
+}
 
 export class TaskRunner {
   private readonly running = new Set<string>();
 
   constructor(private readonly db: AppDatabase, private readonly sessionKeys: Map<string, string>) {}
 
-  create(input: GenerationInput): Task {
+  async create(input: GenerationInput): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
@@ -32,7 +42,8 @@ export class TaskRunner {
     const rawSize = JSON.stringify(input.rawParameters ?? {}).length;
     if (rawSize > 65536) throw new AppError("INVALID_INPUT", "高级参数不能超过 64 KB", 400);
     const id = crypto.randomUUID();
-    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input });
+    const storedInput = await this.persistInputImage(id, input);
+    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput });
     queueMicrotask(() => void this.run(id));
     return this.db.getTaskView(id)!;
   }
@@ -43,11 +54,12 @@ export class TaskRunner {
     try {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
-      const input = JSON.parse(task.inputJson) as GenerationInput;
+      const input = await this.hydrateInputImage(JSON.parse(task.inputJson) as StoredGenerationInput);
       const key = this.resolveKey(channel);
       this.db.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
       const prepared = buildGenerationRequest(channel, input, key);
-      this.db.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(prepared.body ?? {}), attemptCount: task.attemptCount + 1 });
+      const effectiveBody = requestForDiagnostic(prepared).body ?? {};
+      this.db.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared);
       const images = extractImageCandidates(result.payload);
       if (images.length) {
@@ -109,9 +121,10 @@ export class TaskRunner {
     return this.db.getTaskView(taskId)!;
   }
 
-  retry(taskId: string) {
+  async retry(taskId: string) {
     const task = this.requireTask(taskId);
-    return this.create(JSON.parse(task.inputJson) as GenerationInput);
+    const input = await this.hydrateInputImage(JSON.parse(task.inputJson) as StoredGenerationInput);
+    return this.create(input);
   }
 
   resume() {
@@ -168,6 +181,56 @@ export class TaskRunner {
     if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的图片", 502);
   }
 
+  private async persistInputImage(taskId: string, input: GenerationInput): Promise<StoredGenerationInput> {
+    if (!input.referenceImage) return { ...input, referenceImage: undefined };
+    const bytes = Buffer.from(input.referenceImage.base64, "base64");
+    if (!bytes.length || bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new AppError("REFERENCE_IMAGE_TOO_LARGE", "参考图不能超过 10 MB", 400);
+    }
+    if (!matchesImageSignature(bytes, input.referenceImage.mimeType)) {
+      throw new AppError("REFERENCE_IMAGE_INVALID", "参考图格式与文件内容不匹配", 400);
+    }
+    const extension = extensionForMime(input.referenceImage.mimeType);
+    const relativePath = safeFileName(`${taskId}.${extension}`);
+    const originalName = safeFileName(input.referenceImage.fileName);
+    const stem = originalName.replace(/\.[^.]+$/, "").slice(0, 80) || "reference";
+    await fs.writeFile(path.join(this.db.inputsDir, relativePath), bytes);
+    return {
+      ...input,
+      referenceImage: {
+        fileName: `${stem}.${extension}`,
+        mimeType: input.referenceImage.mimeType,
+        relativePath,
+        byteSize: bytes.length,
+      },
+    };
+  }
+
+  private async hydrateInputImage(input: StoredGenerationInput): Promise<GenerationInput> {
+    if (!input.referenceImage) return { ...input, referenceImage: undefined };
+    const absolutePath = path.resolve(this.db.inputsDir, input.referenceImage.relativePath);
+    if (!absolutePath.startsWith(path.resolve(this.db.inputsDir) + path.sep)) {
+      throw new AppError("REFERENCE_IMAGE_INVALID", "参考图路径无效", 400);
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await fs.readFile(absolutePath);
+    } catch {
+      throw new AppError("REFERENCE_IMAGE_MISSING", "参考图文件不存在，请重新上传", 400);
+    }
+    if (!bytes.length || bytes.length > MAX_REFERENCE_IMAGE_BYTES || !matchesImageSignature(bytes, input.referenceImage.mimeType)) {
+      throw new AppError("REFERENCE_IMAGE_INVALID", "参考图文件无效", 400);
+    }
+    return {
+      ...input,
+      referenceImage: {
+        base64: bytes.toString("base64"),
+        mimeType: input.referenceImage.mimeType,
+        fileName: input.referenceImage.fileName,
+      },
+    };
+  }
+
   private async resolveImage(image: ImageCandidate, channel: DbChannel) {
     if (image.base64) {
       const clean = image.base64.replace(/^data:image\/[^;]+;base64,/, "").replace(/\s/g, "");
@@ -214,6 +277,14 @@ function extensionForMime(mimeType: string) {
   if (mimeType.includes("webp")) return "webp";
   if (mimeType.includes("gif")) return "gif";
   return "png";
+}
+
+function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
+  if (mimeType === "image/png") {
+    return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  return bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
 }
 
 function sleep(ms: number) {

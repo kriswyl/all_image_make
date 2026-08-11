@@ -56,4 +56,72 @@ describe("generation API", () => {
     expect(diagnostics).toHaveLength(1);
     expect(JSON.stringify(diagnostics)).not.toContain("Authorization");
   });
+
+  it("persists a reference image outside SQLite and submits an OpenAI edit request", async () => {
+    let receivedContentType = "";
+    let receivedBody = "";
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/v1/images/edits" && req.method === "POST") {
+        receivedContentType = String(req.headers["content-type"] ?? "");
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          receivedBody = Buffer.concat(chunks).toString("latin1");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-edit-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Edit Mock", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    const createResponse = await request(app).post("/api/generations").send({
+      channelId: channelResponse.body.data.id, model: "mock-image", prompt: "edit image",
+      referenceImage: { base64: pngBase64, mimeType: "image/png", fileName: "source.png" },
+    }).expect(202);
+    const taskId = createResponse.body.data.id as string;
+    let task = createResponse.body.data;
+    for (let index = 0; index < 30 && task.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    }
+
+    expect(task.status).toBe("succeeded");
+    expect(receivedContentType).toContain("multipart/form-data; boundary=");
+    expect(receivedBody).toContain('name="image"; filename="source.png"');
+    expect(receivedBody).toContain('name="prompt"');
+    expect(receivedBody).toContain("edit image");
+    const storedInput = context.db.getTaskRow(taskId)?.inputJson ?? "";
+    expect(storedInput).not.toContain(pngBase64);
+    expect(JSON.parse(storedInput).referenceImage).toMatchObject({ mimeType: "image/png", byteSize: 68 });
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(1);
+    const diagnostics = (await request(app).get(`/api/generations/${taskId}/diagnostics`).expect(200)).body.data;
+    expect(JSON.stringify(diagnostics[0].request)).not.toContain(pngBase64);
+    expect(diagnostics[0].request.body.image).toMatchObject({ fileName: "source.png", mimeType: "image/png", byteSize: 68 });
+
+    const retryResponse = await request(app).post(`/api/generations/${taskId}/retry`).expect(202);
+    const retryTaskId = retryResponse.body.data.id as string;
+    let retryTask = retryResponse.body.data;
+    for (let index = 0; index < 30 && retryTask.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      retryTask = (await request(app).get(`/api/generations/${retryTaskId}`).expect(200)).body.data;
+    }
+    expect(retryTask.status).toBe("succeeded");
+    expect(context.db.getTaskRow(retryTaskId)?.inputJson).not.toContain(pngBase64);
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(2);
+  });
 });

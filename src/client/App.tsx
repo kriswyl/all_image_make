@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, History, Image as ImageIcon,
-  KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
-  Sparkles, Square, Trash2, X,
+  ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
+  Sparkles, Square, Trash2, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
-import type { AdapterType, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
+import type { AdapterType, Channel, ChannelInput, Diagnostic, ReferenceImageInput, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "channels" | "history";
 type Toast = { kind: "success" | "error"; message: string };
+type ReferenceImageState = ReferenceImageInput & { previewUrl: string; byteSize: number };
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const adapterLabels: Record<AdapterType, string> = {
   "openai-images": "OpenAI Images",
@@ -204,12 +206,33 @@ function GenerateView(props: {
   const [weirdness, setWeirdness] = useState("");
   const [count, setCount] = useState(1);
   const [raw, setRaw] = useState("{}");
+  const [referenceImage, setReferenceImage] = useState<ReferenceImageState | null>(null);
+  const [readingImage, setReadingImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const showAspectRatio = adapterType === "gemini-content" || adapterType === "midjourney-task";
   const showCount = adapterType !== "midjourney-task";
+
+  async function selectReferenceImage(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const mimeType = referenceImageMimeType(file);
+    if (!mimeType) return props.onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图");
+    if (file.size > MAX_REFERENCE_IMAGE_BYTES) return props.onToast("error", "参考图不能超过 10 MB");
+    setReadingImage(true);
+    try {
+      const previewUrl = await readFileAsDataUrl(file);
+      const base64 = previewUrl.slice(previewUrl.indexOf(",") + 1);
+      setReferenceImage({ base64, mimeType, fileName: file.name, previewUrl, byteSize: file.size });
+    } catch {
+      props.onToast("error", "无法读取参考图");
+    } finally {
+      setReadingImage(false);
+    }
+  }
 
   async function generate() {
     if (!channel) return props.onToast("error", "请先添加渠道");
@@ -227,6 +250,11 @@ function GenerateView(props: {
     try {
       const task = await api.generate({
         channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(), negativePrompt: negativePrompt.trim() || undefined,
+        referenceImage: referenceImage ? {
+          base64: referenceImage.base64,
+          mimeType: referenceImage.mimeType,
+          fileName: referenceImage.fileName,
+        } : undefined,
         size: size === "auto" ? undefined : size,
         aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
         count,
@@ -263,7 +291,7 @@ function GenerateView(props: {
   return (
     <div className="page generate-page">
       <div className="page-header">
-        <div><h1>生成工作台</h1><span className="page-kicker">TEXT TO IMAGE</span></div>
+        <div><h1>生成工作台</h1><span className="page-kicker">{referenceImage ? "IMAGE TO IMAGE" : "TEXT TO IMAGE"}</span></div>
         <div className="header-selects">
           <label><span>渠道</span><select value={props.selectedChannelId} onChange={(event) => props.onChannelChange(event.target.value)}>
             <option value="">选择渠道</option>{props.channels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -281,6 +309,24 @@ function GenerateView(props: {
           <section className="control-panel">
             <div className="section-title"><div><Sparkles size={17} /><h2>提示词</h2></div><span>{prompt.length} / 20000</span></div>
             <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="输入画面内容、构图、风格与光线…" />
+            <div className="reference-block">
+              <div className="reference-heading">
+                <div><ImagePlus size={16} /><span>参考图</span></div>
+                {referenceImage ? <button type="button" className="icon-button compact" title="移除参考图" onClick={() => setReferenceImage(null)}><X size={15} /></button> : null}
+              </div>
+              <label className={`reference-picker ${referenceImage ? "has-image" : ""}`}>
+                <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={selectReferenceImage} disabled={readingImage || submitting} />
+                {referenceImage ? <>
+                  <img src={referenceImage.previewUrl} alt="参考图预览" />
+                  <span className="reference-file"><strong>{referenceImage.fileName}</strong><small>{formatFileSize(referenceImage.byteSize)}</small></span>
+                  <Upload size={17} />
+                </> : <>
+                  <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
+                  <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 最大 10 MB</small></span>
+                  <Upload size={17} />
+                </>}
+              </label>
+            </div>
             <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
 
             <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>参数</h2></div></div>
@@ -333,7 +379,7 @@ function GenerateView(props: {
             </details>
             <div className="submit-row">
               {channel && !channel.hasKey ? <span className="key-warning"><KeyRound size={15} />未配置密钥</span> : <span />}
-              <button className="primary-button generate-button" onClick={generate} disabled={submitting || !channel || !props.selectedModel}>
+              <button className="primary-button generate-button" onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel}>
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />}生成图片
               </button>
             </div>
@@ -513,4 +559,26 @@ function optionalNumber(value: string) {
   if (!value.trim()) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function referenceImageMimeType(file: File): ReferenceImageInput["mimeType"] | null {
+  if (file.type === "image/png" || file.type === "image/jpeg" || file.type === "image/webp") return file.type;
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  return null;
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("invalid result"));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatFileSize(bytes: number) {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

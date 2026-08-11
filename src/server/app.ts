@@ -10,6 +10,8 @@ import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest }
 
 const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "midjourney-task", "generic-json"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
+const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
+const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
 
 const channelSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -30,6 +32,11 @@ const generationSchema = z.object({
   channelId: z.string().uuid(),
   model: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20000),
+  referenceImage: z.object({
+    base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    mimeType: z.enum(referenceImageMimeTypes),
+    fileName: z.string().trim().min(1).max(200),
+  }).optional(),
   negativePrompt: z.string().max(10000).optional(),
   size: z.string().max(60).optional(),
   aspectRatio: z.string().max(20).optional(),
@@ -73,7 +80,7 @@ export function createApp(options: { dataDir?: string } = {}) {
   const context: AppContext = { db, sessionKeys, runner };
 
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "16mb" }));
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173") {
@@ -150,13 +157,11 @@ export function createApp(options: { dataDir?: string } = {}) {
     }
   }));
 
-  app.post("/api/generations", (req, res, next) => {
-    try {
+  app.post("/api/generations", asyncHandler(async (req, res) => {
       const input = generationSchema.parse(req.body) as GenerationInput;
-      const task = runner.create(input);
+      const task = await runner.create(input);
       res.status(202).json(ok(task));
-    } catch (error) { next(error); }
-  });
+  }));
 
   app.get("/api/generations", (req, res) => {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit ?? 40)));
@@ -173,9 +178,9 @@ export function createApp(options: { dataDir?: string } = {}) {
     try { res.json(ok(runner.cancel(routeParam(req.params.id)))); } catch (error) { next(error); }
   });
 
-  app.post("/api/generations/:id/retry", (req, res, next) => {
-    try { res.status(202).json(ok(runner.retry(routeParam(req.params.id)))); } catch (error) { next(error); }
-  });
+  app.post("/api/generations/:id/retry", asyncHandler(async (req, res) => {
+    res.status(202).json(ok(await runner.retry(routeParam(req.params.id))));
+  }));
 
   app.get("/api/generations/:id/diagnostics", (req, res) => {
     const id = routeParam(req.params.id);

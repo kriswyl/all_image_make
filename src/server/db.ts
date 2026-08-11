@@ -38,12 +38,15 @@ function parseJson<T>(value: unknown, fallback: T): T {
 export class AppDatabase {
   readonly filePath: string;
   readonly assetsDir: string;
+  readonly inputsDir: string;
   private readonly db: DatabaseSync;
 
   constructor(dataDir = path.resolve("data")) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.assetsDir = path.join(dataDir, "assets");
+    this.inputsDir = path.join(dataDir, "inputs");
     fs.mkdirSync(this.assetsDir, { recursive: true });
+    fs.mkdirSync(this.inputsDir, { recursive: true });
     this.filePath = path.join(dataDir, "app.db");
     this.db = new DatabaseSync(this.filePath);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");

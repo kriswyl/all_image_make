@@ -18,12 +18,14 @@
 
 - 多渠道和多模型 ID。
 - OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task、Generic JSON 适配器。
+- 单张参考图图生图；上传支持 PNG、JPEG、WebP，最大 10 MB。
 - 文生图基础参数、高级 JSON 参数透传。
 - OpenAI、Gemini、Midjourney 的常用官方参数。
 - Midjourney 异步轮询、取消和失败重试。
 - URL/Base64 图片保存、本地历史记录、脱敏诊断。
 - SSRF 防护和 API Key 环境变量支持。
 - 高级 JSON 对同名基础字段拥有最高优先级，不维护渠道能力矩阵。
+- 参考图保存在数据目录的 `inputs/`，任务 JSON 和诊断记录不会保存上传 Base64；OpenAI Images 默认使用 `/v1/images/edits` multipart 请求。
 
 ## API Key 规则
 
@@ -109,7 +111,7 @@ npm run tauri:build
 
 Tauri 版本默认使用：
 
-- SQLite 和图片：`%APPDATA%/com.imagerelay.studio/data`
+- SQLite、参考图和生成图片：`%APPDATA%/com.imagerelay.studio/data`
 - 日志：`%LOCALAPPDATA%/com.imagerelay.studio/logs`
 
 迁移历史图片和记录时，需要单独复制旧电脑对应的 `data` 目录。

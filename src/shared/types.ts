@@ -39,10 +39,17 @@ export interface ChannelInput extends Omit<Channel, "id" | "hasKey" | "createdAt
   apiKey?: string;
 }
 
+export interface ReferenceImageInput {
+  base64: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  fileName: string;
+}
+
 export interface GenerationInput {
   channelId: string;
   model: string;
   prompt: string;
+  referenceImage?: ReferenceImageInput;
   negativePrompt?: string;
   size?: string;
   aspectRatio?: string;

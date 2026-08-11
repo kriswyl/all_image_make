@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { buildGenerationRequest, extractImageCandidates, extractRemoteTaskId, readRemoteState } from "../src/server/adapters";
+import { buildGenerationRequest, extractImageCandidates, extractRemoteTaskId, readRemoteState, requestForDiagnostic } from "../src/server/adapters";
 import type { DbChannel } from "../src/server/db";
 
 const channel: DbChannel = {
   id: "channel-1", name: "Test", baseUrl: "https://relay.example.com", adapterType: "openai-images",
   authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "",
   models: ["image-model"], allowPrivateNetwork: false, enabled: true, createdAt: "", updatedAt: "",
+};
+
+const referenceImage = {
+  base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  mimeType: "image/png" as const,
+  fileName: "source.png",
 };
 
 describe("adapter request building", () => {
@@ -23,6 +29,51 @@ describe("adapter request building", () => {
       background: "transparent", output_compression: 80, moderation: "low", style: "natural",
       response_format: "b64_json", stream: true, partial_images: 2, user: "test-user", seed: 42,
     });
+  });
+
+  it("builds an OpenAI multipart edit request without exposing image data", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "restyle", referenceImage,
+      size: "1024x1024", count: 1, rawParameters: { quality: "high" },
+    }, "secret");
+    expect(request.url).toBe("https://relay.example.com/v1/images/edits");
+    expect(request.headers["Content-Type"]).toBeUndefined();
+    expect(request.formData?.get("model")).toBe("image-model");
+    expect(request.formData?.get("prompt")).toBe("restyle");
+    expect(request.formData?.get("quality")).toBe("high");
+    expect(request.formData?.get("image")).toBeInstanceOf(Blob);
+    const diagnostic = requestForDiagnostic(request);
+    expect(diagnostic.body).toMatchObject({ image: { fileName: "source.png", mimeType: "image/png" } });
+    expect(JSON.stringify(diagnostic)).not.toContain(referenceImage.base64);
+  });
+
+  it("maps reference images for JSON adapters and lets raw parameters override defaults", () => {
+    const chat = buildGenerationRequest({ ...channel, adapterType: "openai-chat-image", endpoint: "/v1/chat/completions" }, {
+      channelId: channel.id, model: "chat-image", prompt: "restyle", referenceImage,
+    }, "secret");
+    expect(chat.body?.messages).toMatchObject([{ content: [
+      { type: "text", text: "restyle" },
+      { type: "image_url", image_url: { url: expect.stringContaining("data:image/png;base64,") } },
+    ] }]);
+
+    const gemini = buildGenerationRequest({ ...channel, adapterType: "gemini-content", endpoint: "/v1beta/models/{model}:generateContent" }, {
+      channelId: channel.id, model: "gemini-image", prompt: "restyle", referenceImage,
+    }, "secret");
+    expect(gemini.body?.contents).toMatchObject([{ parts: [
+      { inlineData: { mimeType: "image/png", data: referenceImage.base64 } },
+      { text: "restyle" },
+    ] }]);
+
+    const midjourney = buildGenerationRequest({ ...channel, adapterType: "midjourney-task", endpoint: "/mj/submit/imagine" }, {
+      channelId: channel.id, model: "mj", prompt: "restyle", referenceImage,
+      rawParameters: { base64Array: ["relay-override"] },
+    }, "secret");
+    expect(midjourney.body?.base64Array).toEqual(["relay-override"]);
+
+    const generic = buildGenerationRequest({ ...channel, adapterType: "generic-json" }, {
+      channelId: channel.id, model: "generic", prompt: "restyle", referenceImage,
+    }, "secret");
+    expect(generic.body?.image).toBe(`data:image/png;base64,${referenceImage.base64}`);
   });
 
   it("builds Gemini content shape", () => {
