@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { DEFAULT_CHANNELS } from "../shared/app-config.js";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset } from "../shared/types.js";
 
 export interface DbChannel {
@@ -13,7 +12,6 @@ export interface DbChannel {
   authHeaderName: string;
   secretEnv: string;
   endpoint: string;
-  statusEndpoint: string;
   models: string[];
   allowPrivateNetwork: boolean;
   enabled: boolean;
@@ -37,6 +35,7 @@ function parseJson<T>(value: unknown, fallback: T): T {
 }
 
 export class AppDatabase {
+  readonly dataDir: string;
   readonly filePath: string;
   readonly assetsDir: string;
   readonly inputsDir: string;
@@ -44,6 +43,7 @@ export class AppDatabase {
 
   constructor(dataDir = path.resolve("data")) {
     fs.mkdirSync(dataDir, { recursive: true });
+    this.dataDir = dataDir;
     this.assetsDir = path.join(dataDir, "assets");
     this.inputsDir = path.join(dataDir, "inputs");
     fs.mkdirSync(this.assetsDir, { recursive: true });
@@ -107,13 +107,6 @@ export class AppDatabase {
         created_at TEXT NOT NULL
       );
     `);
-    this.seedDefaultChannels();
-  }
-
-  private seedDefaultChannels() {
-    const row = this.db.prepare("SELECT COUNT(*) AS count FROM channels").get() as { count: number };
-    if (Number(row.count) > 0) return;
-    for (const channel of DEFAULT_CHANNELS) this.saveChannel(channel.input, channel.id);
   }
 
   close() {
@@ -143,7 +136,7 @@ export class AppDatabase {
       input.authHeaderName ?? "",
       input.secretEnv ?? "",
       input.endpoint ?? "",
-      input.statusEndpoint ?? "",
+      "",
       JSON.stringify(input.models ?? []),
       input.allowPrivateNetwork ? 1 : 0,
       input.enabled === false ? 0 : 1,
@@ -191,13 +184,12 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
+  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
     const fields: string[] = [];
     const values: Array<string | number | bigint | null | Uint8Array> = [];
     const mapping: Record<string, string> = {
       status: "status",
       progress: "progress",
-      remoteTaskId: "remote_task_id",
       effectiveJson: "effective_json",
       attemptCount: "attempt_count",
       errorCode: "error_code",
@@ -216,8 +208,11 @@ export class AppDatabase {
     this.db.prepare(`UPDATE tasks SET ${fields.join(", ")} WHERE id = ?`).run(...values);
   }
 
+  /** 进程重启后仍停留在进行中状态的任务，需要被标记为失败 */
   listPendingTasks(): TaskRow[] {
-    const rows = this.db.prepare("SELECT * FROM tasks WHERE status = 'running' AND remote_task_id IS NOT NULL").all() as DbRow[];
+    const rows = this.db.prepare(
+      "SELECT * FROM tasks WHERE status IN ('queued', 'validating', 'submitting', 'running')",
+    ).all() as DbRow[];
     return rows.map((row) => this.taskFromRow(row));
   }
 
@@ -268,7 +263,7 @@ export class AppDatabase {
   private taskView(task: TaskRow): Task {
     return {
       id: task.id, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
-      status: task.status, progress: task.progress, remoteTaskId: task.remoteTaskId, effectiveParameters: parseJson(task.effectiveJson, null),
+      status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage, assets: this.listAssets(task.id).map((asset) => ({
         id: asset.id, taskId: asset.taskId, fileName: asset.fileName, mimeType: asset.mimeType, byteSize: asset.byteSize,
         url: `/api/assets/${asset.id}/file`, createdAt: asset.createdAt,
@@ -280,7 +275,7 @@ export class AppDatabase {
     return {
       id: String(row.id), name: String(row.name), baseUrl: String(row.base_url), adapterType: String(row.adapter_type) as AdapterType,
       authType: String(row.auth_type) as AuthType, authHeaderName: String(row.auth_header_name ?? ""), secretEnv: String(row.secret_env ?? ""),
-      endpoint: String(row.endpoint ?? ""), statusEndpoint: String(row.status_endpoint ?? ""), models: parseJson(row.models_json, []),
+      endpoint: String(row.endpoint ?? ""), models: parseJson(row.models_json, []),
       allowPrivateNetwork: Boolean(row.allow_private_network), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     };
   }
@@ -289,7 +284,7 @@ export class AppDatabase {
     return {
       id: String(row.id), channelId: String(row.channel_id), channelName: row.channel_name == null ? null : String(row.channel_name),
       model: String(row.model), prompt: String(row.prompt), status: String(row.status) as TaskStatus,
-      progress: row.progress == null ? null : Number(row.progress), remoteTaskId: row.remote_task_id == null ? null : String(row.remote_task_id),
+      progress: row.progress == null ? null : Number(row.progress),
       inputJson: String(row.input_json), effectiveJson: row.effective_json == null ? null : String(row.effective_json), attemptCount: Number(row.attempt_count),
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
@@ -299,7 +294,7 @@ export class AppDatabase {
 
 export interface TaskRow {
   id: string; channelId: string; channelName: string | null; model: string; prompt: string; status: TaskStatus; progress: number | null;
-  remoteTaskId: string | null; inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
+  inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
   errorMessage: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
 }
 

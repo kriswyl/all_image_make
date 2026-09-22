@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+// Windows 上 npm 是 .cmd 脚本，新版 Node 要求加 shell: true 才能启动
 const children = [
-  spawn(npm, ["run", "dev:server"], { stdio: "inherit" }),
-  spawn(npm, ["run", "dev:web"], { stdio: "inherit" }),
+  spawn(npm, ["run", "dev:server"], { stdio: "inherit", shell: true }),
+  spawn(npm, ["run", "dev:web"], { stdio: "inherit", shell: true }),
 ];
 
 let stopping = false;

@@ -14,20 +14,42 @@ afterEach(async () => {
 });
 
 describe("generation API", () => {
-  it("seeds the bundled VectorEngine channels for a fresh data directory", async () => {
+  it("starts a fresh data directory with no channels", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-defaults-test-"));
     const { app, context } = createApp({ dataDir });
     cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
 
     const bootstrap = (await request(app).get("/api/bootstrap").expect(200)).body.data;
-    expect(bootstrap.channels).toHaveLength(4);
-    expect(bootstrap.channels.map((channel: { name: string }) => channel.name)).toEqual([
-      "向量引擎-gpt-image-2-c",
-      "向量引擎-香蕉生图",
-      "向量引擎-mj",
-      "向量引擎-gpt-image-2",
-    ]);
-    expect(bootstrap.channels.every((channel: { secretEnv: string; apiKey?: string }) => channel.secretEnv === "VECTORENGINE_API_KEY" && !("apiKey" in channel))).toBe(true);
+    expect(bootstrap.channels).toEqual([]);
+  });
+
+  it("keeps channel API keys after a restart and forgets deleted channels", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-keys-test-"));
+    const channelInput = {
+      name: "Relay", baseUrl: "http://127.0.0.1:8123", adapterType: "openai-images",
+      authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["image-model"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-persisted",
+    };
+
+    const first = createApp({ dataDir });
+    const created = (await request(first.app).post("/api/channels").send(channelInput).expect(201)).body.data;
+    expect(created.hasKey).toBe(true);
+    first.context.db.close();
+
+    // 重开服务：密钥应当从数据目录载入，不需要二次配置
+    const second = createApp({ dataDir });
+    cleanups.push(() => { second.context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const reloaded = (await request(second.app).get("/api/bootstrap").expect(200)).body.data;
+    expect(reloaded.channels).toHaveLength(1);
+    expect(reloaded.channels[0].hasKey).toBe(true);
+    expect(second.context.sessionKeys.get(created.id)).toBe("sk-persisted");
+    // 密钥文件不会把明文暴露给渠道接口响应
+    expect(JSON.stringify(reloaded.channels)).not.toContain("sk-persisted");
+
+    await request(second.app).delete(`/api/channels/${created.id}`).expect(200);
+    expect(second.context.sessionKeys.get(created.id)).toBeUndefined();
+    const stored = JSON.parse(await fs.readFile(path.join(dataDir, "channel-keys.json"), "utf8"));
+    expect(stored).toEqual({});
   });
 
   it("persists a channel, generates an image and records diagnostics", async () => {
@@ -51,7 +73,7 @@ describe("generation API", () => {
 
     const channelResponse = await request(app).post("/api/channels").send({
       name: "Local Mock", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none",
-      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "", models: ["mock-image"],
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
       allowPrivateNetwork: true, enabled: true,
     }).expect(201);
     const channelId = channelResponse.body.data.id as string;
@@ -106,7 +128,7 @@ describe("generation API", () => {
 
     const channelResponse = await request(app).post("/api/channels").send({
       name: "Edit Mock", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none",
-      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "", models: ["mock-image"],
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
       allowPrivateNetwork: true, enabled: true,
     }).expect(201);
     const pngBytes = Buffer.from(pngBase64, "base64");

@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
-import { APP_VERSION, VECTORENGINE_KEY_ENV, VECTORENGINE_KEY_PLACEHOLDER } from "../shared/app-config";
-import type { AdapterType, Asset, Channel, ChannelInput, Diagnostic, Task, TaskStatus } from "../shared/types";
+import { APP_VERSION } from "../shared/app-config";
+import { AddChannelWizard } from "./channels/AddChannelWizard";
+import { ChannelDialog } from "./channels/ChannelDialog";
+import { ChannelsView } from "./channels/ChannelsView";
+import type { Asset, Channel, Diagnostic, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "channels" | "history";
 type Toast = { kind: "success" | "error"; message: string };
@@ -21,14 +24,6 @@ const openAiSizeGroups = [
   { label: "横向", sizes: ["1280x720", "1536x1024", "1600x1200", "2048x1152", "3840x2160"] },
   { label: "纵向", sizes: ["720x1280", "1024x1536", "1200x1600", "1152x2048", "2160x3840"] },
 ] as const;
-
-const adapterLabels: Record<AdapterType, string> = {
-  "openai-images": "OpenAI Images",
-  "openai-chat-image": "OpenAI Chat Image",
-  "gemini-content": "Gemini Content",
-  "midjourney-task": "Midjourney Task",
-  "generic-json": "Generic JSON",
-};
 
 const statusLabels: Record<TaskStatus, string> = {
   queued: "排队中", validating: "校验中", submitting: "提交中", running: "生成中", succeeded: "已完成",
@@ -61,6 +56,7 @@ export function App() {
   const [selectedModel, setSelectedModel] = usePersistentState("model", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
@@ -123,6 +119,22 @@ export function App() {
     showToast("success", "渠道已保存");
   }
 
+  function handleWizardSaved(channel: Channel) {
+    setChannels((current) => [channel, ...current.filter((item) => item.id !== channel.id)]);
+    if (!selectedChannelId || selectedChannelId === channel.id) {
+      setSelectedChannelId(channel.id);
+      setSelectedModel(channel.models[0] ?? "");
+    }
+  }
+
+  function handleWizardRemoved(id: string) {
+    setChannels((current) => {
+      const remaining = current.filter((item) => item.id !== id);
+      if (selectedChannelId === id) selectChannel(remaining[0]?.id ?? "");
+      return remaining;
+    });
+  }
+
   async function deleteChannel(channel: Channel) {
     if (!window.confirm(`删除渠道“${channel.name}”？历史任务仍会保留。`)) return;
     try {
@@ -137,29 +149,20 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setView("generate")} aria-label="向量生图">
+        <button className="brand" onClick={() => setView("generate")} aria-label="小勤画图">
           <span className="brand-mark"><img src="/app-logo.png" alt="" /></span>
-          <span>向量生图</span>
+          <span>小勤画图</span>
         </button>
+        <nav className="topnav" aria-label="主导航">
+          <NavButton active={view === "generate"} icon={<Sparkles size={16} />} label="生图工作台" onClick={() => setView("generate")} />
+          <NavButton active={view === "channels"} icon={<Server size={16} />} label="渠道配置" onClick={() => setView("channels")} />
+          <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" onClick={() => setView("history")} />
+        </nav>
         <div className="topbar-status">
-          <span className="support-label">向量引擎支持</span>
           <span className="status-dot" />
-          <span>本地服务</span>
           <span className="version">v{APP_VERSION}</span>
         </div>
       </header>
-
-      <aside className="sidebar" aria-label="主导航">
-        <nav>
-          <NavButton active={view === "generate"} icon={<Sparkles size={18} />} label="生成" onClick={() => setView("generate")} />
-          <NavButton active={view === "channels"} icon={<Server size={18} />} label="渠道" onClick={() => setView("channels")} />
-          <NavButton active={view === "history"} icon={<History size={18} />} label="历史" onClick={() => setView("history")} />
-        </nav>
-        <div className="sidebar-foot">
-          <span>{channels.length}</span>
-          <span>个渠道</span>
-        </div>
-      </aside>
 
       <main className="workspace">
         {loading ? <LoadingScreen /> : null}
@@ -171,7 +174,7 @@ export function App() {
             activeTask={activeTask}
             onChannelChange={selectChannel}
             onModelChange={setSelectedModel}
-            onAddChannel={() => setEditorChannel(null)}
+            onAddChannel={() => setWizardOpen(true)}
             onConfigureChannel={(channel) => setEditorChannel(channel)}
             onTask={(task) => {
               setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
@@ -182,13 +185,23 @@ export function App() {
           />
         ) : null}
         {!loading && view === "channels" ? (
-          <ChannelsView channels={channels} onAdd={() => setEditorChannel(null)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
+          <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
         ) : null}
         {!loading && view === "history" ? (
           <HistoryView tasks={tasks} onRefresh={refreshTasks} onSelect={(task) => { setActiveTaskId(task.id); setView("generate"); }} onDiagnostics={setDiagnosticTask} />
         ) : null}
       </main>
 
+      {wizardOpen ? (
+        <AddChannelWizard
+          channels={channels}
+          onClose={() => setWizardOpen(false)}
+          onSaved={handleWizardSaved}
+          onRemoved={handleWizardRemoved}
+          onCustom={() => { setWizardOpen(false); setEditorChannel(null); }}
+          onToast={showToast}
+        />
+      ) : null}
       {editorChannel !== undefined ? (
         <ChannelDialog channel={editorChannel} onClose={() => setEditorChannel(undefined)} onSaved={handleChannelSaved} />
       ) : null}
@@ -227,11 +240,7 @@ function GenerateView(props: {
   const [maxOutputTokens, setMaxOutputTokens] = usePersistentState("maxOutputTokens", "");
   const [responseModalities, setResponseModalities] = usePersistentState<"IMAGE" | "TEXT,IMAGE">("responseModalities", "IMAGE");
   const [seed, setSeed] = usePersistentState("seed", "");
-  const [mjVersion, setMjVersion] = usePersistentState("mjVersion", "");
-  const [processMode, setProcessMode] = usePersistentState<"auto" | "fast" | "relax" | "turbo">("processMode", "auto");
-  const [stylize, setStylize] = usePersistentState("stylize", "");
-  const [chaos, setChaos] = usePersistentState("chaos", "");
-  const [weirdness, setWeirdness] = usePersistentState("weirdness", "");
+  const [timeoutSeconds, setTimeoutSeconds] = usePersistentState("timeoutSeconds", 180);
   const [count, setCount] = usePersistentState("count", 1);
   const [raw, setRaw] = usePersistentState("raw", "{}");
   const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
@@ -241,8 +250,7 @@ function GenerateView(props: {
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
-  const showAspectRatio = adapterType === "gemini-content" || adapterType === "midjourney-task";
-  const showCount = adapterType !== "midjourney-task";
+  const showAspectRatio = adapterType === "gemini-content";
 
   useEffect(() => () => {
     referenceUrls.current.forEach((url) => URL.revokeObjectURL(url));
@@ -324,12 +332,8 @@ function GenerateView(props: {
         topK: adapterType === "gemini-content" ? optionalNumber(topK) : undefined,
         maxOutputTokens: adapterType === "gemini-content" ? optionalNumber(maxOutputTokens) : undefined,
         responseModalities: adapterType === "gemini-content" ? responseModalities.split(",") as Array<"TEXT" | "IMAGE"> : undefined,
-        seed: adapterType === "gemini-content" || adapterType === "midjourney-task" ? optionalNumber(seed) : undefined,
-        mjVersion: adapterType === "midjourney-task" ? mjVersion.trim() || undefined : undefined,
-        processMode: adapterType === "midjourney-task" && processMode !== "auto" ? processMode : undefined,
-        stylize: adapterType === "midjourney-task" ? optionalNumber(stylize) : undefined,
-        chaos: adapterType === "midjourney-task" ? optionalNumber(chaos) : undefined,
-        weirdness: adapterType === "midjourney-task" ? optionalNumber(weirdness) : undefined,
+        seed: adapterType === "gemini-content" ? optionalNumber(seed) : undefined,
+        timeoutMs: timeoutSeconds * 1000,
         rawParameters,
       }, referenceImages.map((item) => item.file));
       props.onTask(task);
@@ -397,7 +401,7 @@ function GenerateView(props: {
               {isOpenAi ? <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label> : null}
               {isOpenAi ? <label><span>背景</span><select value={background} onChange={(event) => setBackground(event.target.value as typeof background)}><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label> : null}
               {isOpenAi ? <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label> : null}
-              {showCount ? <label><span>{adapterType === "gemini-content" ? "候选数量" : "数量"}</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label> : null}
+              <label><span>{adapterType === "gemini-content" ? "候选数量" : "数量"}</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label>
             </div>
             {isOpenAi ? <>
               <div className="parameter-subtitle">OpenAI Images</div>
@@ -420,17 +424,26 @@ function GenerateView(props: {
                 <label><span>响应模态</span><select value={responseModalities} onChange={(event) => setResponseModalities(event.target.value as typeof responseModalities)}><option value="IMAGE">仅图片</option><option value="TEXT,IMAGE">文字 + 图片</option></select></label>
               </div>
             </> : null}
-            {adapterType === "midjourney-task" ? <>
-              <div className="parameter-subtitle">Midjourney 常用参数</div>
-              <div className="parameter-grid">
-                <label><span>版本</span><input value={mjVersion} onChange={(event) => setMjVersion(event.target.value)} placeholder="例如 7 或 6.1" /></label>
-                <label><span>处理模式</span><select value={processMode} onChange={(event) => setProcessMode(event.target.value as typeof processMode)}><option value="auto">渠道默认</option><option value="fast">Fast</option><option value="relax">Relax</option><option value="turbo">Turbo</option></select></label>
-                <label><span>风格化</span><input type="number" min={0} max={3000} value={stylize} onChange={(event) => setStylize(event.target.value)} placeholder="0 - 3000" /></label>
-                <label><span>混乱度</span><input type="number" min={0} max={100} value={chaos} onChange={(event) => setChaos(event.target.value)} placeholder="0 - 100" /></label>
-                <label><span>奇异度</span><input type="number" min={0} max={3000} value={weirdness} onChange={(event) => setWeirdness(event.target.value)} placeholder="0 - 3000" /></label>
-                <label><span>Seed</span><input type="number" min={0} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="可选" /></label>
-              </div>
-            </> : null}
+            <div className="parameter-subtitle">生成超时</div>
+            <div className="parameter-grid">
+              <label>
+                <span>等待时长 <small>秒</small></span>
+                <input type="number" min={10} max={1800} step={10} value={timeoutSeconds}
+                  onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(1800, Number(event.target.value) || 180)))} />
+              </label>
+              <label>
+                <span>快速选择</span>
+                <select value={[60, 180, 300, 600, 900].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
+                  onChange={(event) => { if (event.target.value !== "custom") setTimeoutSeconds(Number(event.target.value)); }}>
+                  <option value="60">1 分钟</option>
+                  <option value="180">3 分钟（默认）</option>
+                  <option value="300">5 分钟</option>
+                  <option value="600">10 分钟</option>
+                  <option value="900">15 分钟</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+            </div>
             <details className="advanced-panel">
               <summary><Settings2 size={16} /><span>高级 JSON</span><ChevronRight className="details-chevron" size={16} /></summary>
               <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} />
@@ -507,100 +520,32 @@ function EmptyResult() {
   return <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function ChannelsView({ channels, onAdd, onEdit, onDelete, onToast }: { channels: Channel[]; onAdd: () => void; onEdit: (channel: Channel) => void; onDelete: (channel: Channel) => void; onToast: (kind: Toast["kind"], message: string) => void }) {
-  const [testing, setTesting] = useState<string | null>(null);
-  async function test(channel: Channel) {
-    setTesting(channel.id);
-    try {
-      const result = await api.testChannel(channel.id);
-      onToast("success", result.message ?? `连接正常 · ${result.httpStatus}${result.durationMs ? ` · ${result.durationMs} ms` : ""}`);
-    } catch (error) { onToast("error", error instanceof Error ? error.message : "连接失败"); }
-    finally { setTesting(null); }
-  }
-  return (
-    <div className="page">
-      <div className="page-header"><div><h1>渠道</h1><span className="page-kicker">CONNECTIONS</span></div><button className="primary-button" onClick={onAdd}><Plus size={17} />添加渠道</button></div>
-      <div className="data-table-wrap">
-        <table className="data-table">
-          <thead><tr><th>名称</th><th>协议</th><th>模型</th><th>密钥</th><th>状态</th><th aria-label="操作" /></tr></thead>
-          <tbody>{channels.map((channel) => (
-            <tr key={channel.id}>
-              <td><button className="table-primary" onClick={() => onEdit(channel)}>{channel.name}</button><span className="table-secondary">{channel.baseUrl}</span></td>
-              <td>{adapterLabels[channel.adapterType]}</td><td>{channel.models.length}</td>
-              <td>{channel.authType === "none" ? "无需密钥" : channel.hasKey ? <span className="positive"><CheckCircle2 size={15} />已配置</span> : <span className="warning"><AlertCircle size={15} />未配置</span>}</td>
-              <td><span className={`channel-state ${channel.enabled ? "enabled" : ""}`}>{channel.enabled ? "启用" : "停用"}</span></td>
-              <td><div className="table-actions"><button className="icon-button" title="测试连接" onClick={() => test(channel)} disabled={testing === channel.id}>{testing === channel.id ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}</button><button className="icon-button" title="编辑渠道" onClick={() => onEdit(channel)}><Settings2 size={16} /></button><button className="icon-button danger" title="删除渠道" onClick={() => onDelete(channel)}><Trash2 size={16} /></button></div></td>
-            </tr>
-          ))}</tbody>
-        </table>
-        {!channels.length ? <div className="table-empty"><Server size={28} /><span>尚无渠道</span></div> : null}
-      </div>
-    </div>
-  );
-}
-
 function HistoryView({ tasks, onRefresh, onSelect, onDiagnostics }: { tasks: Task[]; onRefresh: () => void; onSelect: (task: Task) => void; onDiagnostics: (task: Task) => void }) {
   return (
     <div className="page">
       <div className="page-header"><div><h1>历史</h1><span className="page-kicker">GENERATIONS</span></div><button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button></div>
       <div className="data-table-wrap">
-        <table className="data-table history-table"><thead><tr><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" /></tr></thead>
-          <tbody>{tasks.map((task) => <tr key={task.id}><td><button className="prompt-cell" onClick={() => onSelect(task)}>{task.prompt}</button></td><td>{task.channelName}</td><td>{task.model}</td><td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td><td><button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button></td></tr>)}</tbody>
+        <table className="data-table history-table">
+          <thead><tr><th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" /></tr></thead>
+          <tbody>{tasks.map((task) => (
+            <tr key={task.id}>
+              <td>
+                <button type="button" className="history-thumb" title={task.assets.length ? "查看结果" : "暂无图片"} onClick={() => onSelect(task)}>
+                  {task.assets[0]
+                    ? <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" />
+                    : <span className="history-thumb-empty"><ImageIcon size={16} /></span>}
+                  {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
+                </button>
+              </td>
+              <td><button className="prompt-cell" onClick={() => onSelect(task)}>{task.prompt}</button></td>
+              <td>{task.channelName}</td><td>{task.model}</td>
+              <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
+              <td><button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button></td>
+            </tr>
+          ))}</tbody>
         </table>
         {!tasks.length ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
       </div>
-    </div>
-  );
-}
-
-function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel | null; onClose: () => void; onSaved: (channel: Channel) => void }) {
-  const [form, setForm] = useState(() => ({
-    name: channel?.name ?? "", baseUrl: channel?.baseUrl ?? "", adapterType: channel?.adapterType ?? "openai-images" as AdapterType,
-    authType: channel?.authType ?? "bearer" as ChannelInput["authType"], authHeaderName: channel?.authHeaderName ?? "",
-    secretEnv: channel?.secretEnv ?? VECTORENGINE_KEY_ENV, endpoint: channel?.endpoint ?? "", statusEndpoint: channel?.statusEndpoint ?? "",
-    modelsText: channel?.models.join("\n") ?? "", apiKey: "", allowPrivateNetwork: channel?.allowPrivateNetwork ?? false, enabled: channel?.enabled ?? true,
-  }));
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
-  const defaults = useMemo(() => endpointDefaults(form.adapterType), [form.adapterType]);
-
-  function update<K extends keyof typeof form>(key: K, value: typeof form[K]) { setForm((current) => ({ ...current, [key]: value })); }
-  async function save(event: React.FormEvent) {
-    event.preventDefault();
-    const models = [...new Set(form.modelsText.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
-    if (!models.length) return;
-    setSaveError("");
-    setSaving(true);
-    try {
-      const saved = await api.saveChannel({
-        name: form.name, baseUrl: form.baseUrl, adapterType: form.adapterType, authType: form.authType,
-        authHeaderName: form.authHeaderName, secretEnv: form.secretEnv, endpoint: form.endpoint || defaults.endpoint,
-        statusEndpoint: form.statusEndpoint || defaults.statusEndpoint, models, apiKey: form.apiKey || undefined,
-        allowPrivateNetwork: form.allowPrivateNetwork, enabled: form.enabled,
-      }, channel?.id);
-      onSaved(saved);
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "保存失败，请检查配置后重试");
-    } finally { setSaving(false); }
-  }
-
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form className="modal channel-modal" onSubmit={save}>
-        <div className="modal-header"><div><Server size={18} /><h2>{channel ? "编辑渠道" : "添加渠道"}</h2></div><button type="button" className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div>
-        <div className="modal-body">
-          <div className="form-grid two"><label><span>名称</span><input required value={form.name} onChange={(event) => update("name", event.target.value)} placeholder="中转渠道" /></label><label><span>适配器</span><select value={form.adapterType} onChange={(event) => update("adapterType", event.target.value as AdapterType)}>{Object.entries(adapterLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
-          <label><span>Base URL</span><input required type="url" value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://relay.example.com" /></label>
-          <div className="form-grid two"><label><span>生成路径</span><input value={form.endpoint} onChange={(event) => update("endpoint", event.target.value)} placeholder={defaults.endpoint} /></label>{form.adapterType === "midjourney-task" ? <label><span>状态路径</span><input value={form.statusEndpoint} onChange={(event) => update("statusEndpoint", event.target.value)} placeholder={defaults.statusEndpoint} /></label> : <label><span>鉴权方式</span><select value={form.authType} onChange={(event) => update("authType", event.target.value as ChannelInput["authType"])}><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom-header">自定义 Header</option><option value="query">Query 参数</option><option value="none">无需鉴权</option></select></label>}</div>
-          {form.adapterType === "midjourney-task" ? <label><span>鉴权方式</span><select value={form.authType} onChange={(event) => update("authType", event.target.value as ChannelInput["authType"])}><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom-header">自定义 Header</option><option value="query">Query 参数</option><option value="none">无需鉴权</option></select></label> : null}
-          {form.authType !== "none" ? <div className="form-grid two"><label><span>环境变量</span><input value={form.secretEnv} onChange={(event) => update("secretEnv", event.target.value)} placeholder={VECTORENGINE_KEY_ENV} /></label><label><span>API Key</span><input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} placeholder={channel?.hasKey ? "已配置，留空不修改" : form.baseUrl.includes("vectorengine.cn") ? VECTORENGINE_KEY_PLACEHOLDER : "仅保存在本次服务会话"} /></label></div> : null}
-          {form.authType === "custom-header" || form.authType === "query" ? <label><span>{form.authType === "query" ? "参数名" : "Header 名称"}</span><input value={form.authHeaderName} onChange={(event) => update("authHeaderName", event.target.value)} placeholder={form.authType === "query" ? "key" : "x-api-key"} /></label> : null}
-          <label><span>模型 ID</span><textarea required className="models-input" value={form.modelsText} onChange={(event) => update("modelsText", event.target.value)} placeholder={"每行一个模型，例如：\ngpt-image-2\ngemini-image"} /></label>
-          <div className="toggle-row"><Toggle checked={form.enabled} onChange={(value) => update("enabled", value)} label="启用渠道" /><Toggle checked={form.allowPrivateNetwork} onChange={(value) => update("allowPrivateNetwork", value)} label="允许本地/内网地址" /></div>
-          {saveError ? <div className="form-error" role="alert"><AlertCircle size={16} />{saveError}</div> : null}
-        </div>
-        <div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}保存</button></div>
-      </form>
     </div>
   );
 }
@@ -621,14 +566,6 @@ function StatusBadge({ status }: { status: TaskStatus }) {
 
 function LoadingScreen({ compact = false }: { compact?: boolean }) {
   return <div className={compact ? "loading-compact" : "loading-screen"}><LoaderCircle className="spin" size={24} /><span>加载中</span></div>;
-}
-
-function endpointDefaults(adapter: AdapterType) {
-  if (adapter === "openai-images") return { endpoint: "/v1/images/generations", statusEndpoint: "" };
-  if (adapter === "openai-chat-image") return { endpoint: "/v1/chat/completions", statusEndpoint: "" };
-  if (adapter === "gemini-content") return { endpoint: "/v1beta/models/{model}:generateContent", statusEndpoint: "" };
-  if (adapter === "midjourney-task") return { endpoint: "/mj/submit/imagine", statusEndpoint: "/mj/task/{taskId}/fetch" };
-  return { endpoint: "/v1/images/generations", statusEndpoint: "" };
 }
 
 function formatTime(value: string) {

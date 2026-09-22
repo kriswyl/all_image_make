@@ -2,7 +2,6 @@ export type AdapterType =
   | "openai-images"
   | "openai-chat-image"
   | "gemini-content"
-  | "midjourney-task"
   | "generic-json";
 
 export type AuthType = "bearer" | "x-api-key" | "query" | "custom-header" | "none";
@@ -26,7 +25,6 @@ export interface Channel {
   authHeaderName: string;
   secretEnv: string;
   endpoint: string;
-  statusEndpoint: string;
   models: string[];
   allowPrivateNetwork: boolean;
   enabled: boolean;
@@ -70,11 +68,8 @@ export interface GenerationInput {
   maxOutputTokens?: number;
   responseModalities?: Array<"TEXT" | "IMAGE">;
   seed?: number;
-  mjVersion?: string;
-  processMode?: "auto" | "fast" | "relax" | "turbo";
-  stylize?: number;
-  chaos?: number;
-  weirdness?: number;
+  /** 本次请求的超时等待时长（毫秒） */
+  timeoutMs?: number;
   rawParameters?: Record<string, unknown>;
 }
 
@@ -96,7 +91,6 @@ export interface Task {
   prompt: string;
   status: TaskStatus;
   progress: number | null;
-  remoteTaskId: string | null;
   effectiveParameters: Record<string, unknown> | null;
   attemptCount: number;
   errorCode: string | null;

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "向量生图",
-  "version": "1.0.2",
+  "productName": "小勤画图",
+  "version": "1.0.3",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "向量生图",
+        "title": "小勤画图",
         "width": 1280,
         "height": 820,
         "minWidth": 980,

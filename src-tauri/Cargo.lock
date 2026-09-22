@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "image_relay_studio"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "log",
  "serde",

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildGenerationRequest, extractImageCandidates, extractRemoteTaskId, readRemoteState, requestForDiagnostic } from "../src/server/adapters";
+import { buildGenerationRequest, extractImageCandidates, normalizeTimeout, requestForDiagnostic } from "../src/server/adapters";
 import type { DbChannel } from "../src/server/db";
 
 const channel: DbChannel = {
   id: "channel-1", name: "Test", baseUrl: "https://relay.example.com", adapterType: "openai-images",
-  authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", statusEndpoint: "",
+  authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
   models: ["image-model"], allowPrivateNetwork: false, enabled: true, createdAt: "", updatedAt: "",
 };
 
@@ -81,12 +81,6 @@ describe("adapter request building", () => {
       { text: "restyle" },
     ] }]);
 
-    const midjourney = buildGenerationRequest({ ...channel, adapterType: "midjourney-task", endpoint: "/mj/submit/imagine" }, {
-      channelId: channel.id, model: "mj", prompt: "restyle", referenceImage,
-      rawParameters: { base64Array: ["relay-override"] },
-    }, "secret");
-    expect(midjourney.body?.base64Array).toEqual(["relay-override"]);
-
     const generic = buildGenerationRequest({ ...channel, adapterType: "generic-json" }, {
       channelId: channel.id, model: "generic", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
     }, "secret");
@@ -111,15 +105,26 @@ describe("adapter request building", () => {
     });
   });
 
-  it("maps common Midjourney task controls", () => {
-    const request = buildGenerationRequest({ ...channel, adapterType: "midjourney-task", endpoint: "/mj/submit/imagine" }, {
-      channelId: channel.id, model: "mj-model", prompt: "landscape", aspectRatio: "3:2", mjVersion: "7",
-      processMode: "fast", stylize: 500, chaos: 20, weirdness: 100, seed: 9,
+  it("carries the requested timeout onto the prepared request", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "city", timeoutMs: 300_000,
     }, "secret");
-    expect(request.body).toMatchObject({
-      model: "mj-model", prompt: "landscape", aspect_ratio: "3:2", version: "7", process_mode: "fast",
-      stylize: 500, chaos: 20, weirdness: 100, seed: 9,
-    });
+    expect(request.timeoutMs).toBe(300_000);
+  });
+
+  it("falls back to the default timeout when none is requested", () => {
+    const request = buildGenerationRequest(channel, { channelId: channel.id, model: "image-model", prompt: "city" }, "secret");
+    expect(request.timeoutMs).toBe(180_000);
+  });
+});
+
+describe("normalizeTimeout", () => {
+  it("clamps to the supported range and keeps valid values", () => {
+    expect(normalizeTimeout(undefined)).toBe(180_000);
+    expect(normalizeTimeout(300_000)).toBe(300_000);
+    expect(normalizeTimeout(1_000)).toBe(10_000);
+    expect(normalizeTimeout(9_999_999)).toBe(1_800_000);
+    expect(normalizeTimeout(Number.NaN)).toBe(180_000);
   });
 });
 
@@ -130,8 +135,4 @@ describe("response normalization", () => {
     expect(images[0].url).toContain("a.png");
   });
 
-  it("reads asynchronous task identifiers and status", () => {
-    expect(extractRemoteTaskId({ data: { taskId: "task-9" } })).toBe("task-9");
-    expect(readRemoteState({ data: { status: "SUCCESS", progress: "100%" } })).toMatchObject({ status: "succeeded", progress: 100 });
-  });
 });

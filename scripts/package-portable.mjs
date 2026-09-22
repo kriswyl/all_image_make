@@ -7,7 +7,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.js
 const version = String(packageJson.version);
 const releaseDir = path.join(projectDir, "src-tauri", "target", "release");
 const artifactDir = path.join(projectDir, "artifacts");
-const artifactName = `向量生图-v${version}-portable-win-x64`;
+const artifactName = `小勤画图-v${version}-portable-win-x64`;
 const portableDir = path.join(artifactDir, artifactName);
 const zipPath = path.join(artifactDir, `${artifactName}.zip`);
 
@@ -36,11 +36,11 @@ fs.cpSync(path.join(releaseDir, "resources"), path.join(portableDir, "resources"
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [
-    `向量生图 v${version} portable Windows build`,
+    `小勤画图 v${version} portable Windows build`,
     "",
     "Run image_relay_studio.exe. Keep node.exe and resources\\ next to it.",
-    "Configure the VectorEngine API key inside the app or through VECTORENGINE_API_KEY.",
-    "The app includes default VectorEngine channels; replace {向量引擎key} with your own key.",
+    "First launch: use the add-channel wizard to create channels, then fill in each model group's API key.",
+    "Keys entered in the app are stored in %APPDATA%\\com.imagerelay.studio\\data\\channel-keys.json and reload on the next start.",
     "User data: %APPDATA%\\com.imagerelay.studio\\data",
     "",
   ].join("\r\n"),
@@ -49,7 +49,8 @@ fs.writeFileSync(
 
 const tar = spawnSync(
   "tar.exe",
-  ["-a", "-c", "-f", zipPath, "-C", artifactDir, path.basename(portableDir)],
+  // --force-local: 阻止 tar 把 "D:" 盘符当成远程主机名
+  ["--force-local", "-a", "-c", "-f", zipPath, "-C", artifactDir, path.basename(portableDir)],
   { stdio: "inherit" },
 );
 if (tar.error) throw tar.error;

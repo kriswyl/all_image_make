@@ -1,4 +1,4 @@
-# 向量生图开发交接背景
+# 小勤画图开发交接背景
 
 ## 项目目标
 
@@ -17,23 +17,26 @@
 ## 已实现能力
 
 - 多渠道和多模型 ID。
-- 新建数据目录自动内置 4 个向量引擎默认渠道；已有数据目录不覆盖。
-- OpenAI Images、OpenAI Chat Image、Gemini Content、Midjourney Task、Generic JSON 适配器。
+- 新建数据目录不预置任何渠道，全部由“添加渠道”向导创建。
+- 添加渠道向导：三步（选站点 → 模型组与密钥 → 确认保存），每个模型组生成独立渠道并使用独立密钥。
+- OpenAI Images、OpenAI Chat Image、Gemini Content、Generic JSON 适配器。
 - 最多 8 张参考图图生图；上传支持 PNG、JPEG、WebP，单张最大 10 MB。
 - 文生图基础参数、高级 JSON 参数透传。
-- OpenAI、Gemini、Midjourney 的常用官方参数。
-- Midjourney 异步轮询、取消和失败重试。
-- URL/Base64 图片保存、本地历史记录、脱敏诊断。
-- SSRF 防护和 API Key 环境变量支持。
+- OpenAI 和 Gemini 的常用官方参数。
+- 可调的生成超时等待时长（10 秒到 30 分钟，默认 3 分钟），在生成页参数区设置。
+- URL/Base64 图片保存、本地历史记录（含结果缩略图）、脱敏诊断。
+- SSRF 防护；API Key 支持环境变量，也会持久化到数据目录的 `channel-keys.json`。
 - 高级 JSON 对同名基础字段拥有最高优先级，不维护渠道能力矩阵。
 - 参考图保存在数据目录的 `inputs/`，任务 JSON 和诊断记录不会保存上传 Base64；OpenAI Images 默认使用 `/v1/images/edits` multipart 请求。
 - 生成表单会在本机自动保存提示词、渠道、模型和全部参数，页面切换或应用重启后继续保留。
 - 结果图支持双击放大；桌面版下载使用原生保存对话框，可选择目录和文件名。
-- 产品显示名为“向量生图”，桌面图标和界面 Logo 来自 `src-tauri/icons/` 与 `src/client/public/app-logo.png`。
+- 产品显示名为“小勤画图”，桌面图标和界面 Logo 来自 `src-tauri/icons/` 与 `src/client/public/app-logo.png`。
 
 ## API Key 规则
 
-渠道的 Base URL、适配器、模型和 API Key 在应用中配置。内置向量引擎渠道默认读取 `VECTORENGINE_API_KEY`，其他渠道也可以使用自定义环境变量，或在渠道界面临时输入。临时输入的密钥只在当前 Node 进程内存中使用，不要提交到 GitHub，也不要写入交接文档。
+渠道的 Base URL、适配器、模型和 API Key 在应用中配置。中转站通常按模型系列分别售卖密钥，所以向导给每个模型组分配独立的环境变量名，例如 `VECTORENGINE_API_KEY`、`VECTORENGINE_GPT_C_API_KEY`、`VECTORENGINE_GEMINI_API_KEY`。
+
+密钥优先读取渠道指定的环境变量；在界面直接填写的 API Key 会以明文 JSON 写入数据目录的 `channel-keys.json`（权限 0600），重启后自动载入，删除渠道时一并清除。该文件是明文的，不要提交到 GitHub，也不要写入交接文档。
 
 换电脑后需要重新配置密钥：
 
@@ -49,6 +52,9 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/api.ts`：前端 API 客户端和桌面 API 地址切换。
 - `src/server/app.ts`：Express 路由和请求校验。
 - `src/server/adapters.ts`：各渠道请求适配。
+- `src/server/key-store.ts`：渠道 API Key 的本地持久化。
+- `src/shared/provider-presets.ts`：添加渠道向导的站点与模型组预设。
+- `src/client/channels/`：渠道列表、编辑弹窗和添加渠道向导。
 - `src/server/index.ts`：本地 API 入口。
 - `src/shared/types.ts`：前后端共享类型。
 - `src-tauri/tauri.conf.json`：Tauri 窗口、资源、sidecar 和 CSP 配置。
@@ -95,7 +101,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/向量生图-v1.0.2-portable-win-x64/` 和 `artifacts/向量生图-v1.0.2-portable-win-x64.zip`。
+输出位于 `artifacts/小勤画图-v1.0.3-portable-win-x64/` 和 `artifacts/小勤画图-v1.0.3-portable-win-x64.zip`。
 
 生成用于换电脑继续开发的源码包：
 
@@ -103,7 +109,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/向量生图-v1.0.2-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/小勤画图-v1.0.3-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 
@@ -117,7 +123,7 @@ npm run tauri:build
 
 Tauri 版本默认使用：
 
-- SQLite、参考图和生成图片：`%APPDATA%/com.imagerelay.studio/data`
+- SQLite、参考图、生成图片和 `channel-keys.json`：`%APPDATA%/com.imagerelay.studio/data`
 - 日志：`%LOCALAPPDATA%/com.imagerelay.studio/logs`
 
 迁移历史图片和记录时，需要单独复制旧电脑对应的 `data` 目录。
@@ -125,5 +131,5 @@ Tauri 版本默认使用：
 ## 给下一次 Codex 对话的提示词
 
 ```text
-继续开发向量生图。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录和 Tauri sidecar 能力。
+继续开发小勤画图。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录和 Tauri sidecar 能力。
 ```

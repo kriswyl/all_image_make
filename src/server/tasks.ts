@@ -6,15 +6,13 @@ import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
   RemoteApiError,
   buildGenerationRequest,
-  buildStatusRequest,
   extractImageCandidates,
-  extractRemoteTaskId,
-  readRemoteState,
   requestForDiagnostic,
   sendPreparedRequest,
   type ImageCandidate,
 } from "./adapters.js";
 import { redact, safeFetch, safeFileName } from "./security.js";
+import type { KeyStore } from "./key-store.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -38,7 +36,7 @@ export interface ReferenceImageUpload {
 export class TaskRunner {
   private readonly running = new Set<string>();
 
-  constructor(private readonly db: AppDatabase, private readonly sessionKeys: Map<string, string>) {}
+  constructor(private readonly db: AppDatabase, private readonly sessionKeys: KeyStore) {}
 
   async create(input: GenerationInput, uploads: ReferenceImageUpload[] = []): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
@@ -78,13 +76,7 @@ export class TaskRunner {
         return;
       }
 
-      const remoteTaskId = extractRemoteTaskId(result.payload);
-      if (channel.adapterType === "midjourney-task" && remoteTaskId) {
-        this.db.updateTask(taskId, { status: "running", remoteTaskId, progress: 0 });
-        await this.poll(taskId, channel, remoteTaskId, key);
-        return;
-      }
-      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片或异步任务 ID", 502);
+      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片", 502);
     } catch (error) {
       const current = this.db.getTaskRow(taskId);
       if (current?.status !== "cancelled") {
@@ -94,34 +86,6 @@ export class TaskRunner {
     } finally {
       this.running.delete(taskId);
     }
-  }
-
-  async poll(taskId: string, channel: DbChannel, remoteTaskId: string, key: string) {
-    const started = Date.now();
-    const intervals = [2000, 3000, 5000, 8000, 10000];
-    let attempt = 0;
-    while (Date.now() - started < 10 * 60 * 1000) {
-      const current = this.requireTask(taskId);
-      if (current.status === "cancelled") return;
-      await sleep(intervals[Math.min(attempt, intervals.length - 1)]);
-      const prepared = buildStatusRequest(channel, remoteTaskId, key);
-      const result = await this.sendWithDiagnostic(taskId, prepared);
-      const state = readRemoteState(result.payload);
-      const images = extractImageCandidates(result.payload);
-      if (images.length && state.status !== "failed") {
-        await this.saveImages(taskId, images, channel);
-        this.db.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
-        return;
-      }
-      if (state.status === "failed") throw new AppError("REMOTE_TASK_FAILED", state.message ?? "远程任务失败", 502);
-      if (state.status === "cancelled") {
-        this.db.updateTask(taskId, { status: "cancelled", finishedAt: new Date().toISOString() });
-        return;
-      }
-      this.db.updateTask(taskId, { status: "running", progress: state.progress });
-      attempt += 1;
-    }
-    this.db.updateTask(taskId, { status: "expired", errorCode: "REMOTE_TASK_EXPIRED", errorMessage: "异步任务等待超时", finishedAt: new Date().toISOString() });
   }
 
   cancel(taskId: string) {
@@ -137,24 +101,15 @@ export class TaskRunner {
     return this.create(input);
   }
 
+  /** 进程重启时把残留的进行中任务标记为失败：同步请求无法跨重启恢复 */
   resume() {
     for (const task of this.db.listPendingTasks()) {
-      const channel = this.db.getChannel(task.channelId);
-      if (!channel || !task.remoteTaskId) continue;
-      let key: string;
-      try { key = this.resolveKey(channel); }
-      catch (error) {
-        const normalized = normalizeError(error);
-        this.db.updateTask(task.id, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
-        continue;
-      }
-      this.running.add(task.id);
-      void this.poll(task.id, channel, task.remoteTaskId, key)
-        .catch((error) => {
-          const normalized = normalizeError(error);
-          this.db.updateTask(task.id, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
-        })
-        .finally(() => this.running.delete(task.id));
+      this.db.updateTask(task.id, {
+        status: "failed",
+        errorCode: "SERVICE_RESTARTED",
+        errorMessage: "服务已重启，请重新生成",
+        finishedAt: new Date().toISOString(),
+      });
     }
   }
 

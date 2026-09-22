@@ -10,6 +10,8 @@ export interface PreparedRequest {
   formData?: FormData;
   diagnosticBody?: Record<string, unknown>;
   allowPrivateNetwork: boolean;
+  /** 等待远端响应的超时时长（毫秒） */
+  timeoutMs?: number;
 }
 
 export interface ImageCandidate {
@@ -117,13 +119,8 @@ export function defaultEndpoint(adapterType: DbChannel["adapterType"]) {
     case "openai-images": return "/v1/images/generations";
     case "openai-chat-image": return "/v1/chat/completions";
     case "gemini-content": return "/v1beta/models/{model}:generateContent";
-    case "midjourney-task": return "/mj/submit/imagine";
     default: return "/v1/images/generations";
   }
-}
-
-export function defaultStatusEndpoint(adapterType: DbChannel["adapterType"]) {
-  return adapterType === "midjourney-task" ? "/mj/task/{taskId}/fetch" : "";
 }
 
 function applyAuth(url: string, headers: Record<string, string>, channel: DbChannel, key: string) {
@@ -204,22 +201,6 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       generationConfig: geminiGenerationConfig(input, raw),
       ...rawBody,
     };
-  } else if (channel.adapterType === "midjourney-task") {
-    body = compact({
-      model: input.model,
-      prompt: input.prompt,
-      negative_prompt: input.negativePrompt,
-      size: input.size,
-      aspect_ratio: input.aspectRatio,
-      version: input.mjVersion,
-      process_mode: input.processMode,
-      stylize: input.stylize,
-      chaos: input.chaos,
-      weirdness: input.weirdness,
-      seed: input.seed,
-      base64Array: references.length ? references.map(imageDataUrl) : undefined,
-      ...raw,
-    });
   } else {
     const referencePayload = references.length === 1 ? { image: imageDataUrl(references[0]) } : references.length > 1 ? { images: references.map(imageDataUrl) } : {};
     body = compact({
@@ -234,18 +215,23 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   if (body) headers["Content-Type"] = "application/json";
   let url = joinEndpoint(channel.baseUrl, endpoint);
   url = applyAuth(url, headers, channel, key);
-  return { url, method: "POST", headers, body, formData, diagnosticBody, allowPrivateNetwork: channel.allowPrivateNetwork };
+  return {
+    url, method: "POST", headers, body, formData, diagnosticBody,
+    allowPrivateNetwork: channel.allowPrivateNetwork,
+    timeoutMs: normalizeTimeout(input.timeoutMs),
+  };
 }
 
-export function buildStatusRequest(channel: DbChannel, remoteTaskId: string, key: string): PreparedRequest {
-  let endpoint = channel.statusEndpoint || defaultStatusEndpoint(channel.adapterType);
-  endpoint = endpoint.replaceAll("{taskId}", encodeURIComponent(remoteTaskId));
-  assertEndpoint(endpoint);
-  const headers: Record<string, string> = { Accept: "application/json" };
-  let url = joinEndpoint(channel.baseUrl, endpoint);
-  url = applyAuth(url, headers, channel, key);
-  return { url, method: "GET", headers, allowPrivateNetwork: channel.allowPrivateNetwork };
+export const MIN_TIMEOUT_MS = 10_000;
+export const MAX_TIMEOUT_MS = 1_800_000;
+export const DEFAULT_TIMEOUT_MS = 180_000;
+
+/** 超时时长约束在 10 秒到 30 分钟之间，缺省沿用原有的 180 秒 */
+export function normalizeTimeout(timeoutMs: number | undefined): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs == null) return DEFAULT_TIMEOUT_MS;
+  return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.round(timeoutMs)));
 }
+
 
 export function buildConnectionTestRequest(channel: DbChannel, key: string): PreparedRequest {
   const endpoint = channel.adapterType === "gemini-content" ? "/v1beta/models" : channel.adapterType.startsWith("openai-") ? "/v1/models" : "/";
@@ -272,6 +258,7 @@ export async function sendPreparedRequest(request: PreparedRequest) {
     method: request.method,
     headers: request.headers,
     body: request.formData ?? (request.body ? JSON.stringify(request.body) : undefined),
+    ...(request.timeoutMs ? { signal: AbortSignal.timeout(request.timeoutMs) } : {}),
   }, { allowPrivateNetwork: request.allowPrivateNetwork });
   const contentType = response.headers.get("content-type") ?? "";
   let payload: unknown;
@@ -346,27 +333,3 @@ export function extractImageCandidates(payload: unknown): ImageCandidate[] {
   return candidates;
 }
 
-export function extractRemoteTaskId(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const record = payload as Record<string, unknown>;
-  for (const key of ["taskId", "task_id", "id", "result"]) {
-    if (typeof record[key] === "string" || typeof record[key] === "number") return String(record[key]);
-  }
-  if (record.data && typeof record.data === "object") return extractRemoteTaskId(record.data);
-  return null;
-}
-
-export function readRemoteState(payload: unknown): { status: "running" | "succeeded" | "failed" | "cancelled"; progress: number | null; message?: string } {
-  const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-  const nested = record.data && typeof record.data === "object" ? record.data as Record<string, unknown> : record;
-  const rawStatus = String(nested.status ?? nested.state ?? nested.task_status ?? "running").toLowerCase();
-  let status: "running" | "succeeded" | "failed" | "cancelled" = "running";
-  if (/success|succeeded|done|finished|completed/.test(rawStatus)) status = "succeeded";
-  if (/fail|error/.test(rawStatus)) status = "failed";
-  if (/cancel/.test(rawStatus)) status = "cancelled";
-  const rawProgress = nested.progress ?? nested.percentage;
-  const parsed = typeof rawProgress === "number" ? rawProgress : typeof rawProgress === "string" ? Number(rawProgress.replace("%", "")) : NaN;
-  const progress = Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed <= 1 ? parsed * 100 : parsed)) : null;
-  const message = typeof nested.message === "string" ? nested.message : typeof nested.failReason === "string" ? nested.failReason : undefined;
-  return { status, progress, message };
-}

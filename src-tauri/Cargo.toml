@@ -1,6 +1,6 @@
 [package]
 name = "image_relay_studio"
-version = "1.0.2"
+version = "1.0.3"
 description = "Local image generation relay desktop client"
 authors = ["向量生图"]
 license = ""

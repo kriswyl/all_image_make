@@ -6,11 +6,12 @@ import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
 import type { Channel, ChannelInput, GenerationInput } from "../shared/types.js";
 import { AppDatabase, type DbChannel } from "./db.js";
+import { KeyStore } from "./key-store.js";
 import { AppError, TaskRunner, normalizeError, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, redact } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "midjourney-task", "generic-json"] as const;
+const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
@@ -31,7 +32,6 @@ const channelSchema = z.object({
   authHeaderName: z.string().trim().max(80).default(""),
   secretEnv: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$|^$/).default(""),
   endpoint: z.string().trim().max(300).default(""),
-  statusEndpoint: z.string().trim().max(300).default(""),
   models: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
   allowPrivateNetwork: z.boolean().default(false),
   enabled: z.boolean().default(true),
@@ -70,24 +70,21 @@ const generationSchema = z.object({
   maxOutputTokens: z.number().int().min(1).max(32768).optional(),
   responseModalities: z.array(z.enum(["TEXT", "IMAGE"])).max(2).optional(),
   seed: z.number().int().min(0).max(2147483647).optional(),
-  mjVersion: z.string().max(30).optional(),
-  processMode: z.enum(["auto", "fast", "relax", "turbo"]).optional(),
-  stylize: z.number().int().min(0).max(3000).optional(),
-  chaos: z.number().int().min(0).max(100).optional(),
-  weirdness: z.number().int().min(0).max(3000).optional(),
+  timeoutMs: z.number().int().min(10_000).max(1_800_000).optional(),
   rawParameters: z.record(z.string(), z.unknown()).optional(),
 });
 
 export interface AppContext {
   db: AppDatabase;
-  sessionKeys: Map<string, string>;
+  sessionKeys: KeyStore;
   runner: TaskRunner;
 }
 
 export function createApp(options: { dataDir?: string } = {}) {
   const app = express();
   const db = new AppDatabase(options.dataDir);
-  const sessionKeys = new Map<string, string>();
+  const sessionKeys = new KeyStore(db.dataDir);
+  sessionKeys.retainOnly(db.listChannels().map((channel) => channel.id));
   const runner = new TaskRunner(db, sessionKeys);
   const context: AppContext = { db, sessionKeys, runner };
 
@@ -127,7 +124,6 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.post("/api/channels", asyncHandler(async (req, res) => {
     const input = channelSchema.parse(req.body);
     assertEndpoint(input.endpoint);
-    assertEndpoint(input.statusEndpoint);
     await assertSafeUrl(input.baseUrl, input.allowPrivateNetwork);
     const saved = db.saveChannel(input as ChannelInput);
     if (input.apiKey) sessionKeys.set(saved.id, input.apiKey);
@@ -139,7 +135,6 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!existing) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在", 404);
     const input = channelSchema.parse(req.body);
     assertEndpoint(input.endpoint);
-    assertEndpoint(input.statusEndpoint);
     await assertSafeUrl(input.baseUrl, input.allowPrivateNetwork);
     const saved = db.saveChannel(input as ChannelInput, existing.id);
     if (input.apiKey) sessionKeys.set(saved.id, input.apiKey);
@@ -246,14 +241,14 @@ export function createApp(options: { dataDir?: string } = {}) {
   return { app, context };
 }
 
-function publicChannel(channel: DbChannel, sessionKeys: Map<string, string>): Channel {
+function publicChannel(channel: DbChannel, sessionKeys: KeyStore): Channel {
   return {
     ...channel,
     hasKey: channel.authType === "none" || Boolean(sessionKeys.get(channel.id) || (channel.secretEnv && process.env[channel.secretEnv])),
   };
 }
 
-function resolveChannelKey(channel: DbChannel, sessionKeys: Map<string, string>) {
+function resolveChannelKey(channel: DbChannel, sessionKeys: KeyStore) {
   if (channel.authType === "none") return "";
   const key = sessionKeys.get(channel.id) || (channel.secretEnv ? process.env[channel.secretEnv] : "");
   if (!key) throw new AppError("CHANNEL_AUTH_FAILED", "该渠道没有可用的 API Key", 400);
