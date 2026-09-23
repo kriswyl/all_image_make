@@ -57,8 +57,16 @@ export const api = {
   tasks: () => request<Task[]>("/api/generations"),
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
+  deleteTask: (id: string) => request<{ deleted: true }>(`/api/generations/${id}`, { method: "DELETE" }),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   assetUrl: (url: string) => apiUrl(url),
+  assetAsFile: async (asset: Asset) => {
+    const response = await fetch(apiUrl(asset.url));
+    if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`);
+    const blob = await response.blob();
+    const type = blob.type || asset.mimeType || "image/png";
+    return new File([blob], asset.fileName, { type });
+  },
   downloadAsset: async (asset: Asset) => {
     const separator = asset.url.includes("?") ? "&" : "?";
 

@@ -101,7 +101,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/小勤画图-v1.0.3-portable-win-x64/` 和 `artifacts/小勤画图-v1.0.3-portable-win-x64.zip`。
+输出位于 `artifacts/小勤画图-v1.0.4-portable-win-x64/` 和 `artifacts/小勤画图-v1.0.4-portable-win-x64.zip`。
 
 生成用于换电脑继续开发的源码包：
 
@@ -109,7 +109,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/小勤画图-v1.0.3-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/小勤画图-v1.0.4-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 

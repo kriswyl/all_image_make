@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
-  Sparkles, Square, Trash2, Upload, X,
+  Sparkles, Square, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { api } from "./api";
 import { APP_VERSION } from "../shared/app-config";
@@ -47,6 +47,79 @@ function usePersistentState<T>(key: string, initialValue: T) {
   return [value, setValue] as const;
 }
 
+export interface ReferenceController {
+  images: ReferenceImageState[];
+  reading: boolean;
+  select: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  remove: (previewUrl: string) => void;
+  clear: () => void;
+  addFromAsset: (asset: Asset) => Promise<void>;
+}
+
+// 参考图状态提升到 App，使其在切换视图时不被卸载清空，并可从生成结果/历史中追加
+function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => void): ReferenceController {
+  const [images, setImages] = useState<ReferenceImageState[]>([]);
+  const [reading, setReading] = useState(false);
+  const referenceUrls = useRef(new Set<string>());
+
+  useEffect(() => () => {
+    referenceUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    referenceUrls.current.clear();
+  }, []);
+
+  function addFiles(files: File[]): boolean {
+    if (!files.length) return false;
+    const remaining = MAX_REFERENCE_IMAGES - images.length;
+    if (files.length > remaining) { onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`); return false; }
+    const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
+    if (prepared.some((item) => !item.mimeType)) { onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图"); return false; }
+    if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) { onToast("error", "单张参考图不能超过 10 MB"); return false; }
+    const nextImages = prepared.map(({ file }) => {
+      const previewUrl = URL.createObjectURL(file);
+      referenceUrls.current.add(previewUrl);
+      return { file, previewUrl };
+    });
+    setImages((current) => [...current, ...nextImages]);
+    return true;
+  }
+
+  function select(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    setReading(true);
+    try { addFiles(files); } finally { setReading(false); }
+  }
+
+  function remove(previewUrl: string) {
+    URL.revokeObjectURL(previewUrl);
+    referenceUrls.current.delete(previewUrl);
+    setImages((current) => current.filter((item) => item.previewUrl !== previewUrl));
+  }
+
+  function clear() {
+    images.forEach((item) => {
+      URL.revokeObjectURL(item.previewUrl);
+      referenceUrls.current.delete(item.previewUrl);
+    });
+    setImages([]);
+  }
+
+  async function addFromAsset(asset: Asset) {
+    if (images.length >= MAX_REFERENCE_IMAGES) { onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`); return; }
+    setReading(true);
+    try {
+      const file = await api.assetAsFile(asset);
+      if (addFiles([file])) onToast("success", "已加入参考图");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "无法读取图片");
+    } finally {
+      setReading(false);
+    }
+  }
+
+  return { images, reading, select, remove, clear, addFromAsset };
+}
+
 export function App() {
   const [view, setView] = useState<View>("generate");
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -62,6 +135,8 @@ export function App() {
 
   const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
   const activeTask = tasks.find((task) => task.id === activeTaskId) ?? null;
+  // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
+  const references = useReferenceImages(showToast);
 
   useEffect(() => {
     void api.bootstrap()
@@ -146,6 +221,26 @@ export function App() {
     } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
   }
 
+  async function deleteTask(task: Task) {
+    try {
+      await api.deleteTask(task.id);
+      setTasks((current) => current.filter((item) => item.id !== task.id));
+      if (activeTaskId === task.id) setActiveTaskId(null);
+      showToast("success", "已删除该记录");
+    } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
+  }
+
+  async function clearTasks() {
+    if (!tasks.length) return;
+    if (!window.confirm(`清空全部 ${tasks.length} 条生成记录？此操作不可恢复。`)) return;
+    const results = await Promise.allSettled(tasks.map((task) => api.deleteTask(task.id)));
+    const failed = results.filter((item) => item.status === "rejected").length;
+    try { setTasks(await api.tasks()); } catch { setTasks([]); }
+    setActiveTaskId(null);
+    if (failed) showToast("error", `${failed} 条记录删除失败`);
+    else showToast("success", "已清空生成历史");
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -172,6 +267,8 @@ export function App() {
             selectedChannelId={selectedChannelId}
             selectedModel={selectedModel}
             activeTask={activeTask}
+            tasks={tasks}
+            references={references}
             onChannelChange={selectChannel}
             onModelChange={setSelectedModel}
             onAddChannel={() => setWizardOpen(true)}
@@ -180,6 +277,7 @@ export function App() {
               setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
               setActiveTaskId(task.id);
             }}
+            onSelectTask={(task) => setActiveTaskId(task.id)}
             onToast={showToast}
             onDiagnostics={setDiagnosticTask}
           />
@@ -188,7 +286,7 @@ export function App() {
           <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
         ) : null}
         {!loading && view === "history" ? (
-          <HistoryView tasks={tasks} onRefresh={refreshTasks} onSelect={(task) => { setActiveTaskId(task.id); setView("generate"); }} onDiagnostics={setDiagnosticTask} />
+          <HistoryView tasks={tasks} references={references} onRefresh={refreshTasks} onDelete={deleteTask} onClear={clearTasks} onDiagnostics={setDiagnosticTask} onToast={showToast} />
         ) : null}
       </main>
 
@@ -216,9 +314,9 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
 }
 
 function GenerateView(props: {
-  channels: Channel[]; selectedChannelId: string; selectedModel: string; activeTask: Task | null;
+  channels: Channel[]; selectedChannelId: string; selectedModel: string; activeTask: Task | null; tasks: Task[]; references: ReferenceController;
   onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void; onConfigureChannel: (channel: Channel) => void;
-  onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
+  onTask: (task: Task) => void; onSelectTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
 }) {
   const [prompt, setPrompt] = usePersistentState("prompt", "");
   const [negativePrompt, setNegativePrompt] = usePersistentState("negativePrompt", "");
@@ -232,7 +330,6 @@ function GenerateView(props: {
   const [moderation, setModeration] = usePersistentState<"auto" | "low">("moderation", "auto");
   const [style, setStyle] = usePersistentState<"auto" | "vivid" | "natural">("style", "auto");
   const [responseFormat, setResponseFormat] = usePersistentState<"auto" | "url" | "b64_json">("responseFormat", "auto");
-  const [stream, setStream] = usePersistentState("stream", false);
   const [imageSize, setImageSize] = usePersistentState("imageSize", "auto");
   const [temperature, setTemperature] = usePersistentState("temperature", "");
   const [topP, setTopP] = usePersistentState("topP", "");
@@ -243,57 +340,14 @@ function GenerateView(props: {
   const [timeoutSeconds, setTimeoutSeconds] = usePersistentState("timeoutSeconds", 180);
   const [count, setCount] = usePersistentState("count", 1);
   const [raw, setRaw] = usePersistentState("raw", "{}");
-  const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
-  const [readingImage, setReadingImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const referenceUrls = useRef(new Set<string>());
+  const references = props.references;
+  const referenceImages = references.images;
+  const readingImage = references.reading;
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const showAspectRatio = adapterType === "gemini-content";
-
-  useEffect(() => () => {
-    referenceUrls.current.forEach((url) => URL.revokeObjectURL(url));
-    referenceUrls.current.clear();
-  }, []);
-
-  async function selectReferenceImage(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
-    if (!files.length) return;
-    const remaining = MAX_REFERENCE_IMAGES - referenceImages.length;
-    if (files.length > remaining) return props.onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`);
-    const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
-    if (prepared.some((item) => !item.mimeType)) return props.onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图");
-    if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) return props.onToast("error", "单张参考图不能超过 10 MB");
-    setReadingImage(true);
-    try {
-      const nextImages = prepared.map(({ file, mimeType }) => {
-        const previewUrl = URL.createObjectURL(file);
-        referenceUrls.current.add(previewUrl);
-        return { file, previewUrl };
-      });
-      setReferenceImages((current) => [...current, ...nextImages]);
-    } catch {
-      props.onToast("error", "无法读取参考图");
-    } finally {
-      setReadingImage(false);
-    }
-  }
-
-  function removeReferenceImage(previewUrl: string) {
-    URL.revokeObjectURL(previewUrl);
-    referenceUrls.current.delete(previewUrl);
-    setReferenceImages((current) => current.filter((item) => item.previewUrl !== previewUrl));
-  }
-
-  function clearReferenceImages() {
-    referenceImages.forEach((item) => {
-      URL.revokeObjectURL(item.previewUrl);
-      referenceUrls.current.delete(item.previewUrl);
-    });
-    setReferenceImages([]);
-  }
 
   async function generate() {
     if (!channel) return props.onToast("error", "请先添加渠道");
@@ -325,7 +379,6 @@ function GenerateView(props: {
         moderation: isOpenAi && moderation !== "auto" ? moderation : undefined,
         style: isOpenAi && style !== "auto" ? style : undefined,
         responseFormat: isOpenAi && responseFormat !== "auto" ? responseFormat : undefined,
-        stream: isOpenAi && stream ? true : undefined,
         imageSize: adapterType === "gemini-content" && imageSize !== "auto" ? imageSize : undefined,
         temperature: adapterType === "gemini-content" ? optionalNumber(temperature) : undefined,
         topP: adapterType === "gemini-content" ? optionalNumber(topP) : undefined,
@@ -361,93 +414,106 @@ function GenerateView(props: {
       ) : (
         <div className="generation-grid">
           <section className="control-panel">
-            <div className="section-title"><div><Sparkles size={17} /><h2>提示词</h2></div><span>{prompt.length} / 20000</span></div>
-            <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="输入画面内容、构图、风格与光线…" />
-            <div className="reference-block">
-              <div className="reference-heading">
-                <div><ImagePlus size={16} /><span>参考图</span></div>
-                <span className="reference-count">{referenceImages.length}/{MAX_REFERENCE_IMAGES}</span>
-                {referenceImages.length ? <button type="button" className="icon-button compact" title="移除全部参考图" onClick={clearReferenceImages}><X size={15} /></button> : null}
+            <div className="control-scroll">
+              {/* 基础参数：常驻可见 */}
+              <div className="section-title"><div><Sparkles size={17} /><h2>提示词</h2></div><span>{prompt.length} / 20000</span></div>
+              <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="输入画面内容、构图、风格与光线…" />
+              <div className="reference-block">
+                <div className="reference-heading">
+                  <div><ImagePlus size={16} /><span>参考图</span></div>
+                  <span className="reference-count">{referenceImages.length}/{MAX_REFERENCE_IMAGES}</span>
+                  {referenceImages.length ? <button type="button" className="icon-button compact" title="移除全部参考图" onClick={references.clear}><X size={15} /></button> : null}
+                </div>
+                <div className={`reference-picker ${referenceImages.length ? "has-image" : ""}`}>
+                  <label className="reference-add-tile" title="添加参考图">
+                    <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= MAX_REFERENCE_IMAGES} />
+                    <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
+                    <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                    <Upload size={17} />
+                  </label>
+                  {referenceImages.map((item, index) => <div className="reference-thumb" key={item.previewUrl}>
+                    <img src={item.previewUrl} alt={`参考图 ${index + 1}`} />
+                    <button type="button" className="reference-remove" title={`移除参考图 ${index + 1}`} onClick={() => references.remove(item.previewUrl)}><X size={13} /></button>
+                    <span>{item.file.name}</span>
+                  </div>)}
+                </div>
               </div>
-              <div className={`reference-picker ${referenceImages.length ? "has-image" : ""}`}>
-                <label className="reference-add-tile" title="添加参考图">
-                  <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={selectReferenceImage} disabled={readingImage || submitting || referenceImages.length >= MAX_REFERENCE_IMAGES} />
-                  <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                  <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 单张最大 10 MB</small></span>
-                  <Upload size={17} />
-                </label>
-                {referenceImages.map((item, index) => <div className="reference-thumb" key={item.previewUrl}>
-                  <img src={item.previewUrl} alt={`参考图 ${index + 1}`} />
-                  <button type="button" className="reference-remove" title={`移除参考图 ${index + 1}`} onClick={() => removeReferenceImage(item.previewUrl)}><X size={13} /></button>
-                  <span>{item.file.name}</span>
-                </div>)}
+              <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>基础参数</h2></div></div>
+              <div className="parameter-grid">
+                {isOpenAi ? <>
+                  <label><span>尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>
+                    <option value="auto">自动</option>
+                    {openAiSizeGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.sizes.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup>)}
+                    <option value="custom">自定义</option>
+                  </select></label>
+                  {size === "custom" ? <div className="custom-size-fields wide-field" aria-label="自定义尺寸">
+                    <label><span>宽度</span><input type="number" min={64} max={3840} step={16} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
+                    <span aria-hidden="true">x</span>
+                    <label><span>高度</span><input type="number" min={64} max={3840} step={16} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
+                  </div> : null}
+                  <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+                  <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
+                  <label><span>响应格式</span><select value={responseFormat} onChange={(event) => setResponseFormat(event.target.value as typeof responseFormat)}><option value="auto">自动</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>
+                </> : null}
+                {showAspectRatio ? <>
+                  <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label>
+                  <label><span>输出尺寸</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}><option value="auto">自动</option><option>1K</option><option>2K</option><option>4K</option></select></label>
+                </> : null}
               </div>
-            </div>
-            <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
 
-            <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>参数</h2></div></div>
-            <div className="parameter-grid">
-              {isOpenAi ? <label><span>尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>
-                <option value="auto">自动</option>
-                {openAiSizeGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.sizes.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup>)}
-                <option value="custom">自定义</option>
-              </select></label> : null}
-              {isOpenAi && size === "custom" ? <div className="custom-size-fields wide-field" aria-label="自定义尺寸">
-                <label><span>宽度</span><input type="number" min={64} max={3840} step={16} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
-                <span aria-hidden="true">x</span>
-                <label><span>高度</span><input type="number" min={64} max={3840} step={16} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
-              </div> : null}
-              {showAspectRatio ? <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label> : null}
-              {isOpenAi ? <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label> : null}
-              {isOpenAi ? <label><span>背景</span><select value={background} onChange={(event) => setBackground(event.target.value as typeof background)}><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label> : null}
-              {isOpenAi ? <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label> : null}
-              <label><span>{adapterType === "gemini-content" ? "候选数量" : "数量"}</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label>
+              {/* 高级参数：默认折叠 */}
+              <details className="advanced-panel">
+                <summary><Settings2 size={16} /><span>高级参数</span><ChevronRight className="details-chevron" size={16} /></summary>
+                <div className="advanced-body">
+                  <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
+                  {isOpenAi ? <>
+                    <div className="parameter-subtitle">OpenAI Images</div>
+                    <div className="parameter-grid">
+                      <label><span>数量</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label>
+                      <label><span>背景</span><select value={background} onChange={(event) => setBackground(event.target.value as typeof background)}><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label>
+                      <label><span>内容审核</span><select value={moderation} onChange={(event) => setModeration(event.target.value as typeof moderation)}><option value="auto">自动</option><option value="low">低限制</option></select></label>
+                      <label><span>风格</span><select value={style} onChange={(event) => setStyle(event.target.value as typeof style)}><option value="auto">自动</option><option value="vivid">Vivid</option><option value="natural">Natural</option></select></label>
+                    </div>
+                  </> : null}
+                  {adapterType === "gemini-content" ? <>
+                    <div className="parameter-subtitle">Gemini Content</div>
+                    <div className="parameter-grid">
+                      <label><span>候选数量</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label>
+                      <label><span>温度</span><input type="number" min={0} max={2} step={0.1} value={temperature} onChange={(event) => setTemperature(event.target.value)} placeholder="0 - 2" /></label>
+                      <label><span>Top P</span><input type="number" min={0} max={1} step={0.01} value={topP} onChange={(event) => setTopP(event.target.value)} placeholder="0 - 1" /></label>
+                      <label><span>Top K</span><input type="number" min={1} max={100} step={1} value={topK} onChange={(event) => setTopK(event.target.value)} placeholder="1 - 100" /></label>
+                      <label><span>最大输出 Token</span><input type="number" min={1} max={32768} step={1} value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} placeholder="可选" /></label>
+                      <label><span>Seed</span><input type="number" min={0} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="可选" /></label>
+                      <label><span>响应模态</span><select value={responseModalities} onChange={(event) => setResponseModalities(event.target.value as typeof responseModalities)}><option value="IMAGE">仅图片</option><option value="TEXT,IMAGE">文字 + 图片</option></select></label>
+                    </div>
+                  </> : null}
+                  <div className="parameter-subtitle">生成超时</div>
+                  <div className="parameter-grid">
+                    <label>
+                      <span>等待时长 <small>秒</small></span>
+                      <input type="number" min={10} max={1800} step={10} value={timeoutSeconds}
+                        onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(1800, Number(event.target.value) || 180)))} />
+                    </label>
+                    <label>
+                      <span>快速选择</span>
+                      <select value={[60, 180, 300, 600, 900].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
+                        onChange={(event) => { if (event.target.value !== "custom") setTimeoutSeconds(Number(event.target.value)); }}>
+                        <option value="60">1 分钟</option>
+                        <option value="180">3 分钟（默认）</option>
+                        <option value="300">5 分钟</option>
+                        <option value="600">10 分钟</option>
+                        <option value="900">15 分钟</option>
+                        <option value="custom">自定义</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="parameter-subtitle">高级 JSON</div>
+                  <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} />
+                </div>
+              </details>
             </div>
-            {isOpenAi ? <>
-              <div className="parameter-subtitle">OpenAI Images</div>
-              <div className="parameter-grid">
-                <label><span>内容审核</span><select value={moderation} onChange={(event) => setModeration(event.target.value as typeof moderation)}><option value="auto">自动</option><option value="low">低限制</option></select></label>
-                <label><span>风格</span><select value={style} onChange={(event) => setStyle(event.target.value as typeof style)}><option value="auto">自动</option><option value="vivid">Vivid</option><option value="natural">Natural</option></select></label>
-                <label><span>响应格式</span><select value={responseFormat} onChange={(event) => setResponseFormat(event.target.value as typeof responseFormat)}><option value="auto">自动</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>
-              </div>
-              <div className="toggle-row parameter-toggles"><Toggle checked={stream} onChange={setStream} label="流式输出" /></div>
-            </> : null}
-            {adapterType === "gemini-content" ? <>
-              <div className="parameter-subtitle">Gemini Content</div>
-              <div className="parameter-grid">
-                <label><span>输出尺寸</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}><option value="auto">自动</option><option>1K</option><option>2K</option><option>4K</option></select></label>
-                <label><span>温度</span><input type="number" min={0} max={2} step={0.1} value={temperature} onChange={(event) => setTemperature(event.target.value)} placeholder="0 - 2" /></label>
-                <label><span>Top P</span><input type="number" min={0} max={1} step={0.01} value={topP} onChange={(event) => setTopP(event.target.value)} placeholder="0 - 1" /></label>
-                <label><span>Top K</span><input type="number" min={1} max={100} step={1} value={topK} onChange={(event) => setTopK(event.target.value)} placeholder="1 - 100" /></label>
-                <label><span>最大输出 Token</span><input type="number" min={1} max={32768} step={1} value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} placeholder="可选" /></label>
-                <label><span>Seed</span><input type="number" min={0} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="可选" /></label>
-                <label><span>响应模态</span><select value={responseModalities} onChange={(event) => setResponseModalities(event.target.value as typeof responseModalities)}><option value="IMAGE">仅图片</option><option value="TEXT,IMAGE">文字 + 图片</option></select></label>
-              </div>
-            </> : null}
-            <div className="parameter-subtitle">生成超时</div>
-            <div className="parameter-grid">
-              <label>
-                <span>等待时长 <small>秒</small></span>
-                <input type="number" min={10} max={1800} step={10} value={timeoutSeconds}
-                  onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(1800, Number(event.target.value) || 180)))} />
-              </label>
-              <label>
-                <span>快速选择</span>
-                <select value={[60, 180, 300, 600, 900].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
-                  onChange={(event) => { if (event.target.value !== "custom") setTimeoutSeconds(Number(event.target.value)); }}>
-                  <option value="60">1 分钟</option>
-                  <option value="180">3 分钟（默认）</option>
-                  <option value="300">5 分钟</option>
-                  <option value="600">10 分钟</option>
-                  <option value="900">15 分钟</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </label>
-            </div>
-            <details className="advanced-panel">
-              <summary><Settings2 size={16} /><span>高级 JSON</span><ChevronRight className="details-chevron" size={16} /></summary>
-              <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} />
-            </details>
+
+            {/* 生成按钮吸底常驻 */}
             <div className="submit-row">
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : <span />}
               <button className="primary-button generate-button" onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel}>
@@ -456,22 +522,28 @@ function GenerateView(props: {
             </div>
           </section>
 
-          <ResultPanel task={props.activeTask} onDiagnostics={props.onDiagnostics} onTask={props.onTask} onToast={props.onToast} />
+          <ResultPanel task={props.activeTask} tasks={props.tasks} references={references} onDiagnostics={props.onDiagnostics} onTask={props.onTask} onSelectTask={props.onSelectTask} onToast={props.onToast} />
         </div>
       )}
     </div>
   );
 }
 
-function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | null; onDiagnostics: (task: Task) => void; onTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void }) {
+function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectTask, onToast }: {
+  task: Task | null; tasks: Task[]; references: ReferenceController;
+  onDiagnostics: (task: Task) => void; onTask: (task: Task) => void; onSelectTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void;
+}) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  // 最近生成：取有图片的成功任务，供缩略图快速切换
+  const recentTasks = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 12);
+  const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
+  useEffect(() => { setSelectedAssetId(task?.assets[0]?.id ?? null); }, [task?.id, task?.assets.length]);
   useEffect(() => {
     if (!previewAsset) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPreviewAsset(null);
-    };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setPreviewAsset(null); };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [previewAsset]);
@@ -481,7 +553,7 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
   }
   async function retry() {
     if (!task) return;
-    try { onTask(await api.retry(task.id)); } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
+    try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }
   async function download(asset: Asset) {
     setDownloadingAssetId(asset.id);
@@ -501,16 +573,46 @@ function ResultPanel({ task, onDiagnostics, onTask, onToast }: { task: Task | nu
         <div className="icon-actions">
           {task ? <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={17} /></button> : null}
           {busy ? <button className="icon-button danger" title="取消任务" onClick={cancel}><Square size={16} /></button> : null}
-          {task && ["failed", "expired", "cancelled"].includes(task.status) ? <button className="icon-button" title="重新生成" onClick={retry}><RotateCcw size={17} /></button> : null}
         </div>
       </div>
-      <div className={`result-canvas ${task?.assets.length ? "has-images" : ""}`}>
+      <div className={`result-stage ${activeAsset ? "has-image" : ""}`}>
         {!task ? <EmptyResult /> : null}
         {busy ? <div className="task-progress"><LoaderCircle className="spin" size={30} /><strong>{statusLabels[task.status]}</strong>{task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}<span>{task.model}</span></div> : null}
         {task && task.status === "failed" ? <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div> : null}
-        {task?.assets.map((asset) => <figure key={asset.id} className="result-image"><img src={api.assetUrl(asset.url)} alt="生成结果" title="双击放大" onDoubleClick={() => setPreviewAsset(asset)} /><button type="button" className="image-download" title="下载图片" aria-label="下载图片" disabled={downloadingAssetId === asset.id} onClick={() => void download(asset)}>{downloadingAssetId === asset.id ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}</button></figure>)}
+        {task && !busy && task.status !== "failed" && !task.assets.length ? <EmptyResult /> : null}
+        {activeAsset ? <figure className="stage-image"><img src={api.assetUrl(activeAsset.url)} alt="生成结果" title="双击放大" onDoubleClick={() => setPreviewAsset(activeAsset)} /></figure> : null}
       </div>
-      {task ? <div className="result-meta"><span>{task.channelName}</span><span>{task.model}</span><span>{formatTime(task.createdAt)}</span></div> : null}
+      {activeAsset ? (
+        <div className="result-actions">
+          <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
+            {downloadingAssetId === activeAsset.id ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载
+          </button>
+          <button type="button" className="secondary-button" onClick={retry}><RotateCcw size={16} />重生成</button>
+          <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(activeAsset)}><Wand2 size={16} />用作参考图</button>
+          {task && task.assets.length > 1 ? (
+            <div className="stage-thumbs" role="tablist" aria-label="本次生成结果">
+              {task.assets.map((asset, index) => (
+                <button key={asset.id} type="button" className={`stage-thumb ${asset.id === activeAsset.id ? "active" : ""}`} title={`结果 ${index + 1}`} onClick={() => setSelectedAssetId(asset.id)}>
+                  <img src={api.assetUrl(asset.url)} alt={`结果 ${index + 1}`} loading="lazy" decoding="async" />
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {recentTasks.length ? (
+        <div className="recent-strip" aria-label="最近生成">
+          <span className="recent-label">最近</span>
+          <div className="recent-thumbs">
+            {recentTasks.map((item) => (
+              <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={item.prompt} onClick={() => onSelectTask(item)}>
+                <img src={api.assetUrl(item.assets[0].url)} alt="最近生成" loading="lazy" decoding="async" />
+                {item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : task ? <div className="result-meta"><span>{task.channelName}</span><span>{task.model}</span><span>{formatTime(task.createdAt)}</span></div> : null}
       {previewAsset ? <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewAsset(null); }}><div className="image-preview"><img src={api.assetUrl(previewAsset.url)} alt="生成结果放大预览" /><button type="button" className="image-preview-close" title="关闭预览" aria-label="关闭预览" onClick={() => setPreviewAsset(null)}><X size={21} /></button></div></div> : null}
     </section>
   );
@@ -520,31 +622,76 @@ function EmptyResult() {
   return <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function HistoryView({ tasks, onRefresh, onSelect, onDiagnostics }: { tasks: Task[]; onRefresh: () => void; onSelect: (task: Task) => void; onDiagnostics: (task: Task) => void }) {
+function HistoryView({ tasks, references, onRefresh, onDelete, onClear, onDiagnostics, onToast }: {
+  tasks: Task[]; references: ReferenceController; onRefresh: () => void; onDelete: (task: Task) => void; onClear: () => void; onDiagnostics: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void;
+}) {
+  const [preview, setPreview] = useState<Task | null>(null);
   return (
     <div className="page">
-      <div className="page-header"><div><h1>历史</h1><span className="page-kicker">GENERATIONS</span></div><button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button></div>
+      <div className="page-header">
+        <div><h1>历史</h1><span className="page-kicker">GENERATIONS</span></div>
+        <div className="header-actions">
+          {tasks.length ? <button className="secondary-button" title="清空全部记录" onClick={onClear}><Trash2 size={16} />清空</button> : null}
+          <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
+        </div>
+      </div>
       <div className="data-table-wrap">
         <table className="data-table history-table">
           <thead><tr><th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" /></tr></thead>
           <tbody>{tasks.map((task) => (
             <tr key={task.id}>
               <td>
-                <button type="button" className="history-thumb" title={task.assets.length ? "查看结果" : "暂无图片"} onClick={() => onSelect(task)}>
+                <button type="button" className="history-thumb" title={task.assets.length ? "查看大图" : "暂无图片"} onClick={() => task.assets.length && setPreview(task)}>
                   {task.assets[0]
-                    ? <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" />
+                    ? <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" decoding="async" />
                     : <span className="history-thumb-empty"><ImageIcon size={16} /></span>}
                   {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
                 </button>
               </td>
-              <td><button className="prompt-cell" onClick={() => onSelect(task)}>{task.prompt}</button></td>
+              <td><button className="prompt-cell" title={task.assets.length ? "查看大图" : task.prompt} onClick={() => task.assets.length ? setPreview(task) : undefined}>{task.prompt}</button></td>
               <td>{task.channelName}</td><td>{task.model}</td>
               <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
-              <td><button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button></td>
+              <td><div className="table-actions">
+                <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button>
+                <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button>
+              </div></td>
             </tr>
           ))}</tbody>
         </table>
         {!tasks.length ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
+      </div>
+      {preview ? <HistoryPreview task={preview} references={references} onClose={() => setPreview(null)} onToast={onToast} /> : null}
+    </div>
+  );
+}
+
+function HistoryPreview({ task, references, onClose, onToast }: { task: Task; references: ReferenceController; onClose: () => void; onToast: (kind: Toast["kind"], message: string) => void }) {
+  const [index, setIndex] = useState(0);
+  const [downloading, setDownloading] = useState(false);
+  const asset = task.assets[Math.min(index, task.assets.length - 1)];
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  async function download() {
+    if (!asset) return;
+    setDownloading(true);
+    try { if (await api.downloadAsset(asset)) onToast("success", "图片已保存"); }
+    catch (error) { onToast("error", error instanceof Error ? error.message : "下载失败"); }
+    finally { setDownloading(false); }
+  }
+  if (!asset) return null;
+  return (
+    <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="历史图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="image-preview history-preview">
+        <img src={api.assetUrl(asset.url)} alt="历史生成大图" />
+        <div className="history-preview-bar">
+          <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
+          <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button>
+          {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => <button key={item.id} type="button" className={`stage-thumb ${i === index ? "active" : ""}`} onClick={() => setIndex(i)}><img src={api.assetUrl(item.url)} alt={`结果 ${i + 1}`} loading="lazy" decoding="async" /></button>)}</div> : null}
+        </div>
+        <button type="button" className="image-preview-close" title="关闭预览" aria-label="关闭预览" onClick={onClose}><X size={21} /></button>
       </div>
     </div>
   );
@@ -554,10 +701,6 @@ function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () => void }
   const [items, setItems] = useState<Diagnostic[] | null>(null);
   useEffect(() => { void api.diagnostics(task.id).then(setItems).catch(() => setItems([])); }, [task.id]);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal diagnostic-modal"><div className="modal-header"><div><Activity size={18} /><h2>请求诊断</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div><div className="diagnostic-summary"><StatusBadge status={task.status} /><span>{task.model}</span><span>{task.id.slice(0, 8)}</span></div><div className="diagnostic-list">{items === null ? <LoadingScreen compact /> : items.length ? items.map((item) => <article key={item.id} className="diagnostic-entry"><header><span>HTTP {item.httpStatus ?? "-"}</span><span>{item.durationMs != null ? `${item.durationMs} ms` : ""}</span><span>{formatTime(item.createdAt)}</span></header><h3>Request</h3><pre>{JSON.stringify(item.request, null, 2)}</pre><h3>Response</h3><pre>{JSON.stringify(item.response, null, 2)}</pre></article>) : <div className="table-empty"><Activity size={28} /><span>暂无诊断记录</span></div>}</div></div></div>;
-}
-
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
-  return <label className="toggle"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="toggle-track"><span /></span><span>{label}</span></label>;
 }
 
 function StatusBadge({ status }: { status: TaskStatus }) {

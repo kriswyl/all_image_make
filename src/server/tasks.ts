@@ -128,10 +128,15 @@ export class TaskRunner {
 
   private async saveImages(taskId: string, images: ImageCandidate[], channel: DbChannel) {
     let saved = 0;
+    // 部分中转会把同一张图同时放在 base64 与 URL 等多个位置，按字节内容去重避免落盘重复图片
+    const seenHashes = new Set<string>();
     for (const image of images.slice(0, 8)) {
       const resolved = await this.resolveImage(image, channel);
       if (resolved.bytes.length > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
       if (!resolved.mimeType.startsWith("image/")) throw new AppError("ASSET_INVALID", "响应内容不是图片", 502);
+      const sha256 = crypto.createHash("sha256").update(resolved.bytes).digest("hex");
+      if (seenHashes.has(sha256)) continue;
+      seenHashes.add(sha256);
       const extension = extensionForMime(resolved.mimeType);
       const id = crypto.randomUUID();
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
@@ -139,7 +144,7 @@ export class TaskRunner {
       await fs.writeFile(absolutePath, resolved.bytes);
       this.db.insertAsset({
         id, taskId, fileName, mimeType: resolved.mimeType, byteSize: resolved.bytes.length,
-        relativePath: fileName, sha256: crypto.createHash("sha256").update(resolved.bytes).digest("hex"),
+        relativePath: fileName, sha256,
       });
       saved += 1;
     }

@@ -209,6 +209,17 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(db.listDiagnostics(id)));
   });
 
+  app.delete("/api/generations/:id", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getTaskRow(id)) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
+    const removed = db.deleteTask(id);
+    await Promise.all([
+      ...removed.assets.map((relativePath) => removeStoredFile(db.assetsDir, relativePath)),
+      ...removed.inputs.map((relativePath) => removeStoredFile(db.inputsDir, relativePath)),
+    ]);
+    res.json(ok({ deleted: true }));
+  }));
+
   app.get("/api/assets/:id/file", (req, res) => {
     const id = routeParam(req.params.id);
     const asset = db.listTaskRows(1000).flatMap((task) => db.listAssets(task.id)).find((item) => item.id === id);
@@ -239,6 +250,12 @@ export function createApp(options: { dataDir?: string } = {}) {
   });
 
   return { app, context };
+}
+
+async function removeStoredFile(baseDir: string, relativePath: string) {
+  const absolutePath = path.resolve(baseDir, relativePath);
+  if (!absolutePath.startsWith(path.resolve(baseDir) + path.sep)) return;
+  await fs.promises.rm(absolutePath, { force: true }).catch(() => undefined);
 }
 
 function publicChannel(channel: DbChannel, sessionKeys: KeyStore): Channel {

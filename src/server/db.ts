@@ -161,6 +161,24 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM channels WHERE id = ?").run(id);
   }
 
+  /** 删除任务及其图片、诊断记录，返回落盘文件的相对路径供调用方清理磁盘 */
+  deleteTask(id: string): { assets: string[]; inputs: string[] } {
+    const assets = this.listAssets(id).map((asset) => asset.relativePath);
+    const inputs = this.collectInputImagePaths(id);
+    this.db.prepare("DELETE FROM diagnostics WHERE task_id = ?").run(id);
+    this.db.prepare("DELETE FROM assets WHERE task_id = ?").run(id);
+    this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    return { assets, inputs };
+  }
+
+  private collectInputImagePaths(id: string): string[] {
+    const row = this.db.prepare("SELECT input_json FROM tasks WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return [];
+    const input = parseJson<{ referenceImages?: Array<{ relativePath?: string }>; referenceImage?: { relativePath?: string } }>(row.input_json, {});
+    const stored = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
+    return stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string");
+  }
+
   createTask(input: { id: string; channelId: string; model: string; prompt: string; input: unknown }): TaskRow {
     const createdAt = now();
     this.db.prepare(`

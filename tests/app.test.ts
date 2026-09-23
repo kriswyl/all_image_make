@@ -99,6 +99,62 @@ describe("generation API", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("Authorization");
   });
 
+  it("deletes a generation and cleans up its asset and input files", async () => {
+    let mockOrigin = "";
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/image.png" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(Buffer.from(pngBase64, "base64"));
+        return;
+      }
+      // 带参考图会走 edits 端点：同一张图同时以 base64 与可下载 URL 出现，验证按字节内容去重只落盘一张
+      if ((req.url === "/v1/images/generations" || req.url === "/v1/images/edits") && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }, { url: `${mockOrigin}/image.png` }] }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    mockOrigin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-delete-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Delete Mock", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    const pngBytes = Buffer.from(pngBase64, "base64");
+    const createResponse = await request(app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId: channelResponse.body.data.id, model: "mock-image", prompt: "delete me" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .expect(202);
+    const taskId = createResponse.body.data.id as string;
+    let task = createResponse.body.data;
+    for (let index = 0; index < 30 && task.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    }
+    expect(task.status).toBe("succeeded");
+    // 中转把同一张图放在两个位置，去重后只应保存一张
+    expect(task.assets).toHaveLength(1);
+    expect(await fs.readdir(path.join(dataDir, "assets"))).toHaveLength(1);
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(1);
+
+    await request(app).delete(`/api/generations/${taskId}`).expect(200);
+    expect(context.db.getTaskRow(taskId)).toBeNull();
+    expect(await fs.readdir(path.join(dataDir, "assets"))).toHaveLength(0);
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(0);
+    await request(app).delete(`/api/generations/${taskId}`).expect(404);
+  });
+
   it("persists a reference image outside SQLite and submits an OpenAI edit request", async () => {
     let receivedContentType = "";
     let receivedBody = "";
