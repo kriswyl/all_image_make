@@ -32,6 +32,31 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
 
+      # tauri 打包器偶尔会把 externalBin 放到非标准位置（或缺失），
+      # 而 tauri-plugin-shell 运行时按“主程序目录/node-<triple>”查找 sidecar。
+      # 打印实际布局、把 node 归位、重签名，最后由下一步重打 dmg。
+      - name: Normalize sidecar location and diagnose layout
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/小勤画图.app"
+          echo "=== Contents/MacOS ==="
+          ls -la "$APP/Contents/MacOS/" || true
+          echo "=== node binaries in bundle ==="
+          find "$APP" -name 'node*' -type f -exec ls -la {} \; || true
+          EXPECTED="$APP/Contents/MacOS/node-aarch64-apple-darwin"
+          if [ ! -f "$EXPECTED" ]; then
+            FOUND="$(find "$APP" -name 'node-aarch64-apple-darwin' -type f | head -1 || true)"
+            if [ -n "$FOUND" ]; then
+              cp "$FOUND" "$EXPECTED"
+              chmod 755 "$EXPECTED"
+              echo "copied sidecar into place: $FOUND -> $EXPECTED"
+            else
+              echo "::warning::node-aarch64-apple-darwin not found anywhere in bundle"
+            fi
+          fi
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --verbose=2 "$APP" || true
+
       # 冒烟测试：直接用 .app 里打包的 node sidecar 启动后端，
       # 验证 /api/health 可访问，防止"构建成功但 Mac 上起不来"
       - name: Smoke test bundled backend
@@ -43,8 +68,13 @@ jobs:
             SCRIPT="$APP/Contents/Resources/resources/server/server/index.js"
           fi
           echo "backend script: $SCRIPT"
+          NODE_BIN="$APP/Contents/MacOS/node-aarch64-apple-darwin"
+          if [ ! -f "$NODE_BIN" ]; then
+            NODE_BIN="$(find "$APP" -name 'node-aarch64-apple-darwin' -type f | head -1)"
+          fi
+          echo "node binary: $NODE_BIN"
           DATA_DIR="$(mktemp -d)"
-          PORT=17892 DATA_DIR="$DATA_DIR" "$APP/Contents/MacOS/node-aarch64-apple-darwin" "$SCRIPT" &
+          PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
           NODE_PID=$!
           trap 'kill "$NODE_PID" 2>/dev/null || true' EXIT
           for i in $(seq 1 40); do
@@ -57,6 +87,17 @@ jobs:
           done
           echo "SMOKE_FAILED: backend not healthy after 20s"
           exit 1
+
+      # 归位/重签名后 .app 已变化，从它重打 dmg 覆盖 tauri 生成的旧包
+      - name: Repack dmg from normalized app
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/小勤画图.app"
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          rm -f "$DMG_DIR"/*.dmg
+          hdiutil create -volname "小勤画图" -srcfolder "$APP" -ov -format UDZO "$DMG_DIR/小勤画图_${VERSION}_aarch64.dmg"
+          ls -la "$DMG_DIR"
 
       - name: Upload dmg artifact
         uses: actions/upload-artifact@v4
