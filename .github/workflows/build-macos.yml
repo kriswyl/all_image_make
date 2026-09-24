@@ -34,42 +34,32 @@ jobs:
 
       # 打印 .app/.dmg 实际布局，动态解析 .app 路径供后续步骤使用。
       # tauri v2 在 macOS 上把 sidecar 命名为不带 triple 的 node。
-      - name: Diagnose bundle layout
+      # tauri --bundles dmg 打完会把中间产物 .app 删除，所以冒烟测试
+      # 需要挂载 dmg、取出 .app 再验证——这也最接近用户真实安装路径
+      - name: Smoke test bundled backend (from dmg)
         run: |
           set -euo pipefail
-          echo "=== bundle dirs ==="
-          ls -la src-tauri/target/release/bundle/ || true
-          echo "=== bundle tree (2 levels) ==="
-          find src-tauri/target/release/bundle -maxdepth 2 || true
-          echo "=== app bundles ==="
-          find src-tauri/target -maxdepth 5 \( -name '*.app' -o -name '*.dmg' \) || true
-          APP="$(find src-tauri/target/release/bundle -maxdepth 2 -name '*.app' -type d | head -1)"
-          if [ -z "$APP" ]; then
-            APP="$(find src-tauri/target -maxdepth 5 -name '*.app' -type d | head -1)"
-          fi
-          echo "resolved app: $APP"
+          DMG="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)"
+          echo "dmg: $DMG"
+          MOUNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          APP="$(find "$MOUNT" -maxdepth 2 -name '*.app' -type d | head -1)"
+          echo "mounted app: $APP"
           echo "=== Contents/MacOS ==="
-          ls -la "$APP/Contents/MacOS/" || true
-          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
-
-      # 冒烟测试：用 .app 里打包的 node sidecar 启动后端，
-      # 验证 /api/health 可访问，防止"构建成功但 Mac 上起不来"
-      - name: Smoke test bundled backend
-        run: |
-          set -euo pipefail
-          APP="${APP_PATH:?app bundle not found}"
-          SCRIPT="$APP/Contents/Resources/server/server/index.js"
+          ls -la "$APP/Contents/MacOS/"
+          # dmg 只读，把 .app 拷出来再跑
+          TEST_APP="$(mktemp -d)/小勤画图.app"
+          cp -R "$APP" "$TEST_APP"
+          hdiutil detach "$MOUNT"
+          SCRIPT="$TEST_APP/Contents/Resources/server/server/index.js"
           if [ ! -f "$SCRIPT" ]; then
-            SCRIPT="$APP/Contents/Resources/resources/server/server/index.js"
+            SCRIPT="$TEST_APP/Contents/Resources/resources/server/server/index.js"
           fi
           echo "backend script: $SCRIPT"
-          ls -la "$SCRIPT" || true
-          NODE_BIN="$APP/Contents/MacOS/node"
+          ls -la "$SCRIPT"
+          NODE_BIN="$TEST_APP/Contents/MacOS/node"
           if [ ! -f "$NODE_BIN" ]; then
-            NODE_BIN="$APP/Contents/MacOS/node-aarch64-apple-darwin"
-          fi
-          if [ ! -f "$NODE_BIN" ]; then
-            NODE_BIN="$(find "$APP" -name 'node*' -type f | grep -v Resources | head -1)"
+            NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
           fi
           echo "node binary: $NODE_BIN"
           DATA_DIR="$(mktemp -d)"
@@ -82,7 +72,6 @@ jobs:
               echo "SMOKE_OK"
               exit 0
             fi
-            # 进程死了就别傻等
             if ! kill -0 "$NODE_PID" 2>/dev/null; then
               echo "SMOKE_FAILED: node exited early"
               wait "$NODE_PID" || echo "node exit code: $?"
