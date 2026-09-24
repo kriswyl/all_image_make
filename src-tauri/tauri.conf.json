@@ -38,6 +38,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "signingIdentity": "-",
+      "entitlements": "entitlements.plist"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

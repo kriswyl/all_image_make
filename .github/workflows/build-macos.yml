@@ -51,17 +51,34 @@ jobs:
           TEST_APP="$(mktemp -d)/小勤画图.app"
           cp -R "$APP" "$TEST_APP"
           hdiutil detach "$MOUNT"
+          echo "FIXED_APP=$TEST_APP" >> "$GITHUB_ENV"
+
+          # 签名体检：hardened runtime 下 node 的 V8 需要 allow-jit 授权，
+          # 否则 mmap PROT_EXEC 被拒，报 "Failed to reserve virtual memory"
+          NODE_BIN="$TEST_APP/Contents/MacOS/node"
+          if [ ! -f "$NODE_BIN" ]; then
+            NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
+          fi
+          echo "node binary: $NODE_BIN"
+          echo "=== node codesign flags ==="
+          codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags=" || true
+          ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null || true)"
+          echo "=== node entitlements ==="
+          echo "$ENTITLEMENTS"
+          IS_HARDENED="$(codesign -dvv "$NODE_BIN" 2>&1 | grep -c 'CodeDirectory flags=.*runtime' || true)"
+          HAS_JIT="$(printf '%s' "$ENTITLEMENTS" | grep -c allow-jit || true)"
+          if [ "$IS_HARDENED" -ge 1 ] && [ "$HAS_JIT" -eq 0 ]; then
+            echo "::warning::node sidecar 在 hardened runtime 下缺少 allow-jit，重签为普通 ad-hoc 并重打 dmg"
+            codesign --force --deep --sign - "$TEST_APP"
+            echo "RESIGNED=1" >> "$GITHUB_ENV"
+          fi
+
           SCRIPT="$TEST_APP/Contents/Resources/server/server/index.js"
           if [ ! -f "$SCRIPT" ]; then
             SCRIPT="$TEST_APP/Contents/Resources/resources/server/server/index.js"
           fi
           echo "backend script: $SCRIPT"
           ls -la "$SCRIPT"
-          NODE_BIN="$TEST_APP/Contents/MacOS/node"
-          if [ ! -f "$NODE_BIN" ]; then
-            NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
-          fi
-          echo "node binary: $NODE_BIN"
           DATA_DIR="$(mktemp -d)"
           PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
           NODE_PID=$!
@@ -81,6 +98,17 @@ jobs:
           done
           echo "SMOKE_FAILED: backend not healthy after 20s"
           exit 1
+
+      # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行
+      - name: Repack dmg after re-sign
+        if: env.RESIGNED == '1'
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          rm -f "$DMG_DIR"/*.dmg
+          hdiutil create -volname "小勤画图" -srcfolder "${FIXED_APP:?}" -ov -format UDZO "$DMG_DIR/小勤画图_${VERSION}_aarch64.dmg"
+          ls -la "$DMG_DIR"
 
       - name: Upload dmg artifact
         uses: actions/upload-artifact@v4
