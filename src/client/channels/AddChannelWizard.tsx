@@ -160,7 +160,10 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
             <div className="preset-grid">
               {PROVIDER_PRESETS.map((item, index) => (
                 <button type="button" key={item.id} className={`preset-card ${providerId === item.id ? "selected" : ""}`} onClick={() => selectProvider(item.id)}>
-                  <span className={`preset-icon tone-${index % 3}`}><Server size={21} /></span>
+                  {/* 有站点品牌图标的用图标，没有的退回通用 Server 图标 + 配色 */}
+                  <span className={`preset-icon ${item.logo ? "has-logo" : `tone-${index % 3}`}`}>
+                    {item.logo ? <img src={item.logo} alt="" loading="lazy" decoding="async" /> : <Server size={21} />}
+                  </span>
                   <span className="preset-title">{item.label}{providerId === item.id ? <CheckCircle2 className="preset-check" size={16} /> : null}</span>
                   <span className="preset-url">{item.baseUrl}</span>
                   <span className="preset-tags">{item.units.map((unit) => <span key={unit.id} className="preset-tag">{unit.label}</span>)}</span>

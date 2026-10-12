@@ -95,6 +95,7 @@ export class AppDatabase {
         byte_size INTEGER NOT NULL,
         relative_path TEXT NOT NULL,
         sha256 TEXT NOT NULL,
+        duration REAL,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS diagnostics (
@@ -107,6 +108,12 @@ export class AppDatabase {
         created_at TEXT NOT NULL
       );
     `);
+    // Migration: add duration column to assets if it doesn't exist
+    const columnsResult = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
+    const hasDuration = columnsResult.some((col) => col.name === "duration");
+    if (!hasDuration) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN duration REAL");
+    }
   }
 
   close() {
@@ -234,18 +241,19 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  insertAsset(asset: { id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string }) {
+  insertAsset(asset: { id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string; duration?: number | null }) {
     this.db.prepare(`
-      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, sha256, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath, asset.sha256, now());
+      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, sha256, duration, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath, asset.sha256, asset.duration ?? null, now());
   }
 
   listAssets(taskId: string): AssetRow[] {
     const rows = this.db.prepare("SELECT * FROM assets WHERE task_id = ? ORDER BY created_at ASC").all(taskId) as DbRow[];
     return rows.map((row) => ({
       id: String(row.id), taskId: String(row.task_id), fileName: String(row.file_name), mimeType: String(row.mime_type),
-      byteSize: Number(row.byte_size), relativePath: String(row.relative_path), sha256: String(row.sha256), createdAt: String(row.created_at),
+      byteSize: Number(row.byte_size), relativePath: String(row.relative_path), sha256: String(row.sha256),
+      duration: row.duration == null ? null : Number(row.duration), createdAt: String(row.created_at),
     }));
   }
 
@@ -284,7 +292,7 @@ export class AppDatabase {
       status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage, assets: this.listAssets(task.id).map((asset) => ({
         id: asset.id, taskId: asset.taskId, fileName: asset.fileName, mimeType: asset.mimeType, byteSize: asset.byteSize,
-        url: `/api/assets/${asset.id}/file`, createdAt: asset.createdAt,
+        url: `/api/assets/${asset.id}/file`, duration: asset.duration, createdAt: asset.createdAt,
       })), createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,
     };
   }
@@ -317,5 +325,5 @@ export interface TaskRow {
 }
 
 export interface AssetRow {
-  id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string; createdAt: string;
+  id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string; duration: number | null; createdAt: string;
 }

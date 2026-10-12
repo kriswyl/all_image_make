@@ -1,21 +1,37 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { isVideoAdapter as isVideoAdapterType } from "../shared/types.js";
 import type { GenerationInput, ReferenceImageInput, Task } from "../shared/types.js";
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
   RemoteApiError,
   buildGenerationRequest,
   extractImageCandidates,
+  extractVideoCandidates,
   requestForDiagnostic,
   sendPreparedRequest,
   type ImageCandidate,
+  type VideoCandidate,
 } from "./adapters.js";
 import { redact, safeFetch, safeFileName } from "./security.js";
 import type { KeyStore } from "./key-store.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+const VIDEO_POLL_INTERVAL_MS = 8000;
+const VIDEO_MAX_POLLS = 100;
+
+/** 中转站对请求体的实际上限在 1~2MB 之间（实测 1MB 通过、2MB 被网关掐断），
+ *  且超限时只回含糊的 502 / fetch failed。内联 base64 素材超过这个字符数就提前拦下。 */
+const MAX_INLINE_MEDIA_CHARS = 1_400_000;
+
+/** 轮询节奏可被环境变量覆盖，测试里用短间隔跑完整个提交流程 */
+const VIDEO_POLL_DELAY_MS = (() => {
+  const raw = Number(process.env.VIDEO_POLL_INTERVAL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : VIDEO_POLL_INTERVAL_MS;
+})();
 
 interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
   relativePath: string;
@@ -46,6 +62,14 @@ export class TaskRunner {
     if (input.prompt.length > 20000) throw new AppError("INVALID_INPUT", "提示词不能超过 20000 个字符", 400);
     const rawSize = JSON.stringify(input.rawParameters ?? {}).length;
     if (rawSize > 65536) throw new AppError("INVALID_INPUT", "高级参数不能超过 64 KB", 400);
+    const inlineMediaChars = inlineMediaSize(input);
+    if (inlineMediaChars > MAX_INLINE_MEDIA_CHARS) {
+      throw new AppError(
+        "INVALID_INPUT",
+        `内联图片合计约 ${(inlineMediaChars / 1024 / 1024).toFixed(1)}MB，超出中转站约 1.4MB 的请求体上限，请改用更小的图片或公网图片地址`,
+        400,
+      );
+    }
     const id = crypto.randomUUID();
     const sources = uploads.length ? uploads : referenceInputs(input).map((image) => ({
       bytes: Buffer.from(image.base64, "base64"), mimeType: image.mimeType, fileName: image.fileName,
@@ -69,6 +93,17 @@ export class TaskRunner {
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.db.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared);
+
+      // Check if this is an async video generation (返回task_id需要轮询)
+      const isVideoAdapter = isVideoAdapterType(channel.adapterType);
+      const asyncTaskId = this.extractAsyncTaskId(result.payload);
+
+      if (isVideoAdapter && asyncTaskId) {
+        await this.pollVideoTask(taskId, asyncTaskId, channel, key);
+        return;
+      }
+
+      // Sync response: extract images immediately
       const images = extractImageCandidates(result.payload);
       if (images.length) {
         await this.saveImages(taskId, images, channel);
@@ -76,7 +111,7 @@ export class TaskRunner {
         return;
       }
 
-      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片", 502);
+      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片或视频", 502);
     } catch (error) {
       const current = this.db.getTaskRow(taskId);
       if (current?.status !== "cancelled") {
@@ -125,6 +160,167 @@ export class TaskRunner {
       throw error;
     }
   }
+
+  private extractAsyncTaskId(payload: unknown): string | null {
+    if (!payload || typeof payload !== "object") return null;
+    const record = payload as Record<string, unknown>;
+    // Wan3.0: { task_id } 或 { output: { task_id } }
+    if (typeof record.task_id === "string") return record.task_id;
+    // Grok: { request_id }
+    if (typeof record.request_id === "string") return record.request_id;
+    // Seedance: { id }
+    if (typeof record.id === "string") return record.id;
+    if (record.output && typeof record.output === "object") {
+      const output = record.output as Record<string, unknown>;
+      if (typeof output.task_id === "string") return output.task_id;
+      if (typeof output.id === "string") return output.id;
+    }
+    return null;
+  }
+
+  private async pollVideoTask(localTaskId: string, remoteTaskId: string, channel: DbChannel, key: string) {
+    this.db.updateTask(localTaskId, { status: "running" });
+    const pollEndpoint = channel.adapterType === "wan-video"
+      ? `/api/v1/tasks/${remoteTaskId}`
+      : channel.adapterType === "seedance-video"
+      ? `/api/v3/contents/generations/tasks/${remoteTaskId}`
+      : `/v1/videos/${remoteTaskId}`;
+
+    const headers: Record<string, string> = { Accept: "application/json" };
+    let url = channel.baseUrl + pollEndpoint;
+    if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
+    else if (channel.authType === "x-api-key") headers[channel.authHeaderName || "x-api-key"] = key;
+
+    for (let poll = 0; poll < VIDEO_MAX_POLLS; poll += 1) {
+      const current = this.db.getTaskRow(localTaskId);
+      if (current?.status === "cancelled") return;
+
+      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_DELAY_MS));
+
+      try {
+        const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+        const payload = await response.json();
+        this.db.insertDiagnostic({ taskId: localTaskId, request: { url, method: "GET" }, response: redact(truncatePayload(payload)), httpStatus: response.status });
+
+        const status = this.extractVideoStatus(payload);
+        const progress = this.extractVideoProgress(payload);
+        if (progress !== null) this.db.updateTask(localTaskId, { progress });
+
+        if (status && ["succeeded", "done", "completed", "success"].includes(status)) {
+          const videos = extractVideoCandidates(payload);
+          if (videos.length === 0) {
+            throw new AppError(
+              "RESPONSE_PARSE_FAILED",
+              `视频生成完成但响应中没有找到视频 URL。原始响应：${JSON.stringify(payload).slice(0, 500)}`,
+              502,
+            );
+          }
+          // 下载失败时 saveVideos 会把视频链接带进报错，方便手动打开核对
+          await this.saveVideos(localTaskId, videos, channel);
+          this.db.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
+          return;
+        }
+
+        if (status && ["failed", "error", "canceled", "cancelled", "unknown"].includes(status)) {
+          const errorMsg = this.extractVideoError(payload);
+          throw new AppError(
+            "REMOTE_TASK_FAILED",
+            errorMsg || `视频生成失败（状态 ${status}）：${JSON.stringify(payload).slice(0, 300)}`,
+            502,
+          );
+        }
+
+        // Still running, continue polling
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询视频状态失败", 502);
+      }
+    }
+
+    throw new AppError("VIDEO_TIMEOUT", `视频生成超时（已轮询 ${VIDEO_MAX_POLLS} 次）`, 504);
+  }
+
+  /** 各家字段名不同：Grok 用 status，万相用 output.task_status */
+  private extractVideoStatus(payload: unknown): string | null {
+    if (!payload || typeof payload !== "object") return null;
+    const record = payload as Record<string, unknown>;
+    if (typeof record.status === "string") return record.status.toLowerCase();
+    if (typeof record.task_status === "string") return record.task_status.toLowerCase();
+    if (record.output && typeof record.output === "object") {
+      const output = record.output as Record<string, unknown>;
+      if (typeof output.task_status === "string") return output.task_status.toLowerCase();
+      if (typeof output.status === "string") return output.status.toLowerCase();
+    }
+    return null;
+  }
+
+  private extractVideoProgress(payload: unknown): number | null {
+    if (!payload || typeof payload !== "object") return null;
+    const record = payload as Record<string, unknown>;
+    if (typeof record.progress === "number") return Math.min(99, Math.max(0, record.progress));
+    return null;
+  }
+
+  private extractVideoError(payload: unknown): string | null {
+    if (!payload || typeof payload !== "object") return null;
+    const record = payload as Record<string, unknown>;
+    if (record.error && typeof record.error === "object") {
+      const error = record.error as Record<string, unknown>;
+      if (typeof error.message === "string") return error.message;
+    }
+    if (typeof record.error === "string") return record.error;
+    // 万相把失败原因放在 output.message / output.code
+    if (record.output && typeof record.output === "object") {
+      const output = record.output as Record<string, unknown>;
+      const parts = [output.code, output.message].filter((item) => typeof item === "string");
+      if (parts.length) return parts.join(": ");
+    }
+    if (typeof record.message === "string") return record.message;
+    return null;
+  }
+
+  private async saveVideos(taskId: string, videos: VideoCandidate[], channel: DbChannel) {
+    let saved = 0;
+    for (const video of videos.slice(0, 1)) {
+      const bytes = await this.fetchVideoBytes(video.url, channel);
+      if (bytes.length > MAX_VIDEO_BYTES) throw new AppError("ASSET_TOO_LARGE", "视频超过 200 MB 限制", 502);
+      const extension = video.url.endsWith(".webm") ? "webm" : "mp4";
+      const mimeType = extension === "webm" ? "video/webm" : "video/mp4";
+      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+      const id = crypto.randomUUID();
+      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
+      const absolutePath = path.join(this.db.assetsDir, fileName);
+      await fs.writeFile(absolutePath, bytes);
+      this.db.insertAsset({
+        id, taskId, fileName, mimeType, byteSize: bytes.length,
+        relativePath: fileName, sha256, duration: video.duration,
+      });
+      saved += 1;
+    }
+    if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的视频", 502);
+  }
+
+  private async fetchVideoBytes(url: string, channel: DbChannel): Promise<Buffer> {
+    try {
+      const response = await safeFetch(url, { method: "GET" }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+      if (!response.ok) {
+        throw new AppError(
+          "VIDEO_DOWNLOAD_FAILED",
+          `下载视频失败：HTTP ${response.status}。视频链接：${url}`,
+          502,
+        );
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        "VIDEO_DOWNLOAD_FAILED",
+        `下载视频失败：${error instanceof Error ? error.message : "未知错误"}。视频链接：${url}`,
+        502,
+      );
+    }
+  }
+
 
   private async saveImages(taskId: string, images: ImageCandidate[], channel: DbChannel) {
     let saved = 0;
@@ -247,6 +443,12 @@ function extensionForMime(mimeType: string) {
 
 function referenceInputs(input: GenerationInput) {
   return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
+}
+
+/** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */
+function inlineMediaSize(input: GenerationInput) {
+  const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? [])];
+  return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
 }
 
 function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {

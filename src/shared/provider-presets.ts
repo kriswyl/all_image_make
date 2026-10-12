@@ -26,6 +26,8 @@ export interface ProviderPreset {
   label: string;
   baseUrl: string;
   keyHint?: string;
+  /** 站点品牌图标（public/ 下的路径）；没有就退回通用 Server 图标 */
+  logo?: string;
   units: ChannelUnitPreset[];
 }
 
@@ -51,12 +53,16 @@ const GEMINI_MODELS = [
   "gemini-3-pro-image-preview",
   "gemini-3-pro-image",
 ];
+const GROK_VIDEO_MODELS = ["grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-imagine-video-1.5"];
+const WAN_VIDEO_MODELS = ["wan3.0-video"];
+const SEEDANCE_VIDEO_MODELS = ["sd-2.5", "sd-2.0", "sd-2.0-fast", "sd-2.0-mini"];
 
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
-    id: "vectorengine",
-    label: "向量引擎",
+    id: "vectorengine-gpt",
+    label: "向量引擎-gpt生图",
     baseUrl: "https://api.vectorengine.cn",
+    logo: "/logo-vectorengine.png",
     keyHint: VECTORENGINE_KEY_PLACEHOLDER,
     units: [
       {
@@ -65,36 +71,55 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         description: "OpenAI Images 协议，标准 gpt-image 系列",
         adapterType: "openai-images",
         authType: "bearer",
-        channelName: "{provider}-gpt",
+        channelName: "{provider}",
         secretEnv: VECTORENGINE_KEY_ENV,
         models: GPT_MODELS,
       },
+    ],
+  },
+  {
+    id: "vectorengine-gpt-c",
+    label: "向量引擎-gpt-c生图",
+    baseUrl: "https://api.vectorengine.cn",
+    logo: "/logo-vectorengine.png",
+    keyHint: VECTORENGINE_KEY_PLACEHOLDER,
+    units: [
       {
         id: "gpt-c",
         label: "gpt-c 生图",
         description: "OpenAI Images 协议，-c 系列独立计费与密钥",
         adapterType: "openai-images",
         authType: "bearer",
-        channelName: "{provider}-gpt-c",
+        channelName: "{provider}",
         secretEnv: "VECTORENGINE_GPT_C_API_KEY",
         models: GPT_C_MODELS,
       },
+    ],
+  },
+  {
+    id: "vectorengine-gemini",
+    label: "向量引擎-gemini生图",
+    baseUrl: "https://api.vectorengine.cn",
+    logo: "/logo-vectorengine.png",
+    keyHint: VECTORENGINE_KEY_PLACEHOLDER,
+    units: [
       {
         id: "gemini",
         label: "gemini 生图",
         description: "Gemini Content 协议，宽高比与出图尺寸控制",
         adapterType: "gemini-content",
         authType: "bearer",
-        channelName: "{provider}-gemini",
+        channelName: "{provider}",
         secretEnv: "VECTORENGINE_GEMINI_API_KEY",
         models: GEMINI_MODELS,
       },
     ],
   },
   {
-    id: "tiantoken",
-    label: "词元流墟",
+    id: "tiantoken-gpt",
+    label: "词元流墟-gpt生图",
     baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
     units: [
       {
         id: "gpt",
@@ -102,29 +127,102 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         description: "OpenAI Images 协议，标准 gpt-image 系列",
         adapterType: "openai-images",
         authType: "bearer",
-        channelName: "{provider}-gpt",
+        channelName: "{provider}",
         secretEnv: "TIANTOKEN_GPT_API_KEY",
         models: GPT_MODELS,
       },
+    ],
+  },
+  {
+    id: "tiantoken-gpt-c",
+    label: "词元流墟-gpt-c生图",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
       {
         id: "gpt-c",
         label: "gpt-c 生图",
         description: "OpenAI Images 协议，-c 系列独立计费与密钥",
         adapterType: "openai-images",
         authType: "bearer",
-        channelName: "{provider}-gpt-c",
+        channelName: "{provider}",
         secretEnv: "TIANTOKEN_GPT_C_API_KEY",
         models: GPT_C_MODELS,
       },
+    ],
+  },
+  {
+    id: "tiantoken-gemini",
+    label: "词元流墟-gemini生图",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
       {
         id: "gemini",
         label: "gemini 生图",
         description: "Gemini Content 协议，宽高比与出图尺寸控制",
         adapterType: "gemini-content",
         authType: "bearer",
-        channelName: "{provider}-gemini",
+        channelName: "{provider}",
         secretEnv: "TIANTOKEN_GEMINI_API_KEY",
         models: GEMINI_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-wan-video",
+    label: "词元流墟-万相视频",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "wan-video",
+        label: "万相视频",
+        description: "万相 3.0，七种生成方式，首尾帧与参考素材",
+        adapterType: "wan-video",
+        authType: "bearer",
+        endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_WAN_VIDEO_API_KEY",
+        models: WAN_VIDEO_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-grok-video",
+    label: "词元流墟-grok视频",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "grok-video",
+        label: "grok 视频",
+        description: "Grok Imagine，1 到 15 秒，支持参考图",
+        adapterType: "grok-video",
+        authType: "bearer",
+        endpoint: "/v1/videos/generations",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_GROK_VIDEO_API_KEY",
+        models: GROK_VIDEO_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-seedance",
+    label: "词元流墟-seedance视频",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "seedance-video",
+        label: "seedance 视频",
+        description: "豆包 Seedance，文生/首帧/首尾帧/参考图",
+        adapterType: "seedance-video",
+        authType: "bearer",
+        endpoint: "/api/v3/contents/generations/tasks",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_SEEDANCE_VIDEO_API_KEY",
+        models: SEEDANCE_VIDEO_MODELS,
       },
     ],
   },
@@ -140,6 +238,9 @@ export function adapterDefaultEndpoint(adapterType: AdapterType) {
     case "openai-images": return { endpoint: "/v1/images/generations" };
     case "openai-chat-image": return { endpoint: "/v1/chat/completions" };
     case "gemini-content": return { endpoint: "/v1beta/models/{model}:generateContent" };
+    case "grok-video": return { endpoint: "/v1/videos/generations" };
+    case "wan-video": return { endpoint: "/api/v1/services/aigc/video-generation/video-synthesis" };
+    case "seedance-video": return { endpoint: "/api/v3/contents/generations/tasks" };
     default: return { endpoint: "/v1/images/generations" };
   }
 }

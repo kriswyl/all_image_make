@@ -74,9 +74,9 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   height: 32px;
   place-items: center;
   overflow: hidden;
-  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  background: var(--surface);
   border-radius: 10px;
-  box-shadow: 0 4px 12px rgba(109, 40, 217, .28);
+  box-shadow: 0 2px 8px rgba(43, 32, 79, .16), 0 0 0 1px rgba(43, 32, 79, .06);
 }
 .brand-mark img { display: block; width: 100%; height: 100%; object-fit: cover; }
 
@@ -422,7 +422,8 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .diagnostic-entry h3 { margin: 13px 13px 7px; color: #5d665f; font-size: 10px; text-transform: uppercase; }
 .diagnostic-entry pre { max-height: 250px; margin: 0 12px 14px; padding: 12px; overflow: auto; color: #d8e7dc; background: #252b27; border-radius: 5px; font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 
-.toast { position: fixed; right: 22px; bottom: 22px; z-index: 80; display: flex; align-items: center; gap: 9px; max-width: min(420px, calc(100vw - 44px)); min-height: 42px; padding: 10px 13px; color: #fff; background: var(--charcoal); border-radius: 5px; box-shadow: var(--shadow); font-size: 12px; }
+/* 提示条只作展示，不吃点击，避免压住下方的缩略图与按钮 */
+.toast { position: fixed; right: 22px; bottom: 22px; z-index: 80; display: flex; align-items: center; gap: 9px; max-width: min(420px, calc(100vw - 44px)); min-height: 42px; padding: 10px 13px; color: #fff; background: var(--charcoal); border-radius: 5px; box-shadow: var(--shadow); font-size: 12px; pointer-events: none; }
 .toast.success svg { color: #68d495; }
 .toast.error svg { color: #ff8d70; }
 .loading-screen, .loading-compact { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 12px; }
@@ -487,6 +488,12 @@ label > span, .header-selects label > span { color: #6a6682; font-weight: 600; }
 .preset-icon.tone-0 { background: linear-gradient(135deg, #a855f7, #7c3aed); box-shadow: 0 6px 16px rgba(124, 58, 237, .3); }
 .preset-icon.tone-1 { background: linear-gradient(135deg, #38bdf8, #2563eb); box-shadow: 0 6px 16px rgba(37, 99, 235, .3); }
 .preset-icon.tone-2 { background: linear-gradient(135deg, #a78bfa, #6366f1); box-shadow: 0 6px 16px rgba(99, 102, 241, .3); }
+/* 带品牌图标时底板改用浅色，免得渐变底色和 logo 自身的配色打架 */
+.preset-icon.has-logo {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px var(--line), 0 2px 8px rgba(43, 32, 79, .07);
+}
+.preset-icon.has-logo img { display: block; width: 30px; height: 30px; object-fit: contain; }
 .preset-title { font-size: 15px; }
 .preset-title svg { color: inherit; }
 .preset-url { color: var(--accent); }
@@ -495,6 +502,272 @@ label > span, .header-selects label > span { color: #6a6682; font-weight: 600; }
 .unit-card:has(input:checked) { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent), var(--shadow-panel); }
 .unit-head input, .group-toggle input { accent-color: var(--accent); }
 .unit-adapter { color: var(--accent-dark); background: var(--accent-soft); border-color: transparent; }
+
+/* Video player styling */
+.stage-video {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.stage-video video {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  background: #000;
+}
+
+.video-duration {
+  padding: 6px 12px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  background: var(--surface-soft);
+  border-radius: 8px;
+}
+
+.stage-thumbs video,
+.recent-thumbs video,
+.history-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Video preview in modal */
+.image-preview video {
+  max-width: 90vw;
+  max-height: 84vh;
+  border-radius: 12px;
+  background: #000;
+}
+
+/* Filter tabs for history */
+.filter-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 3px;
+  background: var(--surface);
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.filter-tabs button {
+  padding: 7px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-soft);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 140ms ease;
+  white-space: nowrap;
+}
+
+.filter-tabs button:hover {
+  color: var(--text);
+  background: var(--surface-soft);
+}
+
+.filter-tabs button.active {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px var(--line);
+}
+
+.header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+/* Asset metadata display */
+.asset-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.asset-meta span {
+  padding: 4px 9px;
+  background: var(--surface-soft);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+/* Switch-style checkbox fields */
+.switch-field {
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.switch-field input[type="checkbox"] {
+  width: 38px;
+  height: 21px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Video task progress hint */
+.task-progress small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Smart duration button beside the duration input */
+.duration-input-wrapper {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.duration-input-wrapper input {
+  flex: 1;
+  min-width: 0;
+}
+
+.smart-duration-btn {
+  flex-shrink: 0;
+  padding: 0 11px;
+  color: var(--accent-dark);
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.smart-duration-btn:hover {
+  background: #ddd0fb;
+}
+
+/* Inline checkbox that sits in the parameter grid */
+.checkbox-label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px;
+  padding-top: 20px;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.checkbox-label span {
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* 万相 7 种生成方式的选择器 */
+.mode-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.mode-chip {
+  padding: 7px 13px;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 140ms ease;
+  white-space: nowrap;
+}
+
+.mode-chip:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: #ddd0fb;
+}
+
+.mode-chip.active {
+  color: #fff;
+  background: linear-gradient(135deg, #8b5cf6, var(--accent-dark));
+  border-color: transparent;
+  box-shadow: 0 2px 6px rgba(109, 40, 217, .22);
+}
+
+.mode-hint {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* 视频/音频/文档的 URL 输入区 */
+.media-url-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 14px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.media-url-block .mode-hint {
+  margin: 0;
+}
+
+.section-title.compact {
+  margin: 0 0 2px;
+}
+
+.section-title.compact h2 {
+  font-size: 14px;
+}
+
+.required-mark {
+  margin-left: 6px;
+  padding: 1px 6px;
+  color: var(--coral);
+  font-size: 11px;
+  font-style: normal;
+  background: var(--coral-soft);
+  border-radius: 5px;
+}
+
+/* 首帧/尾帧角色标签 */
+.reference-role {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  padding: 2px 7px;
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  background: rgba(43, 32, 79, .82);
+  border-radius: 5px;
+  backdrop-filter: blur(4px);
+}
+
 .model-chip { background: var(--surface); border-color: var(--line-strong); }
 .wizard-steps { background: var(--surface); }
 .wizard-note.neutral { background: var(--surface-soft); border-color: var(--line); }
@@ -511,6 +784,114 @@ label > span, .header-selects label > span { color: #6a6682; font-weight: 600; }
   .control-panel, .result-panel { min-height: 580px; }
   .submit-row { position: sticky; bottom: 0; }
 }
+
+/* ---- 页头主控件：渠道 / 模型选择器做成醒目的卡片，用主色描边和填充拉开层级 ---- */
+.header-selects {
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+}
+.header-selects label { min-width: 198px; }
+.header-selects label > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .06em;
+}
+.header-selects label > span::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.header-selects select {
+  height: 44px;
+  padding: 0 38px 0 13px;
+  color: var(--ink);
+  background-color: var(--accent-soft);
+  border: 1.5px solid #ddd0fb;
+  border-radius: 11px;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+.header-selects select:hover:not(:focus):not(:disabled) { background-color: #eae0fe; border-color: #c9b6f9; }
+.header-selects select:focus { background-color: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 4px rgba(124, 58, 237, .16); }
+
+/* ---- 下拉框：去掉原生外观，换成白底描边 + 主色自绘箭头 ---- */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237c3aed' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 13px 13px;
+}
+select:disabled { color: #a9a4bd; background-color: #f3f1fa; cursor: not-allowed; }
+
+/* ---- 复选框：方形勾选框 + 药丸开关，替代浏览器原生控件 ---- */
+input[type="checkbox"] {
+  position: relative;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin: 0;
+  background-color: var(--surface);
+  border: 1.5px solid var(--line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+input[type="checkbox"]:hover:not(:disabled) { border-color: #c4b5fd; background-color: var(--accent-soft); }
+input[type="checkbox"]:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(124, 58, 237, .16); }
+input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 12px 12px;
+  border-color: transparent;
+}
+input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 开关型字段渲染成药丸，滑块带过渡，比原来的原生方框更像开关 */
+.switch-field input[type="checkbox"] {
+  width: 40px;
+  height: 22px;
+  background-color: #ddd8ee;
+  background-image: none;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 2px rgba(43, 32, 79, .12);
+}
+.switch-field input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(43, 32, 79, .3);
+  transition: transform 190ms cubic-bezier(.3, .9, .3, 1);
+}
+.switch-field input[type="checkbox"]:hover:not(:disabled) { background-color: #d3cceb; }
+.switch-field input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  background-image: none;
+  border: 0;
+}
+.switch-field input[type="checkbox"]:checked::after { transform: translateX(18px); }
 
 @media (max-width: 720px) {
   body { overflow: auto; }

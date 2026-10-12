@@ -21,6 +21,12 @@ function imageExtension(asset: Asset) {
   if (fileExtension && /^[a-z0-9]+$/.test(fileExtension)) return fileExtension;
   if (asset.mimeType === "image/jpeg") return "jpg";
   if (asset.mimeType === "image/webp") return "webp";
+  if (asset.mimeType.startsWith("video/")) {
+    if (asset.mimeType === "video/mp4") return "mp4";
+    if (asset.mimeType === "video/webm") return "webm";
+    if (asset.mimeType === "video/quicktime") return "mov";
+    return "mp4";
+  }
   return "png";
 }
 
@@ -69,6 +75,8 @@ export const api = {
   },
   downloadAsset: async (asset: Asset) => {
     const separator = asset.url.includes("?") ? "&" : "?";
+    const isVideo = asset.mimeType.startsWith("video/");
+    const fileType = isVideo ? "视频" : "图片";
 
     if (isTauriRuntime()) {
       const [{ save }, { writeFile }] = await Promise.all([
@@ -77,9 +85,9 @@ export const api = {
       ]);
       const extension = imageExtension(asset);
       const destination = await save({
-        title: "保存图片",
+        title: `保存${fileType}`,
         defaultPath: asset.fileName,
-        filters: [{ name: "图片", extensions: [extension] }],
+        filters: [{ name: fileType, extensions: [extension] }],
       });
       if (!destination) return false;
 

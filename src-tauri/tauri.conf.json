@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "小勤画图",
-  "version": "1.0.5",
+  "productName": "益达工作台",
+  "version": "2.0.0",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "小勤画图",
+        "title": "益达工作台",
         "width": 1280,
         "height": 820,
         "minWidth": 980,

@@ -20,6 +20,11 @@ export interface ImageCandidate {
   mimeType?: string;
 }
 
+export interface VideoCandidate {
+  url: string;
+  duration?: number;
+}
+
 export class RemoteApiError extends Error {
   constructor(public status: number, public payload: unknown, message = "中转接口返回错误") {
     super(message);
@@ -59,6 +64,21 @@ function referenceImages(input: GenerationInput) {
 
 function imageSummary(input: NonNullable<GenerationInput["referenceImage"]>) {
   return { fileName: input.fileName, mimeType: input.mimeType, byteSize: Buffer.byteLength(input.base64, "base64") };
+}
+
+function buildWanMedia(input: GenerationInput, references: NonNullable<GenerationInput["referenceImages"]>) {
+  // 优先使用 wanVideoMedia（前端模式选择器构造的）
+  if (input.wanVideoMedia?.length) {
+    return input.wanVideoMedia;
+  }
+  // 降级：兼容旧的 referenceImages（全部标记为 reference_image）
+  if (references.length) {
+    return references.map((ref) => ({
+      type: "reference_image" as const,
+      url: imageDataUrl(ref),
+    }));
+  }
+  return [];
 }
 
 function appendFormValue(formData: FormData, key: string, value: unknown) {
@@ -119,6 +139,9 @@ export function defaultEndpoint(adapterType: DbChannel["adapterType"]) {
     case "openai-images": return "/v1/images/generations";
     case "openai-chat-image": return "/v1/chat/completions";
     case "gemini-content": return "/v1beta/models/{model}:generateContent";
+    case "wan-video": return "/api/v1/services/aigc/video-generation/video-synthesis";
+    case "grok-video": return "/v1/videos/generations";
+    case "seedance-video": return "/api/v3/contents/generations/tasks";
     default: return "/v1/images/generations";
   }
 }
@@ -152,7 +175,73 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   let diagnosticBody: Record<string, unknown> | undefined;
   const raw = input.rawParameters ?? {};
 
-  if (channel.adapterType === "openai-images" && references.length) {
+  if (channel.adapterType === "wan-video") {
+    // 万相视频生成必须启用异步，否则会超时
+    headers["X-DashScope-Async"] = "enable";
+
+    const media = buildWanMedia(input, references);
+    // 文档要求：传入 file 或 link 素材时 prompt_extend 必须为 true
+    const forcePromptExtend = media.some((item) => item.type === "file" || item.type === "link");
+
+    body = {
+      model: input.model,
+      input: compact({
+        prompt: input.prompt,
+        ...(media.length ? { media } : {}),
+      }),
+      parameters: compact({
+        resolution: input.resolution,
+        ratio: input.ratio,
+        duration: input.duration,
+        audio: input.audio,
+        prompt_extend: forcePromptExtend ? true : input.promptExtend,
+        seed: input.seed,
+        watermark: input.watermark,
+        ...raw,
+      }),
+    };
+  } else if (channel.adapterType === "grok-video") {
+    body = compact({
+      model: input.model,
+      prompt: input.prompt,
+      duration: input.duration ?? 8,
+      resolution: input.resolution,
+      aspect_ratio: input.aspectRatio,
+      ...(references.length ? {
+        reference_images: references.map((ref) => ({
+          url: imageDataUrl(ref),
+        })),
+      } : {}),
+      ...raw,
+    });
+  } else if (channel.adapterType === "seedance-video") {
+    const content: Array<{ type: string; text?: string; image_url?: { url: string }; role?: string }> = [];
+    if (input.prompt) {
+      content.push({ type: "text", text: input.prompt });
+    }
+    if (input.seedanceVideoMedia && input.seedanceVideoMedia.length) {
+      input.seedanceVideoMedia.forEach((media) => {
+        if (media.type === "image_url") {
+          content.push({
+            type: "image_url",
+            image_url: { url: media.url },
+            ...(media.role ? { role: media.role } : {}),
+          });
+        }
+      });
+    }
+    body = compact({
+      model: input.model,
+      content,
+      resolution: input.resolution,
+      ratio: input.ratio,
+      duration: input.duration,
+      generate_audio: input.audio ?? false,
+      seed: input.seed,
+      watermark: input.watermark,
+      ...raw,
+    });
+  } else if (channel.adapterType === "openai-images" && references.length) {
     const fields = compact({
       model: input.model,
       prompt: input.prompt,
@@ -333,3 +422,47 @@ export function extractImageCandidates(payload: unknown): ImageCandidate[] {
   return candidates;
 }
 
+/** 视频地址常见的字段名：顶层 video_url、嵌套 video.url、万相的 output.video_url 等 */
+const VIDEO_KEY_PATTERN = /video|url|output|result|media|download/i;
+const VIDEO_EXTENSION_PATTERN = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
+
+export function extractVideoCandidates(payload: unknown): VideoCandidate[] {
+  const candidates: VideoCandidate[] = [];
+  const seen = new Set<string>();
+
+  const add = (url: string, duration?: unknown) => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    candidates.push({ url, duration: typeof duration === "number" ? duration : undefined });
+  };
+
+  /**
+   * inheritedDuration 让 duration 向下传递：Seedance 把它放在 content 的兄弟节点
+   * （{ content: { video_url }, duration: 5 }），URL 本身拿不到时长，得从父级带下来。
+   */
+  const walk = (value: unknown, parentKey = "", depth = 0, inheritedDuration?: unknown) => {
+    if (depth > 8 || value == null) return;
+    if (typeof value === "string") {
+      if (!/^https?:\/\//i.test(value)) return;
+      // 扩展名能认出来的直接收，否则看字段名是否像视频地址
+      if (VIDEO_EXTENSION_PATTERN.test(value) || VIDEO_KEY_PATTERN.test(parentKey)) add(value, inheritedDuration);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => walk(item, parentKey, depth + 1, inheritedDuration));
+      return;
+    }
+    if (typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    // 本层的 duration 供子节点兜底使用
+    const duration = typeof record.duration === "number" ? record.duration : inheritedDuration;
+    // { video: { url, duration } } 这类嵌套结构，duration 要和 url 一起取出来
+    if (typeof record.url === "string" && /^https?:\/\//i.test(record.url)) {
+      add(record.url, record.duration ?? inheritedDuration);
+    }
+    for (const [key, item] of Object.entries(record)) walk(item, key, depth + 1, duration);
+  };
+
+  walk(payload);
+  return candidates;
+}

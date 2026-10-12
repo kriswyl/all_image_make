@@ -11,11 +11,13 @@ import { AppError, TaskRunner, normalizeError, type ReferenceImageUpload } from 
 import { assertEndpoint, assertSafeUrl, redact } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json"] as const;
+const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
 const MAX_REFERENCE_IMAGES = 8;
+/** 单个 media URL 的上限：图片 data URI 按 20MB 原始体积 base64 后约 27M 字符 */
+const MAX_MEDIA_URL_CHARS = 28_000_000;
 const referenceUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: MAX_REFERENCE_IMAGES, fields: 1 },
@@ -70,6 +72,52 @@ const generationSchema = z.object({
   maxOutputTokens: z.number().int().min(1).max(32768).optional(),
   responseModalities: z.array(z.enum(["TEXT", "IMAGE"])).max(2).optional(),
   seed: z.number().int().min(0).max(2147483647).optional(),
+  // Video generation parameters
+  duration: z.number().int().min(-1).max(30).optional(),
+  resolution: z.string().max(10).optional(),
+  ratio: z.string().max(10).optional(),
+  audio: z.boolean().optional(),
+  promptExtend: z.boolean().optional(),
+  watermark: z.boolean().optional(),
+  wanVideoMode: z.enum([
+    "text-to-video",
+    "first-frame",
+    "first-last-frame",
+    "reference",
+    "video-edit",
+    "video-extend",
+    "file-to-video",
+  ]).optional(),
+  wanVideoMedia: z.array(z.object({
+    type: z.enum([
+      "first_frame",
+      "last_frame",
+      "reference_image",
+      "reference_video",
+      "reference_audio",
+      "file",
+      "link",
+    ]),
+    // 图片走 data URI（base64 后体积放大约 1/3），视频音频走公网或 oss 地址
+    url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
+  })).max(20).optional(),
+  seedanceVideoMode: z.enum([
+    "text-to-video",
+    "first-frame",
+    "first-last-frame",
+    "reference",
+  ]).optional(),
+  seedanceVideoMedia: z.array(z.object({
+    type: z.enum(["image_url", "video_url", "audio_url"]),
+    url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
+    role: z.enum([
+      "first_frame",
+      "last_frame",
+      "reference_image",
+      "reference_video",
+      "reference_audio",
+    ]).optional(),
+  })).max(20).optional(),
   timeoutMs: z.number().int().min(10_000).max(1_800_000).optional(),
   rawParameters: z.record(z.string(), z.unknown()).optional(),
 });
@@ -89,7 +137,8 @@ export function createApp(options: { dataDir?: string } = {}) {
   const context: AppContext = { db, sessionKeys, runner };
 
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "16mb" }));
+  // 万相支持 10 张参考图，每张 20MB，base64 后 * 4/3 ≈ 266MB；留 300MB 余量
+  app.use(express.json({ limit: "300mb" }));
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173") {

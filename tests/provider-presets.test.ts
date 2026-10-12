@@ -14,53 +14,86 @@ function makeChannel(overrides: Partial<Channel>): Channel {
   };
 }
 
-const vectorengine = findProviderPreset("vectorengine")!;
+const vectorengineGpt = findProviderPreset("vectorengine-gpt")!;
 
-function selectionFor(unitId: string) {
-  const unit = vectorengine.units.find((item) => item.id === unitId)!;
+function selectionFor(preset: ReturnType<typeof findProviderPreset>, unitId: string) {
+  if (!preset) throw new Error("Preset not found");
+  const unit = preset.units.find((item) => item.id === unitId)!;
   return { unitId, models: [...unit.models], secretEnv: unit.secretEnv };
 }
 
 describe("provider presets", () => {
-  it("exposes the two relay providers", () => {
-    expect(PROVIDER_PRESETS.map((preset) => preset.id)).toEqual(["vectorengine", "tiantoken"]);
+  it("exposes the relay and video providers", () => {
+    expect(PROVIDER_PRESETS.map((preset) => preset.id)).toEqual([
+      "vectorengine-gpt",
+      "vectorengine-gpt-c",
+      "vectorengine-gemini",
+      "tiantoken-gpt",
+      "tiantoken-gpt-c",
+      "tiantoken-gemini",
+      "tiantoken-wan-video",
+      "tiantoken-grok-video",
+      "tiantoken-seedance",
+    ]);
   });
 
-  it("gives gpt, gpt-c and gemini separate units with distinct secret envs", () => {
-    const envs = vectorengine.units.map((unit) => unit.secretEnv);
-    expect(new Set(envs).size).toBe(vectorengine.units.length);
-    expect(vectorengine.units.find((unit) => unit.id === "gpt")!.secretEnv).toBe("VECTORENGINE_API_KEY");
-    expect(vectorengine.units.find((unit) => unit.id === "gpt-c")!.secretEnv).toBe("VECTORENGINE_GPT_C_API_KEY");
-    expect(vectorengine.units.find((unit) => unit.id === "gemini")!.secretEnv).toBe("VECTORENGINE_GEMINI_API_KEY");
+  it("points video presets at tiantoken relay", () => {
+    const wanVideo = findProviderPreset("tiantoken-wan-video")!;
+    expect(wanVideo.baseUrl).toBe("https://api.tiantoken.com");
+    expect(wanVideo.units.map((unit) => unit.adapterType)).toEqual(["wan-video"]);
+
+    const grokVideo = findProviderPreset("tiantoken-grok-video")!;
+    expect(grokVideo.baseUrl).toBe("https://api.tiantoken.com");
+    expect(grokVideo.units.map((unit) => unit.adapterType)).toEqual(["grok-video"]);
+  });
+
+  it("keeps the relay providers on their own hosts", () => {
+    expect(findProviderPreset("tiantoken-gpt")!.baseUrl).toBe("https://api.tiantoken.com");
+    expect(findProviderPreset("vectorengine-gpt")!.baseUrl).toBe("https://api.vectorengine.cn");
+  });
+
+  it("gives gpt, gpt-c and gemini separate presets with distinct secret envs", () => {
+    expect(vectorengineGpt.units[0].secretEnv).toBe("VECTORENGINE_API_KEY");
+    expect(findProviderPreset("vectorengine-gpt-c")!.units[0].secretEnv).toBe("VECTORENGINE_GPT_C_API_KEY");
+    expect(findProviderPreset("vectorengine-gemini")!.units[0].secretEnv).toBe("VECTORENGINE_GEMINI_API_KEY");
   });
 
   it("keeps gpt and gpt-c model lists disjoint", () => {
-    const gpt = vectorengine.units.find((unit) => unit.id === "gpt")!.models;
-    const gptC = vectorengine.units.find((unit) => unit.id === "gpt-c")!.models;
+    const gpt = vectorengineGpt.units[0].models;
+    const gptC = findProviderPreset("vectorengine-gpt-c")!.units[0].models;
     expect(gpt.some((model) => gptC.includes(model))).toBe(false);
   });
 });
 
 describe("buildChannelDrafts", () => {
   it("creates one channel per unit, carrying that unit's key", () => {
-    const drafts = buildChannelDrafts(vectorengine, [
-      { ...selectionFor("gpt"), apiKey: "sk-gpt" },
-      { ...selectionFor("gpt-c"), apiKey: "sk-gpt-c" },
-      selectionFor("gemini"),
+    const drafts = buildChannelDrafts(vectorengineGpt, [
+      { ...selectionFor(vectorengineGpt, "gpt"), apiKey: "sk-gpt" },
     ]);
-    expect(drafts.map((draft) => draft.name)).toEqual(["向量引擎-gpt", "向量引擎-gpt-c", "向量引擎-gemini"]);
-    expect(drafts.map((draft) => draft.input.secretEnv)).toEqual([
-      "VECTORENGINE_API_KEY", "VECTORENGINE_GPT_C_API_KEY", "VECTORENGINE_GEMINI_API_KEY",
-    ]);
+    expect(drafts.map((draft) => draft.name)).toEqual(["向量引擎-gpt生图"]);
+    expect(drafts.map((draft) => draft.input.secretEnv)).toEqual(["VECTORENGINE_API_KEY"]);
     expect(drafts[0].input.apiKey).toBe("sk-gpt");
-    expect(drafts[1].input.apiKey).toBe("sk-gpt-c");
-    expect(drafts[2].input.apiKey).toBeUndefined();
   });
 
   it("applies adapter default endpoints", () => {
-    const [gpt, gemini] = buildChannelDrafts(vectorengine, [selectionFor("gpt"), selectionFor("gemini")]);
+    const [gpt] = buildChannelDrafts(vectorengineGpt, [selectionFor(vectorengineGpt, "gpt")]);
     expect(gpt.input.endpoint).toBe("/v1/images/generations");
-    expect(gemini.input.endpoint).toBe("/v1beta/models/{model}:generateContent");
+    const gemini = findProviderPreset("vectorengine-gemini")!;
+    const [geminiDraft] = buildChannelDrafts(gemini, [selectionFor(gemini, "gemini")]);
+    expect(geminiDraft.input.endpoint).toBe("/v1beta/models/{model}:generateContent");
+  });
+
+  it("keeps the video presets on their documented endpoints", () => {
+    const wan = findProviderPreset("tiantoken-wan-video")!;
+    const [wanDraft] = buildChannelDrafts(wan, [selectionFor(wan, "wan-video")]);
+    expect(wanDraft.input.endpoint).toBe("/api/v1/services/aigc/video-generation/video-synthesis");
+
+    const grok = findProviderPreset("tiantoken-grok-video")!;
+    const [grokDraft] = buildChannelDrafts(grok, [selectionFor(grok, "grok-video")]);
+    expect(grokDraft.input.endpoint).toBe("/v1/videos/generations");
+    expect(grokDraft.input.models).toEqual([
+      "grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-imagine-video-1.5",
+    ]);
   });
 
   it("no longer exposes a Midjourney unit", () => {
@@ -71,7 +104,7 @@ describe("buildChannelDrafts", () => {
   });
 
   it("drops empty and unknown units", () => {
-    const drafts = buildChannelDrafts(vectorengine, [
+    const drafts = buildChannelDrafts(vectorengineGpt, [
       { unitId: "gpt", models: [], secretEnv: "A" },
       { unitId: "missing", models: ["whatever"], secretEnv: "B" },
     ]);
@@ -79,13 +112,15 @@ describe("buildChannelDrafts", () => {
   });
 
   it("honours a custom secret env override", () => {
-    const [draft] = buildChannelDrafts(vectorengine, [{ ...selectionFor("gpt"), secretEnv: "MY_KEY" }]);
+    const [draft] = buildChannelDrafts(vectorengineGpt, [{ ...selectionFor(vectorengineGpt, "gpt"), secretEnv: "MY_KEY" }]);
     expect(draft.input.secretEnv).toBe("MY_KEY");
   });
 });
 
 describe("conflict detection", () => {
-  const [gptDraft, gptCDraft] = buildChannelDrafts(vectorengine, [selectionFor("gpt"), selectionFor("gpt-c")]);
+  const vectorengineGptC = findProviderPreset("vectorengine-gpt-c")!;
+  const [gptDraft] = buildChannelDrafts(vectorengineGpt, [selectionFor(vectorengineGpt, "gpt")]);
+  const [gptCDraft] = buildChannelDrafts(vectorengineGptC, [selectionFor(vectorengineGptC, "gpt-c")]);
 
   it("matches the built-in channel sharing models, not the sibling -c channel", () => {
     const channels = [
@@ -98,7 +133,7 @@ describe("conflict detection", () => {
 
   it("prefers an exact name match so re-running the wizard updates its own channel", () => {
     const channels = [
-      makeChannel({ id: "own", name: "向量引擎-gpt", models: ["gpt-image-2"] }),
+      makeChannel({ id: "own", name: "向量引擎-gpt生图", models: ["gpt-image-2"] }),
       makeChannel({ id: "other", name: "向量引擎-gpt-image-2", models: ["gpt-image-2"] }),
     ];
     expect(findConflictChannels(gptDraft, channels).map((channel) => channel.id)).toEqual(["own"]);
@@ -122,10 +157,12 @@ describe("conflict detection", () => {
 
 describe("duplicate detection across repeated wizard runs", () => {
   it("matches the channel this unit created before, not its sibling", () => {
-    const [gptDraft, gptCDraft] = buildChannelDrafts(vectorengine, [selectionFor("gpt"), selectionFor("gpt-c")]);
+    const gptC = findProviderPreset("vectorengine-gpt-c")!;
+    const [gptDraft] = buildChannelDrafts(vectorengineGpt, [selectionFor(vectorengineGpt, "gpt")]);
+    const [gptCDraft] = buildChannelDrafts(gptC, [selectionFor(gptC, "gpt-c")]);
     const channels = [
-      makeChannel({ id: "own-gpt", name: "向量引擎-gpt", models: gptDraft.input.models }),
-      makeChannel({ id: "own-gpt-c", name: "向量引擎-gpt-c", models: gptCDraft.input.models }),
+      makeChannel({ id: "own-gpt", name: "向量引擎-gpt生图", models: gptDraft.input.models }),
+      makeChannel({ id: "own-gpt-c", name: "向量引擎-gpt-c生图", models: gptCDraft.input.models }),
     ];
     expect(findConflictChannels(gptDraft, channels)[0]?.id).toBe("own-gpt");
     expect(findConflictChannels(gptCDraft, channels)[0]?.id).toBe("own-gpt-c");

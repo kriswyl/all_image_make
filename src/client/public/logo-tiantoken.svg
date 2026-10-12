@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="4.5 4.5 15 15">
+  <defs>
+    <path id="mainShape" d="m14.707 4.372l-.454.19l.346.208c.28.168.562.337.856.475l.07-.03q.648-.31 1.284-.644q-.6-.291-1.203-.571zm-1.825.562l-1.202.476l.882.631l1.328-.575l-1.008-.536zm1.548 1.86l.54-.217c.269-.112.537-.225.805-.328l1.06.549l-.212.104c-.364.173-.723.346-1.09.51c-.26-.121-.506-.268-.752-.41q-.175-.106-.35-.208m-4.082-.416c-.493.173-.982.338-1.47.515c.389.199.787.39 1.185.575c.359-.09.709-.225 1.055-.354l.57-.208q-.455-.255-.92-.493l-.066-.035c-.077-.043-.164-.086-.25-.034zm1.405.835c.346-.138.692-.272 1.051-.39l1.254.52l-1.362.692q-.692-.316-1.37-.658zm-3.277.346c-.39.125-.774.246-1.155.38l.415.23c.26.147.52.294.791.402q.655-.215 1.302-.45l.346-.125l-.817-.415l-.363-.186zm5.824.822a15 15 0 0 0-.687-.372l-1.557.64c.169.086.329.186.489.285c.229.138.462.281.705.398c.346-.147.678-.307 1.016-.467l.497-.234zm-7.213-.364l-1.574.515c.152.1.277.203.398.303c.182.142.36.285.597.41l1.76-.58zm4.152.52a11 11 0 0 0-.874-.433l-1.617.614q.274.144.545.294c.26.138.519.277.778.406c.346-.1.675-.246 1.008-.397l.61-.26l-.446-.23zm5.435-.373l-1.37.645l.674.311c.338.151.675.303 1.004.476l.268-.126c.415-.186.852-.389 1.236-.588zm-8.79.813l.57-.207l.454.25l.925.524l-.683.302c-.346.148-.705.299-1.007.446a9 9 0 0 1-1.41-.895c.35-.134.757-.281 1.15-.42m2.425.571q.785-.346 1.578-.67c.303.12.584.272.874.424l.454.233l-.895.424l-.675.316l-.389-.208zm-4.796-.605q.649.382 1.267.808l1.44.952q1.57 1.041 3.144 2.075c-.013 1.142-.065 2.284-.112 3.425c-.056 1.267-.108 2.53-.117 3.797a180 180 0 0 1-2.802-2.197c-.926-.735-1.85-1.47-2.82-2.205zm8.952.26l-.779.362c.29.16.584.307.878.455c.247.125.489.246.727.376l.385-.178l1.037-.493l-1.068-.488l-.631-.294l-.545.26zm-2.604 3.39c.848-.416 1.696-.84 2.547-1.263a237 237 0 0 1 4.078-2.011v6.79l-6.607 3.497l-.009-.177c-.013-.298-.026-.549-.021-.865v-2.633c0-1.112 0-2.223.012-3.338M9.298 9.98c-.346.15-.7.307-1.016.428c.42.324.895.592 1.375.821a16 16 0 0 1 1.094-.536l.614-.285l-.648-.368l-.67-.385c-.234.095-.49.208-.749.325m2.595.432l1.24-.584l.343-.16l.501.26c.372.186.744.376 1.124.557l-1.253.589l-.386.177l-.557-.303l-1.008-.536zm-.398.182l-.048.021l-.562.273c-.337.16-.679.324-.994.462c.302.251.67.441 1.029.627l.484.26a24 24 0 0 1 1.081-.523l.649-.307c-.48-.277-.964-.554-1.453-.822c-.06-.052-.125-.017-.186.009"/>
+
+    <path id="detail1" d="M5.513 8.533c1.925 1.288 3.827 2.52 5.838 3.675l.108.065s-.337.584-.324.593c-1.53-1.004-2.824-2.102-4.355-3.114c-.415-.272-.834-.558-1.267-.808z"/>
+    <path id="detail2" d="m18.43 8.918l.056-.03v.432c-2.218 1.068-4.42 2.205-6.625 3.295c-.458-.294-.51-.233-.51-.398c.566-.302 1.21-.527 1.786-.808l.324-.156c.545-.255 1.094-.506 1.64-.765c.042-.026.142-.07.19-.091c.475-.225.95-.441 1.422-.675l.268-.13c.485-.216.973-.432 1.449-.674"/>
+    <path id="detail3" d="M12 18.715s-.044-4.22-.022-6.162c0 .013-.515-.29-.627-.337l-.217.648V20l.866-.46z"/>
+
+    <!-- 主渐变：白 → 浅紫 → 中紫（保持偏亮，头部可见） -->
+    <linearGradient id="mainGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="35%"  stop-color="#F0ECFF"/>
+      <stop offset="70%"  stop-color="#C4A5FF"/>
+      <stop offset="100%" stop-color="#8B5CFF"/>
+    </linearGradient>
+
+    <radialGradient id="topGloss" cx="35%" cy="15%" r="65%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="40%"  stop-color="#FFFFFF" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="bottomShadow" x1="0%" y1="65%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#5B2EBD" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#5B2EBD" stop-opacity="0.6"/>
+    </linearGradient>
+
+    <linearGradient id="detailGradA" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E9D5FF"/>
+    </linearGradient>
+
+    <linearGradient id="detailGradB" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#D9C8FF"/>
+    </linearGradient>
+
+    <radialGradient id="fresnelLight" cx="50%" cy="50%" r="62%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="80%"  stop-color="#FFFFFF" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.7"/>
+    </radialGradient>
+
+    <filter id="glowFilter" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="0.12" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 立方体 -->
+  <g filter="url(#glowFilter)">
+
+    <!-- 主体填充 -->
+    <use href="#mainShape" fill="url(#mainGrad)"/>
+
+    <!-- 顶部高光 -->
+    <use href="#mainShape" fill="url(#topGloss)"/>
+
+    <!-- 底部阴影 -->
+    <use href="#mainShape" fill="url(#bottomShadow)"/>
+
+    <!-- 边缘菲涅尔光 -->
+    <use href="#mainShape" fill="url(#fresnelLight)"/>
+
+    <!-- ★★★ 关键：深紫色轮廓 ★★★ -->
+    <use href="#mainShape" fill="none" stroke="#6B46C1" stroke-width="0.18" stroke-linejoin="round"/>
+
+    <!-- 细节 -->
+    <use href="#detail1" fill="url(#detailGradA)"/>
+    <use href="#detail2" fill="url(#detailGradA)"/>
+    <use href="#detail3" fill="url(#detailGradB)"/>
+
+    <!-- 细节也加轮廓，让结构在浅色背景上显现 -->
+    <use href="#detail1" fill="none" stroke="#6B46C1" stroke-width="0.1" stroke-linejoin="round"/>
+    <use href="#detail2" fill="none" stroke="#6B46C1" stroke-width="0.1" stroke-linejoin="round"/>
+    <use href="#detail3" fill="none" stroke="#6B46C1" stroke-width="0.1" stroke-linejoin="round"/>
+
+  </g>
+</svg>

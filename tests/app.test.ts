@@ -99,6 +99,184 @@ describe("generation API", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("Authorization");
   });
 
+  it("accepts base64 data URIs in wanVideoMedia without hitting body size limits", async () => {
+    // 万相的异步接口：提交返回 task_id，轮询立刻报完成但不给视频，任务会失败收尾——
+    // 这里只关心大体积 body 能否通过 express 与 zod 的校验
+    let receivedMedia: Array<{ type: string; url: string }> = [];
+    const mockServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        if (req.method === "POST") {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          receivedMedia = parsed.input?.media ?? [];
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ output: { task_id: "task-1", task_status: "PENDING" } }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: { task_status: "FAILED", message: "stop here" } }));
+      });
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-wan-video-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Wan Video", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "wan-video",
+      authType: "bearer", authHeaderName: "", secretEnv: "",
+      endpoint: "/api/v1/services/aigc/video-generation/video-synthesis", models: ["wan3.0-video"],
+      allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+    const channelId = channelResponse.body.data.id as string;
+
+    // 两张 600KB 的图合计约 1.2M 字符，压在 1.4M 的中转站预算内，
+    // 用来确认 express / zod 这一层不会拦下正常的 base64 素材
+    const pngBase64 = "A".repeat(600_000);
+    const createResponse = await request(app).post("/api/generations").send({
+      channelId,
+      model: "wan3.0-video",
+      prompt: "test video",
+      wanVideoMode: "first-last-frame",
+      wanVideoMedia: [
+        { type: "first_frame", url: `data:image/png;base64,${pngBase64}` },
+        { type: "last_frame", url: `data:image/png;base64,${pngBase64}` },
+      ],
+    }).expect(202);
+    const taskId = createResponse.body.data.id as string;
+
+    // 等到请求真的发出去，确认两张图带着各自的 type 到达上游
+    for (let index = 0; index < 40 && receivedMedia.length === 0; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(receivedMedia.map((item) => item.type)).toEqual(["first_frame", "last_frame"]);
+    expect(receivedMedia[0].url.startsWith("data:image/png;base64,")).toBe(true);
+
+    // 等任务自己进入终态再收尾：mock 的 GET 会返回 FAILED，轮询随即结束，
+    // 否则后台轮询会在 DB 关闭后继续访问
+    await request(app).post(`/api/generations/${taskId}/cancel`);
+    let settled = createResponse.body.data;
+    for (let index = 0; index < 60; index += 1) {
+      settled = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+      if (["failed", "expired", "cancelled", "succeeded"].includes(settled.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    expect(["failed", "expired", "cancelled", "succeeded"]).toContain(settled.status);
+  });
+
+  it("rejects inline media beyond the relay request budget with an actionable message", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-oversize-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Seedance Video", baseUrl: "https://api.tiantoken.com", adapterType: "seedance-video",
+      authType: "bearer", authHeaderName: "", secretEnv: "",
+      endpoint: "/api/v3/contents/generations/tasks", models: ["sd-2.5"],
+      allowPrivateNetwork: false, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+
+    // 单张约 3.7M 字符，远超实测约 2MB 就被网关掐断的上限
+    const response = await request(app).post("/api/generations").send({
+      channelId: channelResponse.body.data.id,
+      model: "sd-2.5",
+      prompt: "test video",
+      seedanceVideoMode: "first-frame",
+      seedanceVideoMedia: [
+        { type: "image_url", url: `data:image/png;base64,${"A".repeat(3_700_000)}`, role: "first_frame" },
+      ],
+    }).expect(400);
+
+    expect(response.body.error.code).toBe("INVALID_INPUT");
+    expect(String(response.body.error.message)).toContain("请求体上限");
+  });
+
+  it("runs a Seedance task end to end: submit, poll content.video_url, download", async () => {
+    let submittedBody: Record<string, unknown> = {};
+    let pollCount = 0;
+    let mockOrigin = "";
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/api/v3/contents/generations/tasks" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          submittedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: "cgt-abc" }));
+        });
+        return;
+      }
+      if (req.url === "/api/v3/contents/generations/tasks/cgt-abc" && req.method === "GET") {
+        pollCount += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        // 先 running 一次，再 succeeded，验证轮询会继续而不是首次就收工
+        res.end(JSON.stringify(pollCount < 2
+          ? { id: "cgt-abc", status: "running" }
+          : { id: "cgt-abc", status: "succeeded", content: { video_url: `${mockOrigin}/out.mp4` }, duration: 5 }));
+        return;
+      }
+      if (req.url === "/out.mp4" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    mockOrigin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-seedance-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Seedance", baseUrl: mockOrigin, adapterType: "seedance-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      models: ["sd-2.5"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+
+    const createResponse = await request(app).post("/api/generations").send({
+      channelId: channelResponse.body.data.id, model: "sd-2.5", prompt: "a cat running",
+      duration: 5, resolution: "720p", ratio: "16:9", audio: false,
+    }).expect(202);
+    const taskId = createResponse.body.data.id as string;
+
+    let task = createResponse.body.data;
+    for (let index = 0; index < 40 && task.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+      if (["failed", "expired", "cancelled"].includes(task.status)) break;
+    }
+    if (task.status !== "succeeded") throw new Error(`Task ended as ${task.status}: ${task.errorMessage}`);
+
+    // 提交体按官方格式构造
+    expect(submittedBody).toMatchObject({
+      model: "sd-2.5",
+      content: [{ type: "text", text: "a cat running" }],
+      resolution: "720p",
+      ratio: "16:9",
+      duration: 5,
+      generate_audio: false,
+    });
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+
+    // 视频落盘，时长从响应里带过来
+    expect(task.assets).toHaveLength(1);
+    expect(task.assets[0].mimeType).toBe("video/mp4");
+    expect(task.assets[0].duration).toBe(5);
+    const video = await request(app).get(task.assets[0].url).expect(200);
+    expect(video.headers["content-type"]).toContain("video/mp4");
+  });
+
   it("deletes a generation and cleans up its asset and input files", async () => {
     let mockOrigin = "";
     const mockServer = http.createServer((req, res) => {

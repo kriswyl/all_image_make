@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, History, Image as ImageIcon,
+  Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, Film, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, Wand2, X,
 } from "lucide-react";
@@ -9,10 +9,12 @@ import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
+import { VideoGenerateView } from "./VideoGenerateView";
+import { isVideoAdapter, isVideoTask } from "../shared/types";
 import type { Asset, Channel, Diagnostic, Task, TaskStatus } from "../shared/types";
 
-type View = "generate" | "channels" | "history";
-type Toast = { kind: "success" | "error"; message: string };
+type View = "generate" | "video" | "channels" | "history";
+export type Toast = { kind: "success" | "error"; message: string };
 type ReferenceImageState = { file: File; previewUrl: string };
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
@@ -45,6 +47,19 @@ function usePersistentState<T>(key: string, initialValue: T) {
     catch { /* The form still works when storage is unavailable. */ }
   }, [storageKey, value]);
   return [value, setValue] as const;
+}
+
+/** 轮询未完成的任务，直到进入终态 */
+function usePolling(task: Task | null, setTasks: React.Dispatch<React.SetStateAction<Task[]>>) {
+  useEffect(() => {
+    if (!task || terminalStatuses.includes(task.status)) return;
+    const timer = window.setInterval(() => {
+      void api.task(task.id).then((updated) => {
+        setTasks((current) => [updated, ...current.filter((item) => item.id !== updated.id)]);
+      }).catch(() => undefined);
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [task?.id, task?.status, setTasks]);
 }
 
 export interface ReferenceController {
@@ -125,16 +140,24 @@ export function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  // 图片与视频各自记住渠道与模型，互不干扰
   const [selectedChannelId, setSelectedChannelId] = usePersistentState("channelId", "");
   const [selectedModel, setSelectedModel] = usePersistentState("model", "");
+  const [videoChannelId, setVideoChannelId] = usePersistentState("videoChannelId", "");
+  const [videoModel, setVideoModel] = usePersistentState("videoModel", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeVideoTaskId, setActiveVideoTaskId] = useState<string | null>(null);
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
-  const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
+  const imageChannels = channels.filter((channel) => !isVideoAdapter(channel.adapterType));
+  const videoChannels = channels.filter((channel) => isVideoAdapter(channel.adapterType));
+  const imageTasks = tasks.filter((task) => !isVideoTask(task, channels));
+  const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
   const activeTask = tasks.find((task) => task.id === activeTaskId) ?? null;
+  const activeVideoTask = tasks.find((task) => task.id === activeVideoTaskId) ?? null;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
   const references = useReferenceImages(showToast);
 
@@ -143,29 +166,36 @@ export function App() {
       .then((data) => {
         setChannels(data.channels);
         setTasks(data.tasks);
-        const first = data.channels.find((item) => item.id === selectedChannelId && item.enabled)
-          ?? data.channels.find((item) => item.enabled)
-          ?? data.channels[0];
-        if (first) {
-          setSelectedChannelId(first.id);
-          setSelectedModel(first.models.includes(selectedModel) ? selectedModel : first.models[0] ?? "");
+        const images = data.channels.filter((item) => !isVideoAdapter(item.adapterType));
+        const videos = data.channels.filter((item) => isVideoAdapter(item.adapterType));
+        const firstImage = images.find((item) => item.id === selectedChannelId && item.enabled)
+          ?? images.find((item) => item.enabled)
+          ?? images[0];
+        if (firstImage) {
+          setSelectedChannelId(firstImage.id);
+          setSelectedModel(firstImage.models.includes(selectedModel) ? selectedModel : firstImage.models[0] ?? "");
         }
-        const latest = data.tasks.find((task) => task.status === "succeeded") ?? data.tasks[0];
-        if (latest) setActiveTaskId(latest.id);
+        const firstVideo = videos.find((item) => item.id === videoChannelId && item.enabled)
+          ?? videos.find((item) => item.enabled)
+          ?? videos[0];
+        if (firstVideo) {
+          setVideoChannelId(firstVideo.id);
+          setVideoModel(firstVideo.models.includes(videoModel) ? videoModel : firstVideo.models[0] ?? "");
+        }
+        const imageHistory = data.tasks.filter((task) => !isVideoTask(task, data.channels));
+        const videoHistory = data.tasks.filter((task) => isVideoTask(task, data.channels));
+        const latestImage = imageHistory.find((task) => task.status === "succeeded") ?? imageHistory[0];
+        if (latestImage) setActiveTaskId(latestImage.id);
+        const latestVideo = videoHistory.find((task) => task.status === "succeeded") ?? videoHistory[0];
+        if (latestVideo) setActiveVideoTaskId(latestVideo.id);
       })
       .catch((error) => showToast("error", error.message))
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (!activeTask || terminalStatuses.includes(activeTask.status)) return;
-    const timer = window.setInterval(() => {
-      void api.task(activeTask.id).then((updated) => {
-        setTasks((current) => [updated, ...current.filter((item) => item.id !== updated.id)]);
-      }).catch(() => undefined);
-    }, 1800);
-    return () => window.clearInterval(timer);
-  }, [activeTask?.id, activeTask?.status]);
+  // 图片与视频任务各自轮询，切换视图也不会中断
+  usePolling(activeTask, setTasks);
+  usePolling(activeVideoTask, setTasks);
 
   function showToast(kind: Toast["kind"], message: string) {
     setToast({ kind, message });
@@ -178,24 +208,37 @@ export function App() {
     setSelectedModel(channel?.models[0] ?? "");
   }
 
+  function selectVideoChannel(id: string) {
+    const channel = channels.find((item) => item.id === id);
+    setVideoChannelId(id);
+    setVideoModel(channel?.models[0] ?? "");
+  }
+
   async function refreshTasks() {
     try { setTasks(await api.tasks()); } catch (error) { showToast("error", error instanceof Error ? error.message : "刷新失败"); }
   }
 
   function handleChannelSaved(channel: Channel) {
     setChannels((current) => [channel, ...current.filter((item) => item.id !== channel.id)]);
-    if (!selectedChannelId) {
-      setSelectedChannelId(channel.id);
-      setSelectedModel(channel.models[0] ?? "");
-    } else if (selectedChannelId === channel.id && !channel.models.includes(selectedModel)) {
-      setSelectedModel(channel.models[0] ?? "");
-    }
+    adoptChannel(channel);
     setEditorChannel(undefined);
     showToast("success", "渠道已保存");
   }
 
   function handleWizardSaved(channel: Channel) {
     setChannels((current) => [channel, ...current.filter((item) => item.id !== channel.id)]);
+    adoptChannel(channel);
+  }
+
+  /** 新渠道按类型落到对应工作台，不会把视频渠道塞进生图选择框 */
+  function adoptChannel(channel: Channel) {
+    if (isVideoAdapter(channel.adapterType)) {
+      if (!videoChannelId || videoChannelId === channel.id) {
+        setVideoChannelId(channel.id);
+        setVideoModel(channel.models[0] ?? "");
+      }
+      return;
+    }
     if (!selectedChannelId || selectedChannelId === channel.id) {
       setSelectedChannelId(channel.id);
       setSelectedModel(channel.models[0] ?? "");
@@ -205,9 +248,23 @@ export function App() {
   function handleWizardRemoved(id: string) {
     setChannels((current) => {
       const remaining = current.filter((item) => item.id !== id);
-      if (selectedChannelId === id) selectChannel(remaining[0]?.id ?? "");
+      dropChannel(id, remaining);
       return remaining;
     });
+  }
+
+  /** 渠道消失后，把该工作台的选择退回到同类型的下一个渠道 */
+  function dropChannel(id: string, remaining: Channel[]) {
+    if (selectedChannelId === id) {
+      const next = remaining.find((item) => !isVideoAdapter(item.adapterType));
+      setSelectedChannelId(next?.id ?? "");
+      setSelectedModel(next?.models[0] ?? "");
+    }
+    if (videoChannelId === id) {
+      const next = remaining.find((item) => isVideoAdapter(item.adapterType));
+      setVideoChannelId(next?.id ?? "");
+      setVideoModel(next?.models[0] ?? "");
+    }
   }
 
   async function deleteChannel(channel: Channel) {
@@ -216,7 +273,7 @@ export function App() {
       await api.deleteChannel(channel.id);
       const remaining = channels.filter((item) => item.id !== channel.id);
       setChannels(remaining);
-      if (selectedChannelId === channel.id) selectChannel(remaining[0]?.id ?? "");
+      dropChannel(channel.id, remaining);
       showToast("success", "渠道已删除");
     } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
   }
@@ -226,17 +283,23 @@ export function App() {
       await api.deleteTask(task.id);
       setTasks((current) => current.filter((item) => item.id !== task.id));
       if (activeTaskId === task.id) setActiveTaskId(null);
+      if (activeVideoTaskId === task.id) setActiveVideoTaskId(null);
       showToast("success", "已删除该记录");
     } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
   }
 
-  async function clearTasks() {
-    if (!tasks.length) return;
-    if (!window.confirm(`清空全部 ${tasks.length} 条生成记录？此操作不可恢复。`)) return;
-    const results = await Promise.allSettled(tasks.map((task) => api.deleteTask(task.id)));
+  /** 清空指定类型的历史：图片、视频或全部 */
+  async function clearTasks(scope: "image" | "video" | "all" = "all") {
+    const target = scope === "image" ? imageTasks : scope === "video" ? videoTasks : tasks;
+    if (!target.length) return;
+    const label = scope === "image" ? "生图" : scope === "video" ? "视频" : "全部";
+    if (!window.confirm(`清空${label} ${target.length} 条生成记录？此操作不可恢复。`)) return;
+    const results = await Promise.allSettled(target.map((task) => api.deleteTask(task.id)));
     const failed = results.filter((item) => item.status === "rejected").length;
-    try { setTasks(await api.tasks()); } catch { setTasks([]); }
-    setActiveTaskId(null);
+    const removed = new Set(target.map((item) => item.id));
+    try { setTasks(await api.tasks()); } catch { setTasks((current) => current.filter((item) => !removed.has(item.id))); }
+    if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
+    if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
     if (failed) showToast("error", `${failed} 条记录删除失败`);
     else showToast("success", "已清空生成历史");
   }
@@ -244,12 +307,13 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setView("generate")} aria-label="小勤画图">
+        <button className="brand" onClick={() => setView("generate")} aria-label="益达工作台">
           <span className="brand-mark"><img src="/app-logo.png" alt="" /></span>
-          <span>小勤画图</span>
+          <span>益达工作台</span>
         </button>
         <nav className="topnav" aria-label="主导航">
           <NavButton active={view === "generate"} icon={<Sparkles size={16} />} label="生图工作台" onClick={() => setView("generate")} />
+          <NavButton active={view === "video"} icon={<Film size={16} />} label="视频工作台" onClick={() => setView("video")} />
           <NavButton active={view === "channels"} icon={<Server size={16} />} label="渠道配置" onClick={() => setView("channels")} />
           <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" onClick={() => setView("history")} />
         </nav>
@@ -263,11 +327,11 @@ export function App() {
         {loading ? <LoadingScreen /> : null}
         {!loading && view === "generate" ? (
           <GenerateView
-            channels={channels}
+            channels={imageChannels}
             selectedChannelId={selectedChannelId}
             selectedModel={selectedModel}
             activeTask={activeTask}
-            tasks={tasks}
+            tasks={imageTasks}
             references={references}
             onChannelChange={selectChannel}
             onModelChange={setSelectedModel}
@@ -285,8 +349,38 @@ export function App() {
         {!loading && view === "channels" ? (
           <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
         ) : null}
+        {!loading && view === "video" ? (
+          <VideoGenerateView
+            channels={videoChannels}
+            selectedChannelId={videoChannelId}
+            selectedModel={videoModel}
+            activeTask={activeVideoTask}
+            tasks={videoTasks}
+            references={references}
+            onChannelChange={selectVideoChannel}
+            onModelChange={setVideoModel}
+            onAddChannel={() => setWizardOpen(true)}
+            onConfigureChannel={(channel) => setEditorChannel(channel)}
+            onTask={(task) => {
+              setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+              setActiveVideoTaskId(task.id);
+            }}
+            onSelectTask={(task) => setActiveVideoTaskId(task.id)}
+            onToast={showToast}
+            onDiagnostics={setDiagnosticTask}
+          />
+        ) : null}
         {!loading && view === "history" ? (
-          <HistoryView tasks={tasks} references={references} onRefresh={refreshTasks} onDelete={deleteTask} onClear={clearTasks} onDiagnostics={setDiagnosticTask} onToast={showToast} />
+          <HistoryView
+            channels={channels}
+            tasks={tasks}
+            references={references}
+            onRefresh={refreshTasks}
+            onDelete={deleteTask}
+            onClear={clearTasks}
+            onDiagnostics={setDiagnosticTask}
+            onToast={showToast}
+          />
         ) : null}
       </main>
 
@@ -622,52 +716,80 @@ function EmptyResult() {
   return <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function HistoryView({ tasks, references, onRefresh, onDelete, onClear, onDiagnostics, onToast }: {
-  tasks: Task[]; references: ReferenceController; onRefresh: () => void; onDelete: (task: Task) => void; onClear: () => void; onDiagnostics: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void;
+function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear, onDiagnostics, onToast }: {
+  channels: Channel[];
+  tasks: Task[];
+  references: ReferenceController;
+  onRefresh: () => void;
+  onDelete: (task: Task) => void;
+  onClear: (scope?: "image" | "video" | "all") => void;
+  onDiagnostics: (task: Task) => void;
+  onToast: (kind: Toast["kind"], message: string) => void;
 }) {
+  const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [preview, setPreview] = useState<Task | null>(null);
+  const imageTasks = tasks.filter((task) => !isVideoTask(task, channels));
+  const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
+  const filtered = filter === "image" ? imageTasks : filter === "video" ? videoTasks : tasks;
   return (
     <div className="page">
       <div className="page-header">
         <div><h1>历史</h1><span className="page-kicker">GENERATIONS</span></div>
         <div className="header-actions">
-          {tasks.length ? <button className="secondary-button" title="清空全部记录" onClick={onClear}><Trash2 size={16} />清空</button> : null}
+          <div className="filter-tabs">
+            <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部 ({tasks.length})</button>
+            <button className={filter === "image" ? "active" : ""} onClick={() => setFilter("image")}>图片 ({imageTasks.length})</button>
+            <button className={filter === "video" ? "active" : ""} onClick={() => setFilter("video")}>视频 ({videoTasks.length})</button>
+          </div>
+          {filtered.length ? <button className="secondary-button" title="清空当前筛选" onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
         </div>
       </div>
       <div className="data-table-wrap">
         <table className="data-table history-table">
           <thead><tr><th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" /></tr></thead>
-          <tbody>{tasks.map((task) => (
-            <tr key={task.id}>
-              <td>
-                <button type="button" className="history-thumb" title={task.assets.length ? "查看大图" : "暂无图片"} onClick={() => task.assets.length && setPreview(task)}>
-                  {task.assets[0]
-                    ? <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" decoding="async" />
-                    : <span className="history-thumb-empty"><ImageIcon size={16} /></span>}
-                  {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
-                </button>
-              </td>
-              <td><button className="prompt-cell" title={task.assets.length ? "查看大图" : task.prompt} onClick={() => task.assets.length ? setPreview(task) : undefined}>{task.prompt}</button></td>
-              <td>{task.channelName}</td><td>{task.model}</td>
-              <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
-              <td><div className="table-actions">
-                <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button>
-                <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button>
-              </div></td>
-            </tr>
-          ))}</tbody>
+          <tbody>{filtered.map((task) => {
+            const isVideo = isVideoTask(task, channels);
+            return (
+              <tr key={task.id}>
+                <td>
+                  <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => task.assets.length && setPreview(task)}>
+                    {task.assets[0]
+                      ? isVideo
+                        ? <video src={api.assetUrl(task.assets[0].url)} muted playsInline preload="metadata" />
+                        : <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" decoding="async" />
+                      : <span className="history-thumb-empty">{isVideo ? <Film size={16} /> : <ImageIcon size={16} />}</span>}
+                    {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
+                  </button>
+                </td>
+                <td><button className="prompt-cell" title={task.assets.length ? "查看详情" : task.prompt} onClick={() => task.assets.length ? setPreview(task) : undefined}>{task.prompt}</button></td>
+                <td>{task.channelName}</td><td>{task.model}</td>
+                <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
+                <td><div className="table-actions">
+                  <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button>
+                  <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button>
+                </div></td>
+              </tr>
+            );
+          })}</tbody>
         </table>
-        {!tasks.length ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
+        {!filtered.length ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
       </div>
-      {preview ? <HistoryPreview task={preview} references={references} onClose={() => setPreview(null)} onToast={onToast} /> : null}
+      {preview ? <HistoryPreview task={preview} channels={channels} references={references} onClose={() => setPreview(null)} onToast={onToast} /> : null}
     </div>
   );
 }
 
-function HistoryPreview({ task, references, onClose, onToast }: { task: Task; references: ReferenceController; onClose: () => void; onToast: (kind: Toast["kind"], message: string) => void }) {
+function HistoryPreview({ task, channels, references, onClose, onToast }: {
+  task: Task;
+  channels: Channel[];
+  references: ReferenceController;
+  onClose: () => void;
+  onToast: (kind: Toast["kind"], message: string) => void;
+}) {
   const [index, setIndex] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const isVideo = isVideoTask(task, channels);
   const asset = task.assets[Math.min(index, task.assets.length - 1)];
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -677,19 +799,32 @@ function HistoryPreview({ task, references, onClose, onToast }: { task: Task; re
   async function download() {
     if (!asset) return;
     setDownloading(true);
-    try { if (await api.downloadAsset(asset)) onToast("success", "图片已保存"); }
+    try { if (await api.downloadAsset(asset)) onToast("success", isVideo ? "视频已保存" : "图片已保存"); }
     catch (error) { onToast("error", error instanceof Error ? error.message : "下载失败"); }
     finally { setDownloading(false); }
   }
   if (!asset) return null;
+  const isAssetVideo = asset.mimeType.startsWith("video/");
   return (
-    <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="历史图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="历史预览" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="image-preview history-preview">
-        <img src={api.assetUrl(asset.url)} alt="历史生成大图" />
+        {/* disablePictureInPicture / disableRemotePlayback 去掉悬停时浮出的「画中画」「投屏」按钮 */}
+        {isAssetVideo ? (
+          <video src={api.assetUrl(asset.url)} controls autoPlay loop disablePictureInPicture disableRemotePlayback />
+        ) : (
+          <img src={api.assetUrl(asset.url)} alt="历史生成大图" />
+        )}
         <div className="history-preview-bar">
           <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
-          <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button>
-          {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => <button key={item.id} type="button" className={`stage-thumb ${i === index ? "active" : ""}`} onClick={() => setIndex(i)}><img src={api.assetUrl(item.url)} alt={`结果 ${i + 1}`} loading="lazy" decoding="async" /></button>)}</div> : null}
+          {!isVideo ? <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button> : null}
+          {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => {
+            const thumbIsVideo = item.mimeType.startsWith("video/");
+            return (
+              <button key={item.id} type="button" className={`stage-thumb ${i === index ? "active" : ""}`} onClick={() => setIndex(i)}>
+                {thumbIsVideo ? <video src={api.assetUrl(item.url)} muted playsInline preload="metadata" /> : <img src={api.assetUrl(item.url)} alt={`结果 ${i + 1}`} loading="lazy" decoding="async" />}
+              </button>
+            );
+          })}</div> : null}
         </div>
         <button type="button" className="image-preview-close" title="关闭预览" aria-label="关闭预览" onClick={onClose}><X size={21} /></button>
       </div>

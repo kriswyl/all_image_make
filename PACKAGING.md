@@ -60,7 +60,7 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：
 
 ```powershell
-npm run version:set -- 1.0.5
+npm run version:set -- 2.0.1
 ```
 
 然后重新运行测试和对应的发布命令。发布前检查：
