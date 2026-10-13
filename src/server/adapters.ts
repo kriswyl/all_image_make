@@ -23,6 +23,12 @@ export interface ImageCandidate {
 export interface VideoCandidate {
   url: string;
   duration?: number;
+  /**
+   * 字段名带 video，或地址本身就是视频扩展名。
+   * 中转生成完却不更新 status 时，只有这类候选能单独作为“已经生成好”的依据，
+   * 避免把封面图之类的弱候选（cover_url、thumbnail.url）当成成品。
+   */
+  strong?: boolean;
 }
 
 export class RemoteApiError extends Error {
@@ -430,10 +436,13 @@ export function extractVideoCandidates(payload: unknown): VideoCandidate[] {
   const candidates: VideoCandidate[] = [];
   const seen = new Set<string>();
 
-  const add = (url: string, duration?: unknown) => {
+  /** 字段名带 video、或地址带视频扩展名，才算能单独断定“这就是成品视频”的强候选 */
+  const isStrong = (key: string, url: string) => /video/i.test(key) || VIDEO_EXTENSION_PATTERN.test(url);
+
+  const add = (url: string, duration: unknown, strong: boolean) => {
     if (seen.has(url)) return;
     seen.add(url);
-    candidates.push({ url, duration: typeof duration === "number" ? duration : undefined });
+    candidates.push({ url, duration: typeof duration === "number" ? duration : undefined, strong });
   };
 
   /**
@@ -445,7 +454,9 @@ export function extractVideoCandidates(payload: unknown): VideoCandidate[] {
     if (typeof value === "string") {
       if (!/^https?:\/\//i.test(value)) return;
       // 扩展名能认出来的直接收，否则看字段名是否像视频地址
-      if (VIDEO_EXTENSION_PATTERN.test(value) || VIDEO_KEY_PATTERN.test(parentKey)) add(value, inheritedDuration);
+      if (VIDEO_EXTENSION_PATTERN.test(value) || VIDEO_KEY_PATTERN.test(parentKey)) {
+        add(value, inheritedDuration, isStrong(parentKey, value));
+      }
       return;
     }
     if (Array.isArray(value)) {
@@ -458,11 +469,12 @@ export function extractVideoCandidates(payload: unknown): VideoCandidate[] {
     const duration = typeof record.duration === "number" ? record.duration : inheritedDuration;
     // { video: { url, duration } } 这类嵌套结构，duration 要和 url 一起取出来
     if (typeof record.url === "string" && /^https?:\/\//i.test(record.url)) {
-      add(record.url, record.duration ?? inheritedDuration);
+      add(record.url, record.duration ?? inheritedDuration, isStrong(parentKey, record.url));
     }
     for (const [key, item] of Object.entries(record)) walk(item, key, depth + 1, duration);
   };
 
   walk(payload);
-  return candidates;
+  // 强候选排前面：saveVideos 只取第一个，别让封面图抢先
+  return candidates.sort((a, b) => Number(Boolean(b.strong)) - Number(Boolean(a.strong)));
 }

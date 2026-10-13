@@ -313,4 +313,21 @@ describe("response normalization", () => {
     expect(videos).toHaveLength(1);
     expect(videos[0].url).toContain("out.mp4");
   });
+
+  // 封面图字段名里也带 url，不能让它排在成品视频前面被当成视频存下来
+  it("ranks the real video above a cover image and marks it as strong", () => {
+    const videos = extractVideoCandidates({
+      status: "unknown",
+      cover_url: "https://cdn.example.com/cover.jpg",
+      video: "https://cdn.example.com/out.mp4",
+    });
+    expect(videos[0].url).toContain("out.mp4");
+    expect(videos[0].strong).toBe(true);
+    expect(videos.find((item) => item.url.includes("cover.jpg"))?.strong).toBe(false);
+  });
+
+  it("finds no video while the relay still returns an empty video field", () => {
+    const videos = extractVideoCandidates({ id: "task-1", video: "", status: "unknown", progress: 0 });
+    expect(videos).toHaveLength(0);
+  });
 });

@@ -180,7 +180,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
 
           {step === 1 && preset ? (
             <>
-              <p className="wizard-note neutral">中转站通常按模型系列分别售卖密钥，每个模型组会生成一个独立渠道并使用各自的密钥。推荐在项目 .env 中配置环境变量，密钥会随服务重启保留；直接填写的 API Key 仅保存在当前服务进程内存中。</p>
+              <p className="wizard-note neutral">每个模型组填上自己的 API Key 即可，密钥保存在本机数据目录，重启后自动载入。</p>
               {preset.units.map((unit) => {
                 const state = units[unit.id];
                 if (!state) return null;
@@ -209,9 +209,19 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                         <ModelInput onAdd={(value) => addModel(unit.id, value)} />
                         <div className="form-grid two key-fields">
                           <label><span><KeyRound size={12} />环境变量</span><input value={state.secretEnv} onChange={(event) => updateUnit(unit.id, { secretEnv: event.target.value })} placeholder={unit.secretEnv} /></label>
-                          <label>
-                            <span>API Key{envConfigured ? <em className="key-flag-inline">环境变量已配置</em> : "（可选）"}</span>
-                            <input type="password" value={state.apiKey} onChange={(event) => updateUnit(unit.id, { apiKey: event.target.value })} placeholder={envConfigured ? "已配置，可留空" : preset.keyHint ?? "仅当前服务会话有效"} />
+                          {/* 密钥是整步里唯一必须动手填的东西，视觉上要压过旁边的环境变量框 */}
+                          <label className="key-input-field">
+                            <span>
+                              <KeyRound size={12} />API Key
+                              {envConfigured ? <em className="key-flag-inline">环境变量已配置</em> : <em className="key-required-flag">在此填写</em>}
+                            </span>
+                            <input
+                              className="key-input"
+                              type="password"
+                              value={state.apiKey}
+                              onChange={(event) => updateUnit(unit.id, { apiKey: event.target.value })}
+                              placeholder={envConfigured ? "已配置，可留空" : preset.keyHint ?? "在此填入密钥"}
+                            />
                           </label>
                         </div>
                       </div>

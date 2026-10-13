@@ -23,6 +23,18 @@ const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 8000;
 const VIDEO_MAX_POLLS = 100;
 
+/** 上游与中转对“生成完成”的叫法不统一，逐个列出 */
+const VIDEO_SUCCESS_STATUSES = ["succeeded", "success", "done", "completed", "complete", "finished", "ok"];
+/**
+ * 真正代表失败的终态。
+ *
+ * 这里刻意不含 `unknown`：中转在任务刚提交、上游还没回报时就会先回一个
+ * `{ status: "unknown", progress: 0 }`，把它当成失败会误杀仍在生成的视频
+ * （用户实际遇到：上游生成成功，应用却立刻报 REMOTE_TASK_FAILED）。
+ * pending / queued / processing / running 同理，都属于“还没好”，继续轮询即可。
+ */
+const VIDEO_FAILURE_STATUSES = ["failed", "failure", "error", "canceled", "cancelled", "expired", "rejected", "timeout"];
+
 /** 中转站对请求体的实际上限在 1~2MB 之间（实测 1MB 通过、2MB 被网关掐断），
  *  且超限时只回含糊的 502 / fetch failed。内联 base64 素材超过这个字符数就提前拦下。 */
 const MAX_INLINE_MEDIA_CHARS = 1_400_000;
@@ -206,9 +218,24 @@ export class TaskRunner {
         const progress = this.extractVideoProgress(payload);
         if (progress !== null) this.db.updateTask(localTaskId, { progress });
 
-        if (status && ["succeeded", "done", "completed", "success"].includes(status)) {
-          const videos = extractVideoCandidates(payload);
-          if (videos.length === 0) {
+        // 先判失败：只有明确的失败状态才算失败，unknown / pending / running 都继续轮询
+        if (status && VIDEO_FAILURE_STATUSES.includes(status)) {
+          const errorMsg = this.extractVideoError(payload);
+          throw new AppError(
+            "REMOTE_TASK_FAILED",
+            errorMsg || `视频生成失败（状态 ${status}）：${JSON.stringify(payload).slice(0, 300)}`,
+            502,
+          );
+        }
+
+        const succeeded = Boolean(status && VIDEO_SUCCESS_STATUSES.includes(status));
+        const videos = extractVideoCandidates(payload);
+        // 状态说完成时收下全部候选；状态还停在 unknown / running 时，只认字段名带 video
+        // 或地址本身是视频扩展名的候选——中转生成完经常不更新 status，只把 video 填上
+        const readyVideos = succeeded ? videos : videos.filter((video) => video.strong);
+        if (succeeded || readyVideos.length) {
+          const chosen = readyVideos.length ? readyVideos : videos;
+          if (chosen.length === 0) {
             throw new AppError(
               "RESPONSE_PARSE_FAILED",
               `视频生成完成但响应中没有找到视频 URL。原始响应：${JSON.stringify(payload).slice(0, 500)}`,
@@ -216,18 +243,9 @@ export class TaskRunner {
             );
           }
           // 下载失败时 saveVideos 会把视频链接带进报错，方便手动打开核对
-          await this.saveVideos(localTaskId, videos, channel);
+          await this.saveVideos(localTaskId, chosen, channel);
           this.db.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
-        }
-
-        if (status && ["failed", "error", "canceled", "cancelled", "unknown"].includes(status)) {
-          const errorMsg = this.extractVideoError(payload);
-          throw new AppError(
-            "REMOTE_TASK_FAILED",
-            errorMsg || `视频生成失败（状态 ${status}）：${JSON.stringify(payload).slice(0, 300)}`,
-            502,
-          );
         }
 
         // Still running, continue polling
@@ -240,16 +258,21 @@ export class TaskRunner {
     throw new AppError("VIDEO_TIMEOUT", `视频生成超时（已轮询 ${VIDEO_MAX_POLLS} 次）`, 504);
   }
 
-  /** 各家字段名不同：Grok 用 status，万相用 output.task_status */
+  /**
+   * 各家字段名不同：Grok 用 status，万相用 output.task_status，
+   * 部分中转还会把任务包在 data / result 里。顶层优先，找不到再看下一层。
+   */
   private extractVideoStatus(payload: unknown): string | null {
     if (!payload || typeof payload !== "object") return null;
     const record = payload as Record<string, unknown>;
     if (typeof record.status === "string") return record.status.toLowerCase();
     if (typeof record.task_status === "string") return record.task_status.toLowerCase();
-    if (record.output && typeof record.output === "object") {
-      const output = record.output as Record<string, unknown>;
-      if (typeof output.task_status === "string") return output.task_status.toLowerCase();
-      if (typeof output.status === "string") return output.status.toLowerCase();
+    for (const key of ["output", "data", "result"]) {
+      const nested = record[key];
+      if (!nested || typeof nested !== "object") continue;
+      const inner = nested as Record<string, unknown>;
+      if (typeof inner.task_status === "string") return inner.task_status.toLowerCase();
+      if (typeof inner.status === "string") return inner.status.toLowerCase();
     }
     return null;
   }
@@ -258,6 +281,12 @@ export class TaskRunner {
     if (!payload || typeof payload !== "object") return null;
     const record = payload as Record<string, unknown>;
     if (typeof record.progress === "number") return Math.min(99, Math.max(0, record.progress));
+    for (const key of ["output", "data", "result"]) {
+      const nested = record[key];
+      if (!nested || typeof nested !== "object") continue;
+      const progress = (nested as Record<string, unknown>).progress;
+      if (typeof progress === "number") return Math.min(99, Math.max(0, progress));
+    }
     return null;
   }
 

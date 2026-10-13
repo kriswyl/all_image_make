@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, Film, History, Image as ImageIcon,
+  Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, Wand2, X,
 } from "lucide-react";
@@ -9,6 +9,7 @@ import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
+import { LazyVideoThumb } from "./LazyVideoThumb";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { isVideoAdapter, isVideoTask } from "../shared/types";
 import type { Asset, Channel, Diagnostic, Task, TaskStatus } from "../shared/types";
@@ -31,6 +32,19 @@ const statusLabels: Record<TaskStatus, string> = {
   queued: "排队中", validating: "校验中", submitting: "提交中", running: "生成中", succeeded: "已完成",
   failed: "失败", cancelled: "已取消", expired: "已超时",
 };
+
+/** 任务最新一次活动的时间：跑完的算完成时间，还在跑的算创建时间 */
+function taskActivityAt(task: Task) {
+  return task.finishedAt ?? task.createdAt;
+}
+
+/** 一批任务里最新的活动时间，都是 ISO 字符串，直接按字典序比大小即可 */
+function latestActivity(tasks: Task[]) {
+  return tasks.reduce((latest, task) => {
+    const at = taskActivityAt(task);
+    return at > latest ? at : latest;
+  }, "");
+}
 
 function usePersistentState<T>(key: string, initialValue: T) {
   const storageKey = `${DRAFT_STORAGE_PREFIX}${key}`;
@@ -147,6 +161,8 @@ export function App() {
   const [videoModel, setVideoModel] = usePersistentState("videoModel", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeVideoTaskId, setActiveVideoTaskId] = useState<string | null>(null);
+  // 上次看过生成历史的时间点，比它新的任务算未读
+  const [historySeenAt, setHistorySeenAt] = usePersistentState("historySeenAt", "");
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
@@ -158,6 +174,8 @@ export function App() {
   const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
   const activeTask = tasks.find((task) => task.id === activeTaskId) ?? null;
   const activeVideoTask = tasks.find((task) => task.id === activeVideoTaskId) ?? null;
+  const latestTaskActivity = latestActivity(tasks);
+  const historyUnread = latestTaskActivity > historySeenAt;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
   const references = useReferenceImages(showToast);
 
@@ -188,6 +206,8 @@ export function App() {
         if (latestImage) setActiveTaskId(latestImage.id);
         const latestVideo = videoHistory.find((task) => task.status === "succeeded") ?? videoHistory[0];
         if (latestVideo) setActiveVideoTaskId(latestVideo.id);
+        // 首次启动把手上已有的历史视为已读，避免一打开就顶着未读小红点
+        setHistorySeenAt((current) => current || latestActivity(data.tasks));
       })
       .catch((error) => showToast("error", error.message))
       .finally(() => setLoading(false));
@@ -196,6 +216,12 @@ export function App() {
   // 图片与视频任务各自轮询，切换视图也不会中断
   usePolling(activeTask, setTasks);
   usePolling(activeVideoTask, setTasks);
+
+  // 停在生成历史页时随时把新记录标记成已读：用户正看着，不该再算未读
+  useEffect(() => {
+    if (view !== "history") return;
+    setHistorySeenAt(latestTaskActivity);
+  }, [view, latestTaskActivity, setHistorySeenAt]);
 
   function showToast(kind: Toast["kind"], message: string) {
     setToast({ kind, message });
@@ -315,7 +341,7 @@ export function App() {
           <NavButton active={view === "generate"} icon={<Sparkles size={16} />} label="生图工作台" onClick={() => setView("generate")} />
           <NavButton active={view === "video"} icon={<Film size={16} />} label="视频工作台" onClick={() => setView("video")} />
           <NavButton active={view === "channels"} icon={<Server size={16} />} label="渠道配置" onClick={() => setView("channels")} />
-          <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" onClick={() => setView("history")} />
+          <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" unread={historyUnread} onClick={() => setView("history")} />
         </nav>
         <div className="topbar-status">
           <span className="status-dot" />
@@ -403,8 +429,20 @@ export function App() {
   );
 }
 
-function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
-  return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span></button>;
+function NavButton({ active, icon, label, unread = false, onClick }: {
+  active: boolean; icon: React.ReactNode; label: string; unread?: boolean; onClick: () => void;
+}) {
+  return (
+    <button
+      className={`nav-button ${active ? "active" : ""}`}
+      title={unread ? `${label}：有新记录` : undefined}
+      onClick={onClick}
+    >
+      {icon}
+      <span>{label}</span>
+      {unread ? <span className="nav-unread-dot" aria-hidden="true" /> : null}
+    </button>
+  );
 }
 
 function GenerateView(props: {
@@ -731,6 +769,17 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
   const imageTasks = tasks.filter((task) => !isVideoTask(task, channels));
   const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
   const filtered = filter === "image" ? imageTasks : filter === "video" ? videoTasks : tasks;
+
+  // 图片视频都落在应用数据目录里，路径不好记，给个按钮直接翻到那儿
+  async function revealMedia() {
+    try {
+      const result = await api.revealMedia();
+      onToast("success", `已打开素材目录：${result.opened}`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "打开素材目录失败");
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-header">
@@ -742,6 +791,7 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
             <button className={filter === "video" ? "active" : ""} onClick={() => setFilter("video")}>视频 ({videoTasks.length})</button>
           </div>
           {filtered.length ? <button className="secondary-button" title="清空当前筛选" onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
+          <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
         </div>
       </div>
@@ -756,7 +806,7 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
                   <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => task.assets.length && setPreview(task)}>
                     {task.assets[0]
                       ? isVideo
-                        ? <video src={api.assetUrl(task.assets[0].url)} muted playsInline preload="metadata" />
+                        ? <LazyVideoThumb src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" />
                         : <img src={api.assetUrl(task.assets[0].url)} alt="生成结果缩略图" loading="lazy" decoding="async" />
                       : <span className="history-thumb-empty">{isVideo ? <Film size={16} /> : <ImageIcon size={16} />}</span>}
                     {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}

@@ -98,6 +98,8 @@ export class AppDatabase {
         duration REAL,
         created_at TEXT NOT NULL
       );
+      -- 列表里每个任务都要按 task_id 取产物，没有索引会退化成全表扫描
+      CREATE INDEX IF NOT EXISTS assets_task_idx ON assets(task_id);
       CREATE TABLE IF NOT EXISTS diagnostics (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
@@ -250,11 +252,21 @@ export class AppDatabase {
 
   listAssets(taskId: string): AssetRow[] {
     const rows = this.db.prepare("SELECT * FROM assets WHERE task_id = ? ORDER BY created_at ASC").all(taskId) as DbRow[];
-    return rows.map((row) => ({
+    return rows.map((row) => this.assetFromRow(row));
+  }
+
+  /** 按主键取单个产物：媒体请求（每个缩略图一次）用它，别走 listTaskRows */
+  getAsset(id: string): AssetRow | null {
+    const row = this.db.prepare("SELECT * FROM assets WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? this.assetFromRow(row) : null;
+  }
+
+  private assetFromRow(row: DbRow): AssetRow {
+    return {
       id: String(row.id), taskId: String(row.task_id), fileName: String(row.file_name), mimeType: String(row.mime_type),
       byteSize: Number(row.byte_size), relativePath: String(row.relative_path), sha256: String(row.sha256),
       duration: row.duration == null ? null : Number(row.duration), createdAt: String(row.created_at),
-    }));
+    };
   }
 
   insertDiagnostic(input: { taskId: string; request: unknown; response: unknown; httpStatus?: number | null; durationMs?: number | null }) {

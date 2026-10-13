@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 打开素材目录会真的弹文件管理器窗口，测试里换成假的 spawn
+const spawnMock = vi.hoisted(() => vi.fn(() => ({ on: () => undefined, unref: () => undefined })));
+vi.mock("node:child_process", () => ({ spawn: spawnMock }));
+
 import { createApp, type AppContext } from "../src/server/app";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -14,6 +19,26 @@ afterEach(async () => {
 });
 
 describe("generation API", () => {
+  it("only ever reveals the app's own media folders", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-reveal-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const assetsDir = path.join(dataDir, "assets");
+    const response = await request(app).post("/api/system/reveal-media").send({ kind: "assets" }).expect(200);
+    expect(response.body.data.opened).toBe(assetsDir);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const [command, args] = spawnMock.mock.calls[0] as unknown as [string, string[]];
+    expect(command).toMatch(/explorer|open|xdg-open/);
+    expect(args).toEqual([assetsDir]);
+
+    // kind 只认三个固定值，传路径进来也只会落到素材目录
+    const injected = await request(app).post("/api/system/reveal-media").send({ kind: "../../Windows" }).expect(200);
+    expect(injected.body.data.opened).toBe(assetsDir);
+    const inputs = await request(app).post("/api/system/reveal-media").send({ kind: "inputs" }).expect(200);
+    expect(inputs.body.data.opened).toBe(path.join(dataDir, "inputs"));
+  });
+
   it("starts a fresh data directory with no channels", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-defaults-test-"));
     const { app, context } = createApp({ dataDir });
@@ -275,6 +300,126 @@ describe("generation API", () => {
     expect(task.assets[0].duration).toBe(5);
     const video = await request(app).get(task.assets[0].url).expect(200);
     expect(video.headers["content-type"]).toContain("video/mp4");
+  });
+
+  // 中转在任务刚提交时回的就是这个形状：status: "unknown"、video 还是空串。
+  // 以前 unknown 被当成终态，第一次轮询就把还在生成的视频判成 REMOTE_TASK_FAILED。
+  it("keeps polling while the relay reports an unknown status instead of failing", async () => {
+    let mockOrigin = "";
+    let pollCount = 0;
+    const mockServer = http.createServer((req, res) => {
+      if (req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: { task_id: "task-1", task_status: "PENDING" } }));
+        return;
+      }
+      if (req.url === "/api/v1/tasks/task-1") {
+        pollCount += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(pollCount < 2
+          ? { id: "task-1", task_id: "task-1", video: "", status: "unknown", progress: 0, created_at: 1791800509, completed_at: 1791800509 }
+          : { id: "task-1", task_id: "task-1", video: `${mockOrigin}/out.mp4`, status: "succeeded", progress: 100 }));
+        return;
+      }
+      if (req.url === "/out.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    mockOrigin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-unknown-status-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Wan Video", baseUrl: mockOrigin, adapterType: "wan-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+      models: ["wan3.0-video"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+
+    const createResponse = await request(app).post("/api/generations").send({
+      channelId: channelResponse.body.data.id, model: "wan3.0-video", prompt: "a cat running",
+    }).expect(202);
+    const taskId = createResponse.body.data.id as string;
+
+    let task = createResponse.body.data;
+    for (let index = 0; index < 40 && task.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+      if (["failed", "expired", "cancelled"].includes(task.status)) break;
+    }
+    if (task.status !== "succeeded") throw new Error(`Task ended as ${task.status}: ${task.errorMessage}`);
+
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+    expect(task.errorCode).toBeNull();
+    expect(task.assets).toHaveLength(1);
+    expect(task.assets[0].mimeType).toBe("video/mp4");
+  });
+
+  // 另一类中转：生成完也不改 status，只把 video 字段填上，靠地址本身认定完成
+  it("accepts a finished video when the relay fills video but never leaves the unknown status", async () => {
+    let mockOrigin = "";
+    let pollCount = 0;
+    const mockServer = http.createServer((req, res) => {
+      if (req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: "task-2" }));
+        return;
+      }
+      if (req.url === "/api/v1/tasks/task-2") {
+        pollCount += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: "task-2", status: "unknown", progress: 40, video: `${mockOrigin}/out.mp4` }));
+        return;
+      }
+      if (req.url === "/out.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    mockOrigin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-stuck-unknown-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channelResponse = await request(app).post("/api/channels").send({
+      name: "Wan Video", baseUrl: mockOrigin, adapterType: "wan-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+      models: ["wan3.0-video"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+
+    const createResponse = await request(app).post("/api/generations").send({
+      channelId: channelResponse.body.data.id, model: "wan3.0-video", prompt: "a cat running",
+    }).expect(202);
+    const taskId = createResponse.body.data.id as string;
+
+    let task = createResponse.body.data;
+    for (let index = 0; index < 40 && task.status !== "succeeded"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+      if (["failed", "expired", "cancelled"].includes(task.status)) break;
+    }
+    if (task.status !== "succeeded") throw new Error(`Task ended as ${task.status}: ${task.errorMessage}`);
+
+    expect(pollCount).toBe(1);
+    expect(task.assets).toHaveLength(1);
+    expect(task.assets[0].mimeType).toBe("video/mp4");
   });
 
   it("deletes a generation and cleans up its asset and input files", async () => {

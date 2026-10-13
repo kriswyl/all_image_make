@@ -4,6 +4,7 @@ import {
   Link as LinkIcon, LoaderCircle, Plus, RotateCcw, Settings2, SlidersHorizontal, Square, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
+import { LazyVideoThumb } from "./LazyVideoThumb";
 import type {
   Asset, Channel, SeedanceMediaInput, SeedanceMediaRole, SeedanceVideoMode,
   Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
@@ -669,6 +670,8 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
   const [theater, setTheater] = useState(false);
   const recentTasks = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
+  // 竖屏视频两侧会空出大片版面，用画面自身的模糊放大图垫底
+  const [portraitAssetId, setPortraitAssetId] = useState<string | null>(null);
 
   useEffect(() => { setSelectedAssetId(task?.assets[0]?.id ?? null); }, [task?.id, task?.assets.length]);
   useEffect(() => {
@@ -727,10 +730,25 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
         ) : null}
         {task && !busy && task.status !== "failed" && !task.assets.length ? <EmptyVideoResult /> : null}
         {activeAsset ? (
-          <figure className="stage-video">
+          <figure className={`stage-video ${portraitAssetId === activeAsset.id ? "portrait" : ""}`}>
+            {/* 竖屏视频左右会空出大片版面，用同一段画面的模糊放大版垫底 */}
+            {portraitAssetId === activeAsset.id ? (
+              <video
+                className="stage-video-backdrop"
+                src={api.assetUrl(activeAsset.url)}
+                muted
+                playsInline
+                preload="auto"
+                aria-hidden="true"
+                tabIndex={-1}
+                disablePictureInPicture
+                disableRemotePlayback
+              />
+            ) : null}
             {/* disablePictureInPicture / disableRemotePlayback 去掉悬停时浮出的「画中画」「投屏」按钮 */}
             <video
               key={activeAsset.id}
+              className="stage-video-main"
               src={api.assetUrl(activeAsset.url)}
               controls
               loop
@@ -738,6 +756,11 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
               preload="metadata"
               title="双击放大"
               onDoubleClick={() => setTheater(true)}
+              onLoadedMetadata={(event) => {
+                const video = event.currentTarget;
+                const isPortrait = video.videoWidth > 0 && video.videoWidth < video.videoHeight;
+                setPortraitAssetId(isPortrait ? activeAsset.id : null);
+              }}
               disablePictureInPicture
               disableRemotePlayback
             />
@@ -773,7 +796,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
           <div className="recent-thumbs">
             {recentTasks.map((item) => (
               <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={item.prompt} onClick={() => onSelectTask(item)}>
-                <video src={api.assetUrl(item.assets[0].url)} muted playsInline preload="metadata" />
+                <LazyVideoThumb src={api.assetUrl(item.assets[0].url)} alt={item.prompt} />
                 {item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
               </button>
             ))}

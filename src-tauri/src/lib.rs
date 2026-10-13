@@ -4,7 +4,9 @@ pub fn run() {
 }
 
 use std::{
-  net::TcpStream,
+  io::{Read, Write},
+  net::{SocketAddr, TcpStream},
+  process::Command,
   sync::atomic::{AtomicI32, Ordering},
   sync::{Arc, Mutex},
   thread,
@@ -20,6 +22,135 @@ use tauri_plugin_shell::{
 const BACKEND_PORT: u16 = 17892;
 const BACKEND_START_TIMEOUT_MS: u64 = 30_000;
 const SIDECAR_NOT_EXITED: i32 = i32::MIN;
+
+/// 端口上应答的是谁
+enum PortOwner {
+  /// 本应用后端的 /api/health 在应答（版本号只用于日志）
+  OurBackend(String),
+  /// 能连上，但不是本应用的接口
+  SomeoneElse,
+  /// 没人应答，端口可用
+  Free,
+}
+
+fn loopback() -> SocketAddr {
+  SocketAddr::from(([127, 0, 0, 1], BACKEND_PORT))
+}
+
+fn port_open(timeout: Duration) -> bool {
+  TcpStream::connect_timeout(&loopback(), timeout).is_ok()
+}
+
+/// 用一条裸 HTTP 请求读回环上的 /api/health 响应体。
+/// 只为判断“端口上回答的是不是本应用的后端”，不值得为此引入 HTTP 客户端依赖。
+fn probe_health(timeout: Duration) -> Option<String> {
+  let mut stream = TcpStream::connect_timeout(&loopback(), timeout).ok()?;
+  let _ = stream.set_read_timeout(Some(timeout));
+  let _ = stream.set_write_timeout(Some(timeout));
+  stream
+    .write_all(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    .ok()?;
+  let mut raw = Vec::new();
+  // 服务端会主动关闭连接；read_to_end 可能以 WouldBlock 收尾，已读到的内容依然有效
+  let _ = stream.read_to_end(&mut raw);
+  let text = String::from_utf8_lossy(&raw).into_owned();
+  Some(match text.split_once("\r\n\r\n") {
+    Some((_, body)) => body.to_string(),
+    None => text,
+  })
+}
+
+/// 本应用健康检查的形状：{"ok":true,"data":{"status":"ok","version":"…"}}
+fn our_backend_version(body: &str) -> Option<String> {
+  let (_, rest) = body.split_once("\"version\":\"")?;
+  let (version, _) = rest.split_once('"')?;
+  body.contains("\"status\":\"ok\"").then(|| version.to_string())
+}
+
+fn inspect_port() -> PortOwner {
+  if !port_open(Duration::from_millis(300)) {
+    return PortOwner::Free;
+  }
+  match probe_health(Duration::from_millis(1500))
+    .as_deref()
+    .and_then(our_backend_version)
+  {
+    Some(version) => PortOwner::OurBackend(version),
+    None => PortOwner::SomeoneElse,
+  }
+}
+
+/// 监听指定端口的进程号（解析 netstat，省掉 Windows API 绑定）
+fn listener_pid(port: u16) -> Option<u32> {
+  let output = Command::new("netstat").args(["-ano", "-p", "TCP"]).output().ok()?;
+  let text = String::from_utf8_lossy(&output.stdout).into_owned();
+  let suffix = format!(":{port}");
+  for line in text.lines() {
+    let columns: Vec<&str> = line.split_whitespace().collect();
+    if columns.len() < 5 || !columns[0].eq_ignore_ascii_case("TCP") {
+      continue;
+    }
+    if !columns[1].ends_with(&suffix) || !columns[3].eq_ignore_ascii_case("LISTENING") {
+      continue;
+    }
+    if let Ok(pid) = columns[4].parse() {
+      return Some(pid);
+    }
+  }
+  None
+}
+
+/// tasklist 的 CSV 第一列就是映像名，据此确认占用端口的确实是内置 node
+fn process_image_name(pid: u32) -> Option<String> {
+  let output = Command::new("tasklist")
+    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+    .output()
+    .ok()?;
+  let text = String::from_utf8_lossy(&output.stdout).into_owned();
+  let first = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+  first.split('"').nth(1).map(str::to_string)
+}
+
+/// 端口上挂着本应用自己的旧后端时把它结束掉。
+///
+/// 旧版本残留、或桌面端被强杀后留下的孤儿进程都会一直占着 17892：Windows 允许
+/// 两个进程绑同一个端口，新后端看起来"启动成功"，实际请求全被旧进程接走（旧代码、
+/// 旧数据、甚至文件已被删除），用户看到的是"添加渠道报错"这类说不清的故障。
+fn reclaim_backend_port(version: &str) -> Result<(), String> {
+  log::warn!("端口 {BACKEND_PORT} 上已有本应用的后端在运行（版本 {version}），结束它让新后端接管");
+  let pid = listener_pid(BACKEND_PORT)
+    .ok_or_else(|| format!("端口 {BACKEND_PORT} 被占用，但查不出占用它的进程号"))?;
+  match process_image_name(pid) {
+    Some(name) if name.eq_ignore_ascii_case("node.exe") => {}
+    Some(name) => {
+      return Err(format!(
+        "端口 {BACKEND_PORT} 被进程 {pid}（{name}）占用，这不是本应用的内置后端，未自动结束"
+      ))
+    }
+    None => {
+      return Err(format!(
+        "端口 {BACKEND_PORT} 被进程 {pid} 占用，无法确认它是不是本应用的内置后端"
+      ))
+    }
+  }
+  let killed = Command::new("taskkill")
+    .args(["/PID", &pid.to_string(), "/F"])
+    .status()
+    .map(|status| status.success())
+    .unwrap_or(false);
+  if !killed {
+    return Err(format!("结束旧后端进程 {pid} 失败，请手动结束该进程后重新打开应用"));
+  }
+  log::warn!("已结束旧后端进程 {pid}");
+  let deadline = Instant::now() + Duration::from_secs(5);
+  while Instant::now() < deadline {
+    if !port_open(Duration::from_millis(200)) {
+      return Ok(());
+    }
+    thread::sleep(Duration::from_millis(100));
+  }
+  Err(format!("旧后端进程 {pid} 已结束，但端口 {BACKEND_PORT} 仍未释放"))
+}
 
 struct BackendState(Mutex<Option<CommandChild>>);
 
@@ -99,6 +230,18 @@ fn start_backend(app: &mut tauri::App) -> Result<(), String> {
     .to_string();
   let data_arg = data_dir.to_string_lossy().to_string();
 
+  // 端口若被上个版本残留的后端占着，必须先拿回来：Windows 允许两个进程绑同一端口，
+  // 新后端会"启动成功"但请求全被旧进程接走，表现成"添加渠道报错"这类说不清的故障
+  match inspect_port() {
+    PortOwner::Free => {}
+    PortOwner::OurBackend(version) => reclaim_backend_port(&version)?,
+    PortOwner::SomeoneElse => {
+      return Err(format!(
+        "端口 {BACKEND_PORT} 被其他程序占用，后端服务无法启动。\n请结束占用该端口的程序后重试（命令行执行 netstat -ano | findstr {BACKEND_PORT} 可以查到占用它的进程号）。"
+      ))
+    }
+  }
+
   let trace = Arc::new(StartupTrace::new());
   let events_trace = Arc::clone(&trace);
   let (mut events, child) = app
@@ -108,6 +251,8 @@ fn start_backend(app: &mut tauri::App) -> Result<(), String> {
     .args([script_arg])
     .env("PORT", BACKEND_PORT.to_string())
     .env("DATA_DIR", data_arg)
+    // 让后端看守桌面端进程，桌面端被强杀时后端跟着退出，不留占着端口的孤儿
+    .env("EXIT_WITH_PARENT", "1")
     .current_dir(resource_dir.clone())
     .spawn()
     .map_err(|error| format!("启动 node 进程失败：{error}"))?;
@@ -140,9 +285,19 @@ fn start_backend(app: &mut tauri::App) -> Result<(), String> {
   });
 
   let deadline = Instant::now() + Duration::from_millis(BACKEND_START_TIMEOUT_MS);
+  // 等到端口上真的是本应用的后端在应答为止。只看 TCP 连得通是不够的：
+  // 别的程序占着端口一样连得通，那样界面会连到不相干的服务上
+  let mut answered_by_other = false;
   loop {
-    if TcpStream::connect(("127.0.0.1", BACKEND_PORT)).is_ok() {
-      return Ok(());
+    if port_open(Duration::from_millis(300)) {
+      if probe_health(Duration::from_millis(1500))
+        .as_deref()
+        .and_then(our_backend_version)
+        .is_some()
+      {
+        return Ok(());
+      }
+      answered_by_other = true;
     }
     let exit_code = trace.exit_code();
     if exit_code != SIDECAR_NOT_EXITED {
@@ -158,8 +313,13 @@ fn start_backend(app: &mut tauri::App) -> Result<(), String> {
     }
     if Instant::now() >= deadline {
       return Err(format!(
-        "后端 {} 秒内未在端口 {BACKEND_PORT} 就绪",
-        BACKEND_START_TIMEOUT_MS / 1000
+        "后端 {} 秒内未在端口 {BACKEND_PORT} 就绪{}",
+        BACKEND_START_TIMEOUT_MS / 1000,
+        if answered_by_other {
+          "（端口有响应，但不是本应用的后端）"
+        } else {
+          ""
+        }
       ));
     }
     thread::sleep(Duration::from_millis(100));

@@ -65,6 +65,10 @@ export const api = {
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
   deleteTask: (id: string) => request<{ deleted: true }>(`/api/generations/${id}`, { method: "DELETE" }),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
+  revealMedia: (kind: "assets" | "inputs" | "data" = "assets") => request<{ opened: string }>("/api/system/reveal-media", {
+    method: "POST",
+    body: JSON.stringify({ kind }),
+  }),
   assetUrl: (url: string) => apiUrl(url),
   assetAsFile: async (asset: Asset) => {
     const response = await fetch(apiUrl(asset.url));

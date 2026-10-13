@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import multer from "multer";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
@@ -152,7 +153,9 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
-    if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store");
+    // 素材是按任务 id + 序号命名的不可变文件，允许缓存：同一段视频会被播放器、
+    // 模糊底图、缩略图反复取用，no-store 会让它们各下一次
+    if (req.path.startsWith("/api/") && !req.path.startsWith("/api/assets/")) res.setHeader("Cache-Control", "no-store");
     next();
   });
 
@@ -269,9 +272,18 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({ deleted: true }));
   }));
 
+  /** 在系统文件管理器里打开素材目录：图片视频都落在应用数据目录里，用户得能直接翻到 */
+  app.post("/api/system/reveal-media", asyncHandler(async (req, res) => {
+    const requested = String((req.body as { kind?: unknown } | undefined)?.kind ?? "assets");
+    const target = requested === "inputs" ? db.inputsDir : requested === "data" ? db.dataDir : db.assetsDir;
+    await revealFolder(target);
+    res.json(ok({ opened: target }));
+  }));
+
   app.get("/api/assets/:id/file", (req, res) => {
     const id = routeParam(req.params.id);
-    const asset = db.listTaskRows(1000).flatMap((task) => db.listAssets(task.id)).find((item) => item.id === id);
+    // 按主键直查：以前这里先取 1000 个任务再逐个查产物，历史一多，每个缩略图都要跑上千次查询
+    const asset = db.getAsset(id);
     if (!asset) return res.status(404).json(fail("ASSET_NOT_FOUND", "图片不存在"));
     const absolutePath = path.resolve(db.assetsDir, asset.relativePath);
     if (!absolutePath.startsWith(path.resolve(db.assetsDir) + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
@@ -299,6 +311,15 @@ export function createApp(options: { dataDir?: string } = {}) {
   });
 
   return { app, context };
+}
+
+/** 用系统文件管理器打开目录：Windows 是 explorer，macOS 是 open，Linux 是 xdg-open */
+function revealFolder(dir: string) {
+  const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  // 用 spawn + 参数数组而不是拼命令字符串：目录名里的引号、空格不会变成命令注入
+  const child = spawn(command, [dir], { detached: true, stdio: "ignore" });
+  child.on("error", () => undefined);
+  child.unref();
 }
 
 async function removeStoredFile(baseDir: string, relativePath: string) {
