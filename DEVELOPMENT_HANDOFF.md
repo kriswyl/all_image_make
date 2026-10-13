@@ -82,6 +82,7 @@ RELAY_API_KEY=替换为中转站密钥
 - `src-tauri/src/lib.rs`：启动和关闭 Node sidecar 的 Rust 代码。
 - `scripts/prepare-tauri.mjs`：复制服务端资源、生产依赖和 Node sidecar。
 - `README.md`：日常运行和构建说明。
+- `CHANGELOG.md`：各版本改动记录（按版本倒序），发版时往顶部加一段。这里写历史，所以 `set-version.mjs` **不**改它的版本号。
 
 ## 新电脑开发步骤
 
