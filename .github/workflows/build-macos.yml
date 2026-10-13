@@ -2,14 +2,33 @@ name: Build macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      # 打 tag 推送会自动触发；这里用于「tag 已存在但上一次没能建 release」
+      # 的补挂场景：填上已有的 tag，会按该 tag 的源码重建并挂到它的 Release 上
+      release_tag:
+        description: "要挂 Release 的 tag（如 v2.0.0）；留空则只出构建产物"
+        required: false
+        type: string
   push:
     tags: ["v*"]
+
+# softprops/action-gh-release 建 Release、传附件都需要写权限。
+# 不声明的话 GITHUB_TOKEN 只读，会在 create-a-release 上报
+# "Resource not accessible by integration"（403）——v2.0.0 就是这么失败的
+permissions:
+  contents: write
 
 jobs:
   build-dmg:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 注意用 github.event.inputs 而不是 inputs：inputs 上下文只在
+          # workflow_dispatch / workflow_call 下存在，push 事件下引用它会让
+          # GitHub 在解析阶段就报 Unrecognized named-value: 'inputs'，
+          # 把打 tag 这条正常路径一起弄坏
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -118,7 +137,8 @@ jobs:
           if-no-files-found: error
 
       - name: Attach dmg to release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           files: src-tauri/target/release/bundle/dmg/*.dmg
