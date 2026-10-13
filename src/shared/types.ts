@@ -221,8 +221,20 @@ export interface BootstrapData {
   service: {
     version: string;
     dataPath: string;
+    /** 产物（图片/视频）当前落盘目录 */
+    assetsPath: string;
+    /** 未自定义时的默认产物目录，用于「恢复默认」 */
+    defaultAssetsPath: string;
   };
 }
+
+export interface Settings {
+  assetsDir: string;
+  defaultAssetsDir: string;
+}
+
+/** 清空历史的作用范围 */
+export type ClearScope = "image" | "video" | "all";
 
 export interface ApiResponse<T> {
   ok: boolean;

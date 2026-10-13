@@ -1,6 +1,6 @@
-# 小勤画图打包文档
+# 益达工作台打包文档
 
-当前发布版本为 `1.0.4`。发布包不包含真实 API Key；首次启动后，在默认向量引擎渠道的“API Key”输入框填入自己的密钥，或在启动前设置 `VECTORENGINE_API_KEY` 环境变量。
+当前发布版本为 `2.0.1`。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
 
 ## 环境准备
 
@@ -29,9 +29,11 @@ npm run release:portable
 命令会依次运行测试、前端和 Node 服务端构建、Tauri sidecar 准备以及压缩。输出位置：
 
 ```text
-artifacts/小勤画图-v1.0.4-portable-win-x64/
-artifacts/小勤画图-v1.0.4-portable-win-x64.zip
+artifacts/益达工作台-v2.0.1-portable-win-x64/
+artifacts/益达工作台-v2.0.1-portable-win-x64.zip
 ```
+
+目录名里的版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，改版本号后自动跟着变。
 
 便携目录中的 `image_relay_studio.exe`、`node.exe` 和 `resources/` 必须保持同级关系，直接运行 `image_relay_studio.exe` 即可。
 
@@ -46,7 +48,7 @@ npm run release:installer
 便于分发的安装程序输出为：
 
 ```text
-artifacts/小勤画图-v1.0.4-win-x64-setup.exe
+artifacts/益达工作台-v2.0.1-win-x64-setup.exe
 ```
 
 Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`。
@@ -60,7 +62,7 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：
 
 ```powershell
-npm run version:set -- 2.0.1
+npm run version:set -- 2.0.2
 ```
 
 然后重新运行测试和对应的发布命令。发布前检查：
@@ -89,4 +91,4 @@ Tauri 用户数据目录：
 %LOCALAPPDATA%\com.imagerelay.studio\logs
 ```
 
-升级时请保留上述 `data` 目录，以继续使用原有渠道、历史任务和图片。
+升级时请保留上述 `data` 目录，以继续使用原有渠道、历史任务和图片。生成产物的目录如果被用户改到了别处（历史页的「目录设置」），要连同那个目录一起保留。

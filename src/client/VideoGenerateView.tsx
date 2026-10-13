@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { LazyVideoThumb } from "./LazyVideoThumb";
+import { useFileDrop } from "./useFileDrop";
 import type {
   Asset, Channel, SeedanceMediaInput, SeedanceMediaRole, SeedanceVideoMode,
   Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
@@ -274,6 +275,7 @@ export function VideoGenerateView(props: {
   const maxReferenceImages = (isWan || isSeedance)
     ? (modeSpec?.imageRepeatable ? caps?.maxReferenceImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
     : caps?.maxReferenceImages ?? 0;
+  const drop = useFileDrop(maxReferenceImages > 0 && !submitting && referenceImages.length < maxReferenceImages, references.dropFiles);
 
   // 切换渠道时把参数收敛到该适配器支持的取值
   useEffect(() => {
@@ -496,11 +498,11 @@ export function VideoGenerateView(props: {
                     <span className="reference-count">{referenceImages.length}/{maxReferenceImages}</span>
                     {referenceImages.length ? <button type="button" className="icon-button compact" title="移除全部图片" onClick={references.clear}><X size={15} /></button> : null}
                   </div>
-                  <div className={`reference-picker ${referenceImages.length ? "has-image" : ""}`}>
+                  <div className={`reference-picker ${referenceImages.length ? "has-image" : ""} ${drop.active ? "is-drop-target" : ""}`} {...drop.dropProps}>
                     <label className="reference-add-tile" title="添加图片">
                       <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple={maxReferenceImages > 1} onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= maxReferenceImages} />
                       <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                      <span className="reference-file"><strong>{readingImage ? "读取中" : "添加图片"}</strong><small>PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                      <span className="reference-file"><strong>{drop.active ? "松开即可添加" : readingImage ? "读取中" : "添加图片"}</strong><small>点击选择，或把图片拖到这里 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
                       <Upload size={17} />
                     </label>
                     {referenceImages.map((item, index) => {

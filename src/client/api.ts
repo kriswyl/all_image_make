@@ -1,4 +1,4 @@
-import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, Diagnostic, GenerationInput, Task } from "../shared/types";
+import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, Settings, Task } from "../shared/types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -9,7 +9,8 @@ function apiUrl(url: string) {
   return `${apiBase}${url}`;
 }
 
-function isTauriRuntime() {
+/** 桌面版才有原生对话框、原生保存等能力，Web 开发模式要单独降级处理 */
+export function isTauriRuntime() {
   return typeof window !== "undefined"
     && ("__TAURI_INTERNALS__" in window
       || window.location.protocol === "tauri:"
@@ -63,12 +64,34 @@ export const api = {
   tasks: () => request<Task[]>("/api/generations"),
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
-  deleteTask: (id: string) => request<{ deleted: true }>(`/api/generations/${id}`, { method: "DELETE" }),
+  /** keepFiles：只删记录，磁盘上的图片视频留着 */
+  deleteTask: (id: string, keepFiles = false) => request<{ deleted: true }>(`/api/generations/${id}${keepFiles ? "?keepFiles=1" : ""}`, { method: "DELETE" }),
+  /** 一次请求清空一批记录，避免前端逐条 DELETE 排队 */
+  clearTasks: (scope: ClearScope, keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
+    `/api/generations?scope=${scope}&keepFiles=${keepFiles ? "1" : "0"}`,
+    { method: "DELETE" },
+  ),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
+  settings: () => request<Settings>("/api/settings"),
+  /** assetsDir 传空串表示恢复默认目录 */
+  updateSettings: (input: { assetsDir?: string }) => request<Settings>("/api/settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  }),
   revealMedia: (kind: "assets" | "inputs" | "data" = "assets") => request<{ opened: string }>("/api/system/reveal-media", {
     method: "POST",
     body: JSON.stringify({ kind }),
   }),
+  /**
+   * 原生文件夹选择器。桌面版之外返回 null，调用方据此提示用户
+   * （Web 开发模式没有原生对话框，也不该让后端去弹一个）。
+   */
+  pickDirectory: async (title = "选择素材目录"): Promise<string | null> => {
+    if (!isTauriRuntime()) return null;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false, title });
+    return typeof picked === "string" ? picked : null;
+  },
   assetUrl: (url: string) => apiUrl(url),
   assetAsFile: async (asset: Asset) => {
     const response = await fetch(apiUrl(asset.url));

@@ -10,7 +10,8 @@ const { app, context } = createApp({ dataDir });
 
 const server = app.listen(port, "127.0.0.1", () => {
   console.log(`益达工作台 API: http://127.0.0.1:${port}`);
-  context.runner.resume();
+  // 已拿到上游 task id 的视频任务会在这里接着轮询，不阻塞启动
+  void context.runner.resume();
 });
 
 function shutdown() {

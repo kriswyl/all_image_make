@@ -6,7 +6,7 @@ import multer from "multer";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
 import type { Channel, ChannelInput, GenerationInput } from "../shared/types.js";
-import { AppDatabase, type DbChannel } from "./db.js";
+import { AppDatabase, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
 import { AppError, TaskRunner, normalizeError, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, redact } from "./security.js";
@@ -39,6 +39,11 @@ const channelSchema = z.object({
   allowPrivateNetwork: z.boolean().default(false),
   enabled: z.boolean().default(true),
   apiKey: z.string().max(10000).optional(),
+});
+
+/** assetsDir 传空串表示恢复默认目录 */
+const settingsSchema = z.object({
+  assetsDir: z.string().trim().max(1000).optional(),
 });
 
 const generationSchema = z.object({
@@ -165,9 +170,27 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({
       channels: db.listChannels().map((channel) => publicChannel(channel, sessionKeys)),
       tasks: db.listTaskViews(40),
-      service: { version: APP_VERSION, dataPath: db.filePath },
+      service: { version: APP_VERSION, dataPath: db.filePath, assetsPath: db.assetsDir, defaultAssetsPath: db.defaultAssetsDir },
     }));
   });
+
+  app.get("/api/settings", (_req, res) => {
+    res.json(ok({ assetsDir: db.assetsDir, defaultAssetsDir: db.defaultAssetsDir }));
+  });
+
+  /** 目前只有素材目录一项设置：改完只影响之后生成的产物，旧文件留在原目录 */
+  app.patch("/api/settings", asyncHandler(async (req, res) => {
+    const input = settingsSchema.parse(req.body);
+    let assetsDir = db.assetsDir;
+    if (input.assetsDir !== undefined) {
+      try {
+        assetsDir = input.assetsDir === "" ? db.resetAssetsDir() : db.setAssetsDir(input.assetsDir);
+      } catch (error) {
+        throw new AppError("INVALID_ASSETS_DIR", error instanceof Error ? error.message : "素材目录无效", 400);
+      }
+    }
+    res.json(ok({ assetsDir, defaultAssetsDir: db.defaultAssetsDir }));
+  }));
 
   app.get("/api/channels", (_req, res) => {
     res.json(ok(db.listChannels().map((channel) => publicChannel(channel, sessionKeys))));
@@ -261,15 +284,29 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(db.listDiagnostics(id)));
   });
 
+  /** keepFiles=1 只删记录、保留磁盘上的图片视频，用户可能只是想清列表 */
   app.delete("/api/generations/:id", asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getTaskRow(id)) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
-    const removed = db.deleteTask(id);
-    await Promise.all([
-      ...removed.assets.map((relativePath) => removeStoredFile(db.assetsDir, relativePath)),
-      ...removed.inputs.map((relativePath) => removeStoredFile(db.inputsDir, relativePath)),
-    ]);
-    res.json(ok({ deleted: true }));
+    const keepFiles = req.query.keepFiles === "1";
+    const removed = db.deleteTask(id, { keepFiles });
+    await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
+    res.json(ok({ deleted: true, keepFiles }));
+  }));
+
+  /** 清空历史：一次请求处理完，避免前端逐条 DELETE 在几百条记录上排队 */
+  app.delete("/api/generations", asyncHandler(async (req, res) => {
+    const scope = req.query.scope === "image" || req.query.scope === "video" ? req.query.scope : "all";
+    const keepFiles = req.query.keepFiles === "1";
+    const adapterByChannel = new Map(db.listChannels().map((channel) => [channel.id, String(channel.adapterType)]));
+    const targets = db.listAllTaskRows().filter((row) => {
+      if (scope === "all") return true;
+      const isVideo = db.isVideoTaskRow(row, adapterByChannel);
+      return scope === "video" ? isVideo : !isVideo;
+    });
+    const removed = db.deleteTasks(targets.map((row) => row.id), { keepFiles });
+    await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
+    res.json(ok({ deleted: removed.deleted.length, keepFiles }));
   }));
 
   /** 在系统文件管理器里打开素材目录：图片视频都落在应用数据目录里，用户得能直接翻到 */
@@ -285,8 +322,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     // 按主键直查：以前这里先取 1000 个任务再逐个查产物，历史一多，每个缩略图都要跑上千次查询
     const asset = db.getAsset(id);
     if (!asset) return res.status(404).json(fail("ASSET_NOT_FOUND", "图片不存在"));
-    const absolutePath = path.resolve(db.assetsDir, asset.relativePath);
-    if (!absolutePath.startsWith(path.resolve(db.assetsDir) + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
+    // 目录跟着记录走：用户换过素材目录后，老产物的绝对路径不能拿当前目录拼
+    const baseDir = path.resolve(asset.baseDir);
+    const absolutePath = path.resolve(baseDir, asset.relativePath);
+    if (!absolutePath.startsWith(baseDir + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
     if (req.query.download === "1") return res.download(absolutePath, asset.fileName);
     res.type(asset.mimeType).sendFile(absolutePath);
   });
@@ -320,6 +359,14 @@ function revealFolder(dir: string) {
   const child = spawn(command, [dir], { detached: true, stdio: "ignore" });
   child.on("error", () => undefined);
   child.unref();
+}
+
+/** 产物按记录自带的目录清理，参考图固定在 inputs/ */
+async function removeStoredFiles(assets: StoredFileRef[], inputs: string[], inputsDir: string) {
+  await Promise.all([
+    ...assets.map((asset) => removeStoredFile(asset.baseDir, asset.relativePath)),
+    ...inputs.map((relativePath) => removeStoredFile(inputsDir, relativePath)),
+  ]);
 }
 
 async function removeStoredFile(baseDir: string, relativePath: string) {

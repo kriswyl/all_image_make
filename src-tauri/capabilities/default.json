@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "dialog:allow-save",
+    "dialog:allow-open",
     "fs:allow-write-file",
     "shell:allow-spawn",
     "shell:allow-kill"

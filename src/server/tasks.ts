@@ -14,7 +14,7 @@ import {
   type ImageCandidate,
   type VideoCandidate,
 } from "./adapters.js";
-import { redact, safeFetch, safeFileName } from "./security.js";
+import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
 import type { KeyStore } from "./key-store.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -44,6 +44,13 @@ const VIDEO_POLL_DELAY_MS = (() => {
   const raw = Number(process.env.VIDEO_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 0 ? raw : VIDEO_POLL_INTERVAL_MS;
 })();
+
+/** 视频任务的状态查询路径。提交路径在 adapters.ts，两处都要跟着官方文档改 */
+export function videoPollEndpoint(adapterType: string, remoteTaskId: string) {
+  if (adapterType === "wan-video") return `/api/v1/tasks/${remoteTaskId}`;
+  if (adapterType === "seedance-video") return `/api/v3/contents/generations/tasks/${remoteTaskId}`;
+  return `/v1/videos/${remoteTaskId}`;
+}
 
 interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
   relativePath: string;
@@ -111,6 +118,8 @@ export class TaskRunner {
       const asyncTaskId = this.extractAsyncTaskId(result.payload);
 
       if (isVideoAdapter && asyncTaskId) {
+        // 先记下上游 task id：进程重启后靠它接着轮询，而不是把任务判死
+        this.db.updateTask(taskId, { remoteTaskId: asyncTaskId });
         await this.pollVideoTask(taskId, asyncTaskId, channel, key);
         return;
       }
@@ -148,16 +157,43 @@ export class TaskRunner {
     return this.create(input);
   }
 
-  /** 进程重启时把残留的进行中任务标记为失败：同步请求无法跨重启恢复 */
-  resume() {
+  /**
+   * 进程重启时收拾残留的进行中任务。
+   *
+   * 已经拿到上游 task id 的视频任务可以直接接着轮询——参考图、请求体都在库里，
+   * 上游通常还在跑，没有理由让用户白等一场。其余情况（还没提交出去、同步请求、
+   * 渠道被删）没法跨重启恢复，只能标记失败。
+   */
+  async resume() {
     for (const task of this.db.listPendingTasks()) {
-      this.db.updateTask(task.id, {
-        status: "failed",
-        errorCode: "SERVICE_RESTARTED",
-        errorMessage: "服务已重启，请重新生成",
-        finishedAt: new Date().toISOString(),
-      });
+      const channel = task.remoteTaskId ? this.db.getChannel(task.channelId) : null;
+      if (!channel || !isVideoAdapterType(channel.adapterType)) {
+        this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
+        continue;
+      }
+      // 不 await：多个任务并行恢复，任一失败都不能拖住启动
+      void this.resumePolling(task.id, task.remoteTaskId!, channel);
     }
+  }
+
+  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel) {
+    if (this.running.has(taskId)) return;
+    this.running.add(taskId);
+    try {
+      await this.pollVideoTask(taskId, remoteTaskId, channel, this.resolveKey(channel), { immediate: true });
+    } catch (error) {
+      const current = this.db.getTaskRow(taskId);
+      if (current && !["succeeded", "failed", "cancelled", "expired"].includes(current.status)) {
+        const normalized = normalizeError(error);
+        this.markFailed(taskId, normalized.code, normalized.message);
+      }
+    } finally {
+      this.running.delete(taskId);
+    }
+  }
+
+  private markFailed(taskId: string, code: string, message: string) {
+    this.db.updateTask(taskId, { status: "failed", errorCode: code, errorMessage: message, finishedAt: new Date().toISOString() });
   }
 
   private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>) {
@@ -190,29 +226,80 @@ export class TaskRunner {
     return null;
   }
 
-  private async pollVideoTask(localTaskId: string, remoteTaskId: string, channel: DbChannel, key: string) {
-    this.db.updateTask(localTaskId, { status: "running" });
-    const pollEndpoint = channel.adapterType === "wan-video"
-      ? `/api/v1/tasks/${remoteTaskId}`
-      : channel.adapterType === "seedance-video"
-      ? `/api/v3/contents/generations/tasks/${remoteTaskId}`
-      : `/v1/videos/${remoteTaskId}`;
+  private async pollVideoTask(
+    localTaskId: string,
+    remoteTaskId: string,
+    channel: DbChannel,
+    key: string,
+    options: { immediate?: boolean } = {},
+  ) {
+    this.db.updateTask(localTaskId, { status: "running", remoteTaskId });
+    // 提交路径走 joinEndpoint（会吃掉 Base URL 的尾斜杠），轮询这里必须一致，
+    // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
+    const url = joinEndpoint(channel.baseUrl, videoPollEndpoint(channel.adapterType, remoteTaskId));
 
     const headers: Record<string, string> = { Accept: "application/json" };
-    let url = channel.baseUrl + pollEndpoint;
     if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
     else if (channel.authType === "x-api-key") headers[channel.authHeaderName || "x-api-key"] = key;
 
-    for (let poll = 0; poll < VIDEO_MAX_POLLS; poll += 1) {
-      const current = this.db.getTaskRow(localTaskId);
-      if (current?.status === "cancelled") return;
+    // 一个视频任务最多轮询 100 次，每次都写完整响应能堆到几 MB。这里只让
+    // 「最后一次」保留完整响应，之前的行等下一次轮询到来时按精简格式落库
+    let pending: { index: number; payload: unknown; httpStatus: number; durationMs: number } | null = null;
+    const flushPending = () => {
+      if (!pending) return;
+      this.db.insertDiagnostic({
+        taskId: localTaskId,
+        request: { url, method: "GET", polls: pending.index },
+        response: redact(truncatePayload(pending.payload)),
+        httpStatus: pending.httpStatus,
+        durationMs: pending.durationMs,
+      });
+      pending = null;
+    };
 
-      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_DELAY_MS));
+    try {
+      for (let poll = 0; poll < VIDEO_MAX_POLLS; poll += 1) {
+        const current = this.db.getTaskRow(localTaskId);
+        if (current?.status === "cancelled") return;
 
-      try {
-        const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-        const payload = await response.json();
-        this.db.insertDiagnostic({ taskId: localTaskId, request: { url, method: "GET" }, response: redact(truncatePayload(payload)), httpStatus: response.status });
+        // 重启恢复时第一轮不再等：上游要是早没了，没必要再耗一个间隔
+        if (poll > 0 || !options.immediate) {
+          await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_DELAY_MS));
+        }
+
+        let response: Response;
+        let payload: unknown;
+        let durationMs: number;
+        try {
+          const startedAt = Date.now();
+          response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+          durationMs = Date.now() - startedAt;
+          // 网关出错时多半回的是 HTML，强行 json() 会抛 SyntaxError 掩盖真实状态码
+          payload = await response.json().catch(() => null);
+        } catch (error) {
+          throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询视频状态失败", 502);
+        }
+
+        // 上一次轮询既然不是终点，就降级成一条状态摘要
+        if (pending) {
+          this.db.insertDiagnostic({
+            taskId: localTaskId,
+            request: null,
+            response: {
+              poll: pending.index,
+              status: this.extractVideoStatus(pending.payload),
+              progress: this.extractVideoProgress(pending.payload),
+            },
+            httpStatus: pending.httpStatus,
+            durationMs: pending.durationMs,
+          });
+        }
+        pending = { index: poll + 1, payload, httpStatus: response.status, durationMs };
+
+        // 上游已经不认这个任务了，再轮询 100 次也没有结果
+        if (response.status === 404) {
+          throw new AppError("REMOTE_TASK_NOT_FOUND", "上游已找不到该任务，可能已过期或被清理", 502);
+        }
 
         const status = this.extractVideoStatus(payload);
         const progress = this.extractVideoProgress(payload);
@@ -249,13 +336,13 @@ export class TaskRunner {
         }
 
         // Still running, continue polling
-      } catch (error) {
-        if (error instanceof AppError) throw error;
-        throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询视频状态失败", 502);
       }
-    }
 
-    throw new AppError("VIDEO_TIMEOUT", `视频生成超时（已轮询 ${VIDEO_MAX_POLLS} 次）`, 504);
+      throw new AppError("VIDEO_TIMEOUT", `视频生成超时（已轮询 ${VIDEO_MAX_POLLS} 次）`, 504);
+    } finally {
+      // 最后一条轮询（成功、失败、超时都一样）保留完整响应：排查时最有用的是它
+      flushPending();
+    }
   }
 
   /**
@@ -309,6 +396,8 @@ export class TaskRunner {
   }
 
   private async saveVideos(taskId: string, videos: VideoCandidate[], channel: DbChannel) {
+    // 目录在写盘和入库之间必须保持一致，取一次而不是每次读 getter
+    const baseDir = this.db.assetsDir;
     let saved = 0;
     for (const video of videos.slice(0, 1)) {
       const bytes = await this.fetchVideoBytes(video.url, channel);
@@ -318,11 +407,11 @@ export class TaskRunner {
       const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
       const id = crypto.randomUUID();
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
-      const absolutePath = path.join(this.db.assetsDir, fileName);
+      const absolutePath = path.join(baseDir, fileName);
       await fs.writeFile(absolutePath, bytes);
       this.db.insertAsset({
         id, taskId, fileName, mimeType, byteSize: bytes.length,
-        relativePath: fileName, sha256, duration: video.duration,
+        relativePath: fileName, baseDir, sha256, duration: video.duration,
       });
       saved += 1;
     }
@@ -352,6 +441,7 @@ export class TaskRunner {
 
 
   private async saveImages(taskId: string, images: ImageCandidate[], channel: DbChannel) {
+    const baseDir = this.db.assetsDir;
     let saved = 0;
     // 部分中转会把同一张图同时放在 base64 与 URL 等多个位置，按字节内容去重避免落盘重复图片
     const seenHashes = new Set<string>();
@@ -365,11 +455,11 @@ export class TaskRunner {
       const extension = extensionForMime(resolved.mimeType);
       const id = crypto.randomUUID();
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
-      const absolutePath = path.join(this.db.assetsDir, fileName);
+      const absolutePath = path.join(baseDir, fileName);
       await fs.writeFile(absolutePath, resolved.bytes);
       this.db.insertAsset({
         id, taskId, fileName, mimeType: resolved.mimeType, byteSize: resolved.bytes.length,
-        relativePath: fileName, sha256,
+        relativePath: fileName, baseDir, sha256,
       });
       saved += 1;
     }
@@ -486,10 +576,6 @@ function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mim
   }
   if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   return bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class AppError extends Error {

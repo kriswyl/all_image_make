@@ -983,3 +983,34 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
   .submit-row { align-items: stretch; flex-direction: column; }
   .generate-button { width: 100%; }
 }
+
+/* 拖拽落图：文件拖到参考图区域时整块高亮 */
+.reference-picker.is-drop-target { background: var(--accent-soft); outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 6px; }
+.reference-picker.is-drop-target .reference-add-tile { color: var(--accent-dark); background: var(--surface); border-color: var(--accent); }
+
+/* 清空历史、素材目录这类只有几个控件的窄弹窗 */
+.modal.narrow { width: min(460px, 100%); }
+.confirm-options { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; }
+.confirm-option { display: flex; gap: 11px; padding: 13px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px; cursor: pointer; }
+.confirm-option:hover { background: var(--surface-soft); }
+.confirm-option.selected { background: var(--accent-soft); border-color: var(--accent); }
+/* 全局 input 是撑满一行、高 40px 的表单控件，单选钮必须显式改回固定尺寸，
+   否则它会占掉整行，把右边的标题和说明挤成竖排的一列字 */
+.confirm-option input { flex: 0 0 15px; width: 15px; height: 15px; margin: 2px 0 0; padding: 0; accent-color: var(--accent); }
+/* label > span 的全局样式是给表单字段标签用的，这里的说明文字要退回默认排版 */
+.confirm-option > span { display: block; margin: 0; color: inherit; font-size: inherit; font-weight: inherit; }
+.confirm-option strong { display: block; color: var(--ink); font-size: 13px; }
+.confirm-option small { display: block; margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.55; }
+.primary-button.danger { background: var(--coral); border-color: var(--coral); }
+.primary-button.danger:hover:not(:disabled) { background: #c01559; border-color: #c01559; }
+.modal-note { display: flex; gap: 8px; padding: 11px 12px; color: #4a4557; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.modal-note svg { flex: 0 0 auto; margin-top: 2px; color: var(--muted); }
+
+/* 素材目录设置 */
+.settings-path { padding: 10px 12px; overflow-wrap: anywhere; color: #3c3450; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; font: 11.5px/1.6 "Cascadia Code", Consolas, monospace; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.modal-lead { margin: 0; color: #4a4557; font-size: 13px; line-height: 1.65; }
+.diagnostic-entry.compact { border-color: var(--line); }
+.diagnostic-entry.compact header { background: var(--surface); }
+.diagnostic-compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; padding: 11px 13px; color: #4a4557; font: 12px/1.5 "Cascadia Code", Consolas, monospace; }
+.diagnostic-compact small { color: var(--muted); font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 11px; }

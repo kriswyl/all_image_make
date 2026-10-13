@@ -37,16 +37,23 @@ function parseJson<T>(value: unknown, fallback: T): T {
 export class AppDatabase {
   readonly dataDir: string;
   readonly filePath: string;
-  readonly assetsDir: string;
   readonly inputsDir: string;
+  /** 默认产物目录。用户改过素材目录后，历史记录里旧产物仍指向这个目录 */
+  readonly defaultAssetsDir: string;
+  private currentAssetsDir: string;
   private readonly db: DatabaseSync;
+
+  /** 产物目录可以在运行时改，所以是 getter 而不是 readonly 字段 */
+  get assetsDir(): string {
+    return this.currentAssetsDir;
+  }
 
   constructor(dataDir = path.resolve("data")) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.dataDir = dataDir;
-    this.assetsDir = path.join(dataDir, "assets");
+    this.defaultAssetsDir = path.join(dataDir, "assets");
     this.inputsDir = path.join(dataDir, "inputs");
-    fs.mkdirSync(this.assetsDir, { recursive: true });
+    fs.mkdirSync(this.defaultAssetsDir, { recursive: true });
     fs.mkdirSync(this.inputsDir, { recursive: true });
     this.filePath = path.join(dataDir, "app.db");
     this.db = new DatabaseSync(this.filePath);
@@ -94,6 +101,7 @@ export class AppDatabase {
         mime_type TEXT NOT NULL,
         byte_size INTEGER NOT NULL,
         relative_path TEXT NOT NULL,
+        base_dir TEXT NOT NULL DEFAULT '',
         sha256 TEXT NOT NULL,
         duration REAL,
         created_at TEXT NOT NULL
@@ -109,6 +117,10 @@ export class AppDatabase {
         duration_ms INTEGER,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     // Migration: add duration column to assets if it doesn't exist
     const columnsResult = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
@@ -116,6 +128,61 @@ export class AppDatabase {
     if (!hasDuration) {
       this.db.exec("ALTER TABLE assets ADD COLUMN duration REAL");
     }
+    // Migration: 每条产物记住自己所在的目录，用户改素材目录后旧历史仍然可读
+    const hasBaseDir = columnsResult.some((col) => col.name === "base_dir");
+    if (!hasBaseDir) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN base_dir TEXT NOT NULL DEFAULT ''");
+    }
+    // 新生成的记录自带 base_dir；加列前留下的行回填成默认目录
+    this.db.prepare("UPDATE assets SET base_dir = ? WHERE base_dir = ''").run(this.defaultAssetsDir);
+
+    this.currentAssetsDir = this.resolveAssetsDir();
+    fs.mkdirSync(this.currentAssetsDir, { recursive: true });
+  }
+
+  /** 读取用户配置的产物目录；配置缺失或不可用时退回数据目录下的 assets/ */
+  private resolveAssetsDir(): string {
+    const stored = this.getSetting("assetsDir");
+    if (!stored || !path.isAbsolute(stored)) return this.defaultAssetsDir;
+    try {
+      const resolved = path.resolve(stored);
+      fs.mkdirSync(resolved, { recursive: true });
+      return resolved;
+    } catch {
+      return this.defaultAssetsDir;
+    }
+  }
+
+  /** 切换产物目录：只影响之后生成的产物，已落盘的文件留在原目录 */
+  setAssetsDir(dir: string): string {
+    if (!path.isAbsolute(dir)) throw new Error("素材目录必须是绝对路径");
+    const resolved = path.resolve(dir);
+    fs.mkdirSync(resolved, { recursive: true });
+    if (resolved !== this.defaultAssetsDir && resolved.startsWith(this.dataDir + path.sep)) {
+      throw new Error("自定义素材目录不能放在应用数据目录内部");
+    }
+    this.setSetting("assetsDir", resolved);
+    this.currentAssetsDir = resolved;
+    return resolved;
+  }
+
+  resetAssetsDir(): string {
+    this.setSetting("assetsDir", "");
+    this.currentAssetsDir = this.defaultAssetsDir;
+    fs.mkdirSync(this.currentAssetsDir, { recursive: true });
+    return this.currentAssetsDir;
+  }
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as DbRow | undefined;
+    return row ? String(row.value) : null;
+  }
+
+  setSetting(key: string, value: string) {
+    this.db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
   }
 
   close() {
@@ -170,14 +237,42 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM channels WHERE id = ?").run(id);
   }
 
-  /** 删除任务及其图片、诊断记录，返回落盘文件的相对路径供调用方清理磁盘 */
-  deleteTask(id: string): { assets: string[]; inputs: string[] } {
-    const assets = this.listAssets(id).map((asset) => asset.relativePath);
+  /**
+   * 删除任务及其图片、诊断记录。
+   *
+   * `keepFiles` 为真时只删记录、不动磁盘：产物文件留在各自目录里，
+   * 参考图留在 inputs/，返回给调用方的待删列表为空。
+   */
+  deleteTask(id: string, options: { keepFiles?: boolean } = {}): { assets: StoredFileRef[]; inputs: string[] } {
+    const assets = this.listAssets(id).map((asset) => ({ baseDir: asset.baseDir, relativePath: asset.relativePath }));
     const inputs = this.collectInputImagePaths(id);
     this.db.prepare("DELETE FROM diagnostics WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM assets WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    if (options.keepFiles) return { assets: [], inputs: [] };
     return { assets, inputs };
+  }
+
+  /** 批量删除：清空历史走这条，避免前端逐条发请求 */
+  deleteTasks(ids: string[], options: { keepFiles?: boolean } = {}): { deleted: string[]; assets: StoredFileRef[]; inputs: string[] } {
+    const assets: StoredFileRef[] = [];
+    const inputs: string[] = [];
+    const deleted: string[] = [];
+    for (const id of ids) {
+      if (!this.getTaskRow(id)) continue;
+      const removed = this.deleteTask(id, options);
+      assets.push(...removed.assets);
+      inputs.push(...removed.inputs);
+      deleted.push(id);
+    }
+    return { deleted, assets, inputs };
+  }
+
+  /** 供清空历史按「图片 / 视频 / 全部」筛选：渠道适配器优先，渠道已删则看产物类型 */
+  isVideoTaskRow(row: TaskRow, adapterByChannel: Map<string, string>): boolean {
+    const adapterType = adapterByChannel.get(row.channelId);
+    if (adapterType) return adapterType.endsWith("-video");
+    return this.listAssets(row.id).some((asset) => asset.mimeType.startsWith("video/"));
   }
 
   private collectInputImagePaths(id: string): string[] {
@@ -211,12 +306,19 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
+  /** 清空历史要把整个表过一遍，不受列表分页限制 */
+  listAllTaskRows(): TaskRow[] {
+    const rows = this.db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all() as DbRow[];
+    return rows.map((row) => this.taskFromRow(row));
+  }
+
+  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
     const fields: string[] = [];
     const values: Array<string | number | bigint | null | Uint8Array> = [];
     const mapping: Record<string, string> = {
       status: "status",
       progress: "progress",
+      remoteTaskId: "remote_task_id",
       effectiveJson: "effective_json",
       attemptCount: "attempt_count",
       errorCode: "error_code",
@@ -243,11 +345,11 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  insertAsset(asset: { id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string; duration?: number | null }) {
+  insertAsset(asset: { id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; baseDir: string; sha256: string; duration?: number | null }) {
     this.db.prepare(`
-      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, sha256, duration, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath, asset.sha256, asset.duration ?? null, now());
+      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, base_dir, sha256, duration, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath, asset.baseDir, asset.sha256, asset.duration ?? null, now());
   }
 
   listAssets(taskId: string): AssetRow[] {
@@ -264,7 +366,9 @@ export class AppDatabase {
   private assetFromRow(row: DbRow): AssetRow {
     return {
       id: String(row.id), taskId: String(row.task_id), fileName: String(row.file_name), mimeType: String(row.mime_type),
-      byteSize: Number(row.byte_size), relativePath: String(row.relative_path), sha256: String(row.sha256),
+      byteSize: Number(row.byte_size), relativePath: String(row.relative_path),
+      baseDir: row.base_dir == null || row.base_dir === "" ? this.defaultAssetsDir : String(row.base_dir),
+      sha256: String(row.sha256),
       duration: row.duration == null ? null : Number(row.duration), createdAt: String(row.created_at),
     };
   }
@@ -277,7 +381,9 @@ export class AppDatabase {
   }
 
   listDiagnostics(taskId: string): Diagnostic[] {
-    const rows = this.db.prepare("SELECT * FROM diagnostics WHERE task_id = ? ORDER BY created_at DESC").all(taskId) as DbRow[];
+    // created_at 只到毫秒，一次轮询的「上一条精简行 + 本次完整行」常落在同一毫秒，
+    // 必须再用 rowid 兜底，否则诊断列表顺序会随机颠倒
+    const rows = this.db.prepare("SELECT * FROM diagnostics WHERE task_id = ? ORDER BY created_at DESC, rowid DESC").all(taskId) as DbRow[];
     return rows.map((row) => ({
       id: String(row.id), taskId: String(row.task_id), request: parseJson(row.request_json, null), response: parseJson(row.response_json, null),
       httpStatus: row.http_status == null ? null : Number(row.http_status), durationMs: row.duration_ms == null ? null : Number(row.duration_ms), createdAt: String(row.created_at),
@@ -323,6 +429,7 @@ export class AppDatabase {
       id: String(row.id), channelId: String(row.channel_id), channelName: row.channel_name == null ? null : String(row.channel_name),
       model: String(row.model), prompt: String(row.prompt), status: String(row.status) as TaskStatus,
       progress: row.progress == null ? null : Number(row.progress),
+      remoteTaskId: row.remote_task_id == null ? null : String(row.remote_task_id),
       inputJson: String(row.input_json), effectiveJson: row.effective_json == null ? null : String(row.effective_json), attemptCount: Number(row.attempt_count),
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
@@ -332,10 +439,21 @@ export class AppDatabase {
 
 export interface TaskRow {
   id: string; channelId: string; channelName: string | null; model: string; prompt: string; status: TaskStatus; progress: number | null;
+  /** 上游异步任务 id：重启后用它接着轮询，不用从头发起 */
+  remoteTaskId: string | null;
   inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
   errorMessage: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
 }
 
 export interface AssetRow {
-  id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; sha256: string; duration: number | null; createdAt: string;
+  id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string;
+  /** 该产物所在目录：用户换过素材目录后，老记录仍指向写入时的目录 */
+  baseDir: string;
+  sha256: string; duration: number | null; createdAt: string;
+}
+
+/** 待清理的落盘文件：目录随记录走，不能用当前素材目录去猜 */
+export interface StoredFileRef {
+  baseDir: string;
+  relativePath: string;
 }

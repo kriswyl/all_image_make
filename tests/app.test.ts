@@ -550,3 +550,275 @@ describe("generation API", () => {
     expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(4);
   });
 });
+
+describe("history cleanup, custom asset directory and restart recovery", () => {
+  async function startMock(handler: http.RequestListener) {
+    const server = http.createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    return `http://127.0.0.1:${address.port}`;
+  }
+
+  async function waitFor<T>(probe: () => T | null, label: string): Promise<T> {
+    for (let index = 0; index < 100; index += 1) {
+      const value = probe();
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    throw new Error(`等待超时：${label}`);
+  }
+
+  /** 生成一张图的完整 mock：提交即返回 base64 */
+  function imageHandler(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (req.url === "/v1/images/generations" && req.method === "POST") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "not found" } }));
+  }
+
+  it("keeps the submit request and the last poll full while compacting the middle polls", async () => {
+    let origin = "";
+    let pollCount = 0;
+    const totalPolls = 4;
+    origin = await startMock((req, res) => {
+      if (req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: { task_id: "task-compact", task_status: "PENDING" } }));
+        return;
+      }
+      if (req.url === "/api/v1/tasks/task-compact") {
+        pollCount += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(pollCount < totalPolls
+          ? { output: { task_id: "task-compact", task_status: "RUNNING", progress: pollCount * 10 } }
+          : { output: { task_id: "task-compact", task_status: "SUCCEEDED" }, video: `${origin}/out.mp4` }));
+        return;
+      }
+      if (req.url === "/out.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-diagnostic-compact-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channel = await request(app).post("/api/channels").send({
+      name: "Wan Video", baseUrl: origin, adapterType: "wan-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+      models: ["wan3.0-video"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+    const created = await request(app).post("/api/generations")
+      .send({ channelId: channel.body.data.id, model: "wan3.0-video", prompt: "a cat running" }).expect(202);
+    const taskId = created.body.data.id as string;
+
+    const finished = await waitFor(() => {
+      const task = context.db.getTaskRow(taskId);
+      return task && ["succeeded", "failed"].includes(task.status) ? task : null;
+    }, "视频任务结束");
+    expect(finished.status).toBe("succeeded");
+    expect(pollCount).toBe(totalPolls);
+
+    // 提交 1 行 + 每次轮询各 1 行，顺序为时间倒序
+    const diagnostics = (await request(app).get(`/api/generations/${taskId}/diagnostics`).expect(200)).body.data;
+    expect(diagnostics).toHaveLength(totalPolls + 1);
+
+    // 最新一行是最后一次轮询：请求与响应都完整
+    expect(diagnostics[0].request).toMatchObject({ method: "GET", polls: totalPolls });
+    expect(diagnostics[0].response).toMatchObject({ output: { task_status: "SUCCEEDED" }, video: `${origin}/out.mp4` });
+
+    // 最早一行是提交请求：完整保留，排查时看的就是它
+    expect(diagnostics[totalPolls].request).toBeTruthy();
+    expect(diagnostics[totalPolls].request.body).toBeTruthy();
+
+    // 中间几行降级成状态摘要：没有请求体，只记第几次、状态和进度
+    const middle = diagnostics.slice(1, totalPolls);
+    expect(middle).toHaveLength(totalPolls - 1);
+    for (const [index, row] of middle.entries()) {
+      expect(row.request).toBeNull();
+      expect(row.response).toMatchObject({ poll: totalPolls - 1 - index, status: "running" });
+      expect(row.response.progress).toBeGreaterThan(0);
+      // 精简行必须真的小，否则轮询 100 次照样能把库撑爆
+      expect(JSON.stringify(row.response).length).toBeLessThan(200);
+    }
+  });
+
+  it("clears history in bulk, skipping the scope the user did not pick and optionally keeping files", async () => {
+    const origin = await startMock(imageHandler);
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-clear-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    async function generate(prompt: string) {
+      const channel = await request(app).post("/api/channels").send({
+        name: "Clear Mock", baseUrl: origin, adapterType: "openai-images", authType: "none",
+        authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+        allowPrivateNetwork: true, enabled: true,
+      }).expect(201);
+      const created = await request(app).post("/api/generations")
+        .send({ channelId: channel.body.data.id, model: "mock-image", prompt }).expect(202);
+      const taskId = created.body.data.id as string;
+      await waitFor(() => {
+        const task = context.db.getTaskRow(taskId);
+        return task?.status === "succeeded" ? task : null;
+      }, `图片任务 ${prompt}`);
+      return taskId;
+    }
+
+    const assetsDir = path.join(dataDir, "assets");
+    const firstId = await generate("keep me on disk");
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+
+    // 只清视频：图片记录不在范围内，文件和记录都不该动
+    const skipped = await request(app).delete("/api/generations?scope=video&keepFiles=0").expect(200);
+    expect(skipped.body.data).toMatchObject({ deleted: 0, keepFiles: false });
+    expect(context.db.getTaskRow(firstId)).not.toBeNull();
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+
+    // 只删记录：行没了，文件留在磁盘上
+    await request(app).delete(`/api/generations/${firstId}?keepFiles=1`).expect(200);
+    expect(context.db.getTaskRow(firstId)).toBeNull();
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+
+    // 连文件一起删：新任务的文件被清掉，上一步留下的孤儿文件仍在
+    const secondId = await generate("delete me entirely");
+    expect(await fs.readdir(assetsDir)).toHaveLength(2);
+    const cleared = await request(app).delete("/api/generations?scope=image&keepFiles=0").expect(200);
+    expect(cleared.body.data).toMatchObject({ deleted: 1 });
+    expect(context.db.getTaskRow(secondId)).toBeNull();
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+    expect(context.db.listTaskRows()).toHaveLength(0);
+  });
+
+  it("writes new assets into a custom directory and keeps old history readable", async () => {
+    const origin = await startMock(imageHandler);
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-assets-dir-test-"));
+    const customDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-custom-assets-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => {
+      context.db.close();
+      return Promise.all([
+        fs.rm(dataDir, { recursive: true, force: true }),
+        fs.rm(customDir, { recursive: true, force: true }),
+      ]).then(() => undefined);
+    });
+
+    const defaults = (await request(app).get("/api/settings").expect(200)).body.data;
+    expect(defaults.assetsDir).toBe(path.join(dataDir, "assets"));
+    expect(defaults.defaultAssetsDir).toBe(defaults.assetsDir);
+
+    const channel = await request(app).post("/api/channels").send({
+      name: "Dir Mock", baseUrl: origin, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+
+    async function generate(prompt: string) {
+      const created = await request(app).post("/api/generations")
+        .send({ channelId: channel.body.data.id, model: "mock-image", prompt }).expect(202);
+      const taskId = created.body.data.id as string;
+      const task = await waitFor(() => {
+        const row = context.db.getTaskRow(taskId);
+        return row?.status === "succeeded" ? row : null;
+      }, `图片任务 ${prompt}`);
+      return { taskId, assets: context.db.listAssets(taskId) };
+    }
+
+    const before = await generate("before switching");
+    expect(await fs.readdir(path.join(dataDir, "assets"))).toHaveLength(1);
+
+    // 相对路径、以及数据目录内部的路径都不接受
+    const relative = await request(app).patch("/api/settings").send({ assetsDir: "some/relative/dir" }).expect(400);
+    expect(relative.body.error.code).toBe("INVALID_ASSETS_DIR");
+    const inside = await request(app).patch("/api/settings").send({ assetsDir: path.join(dataDir, "inside") }).expect(400);
+    expect(inside.body.error.code).toBe("INVALID_ASSETS_DIR");
+
+    const switched = await request(app).patch("/api/settings").send({ assetsDir: customDir }).expect(200);
+    expect(switched.body.data.assetsDir).toBe(path.resolve(customDir));
+    expect(switched.body.data.defaultAssetsDir).toBe(path.join(dataDir, "assets"));
+
+    const after = await generate("after switching");
+    expect(await fs.readdir(customDir)).toHaveLength(1);
+    expect(await fs.readdir(path.join(dataDir, "assets"))).toHaveLength(1);
+    expect(after.assets[0].baseDir).toBe(path.resolve(customDir));
+    // 新产物能读，旧产物靠各自记录的目录也还能读（前端历史缩略图不会全裂）
+    await request(app).get(`/api/assets/${after.assets[0].id}/file`).expect(200);
+    await request(app).get(`/api/assets/${before.assets[0].id}/file`).expect(200);
+
+    const bootstrap = (await request(app).get("/api/bootstrap").expect(200)).body.data.service;
+    expect(bootstrap.assetsPath).toBe(path.resolve(customDir));
+
+    // 空串表示恢复默认目录，旧文件仍留在自定义目录里
+    const reset = await request(app).patch("/api/settings").send({ assetsDir: "" }).expect(200);
+    expect(reset.body.data.assetsDir).toBe(path.join(dataDir, "assets"));
+    expect(await fs.readdir(customDir)).toHaveLength(1);
+    await request(app).get(`/api/assets/${after.assets[0].id}/file`).expect(200);
+  });
+
+  it("resumes polling a video task after a restart instead of failing it, even with a trailing-slash Base URL", async () => {
+    let origin = "";
+    let pollCount = 0;
+    origin = await startMock((req, res) => {
+      // Base URL 带尾斜杠时，只有走 joinEndpoint 才会请求到这里；拼字符串会变成 //api/... 而 404
+      if (req.url === "/api/v1/tasks/remote-9") {
+        pollCount += 1;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(pollCount < 2
+          ? { output: { task_id: "remote-9", task_status: "RUNNING", progress: 30 } }
+          : { output: { task_id: "remote-9", task_status: "SUCCEEDED" }, video: `${origin}/out.mp4` }));
+        return;
+      }
+      if (req.url === "/out.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-resume-test-"));
+    const first = createApp({ dataDir });
+    const channel = await request(first.app).post("/api/channels").send({
+      name: "Wan Video", baseUrl: `${origin}/`, adapterType: "wan-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+      models: ["wan3.0-video"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-test",
+    }).expect(201);
+    const channelId = channel.body.data.id as string;
+
+    // 模拟「提交完、拿到上游 id 之后就崩了」：直接落库一条进行中的任务
+    const input = { channelId, model: "wan3.0-video", prompt: "resume me" };
+    first.context.db.createTask({ id: "task-resume", channelId, model: "wan3.0-video", prompt: "resume me", input });
+    first.context.db.updateTask("task-resume", { remoteTaskId: "remote-9" });
+    // 还没拿到上游 id 的任务没法跨重启恢复
+    first.context.db.createTask({ id: "task-no-remote", channelId, model: "wan3.0-video", prompt: "no id", input });
+    first.context.db.close();
+
+    const second = createApp({ dataDir });
+    cleanups.push(() => { second.context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    await second.context.runner.resume();
+
+    const resumed = await waitFor(() => {
+      const row = second.context.db.getTaskRow("task-resume");
+      return row && ["succeeded", "failed"].includes(row.status) ? row : null;
+    }, "重启后继续轮询");
+    expect(resumed.status).toBe("succeeded");
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+    expect(second.context.db.getTaskRow("task-no-remote")).toMatchObject({ status: "failed", errorCode: "SERVICE_RESTARTED" });
+
+    // 视频落盘在默认产物目录里
+    const assets = second.context.db.listAssets("task-resume");
+    expect(assets).toHaveLength(1);
+    expect(assets[0].mimeType).toBe("video/mp4");
+    await fs.access(path.join(assets[0].baseDir, assets[0].relativePath));
+  });
+});

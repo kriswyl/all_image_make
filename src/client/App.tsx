@@ -4,15 +4,16 @@ import {
   ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, Wand2, X,
 } from "lucide-react";
-import { api } from "./api";
+import { api, isTauriRuntime } from "./api";
 import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
 import { LazyVideoThumb } from "./LazyVideoThumb";
+import { useFileDrop } from "./useFileDrop";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { isVideoAdapter, isVideoTask } from "../shared/types";
-import type { Asset, Channel, Diagnostic, Task, TaskStatus } from "../shared/types";
+import type { Asset, Channel, ClearScope, Diagnostic, Task, TaskStatus } from "../shared/types";
 
 type View = "generate" | "video" | "channels" | "history";
 export type Toast = { kind: "success" | "error"; message: string };
@@ -80,6 +81,8 @@ export interface ReferenceController {
   images: ReferenceImageState[];
   reading: boolean;
   select: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  /** 拖拽落图：与文件选择框走同一条校验路径 */
+  dropFiles: (files: File[]) => void;
   remove: (previewUrl: string) => void;
   clear: () => void;
   addFromAsset: (asset: Asset) => Promise<void>;
@@ -119,6 +122,16 @@ function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => v
     try { addFiles(files); } finally { setReading(false); }
   }
 
+  function dropFiles(files: File[]) {
+    if (!files.length) return;
+    setReading(true);
+    try {
+      if (addFiles(files)) onToast("success", `已加入 ${files.length} 张参考图`);
+    } finally {
+      setReading(false);
+    }
+  }
+
   function remove(previewUrl: string) {
     URL.revokeObjectURL(previewUrl);
     referenceUrls.current.delete(previewUrl);
@@ -146,7 +159,7 @@ function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => v
     }
   }
 
-  return { images, reading, select, remove, clear, addFromAsset };
+  return { images, reading, select, dropFiles, remove, clear, addFromAsset };
 }
 
 export function App() {
@@ -166,6 +179,10 @@ export function App() {
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
+  const [clearRequest, setClearRequest] = useState<{ scope: ClearScope; count: number; label: string; tasks: Task[] } | null>(null);
+  const [assetDirOpen, setAssetDirOpen] = useState(false);
+  const [assetsPath, setAssetsPath] = useState("");
+  const [defaultAssetsPath, setDefaultAssetsPath] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
 
   const imageChannels = channels.filter((channel) => !isVideoAdapter(channel.adapterType));
@@ -184,6 +201,8 @@ export function App() {
       .then((data) => {
         setChannels(data.channels);
         setTasks(data.tasks);
+        setAssetsPath(data.service.assetsPath);
+        setDefaultAssetsPath(data.service.defaultAssetsPath);
         const images = data.channels.filter((item) => !isVideoAdapter(item.adapterType));
         const videos = data.channels.filter((item) => isVideoAdapter(item.adapterType));
         const firstImage = images.find((item) => item.id === selectedChannelId && item.enabled)
@@ -304,30 +323,39 @@ export function App() {
     } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
   }
 
-  async function deleteTask(task: Task) {
-    try {
-      await api.deleteTask(task.id);
-      setTasks((current) => current.filter((item) => item.id !== task.id));
-      if (activeTaskId === task.id) setActiveTaskId(null);
-      if (activeVideoTaskId === task.id) setActiveVideoTaskId(null);
-      showToast("success", "已删除该记录");
-    } catch (error) { showToast("error", error instanceof Error ? error.message : "删除失败"); }
+  /** 删除单条记录：和清空历史走同一个弹窗，都要问一句磁盘上的文件删不删 */
+  function requestDeleteTask(task: Task) {
+    setClearRequest({ scope: "all", count: 1, label: "该条记录", tasks: [task] });
   }
 
   /** 清空指定类型的历史：图片、视频或全部 */
-  async function clearTasks(scope: "image" | "video" | "all" = "all") {
+  function requestClearTasks(scope: ClearScope = "all") {
     const target = scope === "image" ? imageTasks : scope === "video" ? videoTasks : tasks;
     if (!target.length) return;
-    const label = scope === "image" ? "生图" : scope === "video" ? "视频" : "全部";
-    if (!window.confirm(`清空${label} ${target.length} 条生成记录？此操作不可恢复。`)) return;
-    const results = await Promise.allSettled(target.map((task) => api.deleteTask(task.id)));
-    const failed = results.filter((item) => item.status === "rejected").length;
-    const removed = new Set(target.map((item) => item.id));
-    try { setTasks(await api.tasks()); } catch { setTasks((current) => current.filter((item) => !removed.has(item.id))); }
-    if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
-    if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
-    if (failed) showToast("error", `${failed} 条记录删除失败`);
-    else showToast("success", "已清空生成历史");
+    const label = scope === "image" ? "生图记录" : scope === "video" ? "视频记录" : "全部记录";
+    setClearRequest({ scope, count: target.length, label, tasks: target });
+  }
+
+  /** 弹窗里选完之后真正执行删除。keepFiles 为真时磁盘上的图片视频原地保留 */
+  async function confirmClear(request: NonNullable<typeof clearRequest>, keepFiles: boolean) {
+    const removed = new Set(request.tasks.map((task) => task.id));
+    const dropLocally = (current: Task[]) => current.filter((task) => !removed.has(task.id));
+    try {
+      if (request.tasks.length === 1) {
+        await api.deleteTask(request.tasks[0].id, keepFiles);
+        setTasks(dropLocally);
+      } else {
+        await api.clearTasks(request.scope, keepFiles);
+        // 服务端按范围清的是全库记录，本地列表要重新拉一次才不会残留
+        try { setTasks(await api.tasks()); } catch { setTasks(dropLocally); }
+      }
+      if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
+      if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
+      showToast("success", request.tasks.length === 1 ? "已删除该记录" : "已清空生成历史");
+      setClearRequest(null);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "删除失败");
+    }
   }
 
   return (
@@ -402,8 +430,9 @@ export function App() {
             tasks={tasks}
             references={references}
             onRefresh={refreshTasks}
-            onDelete={deleteTask}
-            onClear={clearTasks}
+            onDelete={requestDeleteTask}
+            onClear={requestClearTasks}
+            onOpenAssetSettings={() => setAssetDirOpen(true)}
             onDiagnostics={setDiagnosticTask}
             onToast={showToast}
           />
@@ -424,6 +453,23 @@ export function App() {
         <ChannelDialog channel={editorChannel} onClose={() => setEditorChannel(undefined)} onSaved={handleChannelSaved} />
       ) : null}
       {diagnosticTask ? <DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} /> : null}
+      {clearRequest ? (
+        <ClearHistoryDialog
+          count={clearRequest.count}
+          label={clearRequest.label}
+          onClose={() => setClearRequest(null)}
+          onConfirm={(keepFiles) => confirmClear(clearRequest, keepFiles)}
+        />
+      ) : null}
+      {assetDirOpen ? (
+        <AssetDirDialog
+          assetsDir={assetsPath}
+          defaultAssetsDir={defaultAssetsPath}
+          onClose={() => setAssetDirOpen(false)}
+          onChanged={(next) => { setAssetsPath(next); void refreshTasks(); }}
+          onToast={showToast}
+        />
+      ) : null}
       {toast ? <div className={`toast ${toast.kind}`} role="status">{toast.kind === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}{toast.message}</div> : null}
     </div>
   );
@@ -480,6 +526,9 @@ function GenerateView(props: {
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const showAspectRatio = adapterType === "gemini-content";
+  const drop = useFileDrop(!submitting && referenceImages.length < MAX_REFERENCE_IMAGES, references.dropFiles);
+  const dropActive = drop.active;
+  const dropProps = drop.dropProps;
 
   async function generate() {
     if (!channel) return props.onToast("error", "请先添加渠道");
@@ -556,11 +605,11 @@ function GenerateView(props: {
                   <span className="reference-count">{referenceImages.length}/{MAX_REFERENCE_IMAGES}</span>
                   {referenceImages.length ? <button type="button" className="icon-button compact" title="移除全部参考图" onClick={references.clear}><X size={15} /></button> : null}
                 </div>
-                <div className={`reference-picker ${referenceImages.length ? "has-image" : ""}`}>
+                <div className={`reference-picker ${referenceImages.length ? "has-image" : ""} ${dropActive ? "is-drop-target" : ""}`} {...dropProps}>
                   <label className="reference-add-tile" title="添加参考图">
                     <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= MAX_REFERENCE_IMAGES} />
                     <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                    <span className="reference-file"><strong>{readingImage ? "读取中" : "添加参考图"}</strong><small>PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                    <span className="reference-file"><strong>{dropActive ? "松开即可添加" : readingImage ? "读取中" : "添加参考图"}</strong><small>点击选择，或把图片拖到这里 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
                     <Upload size={17} />
                   </label>
                   {referenceImages.map((item, index) => <div className="reference-thumb" key={item.previewUrl}>
@@ -754,13 +803,14 @@ function EmptyResult() {
   return <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear, onDiagnostics, onToast }: {
+function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear, onOpenAssetSettings, onDiagnostics, onToast }: {
   channels: Channel[];
   tasks: Task[];
   references: ReferenceController;
   onRefresh: () => void;
   onDelete: (task: Task) => void;
-  onClear: (scope?: "image" | "video" | "all") => void;
+  onClear: (scope?: ClearScope) => void;
+  onOpenAssetSettings: () => void;
   onDiagnostics: (task: Task) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
@@ -790,8 +840,9 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
             <button className={filter === "image" ? "active" : ""} onClick={() => setFilter("image")}>图片 ({imageTasks.length})</button>
             <button className={filter === "video" ? "active" : ""} onClick={() => setFilter("video")}>视频 ({videoTasks.length})</button>
           </div>
-          {filtered.length ? <button className="secondary-button" title="清空当前筛选" onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
+          {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : "视频"}记录`} onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
+          <button className="secondary-button" title="更改素材保存目录" onClick={onOpenAssetSettings}><Settings2 size={16} />目录设置</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
         </div>
       </div>
@@ -882,10 +933,181 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
   );
 }
 
+/**
+ * 清空历史 / 删除记录的确认弹窗。
+ *
+ * 除了二次确认，还要问清楚磁盘上的图片视频删不删——以前是直接删，
+ * 想留图的用户只能自己去素材目录翻。
+ */
+function ClearHistoryDialog({ count, label, onClose, onConfirm }: {
+  count: number;
+  label: string;
+  onClose: () => void;
+  onConfirm: (keepFiles: boolean) => Promise<void>;
+}) {
+  // 默认连文件一起删：和改动前的行为一致，也避免磁盘无限增长
+  const [deleteFiles, setDeleteFiles] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  async function confirm() {
+    setBusy(true);
+    try { await onConfirm(!deleteFiles); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className="modal narrow" role="dialog" aria-modal="true" aria-label={count === 1 ? "删除记录" : "清空历史"}>
+        <div className="modal-header">
+          <div><Trash2 size={18} /><h2>{count === 1 ? "删除记录" : "清空历史"}</h2></div>
+          <button className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-lead">将删除 {count} 条{label}。删除记录不可恢复，请确认本地文件怎么处理。</p>
+          <div className="confirm-options" role="radiogroup" aria-label="本地文件处理方式">
+            <label className={`confirm-option ${deleteFiles ? "selected" : ""}`}>
+              <input type="radio" name="clear-files" checked={deleteFiles} onChange={() => setDeleteFiles(true)} />
+              <span>
+                <strong>同时删除本地文件</strong>
+                <small>记录和磁盘上的图片、视频一起删除，无法恢复。该任务上传的参考图也会一并清理。</small>
+              </span>
+            </label>
+            <label className={`confirm-option ${!deleteFiles ? "selected" : ""}`}>
+              <input type="radio" name="clear-files" checked={!deleteFiles} onChange={() => setDeleteFiles(false)} />
+              <span>
+                <strong>仅删除记录，保留本地文件</strong>
+                <small>图片和视频留在素材目录里，只是不再显示在生成历史中，之后可以自己去目录里整理。</small>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="secondary-button" onClick={onClose} disabled={busy}>取消</button>
+          <button className="primary-button danger" onClick={() => void confirm()} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+            {count === 1 ? "删除" : `清空 ${count} 条`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 素材目录设置。
+ *
+ * 目录由桌面版的原生选择器挑，服务端只负责校验和落库；切换只影响之后生成的
+ * 产物，历史记录里的旧产物按各自记录保存的目录读取，不会被搬动。
+ */
+function AssetDirDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToast }: {
+  assetsDir: string;
+  defaultAssetsDir: string;
+  onClose: () => void;
+  onChanged: (assetsDir: string) => void;
+  onToast: (kind: Toast["kind"], message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isDefault = assetsDir === defaultAssetsDir;
+  const canPick = isTauriRuntime();
+
+  async function apply(next: string) {
+    setBusy(true);
+    try {
+      const result = await api.updateSettings({ assetsDir: next });
+      onChanged(result.assetsDir);
+      onToast("success", next === "" ? "已恢复默认素材目录" : "素材目录已更新");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "素材目录更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function choose() {
+    try {
+      const picked = await api.pickDirectory();
+      if (!picked) return; // 用户取消
+      await apply(picked);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "无法打开目录选择器");
+    }
+  }
+
+  async function reveal() {
+    try {
+      const result = await api.revealMedia();
+      onToast("success", `已打开素材目录：${result.opened}`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "打开素材目录失败");
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className="modal narrow" role="dialog" aria-modal="true" aria-label="素材目录">
+        <div className="modal-header">
+          <div><Settings2 size={18} /><h2>素材目录</h2></div>
+          <button className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-lead">生成的图片和视频保存到下面这个目录。{isDefault ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
+          <div className="settings-path">{assetsDir || "（未获取到）"}</div>
+          <div className="settings-actions">
+            <button className="secondary-button" onClick={() => void choose()} disabled={busy || !canPick}>
+              <FolderOpen size={16} />更改目录
+            </button>
+            <button className="secondary-button" onClick={() => void reveal()} disabled={busy}>
+              <Eye size={16} />打开目录
+            </button>
+            <button className="secondary-button" onClick={() => void apply("")} disabled={busy || isDefault}>
+              <RotateCcw size={16} />恢复默认
+            </button>
+          </div>
+          <div className="modal-note">
+            <AlertCircle size={15} />
+            <span>
+              {canPick
+                ? "更改目录只影响之后生成的产物。历史记录里的旧图片、视频仍从原来的目录读取，不会被搬动，也不会失效。"
+                : "只有桌面版支持用原生对话框选择目录；Web 开发模式下这里不可用。"}
+            </span>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="secondary-button" onClick={onClose} disabled={busy}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () => void }) {
   const [items, setItems] = useState<Diagnostic[] | null>(null);
   useEffect(() => { void api.diagnostics(task.id).then(setItems).catch(() => setItems([])); }, [task.id]);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal diagnostic-modal"><div className="modal-header"><div><Activity size={18} /><h2>请求诊断</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div><div className="diagnostic-summary"><StatusBadge status={task.status} /><span>{task.model}</span><span>{task.id.slice(0, 8)}</span></div><div className="diagnostic-list">{items === null ? <LoadingScreen compact /> : items.length ? items.map((item) => <article key={item.id} className="diagnostic-entry"><header><span>HTTP {item.httpStatus ?? "-"}</span><span>{item.durationMs != null ? `${item.durationMs} ms` : ""}</span><span>{formatTime(item.createdAt)}</span></header><h3>Request</h3><pre>{JSON.stringify(item.request, null, 2)}</pre><h3>Response</h3><pre>{JSON.stringify(item.response, null, 2)}</pre></article>) : <div className="table-empty"><Activity size={28} /><span>暂无诊断记录</span></div>}</div></div></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal diagnostic-modal"><div className="modal-header"><div><Activity size={18} /><h2>请求诊断</h2></div><button className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></div><div className="diagnostic-summary"><StatusBadge status={task.status} /><span>{task.model}</span><span>{task.id.slice(0, 8)}</span></div><div className="diagnostic-list">{items === null ? <LoadingScreen compact /> : items.length ? items.map((item) => {
+      // 中间轮询不存完整响应（一个视频任务上百次能把库撑到几 MB），request 为 null 就是摘要行
+      const compact = item.request === null;
+      return (
+        <article key={item.id} className={`diagnostic-entry ${compact ? "compact" : ""}`}>
+          <header>
+            <span>HTTP {item.httpStatus ?? "-"}</span>
+            <span>{item.durationMs != null ? `${item.durationMs} ms` : ""}</span>
+            <span>{formatTime(item.createdAt)}</span>
+          </header>
+          {compact ? (
+            <p className="diagnostic-compact">{pollSummary(item.response)}<small>中间轮询只保留状态摘要，完整响应见最后一次</small></p>
+          ) : (
+            <><h3>Request</h3><pre>{JSON.stringify(item.request, null, 2)}</pre><h3>Response</h3><pre>{JSON.stringify(item.response, null, 2)}</pre></>
+          )}
+        </article>
+      );
+    }) : <div className="table-empty"><Activity size={28} /><span>暂无诊断记录</span></div>}</div></div></div>;
+}
+
+function pollSummary(response: unknown) {
+  if (!response || typeof response !== "object") return "轮询中";
+  const record = response as Record<string, unknown>;
+  const parts: string[] = [typeof record.status === "string" ? record.status : "进行中"];
+  if (typeof record.progress === "number") parts.push(`${record.progress}%`);
+  return `${typeof record.poll === "number" ? `第 ${record.poll} 次轮询 · ` : ""}${parts.join(" · ")}`;
 }
 
 function StatusBadge({ status }: { status: TaskStatus }) {
