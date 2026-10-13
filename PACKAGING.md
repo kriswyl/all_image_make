@@ -1,6 +1,6 @@
 # 益达工作台打包文档
 
-当前发布版本为 `2.0.1`。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
+当前发布版本为 `2.0.2`。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
 
 ## 环境准备
 
@@ -29,8 +29,8 @@ npm run release:portable
 命令会依次运行测试、前端和 Node 服务端构建、Tauri sidecar 准备以及压缩。输出位置：
 
 ```text
-artifacts/益达工作台-v2.0.1-portable-win-x64/
-artifacts/益达工作台-v2.0.1-portable-win-x64.zip
+artifacts/益达工作台-v2.0.2-portable-win-x64/
+artifacts/益达工作台-v2.0.2-portable-win-x64.zip
 ```
 
 目录名里的版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，改版本号后自动跟着变。
@@ -48,7 +48,7 @@ npm run release:installer
 便于分发的安装程序输出为：
 
 ```text
-artifacts/益达工作台-v2.0.1-win-x64-setup.exe
+artifacts/益达工作台-v2.0.2-win-x64-setup.exe
 ```
 
 Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`。
@@ -62,7 +62,7 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：
 
 ```powershell
-npm run version:set -- 2.0.2
+npm run version:set -- 2.0.3
 ```
 
 然后重新运行测试和对应的发布命令。发布前检查：

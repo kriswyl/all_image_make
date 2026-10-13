@@ -179,7 +179,14 @@ export function App() {
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
-  const [clearRequest, setClearRequest] = useState<{ scope: ClearScope; count: number; label: string; tasks: Task[] } | null>(null);
+  // 三个入口共用同一个确认弹窗，靠 mode 区分真正要删的范围：
+  // task=单条、selection=历史页勾选的若干条、scope=按图片/视频/全部清空
+  const [clearRequest, setClearRequest] = useState<
+    | { mode: "task"; count: number; label: string; tasks: Task[] }
+    | { mode: "selection"; count: number; label: string; tasks: Task[] }
+    | { mode: "scope"; scope: ClearScope; count: number; label: string; tasks: Task[] }
+    | null
+  >(null);
   const [assetDirOpen, setAssetDirOpen] = useState(false);
   const [assetsPath, setAssetsPath] = useState("");
   const [defaultAssetsPath, setDefaultAssetsPath] = useState("");
@@ -325,15 +332,21 @@ export function App() {
 
   /** 删除单条记录：和清空历史走同一个弹窗，都要问一句磁盘上的文件删不删 */
   function requestDeleteTask(task: Task) {
-    setClearRequest({ scope: "all", count: 1, label: "该条记录", tasks: [task] });
+    setClearRequest({ mode: "task", count: 1, label: "记录", tasks: [task] });
+  }
+
+  /** 删除历史页勾选的若干条：只动勾中的，页面上没勾的照旧留着 */
+  function requestDeleteSelected(selected: Task[]) {
+    if (!selected.length) return;
+    setClearRequest({ mode: "selection", count: selected.length, label: "记录", tasks: selected });
   }
 
   /** 清空指定类型的历史：图片、视频或全部 */
   function requestClearTasks(scope: ClearScope = "all") {
     const target = scope === "image" ? imageTasks : scope === "video" ? videoTasks : tasks;
     if (!target.length) return;
-    const label = scope === "image" ? "生图记录" : scope === "video" ? "视频记录" : "全部记录";
-    setClearRequest({ scope, count: target.length, label, tasks: target });
+    const label = scope === "image" ? "生图记录" : scope === "video" ? "视频记录" : "记录";
+    setClearRequest({ mode: "scope", scope, count: target.length, label, tasks: target });
   }
 
   /** 弹窗里选完之后真正执行删除。keepFiles 为真时磁盘上的图片视频原地保留 */
@@ -341,8 +354,11 @@ export function App() {
     const removed = new Set(request.tasks.map((task) => task.id));
     const dropLocally = (current: Task[]) => current.filter((task) => !removed.has(task.id));
     try {
-      if (request.tasks.length === 1) {
+      if (request.mode === "task") {
         await api.deleteTask(request.tasks[0].id, keepFiles);
+        setTasks(dropLocally);
+      } else if (request.mode === "selection") {
+        await api.deleteTasks(request.tasks.map((task) => task.id), keepFiles);
         setTasks(dropLocally);
       } else {
         await api.clearTasks(request.scope, keepFiles);
@@ -351,7 +367,8 @@ export function App() {
       }
       if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
       if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
-      showToast("success", request.tasks.length === 1 ? "已删除该记录" : "已清空生成历史");
+      showToast("success", request.mode === "scope" ? "已清空生成历史"
+        : request.mode === "task" ? "已删除该记录" : `已删除 ${removed.size} 条记录`);
       setClearRequest(null);
     } catch (error) {
       showToast("error", error instanceof Error ? error.message : "删除失败");
@@ -431,6 +448,7 @@ export function App() {
             references={references}
             onRefresh={refreshTasks}
             onDelete={requestDeleteTask}
+            onDeleteSelected={requestDeleteSelected}
             onClear={requestClearTasks}
             onOpenAssetSettings={() => setAssetDirOpen(true)}
             onDiagnostics={setDiagnosticTask}
@@ -455,6 +473,7 @@ export function App() {
       {diagnosticTask ? <DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} /> : null}
       {clearRequest ? (
         <ClearHistoryDialog
+          mode={clearRequest.mode}
           count={clearRequest.count}
           label={clearRequest.label}
           onClose={() => setClearRequest(null)}
@@ -803,12 +822,13 @@ function EmptyResult() {
   return <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear, onOpenAssetSettings, onDiagnostics, onToast }: {
+function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onToast }: {
   channels: Channel[];
   tasks: Task[];
   references: ReferenceController;
   onRefresh: () => void;
   onDelete: (task: Task) => void;
+  onDeleteSelected: (tasks: Task[]) => void;
   onClear: (scope?: ClearScope) => void;
   onOpenAssetSettings: () => void;
   onDiagnostics: (task: Task) => void;
@@ -816,9 +836,46 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
 }) {
   const [filter, setFilter] = useState<"all" | "image" | "video">("all");
   const [preview, setPreview] = useState<Task | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const imageTasks = tasks.filter((task) => !isVideoTask(task, channels));
   const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
   const filtered = filter === "image" ? imageTasks : filter === "video" ? videoTasks : tasks;
+  const selectedTasks = tasks.filter((task) => selected.has(task.id));
+  const allFilteredSelected = filtered.length > 0 && filtered.every((task) => selected.has(task.id));
+
+  // 列表刷新后，已经被删掉/过期的勾选要跟着清掉，否则「已选 N 条」和实际能删的对不上
+  useEffect(() => {
+    setSelected((current) => {
+      if (!current.size) return current;
+      const alive = new Set(tasks.map((task) => task.id));
+      const next = new Set([...current].filter((id) => alive.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [tasks]);
+
+  // 半选状态只能通过 DOM 属性设置，React 没有对应的 prop
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selected.size > 0 && !allFilteredSelected;
+  }, [selected, allFilteredSelected]);
+
+  /** 换筛选时清空勾选：勾中的可能已经不在眼前，留着会出现「看不见却被删掉」 */
+  function changeFilter(next: "all" | "image" | "video") {
+    setFilter(next);
+    setSelected(new Set());
+  }
+
+  function toggleAll() {
+    setSelected(allFilteredSelected ? new Set() : new Set(filtered.map((task) => task.id)));
+  }
+
+  function toggleOne(id: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
 
   // 图片视频都落在应用数据目录里，路径不好记，给个按钮直接翻到那儿
   async function revealMedia() {
@@ -836,10 +893,17 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
         <div><h1>历史</h1><span className="page-kicker">GENERATIONS</span></div>
         <div className="header-actions">
           <div className="filter-tabs">
-            <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部 ({tasks.length})</button>
-            <button className={filter === "image" ? "active" : ""} onClick={() => setFilter("image")}>图片 ({imageTasks.length})</button>
-            <button className={filter === "video" ? "active" : ""} onClick={() => setFilter("video")}>视频 ({videoTasks.length})</button>
+            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部 ({tasks.length})</button>
+            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片 ({imageTasks.length})</button>
+            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频 ({videoTasks.length})</button>
           </div>
+          {selected.size ? (
+            <div className="selection-bar">
+              <span>已选 <strong>{selected.size}</strong> 条</span>
+              <button className="secondary-button danger" onClick={() => onDeleteSelected(selectedTasks)}><Trash2 size={16} />删除选中</button>
+              <button className="secondary-button" onClick={() => setSelected(new Set())}>取消选择</button>
+            </div>
+          ) : null}
           {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : "视频"}记录`} onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
           <button className="secondary-button" title="更改素材保存目录" onClick={onOpenAssetSettings}><Settings2 size={16} />目录设置</button>
@@ -848,11 +912,15 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onClear
       </div>
       <div className="data-table-wrap">
         <table className="data-table history-table">
-          <thead><tr><th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" /></tr></thead>
+          <thead><tr>
+            <th className="history-select"><input ref={selectAllRef} type="checkbox" checked={allFilteredSelected} disabled={!filtered.length} onChange={toggleAll} aria-label="全选当前列表" /></th>
+            <th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" />
+          </tr></thead>
           <tbody>{filtered.map((task) => {
             const isVideo = isVideoTask(task, channels);
             return (
-              <tr key={task.id}>
+              <tr key={task.id} className={selected.has(task.id) ? "selected" : ""}>
+                <td className="history-select"><input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /></td>
                 <td>
                   <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => task.assets.length && setPreview(task)}>
                     {task.assets[0]
@@ -939,7 +1007,8 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
  * 除了二次确认，还要问清楚磁盘上的图片视频删不删——以前是直接删，
  * 想留图的用户只能自己去素材目录翻。
  */
-function ClearHistoryDialog({ count, label, onClose, onConfirm }: {
+function ClearHistoryDialog({ mode, count, label, onClose, onConfirm }: {
+  mode: "task" | "selection" | "scope";
   count: number;
   label: string;
   onClose: () => void;
@@ -948,6 +1017,9 @@ function ClearHistoryDialog({ count, label, onClose, onConfirm }: {
   // 默认连文件一起删：和改动前的行为一致，也避免磁盘无限增长
   const [deleteFiles, setDeleteFiles] = useState(true);
   const [busy, setBusy] = useState(false);
+  // 「清空」和「删除选中的几条」是两件事，标题和按钮都得分开说
+  const scopeClear = mode === "scope";
+  const title = scopeClear ? "清空历史" : mode === "selection" ? "删除选中的记录" : "删除记录";
 
   async function confirm() {
     setBusy(true);
@@ -956,9 +1028,9 @@ function ClearHistoryDialog({ count, label, onClose, onConfirm }: {
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-      <div className="modal narrow" role="dialog" aria-modal="true" aria-label={count === 1 ? "删除记录" : "清空历史"}>
+      <div className="modal narrow" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
-          <div><Trash2 size={18} /><h2>{count === 1 ? "删除记录" : "清空历史"}</h2></div>
+          <div><Trash2 size={18} /><h2>{title}</h2></div>
           <button className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={18} /></button>
         </div>
         <div className="modal-body">
@@ -984,7 +1056,7 @@ function ClearHistoryDialog({ count, label, onClose, onConfirm }: {
           <button className="secondary-button" onClick={onClose} disabled={busy}>取消</button>
           <button className="primary-button danger" onClick={() => void confirm()} disabled={busy}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
-            {count === 1 ? "删除" : `清空 ${count} 条`}
+            {scopeClear ? `清空 ${count} 条` : count === 1 ? "删除" : `删除 ${count} 条`}
           </button>
         </div>
       </div>

@@ -71,6 +71,11 @@ export const api = {
     `/api/generations?scope=${scope}&keepFiles=${keepFiles ? "1" : "0"}`,
     { method: "DELETE" },
   ),
+  /** 只删勾选的那些记录：和清空历史同一个接口，用 ids 指定范围 */
+  deleteTasks: (ids: string[], keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
+    `/api/generations?ids=${encodeURIComponent(ids.join(","))}&keepFiles=${keepFiles ? "1" : "0"}`,
+    { method: "DELETE" },
+  ),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   settings: () => request<Settings>("/api/settings"),
   /** assetsDir 传空串表示恢复默认目录 */

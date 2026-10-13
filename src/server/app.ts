@@ -294,17 +294,30 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({ deleted: true, keepFiles }));
   }));
 
-  /** 清空历史：一次请求处理完，避免前端逐条 DELETE 在几百条记录上排队 */
+  /**
+   * 清空历史 / 批量删除：一次请求处理完，避免前端逐条 DELETE 在几百条记录上排队。
+   *
+   * `ids=a,b,c` 是「只删这些」（历史页勾选后批量删），`scope` 是「按类型全清」。
+   * ids 优先：勾选删除只该动用户勾中的那些，范围清空是另一个入口。
+   */
   app.delete("/api/generations", asyncHandler(async (req, res) => {
     const scope = req.query.scope === "image" || req.query.scope === "video" ? req.query.scope : "all";
     const keepFiles = req.query.keepFiles === "1";
-    const adapterByChannel = new Map(db.listChannels().map((channel) => [channel.id, String(channel.adapterType)]));
-    const targets = db.listAllTaskRows().filter((row) => {
-      if (scope === "all") return true;
-      const isVideo = db.isVideoTaskRow(row, adapterByChannel);
-      return scope === "video" ? isVideo : !isVideo;
-    });
-    const removed = db.deleteTasks(targets.map((row) => row.id), { keepFiles });
+    const ids = String(req.query.ids ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+    let targets: string[];
+    if (ids.length) {
+      targets = ids.filter((id) => db.getTaskRow(id));
+    } else {
+      const adapterByChannel = new Map(db.listChannels().map((channel) => [channel.id, String(channel.adapterType)]));
+      targets = db.listAllTaskRows()
+        .filter((row) => {
+          if (scope === "all") return true;
+          const isVideo = db.isVideoTaskRow(row, adapterByChannel);
+          return scope === "video" ? isVideo : !isVideo;
+        })
+        .map((row) => row.id);
+    }
+    const removed = db.deleteTasks(targets, { keepFiles });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
     res.json(ok({ deleted: removed.deleted.length, keepFiles }));
   }));

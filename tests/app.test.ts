@@ -699,6 +699,55 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect(context.db.listTaskRows()).toHaveLength(0);
   });
 
+  it("deletes only the checked tasks when ids are given, and lets ids win over scope", async () => {
+    const origin = await startMock(imageHandler);
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-ids-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channel = await request(app).post("/api/channels").send({
+      name: "Ids Mock", baseUrl: origin, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+
+    async function generate(prompt: string) {
+      const created = await request(app).post("/api/generations")
+        .send({ channelId: channel.body.data.id, model: "mock-image", prompt }).expect(202);
+      const taskId = created.body.data.id as string;
+      await waitFor(() => {
+        const task = context.db.getTaskRow(taskId);
+        return task?.status === "succeeded" ? task : null;
+      }, `图片任务 ${prompt}`);
+      return taskId;
+    }
+
+    const assetsDir = path.join(dataDir, "assets");
+    const keepId = await generate("keep me");
+    const dropAId = await generate("drop a");
+    const dropBId = await generate("drop b");
+    expect(await fs.readdir(assetsDir)).toHaveLength(3);
+
+    // 勾中两条：只删这两条，磁盘上的文件跟着走，没勾的那条连文件一起留着
+    const removed = await request(app).delete(`/api/generations?ids=${dropAId},${dropBId}&keepFiles=0`).expect(200);
+    expect(removed.body.data).toMatchObject({ deleted: 2, keepFiles: false });
+    expect(context.db.getTaskRow(dropAId)).toBeNull();
+    expect(context.db.getTaskRow(dropBId)).toBeNull();
+    expect(context.db.getTaskRow(keepId)).not.toBeNull();
+    expect(context.db.listTaskRows()).toHaveLength(1);
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+
+    // ids 优先于 scope：带上 scope=video 也只删点名的那条，且保留文件
+    const single = await request(app).delete(`/api/generations?ids=${keepId}&scope=video&keepFiles=1`).expect(200);
+    expect(single.body.data).toMatchObject({ deleted: 1 });
+    expect(context.db.getTaskRow(keepId)).toBeNull();
+    expect(await fs.readdir(assetsDir)).toHaveLength(1);
+
+    // 列表里混进不存在的 id（比如别的窗口已经删过）：忽略它，不让整批请求失败
+    const stale = await request(app).delete(`/api/generations?ids=missing-id,${dropAId}&keepFiles=0`).expect(200);
+    expect(stale.body.data).toMatchObject({ deleted: 0 });
+  });
+
   it("writes new assets into a custom directory and keeps old history readable", async () => {
     const origin = await startMock(imageHandler);
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-assets-dir-test-"));

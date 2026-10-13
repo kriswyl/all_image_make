@@ -327,8 +327,9 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .data-table tbody tr:hover { background: #fafbf9; }
 .data-table th:first-child { width: 30%; }
 .data-table th:last-child { width: 128px; }
-.history-table th:first-child { width: 64px; }
-.history-table th:nth-child(2) { width: 30%; }
+.history-table th.history-select, .history-table td.history-select { width: 44px; padding-right: 0; }
+.history-table th:nth-child(2) { width: 64px; }
+.history-table th:nth-child(3) { width: 30%; }
 .history-thumb { position: relative; display: block; width: 46px; height: 46px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 9px; }
 .history-thumb:hover { border-color: #c4b5fd; box-shadow: 0 0 0 3px rgba(124, 58, 237, .1); }
 .history-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
@@ -903,6 +904,9 @@ input[type="checkbox"] {
   height: 18px;
   flex-shrink: 0;
   margin: 0;
+  /* 表单控件那条全局规则给了 input 左右各 11px 内边距，在 border-box 下会把
+     这里的 18px 硬撑成 25px——复选框要显式清零，宽度才真是写死的那个数 */
+  padding: 0;
   background-color: var(--surface);
   border: 1.5px solid var(--line-strong);
   border-radius: 6px;
@@ -1012,5 +1016,25 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .modal-lead { margin: 0; color: #4a4557; font-size: 13px; line-height: 1.65; }
 .diagnostic-entry.compact { border-color: var(--line); }
 .diagnostic-entry.compact header { background: var(--surface); }
+
+/* 全局复选框是 18px 见方，向导里的两组更小；上面那条 15px 的规则和全局同权重又更早，
+   高度会被全局压回去，成了 15×18 的扁方框，这里补一道更具体的改回正方形 */
+.unit-head input[type="checkbox"], .group-toggle input[type="checkbox"] { width: 15px; height: 15px; }
+
+/* 历史页头部最多会同时出现筛选、批量条、清空、素材目录、目录设置五组控件，
+   窄窗口下宁可让它们换行，也不要把按钮压扁成竖排的单字（flex 会一直缩到底） */
+.header-actions { flex-wrap: wrap; justify-content: flex-end; }
+.header-actions > button { flex: 0 0 auto; white-space: nowrap; }
+
+/* 历史页勾选：勾中后才出现的批量操作条，用竖线和右边的筛选/清空隔开 */
+.selection-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--line-strong); white-space: nowrap; }
+.selection-bar span { color: var(--muted); font-size: 12px; }
+.selection-bar strong { color: var(--accent-dark); font-size: 13px; }
+.selection-bar .secondary-button { min-height: 34px; padding: 0 12px; font-size: 12px; }
+.secondary-button.danger { color: #a33b27; background: var(--surface); border-color: #f0d3ca; }
+.secondary-button.danger:hover:not(:disabled) { color: #8f3320; background: var(--coral-soft); border-color: var(--coral); }
+/* 勾中的行整行留个底色，表头的全选框和每行的复选钮都对齐在同一列 */
+.data-table tbody tr.selected { background: var(--accent-soft); }
+.history-table th.history-select, .history-table td.history-select { vertical-align: middle; }
 .diagnostic-compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; padding: 11px 13px; color: #4a4557; font: 12px/1.5 "Cascadia Code", Consolas, monospace; }
 .diagnostic-compact small { color: var(--muted); font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 11px; }

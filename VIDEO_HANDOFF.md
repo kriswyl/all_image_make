@@ -9,7 +9,7 @@
 | 项目 | 状态 |
 |---|---|
 | TypeScript | `npx tsc --noEmit` 零错误 |
-| 单元测试 | `npm test` → 57 passed（3 个文件） |
+| 单元测试 | `npm test` → 58 passed（3 个文件） |
 | 开发服务 | 前端 `127.0.0.1:5173`，API `127.0.0.1:17891` |
 | 真实 API 联调 | Seedance **已跑通**（见下）；万相 / Grok 仍只测到 mock 上游 |
 
@@ -117,6 +117,8 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
    注意只有 `data:` 开头的内联 base64 才算进这个预算，公网 / `oss://` 地址不占请求体。
 
+9. **桌面版拖不进图片，浏览器里却是好的** —— Tauri 窗口默认 `dragDropEnabled: true`，系统级的拖放处理器把文件拦在 webview 前面，前端根本收不到 `drop` 事件（tauri 自己的文档写着：Disabling it is required to use HTML5 drag and drop on the frontend on Windows）。`src-tauri/tauri.conf.json` 的窗口里显式写了 `"dragDropEnabled": false` 才正常。**前端代码一直是对的，改这个必须重新构建桌面版才生效**——Web 开发模式下永远看不出这个毛病，所以以前「浏览器里验过」并不能说明桌面版能用。
+
 ## 重启恢复与诊断体积（最近一轮改动）
 
 ### 重启不再丢掉正在生成的视频
@@ -161,6 +163,14 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 顺带发现并修掉一个 CSS 问题：全局 `input { width: 100% }` 会把单选钮撑成整行，把选项文字挤成竖排——`.confirm-option input` 现在显式写成 15×15。
 
+### 历史页勾选批量删除（2026-10-13）
+
+同样在浏览器里走了一遍：表头全选/取消、单选两行后头部出现「已选 2 条」、表头半选态、切筛选清空勾选、视频筛选下全选只勾中 9 条、三种弹窗文案（`删除选中的记录` / `删除 2 条`、`删除记录` / `删除`、`清空历史` / `清空 18 条`）。**没有点确认删除**，用户库里 6 个渠道 / 18 条记录原样未动。
+
+顺带又发现一个同源的 CSS 坑并修掉：`input, select { padding: 0 11px }` 这条全局规则在 `border-box` 下会把固定宽度的复选框**硬撑成 25px 宽**（`.unit-head` 想要 15px、`.checkbox-label` 想要 17px，实际都是 25px 宽的扁方框）。现在全局 `input[type="checkbox"]` 显式 `padding: 0`；`.unit-head` / `.group-toggle` 那条 15px 规则和全局同权重又更早，高度会被全局的 18px 盖掉，所以补了一道更具体的规则。
+
+历史页头部控件（筛选 + 批量条 + 清空 + 素材目录 + 目录设置）在窄窗口下会挤成竖排的单字，`.header-actions` 现在允许换行、按钮 `flex: 0 0 auto` + `white-space: nowrap`。
+
 ## Seedance 真实验证记录（2026-10-12）
 
 用 `词元流墟-seedance视频` 渠道（`996611d8-…`）跑通了一次完整链路：
@@ -183,7 +193,7 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 ```bash
 cd all_image_make
-npm test          # 57 个测试
+npm test          # 58 个测试
 npx tsc --noEmit  # 类型检查
 npm run dev       # 起服务
 ```
@@ -197,6 +207,7 @@ npm run dev       # 起服务
 - 「keeps the submit request and the last poll full while compacting the middle polls」——诊断首尾完整、中间精简
 - 「resumes polling a video task after a restart…」——直接往库里插一条带 `remote_task_id` 的任务，`db.close()` 后再 `createApp()`，调 `runner.resume()` 验证接着轮询；顺带用带尾斜杠的 Base URL 盯 `joinEndpoint`
 - 「clears history in bulk…」「writes new assets into a custom directory…」——清空历史与素材目录（在 `history cleanup, custom asset directory and restart recovery` 这个 describe 里）
+- 「deletes only the checked tasks when ids are given, and lets ids win over scope」——历史页勾选批量删除：只删点名的那些、文件跟着走、`ids` 压过 `scope`、混进不存在的 id 也不整批失败
 
 ## 主要文件职责
 
