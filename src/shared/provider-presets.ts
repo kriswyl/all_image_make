@@ -57,6 +57,22 @@ const GROK_VIDEO_MODELS = ["grok-imagine-video", "grok-imagine-video-1.5-preview
 const WAN_VIDEO_MODELS = ["wan3.0-video"];
 const SEEDANCE_VIDEO_MODELS = ["sd-2.5", "sd-2.0", "sd-2.0-fast", "sd-2.0-mini"];
 
+/**
+ * 对话（大脑）模型候选。
+ * 挑选标准：指令跟随稳、JSON 输出不跑偏、支持视觉（看图改要用），
+ * 并且尽量避开纯推理模型——它们每次调用都有几秒的推理开销，Agent 一轮要调好几次。
+ * 实测 deepseek-v4-1-flash 三项都满足，所以排在第一个。
+ */
+const CHAT_MODELS = [
+  "deepseek-v4-1-flash",
+  "deepseek-v4-pro",
+  "glm-5.3",
+  "qwen3.8-max",
+  "grok-4.7",
+  "gpt-5.6-sol",
+  "claude-sonnet-5-5",
+];
+
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
     id: "vectorengine-gpt",
@@ -226,6 +242,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       },
     ],
   },
+  {
+    id: "tiantoken-chat",
+    label: "词元流墟-对话模型",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "chat",
+        label: "对话模型",
+        description: "chat completions 协议，用作对话工作区的大脑（不出图）",
+        adapterType: "openai-chat",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_CHAT_API_KEY",
+        models: CHAT_MODELS,
+      },
+    ],
+  },
 ];
 
 export function findProviderPreset(id: string): ProviderPreset | undefined {
@@ -237,6 +271,7 @@ export function adapterDefaultEndpoint(adapterType: AdapterType) {
   switch (adapterType) {
     case "openai-images": return { endpoint: "/v1/images/generations" };
     case "openai-chat-image": return { endpoint: "/v1/chat/completions" };
+    case "openai-chat": return { endpoint: "/v1/chat/completions" };
     case "gemini-content": return { endpoint: "/v1beta/models/{model}:generateContent" };
     case "grok-video": return { endpoint: "/v1/videos/generations" };
     case "wan-video": return { endpoint: "/api/v1/services/aigc/video-generation/video-synthesis" };

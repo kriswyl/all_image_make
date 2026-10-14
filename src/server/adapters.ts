@@ -144,6 +144,7 @@ export function defaultEndpoint(adapterType: DbChannel["adapterType"]) {
   switch (adapterType) {
     case "openai-images": return "/v1/images/generations";
     case "openai-chat-image": return "/v1/chat/completions";
+    case "openai-chat": return "/v1/chat/completions";
     case "gemini-content": return "/v1beta/models/{model}:generateContent";
     case "wan-video": return "/api/v1/services/aigc/video-generation/video-synthesis";
     case "grok-video": return "/v1/videos/generations";
@@ -152,7 +153,8 @@ export function defaultEndpoint(adapterType: DbChannel["adapterType"]) {
   }
 }
 
-function applyAuth(url: string, headers: Record<string, string>, channel: DbChannel, key: string) {
+/** 大脑调用（brain.ts）复用同一套鉴权，避免两处逻辑漂移 */
+export function applyAuth(url: string, headers: Record<string, string>, channel: DbChannel, key: string) {
   if (channel.authType === "none") return url;
   if (!key) throw new Error("该渠道尚未配置 API Key");
   if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
@@ -368,12 +370,34 @@ export async function sendPreparedRequest(request: PreparedRequest) {
   return { payload, status: response.status, durationMs };
 }
 
+/**
+ * 从中转站的错误响应里抠出一句人话。
+ *
+ * 以前只认 `message` / `error.message`，其余形状一律退化成常量「中转接口返回错误」——
+ * 用户在界面上因此看不到任何线索，只能反复描述「它说参数没带上」。
+ * 现在把常见的几种形状都认掉，最后再兜一个 JSON 片段，宁长勿丢。
+ */
 function extractErrorMessage(payload: unknown) {
   if (!payload || typeof payload !== "object") return "中转接口返回错误";
   const record = payload as Record<string, unknown>;
-  if (typeof record.message === "string") return record.message;
-  if (record.error && typeof record.error === "object" && typeof (record.error as Record<string, unknown>).message === "string") {
-    return String((record.error as Record<string, unknown>).message);
+  if (typeof record.message === "string" && record.message) return record.message;
+  const nested = record.error;
+  if (nested && typeof nested === "object") {
+    const inner = nested as Record<string, unknown>;
+    if (typeof inner.message === "string" && inner.message) return inner.message;
+    // 有的站点只回 code / status，把这半句也留下，好过换成一句常量
+    if (typeof inner.code === "string" || typeof inner.code === "number") return `上游错误 ${inner.code}`;
+    if (typeof inner.status === "string") return `上游错误 ${inner.status}`;
+  }
+  if (typeof nested === "string" && nested) return nested;
+  // 非 JSON 的响应体被上游包成 { text }，原文比常量有用得多
+  if (typeof record.text === "string" && record.text.trim()) return record.text.trim().slice(0, 300);
+  if (typeof record.code === "string" || typeof record.code === "number") return `上游错误 ${record.code}`;
+  try {
+    const text = JSON.stringify(record);
+    if (text && text !== "{}") return `上游返回了无法识别的错误：${text.slice(0, 300)}`;
+  } catch {
+    // 循环引用之类，退回常量
   }
   return "中转接口返回错误";
 }

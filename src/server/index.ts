@@ -16,6 +16,8 @@ const server = app.listen(port, "127.0.0.1", () => {
 
 function shutdown() {
   server.close(() => {
+    // 先让 Agent 解绑 TaskRunner 的订阅并中断在跑的那一轮，再关库
+    context.agent.dispose();
     context.db.close();
     process.exit(0);
   });

@@ -1,0 +1,187 @@
+/**
+ * 工具调用卡片（AGENT_PLAN.md §14 的 `plan` / `progress` / `message` 三个事件都落在这张卡上）。
+ *
+ * 一次工具调用在库里是**两行**：assistant 那行存大脑的计划和 `say`，
+ * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
+ * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
+ */
+import { AlertCircle, CheckCircle2, ChevronDown, Film, Image as ImageIcon, Layers, LoaderCircle, Sparkles, Wand2 } from "lucide-react";
+import { useState } from "react";
+import { api } from "../api";
+import { LazyVideoThumb } from "../LazyVideoThumb";
+import { ParamChips } from "../ParamChips";
+import {
+  agentToolLabels, assetRef, readCanvasAssetIds, readParamNotes,
+  type AgentToolName, type CanvasAsset, type ChatMessage, type ToolResult,
+} from "../../shared/agent-types";
+import type { Asset } from "../../shared/types";
+
+const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
+  generate_image: ImageIcon,
+  edit_image: Sparkles,
+  set_canvas: Layers,
+  optimize_prompt: Wand2,
+  generate_video: Film,
+  ask: Sparkles,
+  reply: Sparkles,
+};
+
+export interface TaskProgress {
+  status: string;
+  progress: number | null;
+}
+
+/** 工具结果里给用户看的那几个字段，各工具不一样 */
+function resultDetail(tool: AgentToolName, result: ToolResult | null) {
+  const data = result?.data;
+  if (!data) return [];
+  const rows: Array<[string, string]> = [];
+  if (typeof data.model === "string") rows.push(["模型", data.model]);
+  if (tool === "optimize_prompt" && typeof data.prompt === "string") rows.push(["优化后", data.prompt]);
+  if (tool === "generate_image" || tool === "edit_image") {
+    if (typeof data.count === "number" && data.count > 1) rows.push(["张数", String(data.count)]);
+  }
+  if (typeof data.round === "number") rows.push(["轮次", `第 ${data.round} 轮`]);
+  // set_canvas 一次设了多张时把整组列出来：ToolResult.assetId 只装得下主图，
+  // 卡片上不写，用户就只能看见「切到 #a3f1」，看不到另外两张也被设进去了
+  const canvasIds = readCanvasAssetIds(data);
+  if (canvasIds.length > 1) rows.push(["画布", canvasIds.map((id) => assetRef(id)).join("、")]);
+  // 模型是怎么选中的：优先用工具给的原话（可能是「按你设的默认模型用了 X」，
+  // 也可能是「你设的默认模型 Y 已经不可用了」），老记录没有这句话时才退回原来的笼统说法
+  if (typeof data.aliasNote === "string") rows.push(["模型来源", data.aliasNote]);
+  else if (data.usedFallback === true) rows.push(["提示", "没认出模型名，用了默认渠道"]);
+  return rows;
+}
+
+export function ToolCard({
+  message,
+  result,
+  progress,
+  assets = [],
+  onPreview,
+}: {
+  message: ChatMessage;
+  result: ChatMessage | null;
+  progress?: TaskProgress;
+  /** 本会话的全部素材（图 + 视频），用来把 assetId 还原成 mimeType 和缩略图 */
+  assets?: CanvasAsset[];
+  onPreview?: (assetId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const tool = message.toolName ?? "reply";
+  const Icon = TOOL_ICONS[tool] ?? Sparkles;
+  const payload = result?.toolResult ?? null;
+  const isPending = !result || result.status === "pending";
+  const failed = (result && result.status === "error") || payload?.ok === false;
+  const detail = resultDetail(tool, payload);
+  const paramNotes = readParamNotes(payload?.data);
+  const args = message.toolArgs ?? {};
+  const prompt = typeof args.prompt === "string" ? args.prompt : null;
+  // set_canvas 的 assetId 是「切到哪张」，一样值得点开看一眼
+  const assetId = result?.assetId ?? null;
+  /**
+   * 素材表里的 mimeType 才是权威：它是**现在**从库里算出来的，
+   * 所以这条改动之前落库的老记录也照样判得对（`toolResult.mimeType` 只写在
+   * 之后落库的消息上，光靠它的话，用户截图里那条视频记录还是会被当图片渲染）。
+   */
+  const produced = assetId ? assets.find((item) => item.asset.id === assetId)?.asset ?? null : null;
+  const isVideoResult = produced
+    ? produced.mimeType.startsWith("video/")
+    // 这一轮刚落的库、还没走过那次全量刷新：退回 ToolResult 里带的那份
+    : payload?.mimeType?.startsWith("video/") ?? false;
+
+  return (
+    <div className="chat-row chat-row-assistant">
+      <div className={`tool-card ${failed ? "is-error" : ""} ${isPending ? "is-pending" : ""}`}>
+        <div className="tool-card-head">
+          <span className="tool-card-icon"><Icon size={14} /></span>
+          <span className="tool-card-title">{agentToolLabels[tool]}</span>
+          <span className="tool-card-status">
+            {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
+              : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+          </span>
+        </div>
+
+        {message.content ? <div className="tool-card-say">{message.content}</div> : null}
+        {prompt ? <div className="tool-card-prompt">{prompt}</div> : null}
+
+        {isPending && progress?.progress != null ? (
+          <div className="tool-card-bar"><span style={{ width: `${Math.max(2, Math.min(100, progress.progress))}%` }} /></div>
+        ) : null}
+
+        {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
+
+        {assetId && onPreview ? (
+          <button type="button" className="tool-card-thumb" onClick={() => onPreview(assetId)} title="点开看">
+            <ResultThumb assetId={assetId} asset={produced} isVideo={isVideoResult} />
+          </button>
+        ) : null}
+
+        {paramNotes.length ? <ParamChips notes={paramNotes} /> : null}
+
+        <div className="tool-card-foot">
+          {detail.length ? (
+            <button type="button" className="link-btn" onClick={() => setOpen((value) => !value)}>
+              <ChevronDown size={12} className={open ? "flip" : ""} />参数
+            </button>
+          ) : null}
+          {assetId && onPreview ? (
+            <button type="button" className="link-btn" onClick={() => onPreview(assetId)}>
+              <ImageIcon size={12} />查看结果
+            </button>
+          ) : null}
+          {result?.taskId ? (
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => { window.open(api.assetUrl(`/api/generations/${result.taskId}/diagnostics`), "_blank"); }}
+            >
+              诊断
+            </button>
+          ) : null}
+        </div>
+
+        {open && detail.length ? (
+          <dl className="tool-card-detail">
+            {detail.map(([key, value]) => (
+              <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+            ))}
+          </dl>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 结果缩略图（需求.md 问题 3）。
+ *
+ * 视频也必须能看：服务端做不出视频缩略图（缩略图走 jimp，对视频直接 404
+ * `ASSET_NOT_IMAGE`），所以视频这一支交给客户端的 `<video preload="metadata">` 解码，
+ * 而且**绝不能**去请求 `/thumb`——那会拿到一个 404，回退到原图后 `<img>` 也还是裂的。
+ */
+function ResultThumb({ assetId, asset, isVideo }: { assetId: string; asset: Asset | null; isVideo: boolean }) {
+  if (isVideo) {
+    const src = asset?.url ?? `/api/assets/${assetId}/file`;
+    return <LazyVideoThumb src={api.assetUrl(src)} />;
+  }
+  return (
+    <img
+      src={api.assetUrl(asset?.thumbUrl ?? asset?.url ?? `/api/assets/${assetId}/thumb`)}
+      alt=""
+      loading="lazy"
+      onError={(event) => {
+        // 缩略图只是省流量，不该成为图裂的原因（和 AssetStrip 一样的回退）
+        const image = event.currentTarget;
+        if (image.dataset.fallback === "1") return;
+        image.dataset.fallback = "1";
+        image.src = api.assetUrl(asset?.url ?? `/api/assets/${assetId}/file`);
+      }}
+    />
+  );
+}
+
+function ProgressLabel({ progress }: { progress: TaskProgress }) {
+  const label = progress.progress == null ? "生成中" : `生成中 ${progress.progress}%`;
+  return <span className="tool-card-progress-label"><LoaderCircle size={12} className="spin" />{label}</span>;
+}

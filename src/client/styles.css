@@ -276,6 +276,14 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 /* 结果工具栏：下载 / 重生成 / 用作参考图 */
 .result-actions { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-bottom: 4px; }
 .result-actions .secondary-button { min-height: 34px; padding: 0 12px; font-size: 12px; }
+/* 请求参数（问题 1 D）：工作台和 Agent 工具卡片用同一组 .tool-param 小标签，这里只提供外壳 */
+.result-params { flex: 0 0 auto; margin-top: 8px; padding: 0 10px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 10px; }
+.result-params > summary { display: flex; align-items: center; gap: 6px; min-height: 34px; color: var(--muted); cursor: pointer; list-style: none; font-size: 12px; font-weight: 600; }
+.result-params > summary::-webkit-details-marker { display: none; }
+.result-params > summary::before { content: "\25B8"; font-size: 10px; }
+.result-params[open] > summary::before { content: "\25BE"; }
+.result-params[open] > summary { color: var(--accent-dark); }
+.result-params .tool-card-params { margin: 0 0 10px; }
 .stage-thumbs { display: flex; gap: 6px; margin-left: auto; overflow-x: auto; }
 .stage-thumb { display: block; width: 40px; height: 40px; flex: 0 0 40px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; }
 .stage-thumb.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(124, 58, 237, .18); }
@@ -1013,6 +1021,13 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 /* 素材目录设置 */
 .settings-path { padding: 10px 12px; overflow-wrap: anywhere; color: #3c3450; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; font: 11.5px/1.6 "Cascadia Code", Consolas, monospace; }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 设置弹窗里的分节：素材目录 / gemini 缺省尺寸 */
+.settings-section { display: grid; gap: 10px; }
+.settings-section + .settings-section { padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-section h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.settings-section code { padding: 1px 5px; font: 11px "Cascadia Code", Consolas, monospace; color: var(--accent-dark); background: var(--accent-soft); border-radius: 5px; }
+.settings-segment { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-segment .secondary-button.is-on { color: var(--accent-dark); background: var(--accent-soft); border-color: #c8b4f8; }
 .modal-lead { margin: 0; color: #4a4557; font-size: 13px; line-height: 1.65; }
 .diagnostic-entry.compact { border-color: var(--line); }
 .diagnostic-entry.compact header { background: var(--surface); }
@@ -1038,3 +1053,228 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .history-table th.history-select, .history-table td.history-select { vertical-align: middle; }
 .diagnostic-compact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; padding: 11px 13px; color: #4a4557; font: 12px/1.5 "Cascadia Code", Consolas, monospace; }
 .diagnostic-compact small { color: var(--muted); font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 11px; }
+
+/* ── 对话式创作工作区 ──────────────────────────────────────────────────────── */
+
+.chat-view { display: grid; grid-template-columns: 258px minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
+
+.chat-sidebar { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--surface); }
+.chat-sidebar-head { padding: 14px; border-bottom: 1px solid var(--line); }
+.chat-sidebar-head .primary-button { width: 100%; }
+.chat-sidebar-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.chat-sidebar-empty { display: flex; gap: 7px; padding: 12px 10px; color: var(--muted); font-size: 12px; line-height: 1.65; }
+
+.chat-conv { display: flex; align-items: stretch; border-radius: 11px; }
+.chat-conv:hover { background: var(--surface-soft); }
+.chat-conv.is-active { background: var(--accent-soft); }
+.chat-conv-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding: 9px 10px; border: 0; background: none; text-align: left; color: inherit; }
+.chat-conv-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-conv.is-active .chat-conv-title { color: var(--accent-dark); }
+.chat-conv-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-conv-meta { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: #a9a5bb; }
+.chat-conv-run { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-style: normal; font-weight: 600; }
+.chat-conv-del { align-self: center; margin-right: 6px; opacity: 0; }
+.chat-conv:hover .chat-conv-del { opacity: 1; }
+
+.chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #f6f5fb; }
+
+.chat-blank { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 40px; text-align: center; color: var(--muted); }
+.chat-blank svg { color: var(--accent); }
+.chat-blank h2 { margin: 0; font-size: 17px; color: var(--ink); }
+.chat-blank p { margin: 0; max-width: 460px; font-size: 13px; line-height: 1.75; }
+.chat-blank ul { margin: 0; padding-left: 18px; max-width: 460px; text-align: left; font-size: 12.5px; line-height: 2; }
+.chat-blank .primary-button { margin-top: 6px; }
+
+.chat-header { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.chat-title { flex: 0 1 260px; min-width: 110px; min-height: 32px; padding: 0 9px; font-size: 14px; font-weight: 700; color: var(--ink); background: transparent; border-color: transparent; }
+.chat-title:hover:not(:focus) { background: var(--surface-soft); }
+.chat-header-controls { flex: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+
+.chat-control { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; min-height: 32px; font-size: 12px; color: var(--muted); background: var(--surface-soft); border: 1px solid transparent; border-radius: 10px; }
+.chat-control select { min-height: 26px; padding: 0 4px; font-size: 12px; background: transparent; border-color: transparent; max-width: 220px; }
+.chat-control.chat-toggle { border-color: transparent; color: var(--muted); }
+.chat-control.chat-toggle.is-on { color: var(--accent-dark); background: var(--accent-soft); }
+
+.chat-caps { position: relative; font-size: 12px; }
+.chat-caps > summary { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; min-height: 32px; color: var(--muted); background: var(--surface-soft); border-radius: 10px; cursor: pointer; list-style: none; }
+.chat-caps > summary::-webkit-details-marker { display: none; }
+.chat-caps[open] > summary { color: var(--accent-dark); background: var(--accent-soft); }
+.chat-caps-body { position: absolute; right: 0; top: 38px; z-index: 20; width: 330px; max-height: 380px; overflow-y: auto; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-card); }
+.chat-caps-item { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 2px 8px; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+.chat-caps-item:last-of-type { border-bottom: 0; }
+.chat-caps-item em { font-style: normal; font-size: 10.5px; color: var(--muted); align-self: center; }
+.chat-caps-item strong { font-size: 12.5px; color: var(--accent-dark); font-family: "Cascadia Code", Consolas, monospace; }
+.chat-caps-item span { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-caps-note { margin: 8px 6px 2px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+/* 默认生图 / 生视频模型（问题 5）：一并标出「现在实际用的是哪个」，说的和做的才对得上 */
+.chat-caps-defaults { padding: 8px 6px 10px; border-bottom: 1px solid var(--line); }
+.chat-caps-defaults label { display: block; }
+.chat-caps-defaults label + label { margin-top: 8px; }
+.chat-caps-defaults label > span { display: block; margin-bottom: 4px; font-size: 10.5px; color: var(--muted); }
+.chat-caps-defaults select { width: 100%; min-height: 28px; padding: 0 4px; font-size: 11.5px; }
+.chat-caps-hint { margin: 8px 0 0; font-size: 10.5px; line-height: 1.65; color: #a9a5bb; }
+.chat-caps-alias { display: flex; align-items: center; gap: 6px; }
+.chat-caps-flag { flex: 0 0 auto; padding: 1px 5px; font-style: normal; font-size: 10px; color: var(--accent-dark); background: var(--accent-soft); border-radius: 6px; }
+.chat-caps-item.is-default strong { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
+
+.chat-thread { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; display: flex; flex-direction: column; gap: 12px; }
+.chat-thread-empty { margin: auto; max-width: 440px; text-align: center; color: var(--muted); font-size: 12.5px; line-height: 1.8; }
+
+.chat-row { display: flex; }
+.chat-row-user { justify-content: flex-end; }
+.chat-row-assistant { flex-direction: column; align-items: flex-start; gap: 6px; max-width: 100%; }
+
+.chat-bubble { max-width: 660px; padding: 10px 13px; border-radius: var(--radius); font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+.chat-bubble-user { background: var(--accent); color: #fff; border-bottom-right-radius: 5px; box-shadow: 0 2px 8px rgba(109, 40, 217, .22); }
+/* 自己传的图跟在气泡里（需求.md 问题 4）：只留一句文件名的话，回头翻记录看不出传的是哪张 */
+.chat-bubble-thumb { display: block; max-width: 220px; margin-bottom: 7px; padding: 0; overflow: hidden; background: rgba(255, 255, 255, .18); border: 1px solid rgba(255, 255, 255, .35); border-radius: 9px; cursor: zoom-in; line-height: 0; }
+.chat-bubble-thumb img { display: block; width: 100%; max-height: 180px; object-fit: cover; }
+.chat-bubble-assistant { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 5px; box-shadow: var(--shadow-panel); }
+.chat-bubble-assistant.is-error { border-color: #f0d3ca; background: var(--coral-soft); color: #8f3320; }
+
+.chat-note { align-self: center; display: inline-flex; align-items: center; gap: 6px; max-width: 620px; padding: 5px 11px; font-size: 11.5px; color: var(--muted); background: var(--surface-soft); border-radius: 999px; }
+.chat-note.is-error { color: #8f3320; background: var(--coral-soft); }
+
+.chat-typing { color: var(--muted); }
+.chat-caret { display: inline-block; width: 2px; height: 1em; margin-left: 3px; vertical-align: -2px; background: var(--accent); animation: chat-blink 1s steps(2, start) infinite; }
+@keyframes chat-blink { 50% { opacity: 0; } }
+
+.chat-reasoning { max-width: 660px; font-size: 12px; }
+.chat-reasoning > summary { color: var(--muted); cursor: pointer; list-style: none; }
+.chat-reasoning > summary::-webkit-details-marker { display: none; }
+.chat-reasoning > summary::before { content: "\25B8  "; }
+.chat-reasoning[open] > summary::before { content: "\25BE  "; }
+.chat-reasoning.is-live > summary { color: var(--accent); }
+.chat-reasoning-body { margin-top: 6px; padding: 9px 11px; max-height: 220px; overflow-y: auto; color: var(--muted); line-height: 1.7; white-space: pre-wrap; background: var(--surface-soft); border-left: 2px solid var(--line-strong); border-radius: 0 8px 8px 0; }
+
+/* ── 工具卡片 ──────────────────────────────────────────────────────────────── */
+
+.tool-card { max-width: 660px; min-width: 280px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 4px var(--radius) var(--radius) 4px; box-shadow: var(--shadow-panel); }
+.tool-card.is-pending { border-left-color: var(--accent); }
+.tool-card.is-error { border-left-color: var(--coral); background: #fffafc; }
+.tool-card-head { display: flex; align-items: center; gap: 7px; }
+.tool-card-icon { display: inline-flex; color: var(--accent); }
+.tool-card.is-error .tool-card-icon { color: var(--coral); }
+.tool-card-title { font-size: 12.5px; font-weight: 700; }
+.tool-card-status { margin-left: auto; display: inline-flex; align-items: center; color: #10b981; }
+.tool-card.is-error .tool-card-status { color: var(--coral); }
+.tool-card.is-pending .tool-card-status { color: var(--accent); }
+.tool-card-progress-label { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; }
+.tool-card-say { margin-top: 5px; font-size: 13px; line-height: 1.7; color: var(--ink); }
+.tool-card-prompt { margin-top: 6px; padding: 7px 9px; font-size: 12px; line-height: 1.65; color: #4a4557; background: var(--surface-soft); border-radius: 9px; }
+.tool-card-bar { margin-top: 8px; height: 3px; overflow: hidden; background: var(--line); border-radius: 999px; }
+.tool-card-bar > span { display: block; height: 100%; background: linear-gradient(90deg, #a78bfa, var(--accent)); transition: width 400ms ease; }
+.tool-card-result { margin-top: 7px; font-size: 12px; line-height: 1.65; color: var(--muted); }
+/* 结果缩略图（问题 3）：视频也走这里，但用的是客户端解码的 <video>，服务端缩略图解不了视频 */
+.tool-card-thumb { display: block; width: 216px; max-width: 100%; height: 134px; margin-top: 8px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 10px; cursor: zoom-in; }
+.tool-card-thumb img, .tool-card-thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.tool-card-thumb:hover { border-color: var(--line-strong); }
+/* 参数核对（问题 1）：摆在卡片正面，因为「请求体里到底带没带」正是用户要盯的那件事 */
+.tool-card-params { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tool-param { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 999px; }
+.tool-param b { font-weight: 600; color: #4a4557; font-family: "Cascadia Code", Consolas, monospace; }
+/* 我们替用户补的默认值：要说清楚这是补的，不然用户以为是自己要的 */
+.tool-param.is-defaulted { color: var(--accent-dark); background: var(--accent-soft); border-color: #ddd0fb; }
+.tool-param.is-defaulted b { color: var(--accent-dark); }
+/* 写了但没发出去：这是问题 1 的现场，必须扎眼 */
+.tool-param.is-dropped { color: var(--warning); background: #fdf5e6; border-color: #f0dcb4; }
+.tool-param.is-dropped b { color: var(--warning); text-decoration: line-through; }
+.tool-card-foot { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.tool-card-detail { margin: 8px 0 0; padding: 8px 10px; background: var(--surface-soft); border-radius: 9px; }
+.tool-card-detail > div { display: flex; gap: 9px; font-size: 11.5px; line-height: 1.9; }
+.tool-card-detail dt { flex: 0 0 62px; color: var(--muted); }
+.tool-card-detail dd { flex: 1; margin: 0; word-break: break-word; }
+
+.link-btn { display: inline-flex; align-items: center; gap: 4px; padding: 0; font-size: 11.5px; color: var(--accent-dark); background: none; border: 0; }
+.link-btn:hover { text-decoration: underline; }
+.link-btn .flip { transform: rotate(180deg); }
+
+/* ── 确认卡片 ──────────────────────────────────────────────────────────────── */
+
+.confirm-card { max-width: 620px; padding: 14px; background: var(--surface); border: 1px solid #ddd0fb; border-radius: var(--radius); box-shadow: var(--shadow-card); }
+.confirm-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.confirm-card-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px; font-weight: 600; color: #fff; background: var(--accent); border-radius: 999px; }
+.confirm-card-badge.is-warn { background: var(--warning); }
+.confirm-card-model { font-size: 11.5px; color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; }
+.confirm-card-message { margin: 10px 0 0; font-size: 13px; line-height: 1.7; }
+.confirm-card-say { margin: 6px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--muted); }
+.confirm-card-prompt { margin-top: 8px; padding: 9px 11px; font-size: 12.5px; line-height: 1.7; color: #4a4557; background: var(--surface-soft); border-radius: 10px; }
+.confirm-card-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; }
+.confirm-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.confirm-field > span { flex: 0 0 auto; }
+.confirm-field input { min-height: 32px; width: 92px; padding: 0 9px; font-size: 12.5px; }
+.confirm-field input[type="number"] { width: 66px; }
+.confirm-field em { font-style: normal; font-size: 11px; }
+.confirm-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.confirm-check input { width: 15px; height: 15px; min-height: 0; accent-color: var(--accent); }
+.confirm-card-meta { margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+/* 批量确认的那一行：「我这一次同意了多少钱」不能和旁边的说明文字一个色号 */
+.confirm-card-batch { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--accent); }
+.confirm-card-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 13px; }
+.confirm-card-actions .primary-button, .confirm-card-actions .secondary-button { min-height: 36px; padding: 0 14px; font-size: 12.5px; }
+
+/* ── 画布条 ────────────────────────────────────────────────────────────────── */
+/* 一行放本会话的全部图，**每张只出现一次**。点一下给它打上「在画布里」的记号：
+   序号落在缩略图左上角（① 就是主图），不在画布里的没有序号。
+   早先是上下两段（上段画布 / 下段本会话），同一张图会在两段里各出现一次，
+   点了之后行会跳，还得在两处之间来回看——记号和序号能做到同样的事，且不重复占位。 */
+.canvas-panel { border: 1px solid #e4d9fd; border-radius: 12px; overflow: hidden; }
+
+.chat-canvas { flex: 0 0 auto; padding: 8px 16px 4px; border-top: 1px solid var(--line); background: var(--surface); }
+.canvas-section { padding: 7px 10px 8px; }
+.canvas-section-head { display: flex; align-items: baseline; gap: 8px; }
+.canvas-section-title { display: inline-flex; flex: none; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: #4a4557; }
+/* 「画布 N 张」是个事实标签，用浅紫药丸让"紫色=画布"这条线索继续成立；
+   `min-width: 0` 才允许它被挤到省略号（flex 子项默认 min-width: auto，窄窗口下会把整行撑出去） */
+.canvas-section-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 1px 8px; font-size: 10.5px; font-weight: 600; color: var(--accent-dark); background: var(--accent-soft); border-radius: 999px; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-section-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 10.5px; color: #a9a5bb; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-section-clear { flex: none; margin-left: auto; padding: 1px 7px; font-size: 11px; color: var(--muted); background: rgba(255, 255, 255, .7); border: 1px solid #ddd0fb; border-radius: 999px; }
+.canvas-section-clear:hover { color: var(--coral); border-color: #f3c9c9; }
+.canvas-section-empty { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+
+.asset-strip-row { display: flex; gap: 8px; margin-top: 6px; padding-bottom: 2px; overflow-x: auto; }
+.asset-strip-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.asset-strip-thumb { position: relative; padding: 0; border: 2px solid transparent; background: none; border-radius: 10px; overflow: hidden; line-height: 0; }
+.asset-strip-thumb img { display: block; object-fit: cover; border-radius: 8px; }
+/* 边框 + 序号就是「被标记」：语义是「属不属于这一组」，图钉那个形状在暗示"只有一根指针" */
+.asset-strip-item.is-in-canvas .asset-strip-thumb { border-color: var(--accent); }
+.asset-strip-order { position: absolute; left: 2px; top: 2px; display: inline-flex; align-items: center; justify-content: center; min-width: 13px; height: 13px; padding: 0 3px; font-size: 9px; font-weight: 700; line-height: 1; color: #fff; background: var(--accent); border-radius: 4px; }
+/* 主图角标：它不是「第 0 张」这种位置概念，而是「视频首帧/助手默认改的那张」，得写出来。
+   `line-height` 必须自己给：缩略图容器为了消掉图片下方的空隙设了 `line-height: 0`，
+   角标是它的**文本**子节点、会继承过去，行盒塌成 0 高——角标就只剩 3px 的色条，
+   「主图」两个字被 `overflow: hidden` 裁掉。这行不是微调，是让角标能被看见 */
+.asset-strip-primary { position: absolute; left: 0; right: 0; bottom: 0; padding: 1px 0 2px; font-size: 9px; line-height: 1.3; text-align: center; font-weight: 700; color: #fff; background: rgba(23, 110, 71, .82); }
+/* 来源标记放右上角：左上角归序号、底边归主图角标，三个标记各占一角才不打架 */
+.asset-strip-origin { position: absolute; right: 2px; top: 2px; display: inline-flex; padding: 2px; color: var(--ink); background: rgba(255, 255, 255, .92); border-radius: 999px; }
+.asset-strip-foot { display: flex; align-items: center; gap: 3px; }
+.asset-strip-ref { font-size: 9.5px; color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; }
+.asset-strip-item.is-in-canvas .asset-strip-ref { color: var(--accent-dark); font-weight: 700; }
+.asset-strip-promote { padding: 0 3px; font-size: 9.5px; color: var(--accent-dark); background: none; border: 0; text-decoration: underline; }
+.asset-strip-promote:hover { color: var(--accent); }
+.asset-strip-remove { display: inline-flex; padding: 1px; color: var(--muted); background: none; border: 0; }
+.asset-strip-remove:hover { color: var(--coral); }
+
+/* ── 输入区 ────────────────────────────────────────────────────────────────── */
+
+.composer { flex: 0 0 auto; padding: 10px 16px 14px; background: var(--surface); }
+.composer-starters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.composer-starter { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; font-size: 11.5px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 999px; }
+.composer-starter:hover:not(:disabled) { color: var(--accent-dark); background: var(--accent-soft); border-color: #ddd0fb; }
+.composer-row { display: flex; align-items: flex-end; gap: 9px; }
+.composer-input { flex: 1; min-height: 44px; max-height: 40vh; padding: 12px 13px; font-size: 13px; line-height: 1.7; resize: none; background: var(--surface-soft); }
+.composer-send, .composer-stop { flex: 0 0 auto; min-height: 44px; padding: 0 16px; }
+.composer-hint { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 10.5px; color: #a9a5bb; }
+.composer-hint-run { margin-left: auto; color: var(--accent); }
+/* 自己传图（需求.md 问题 4）：按钮贴在输入框左边，和发送按钮一样高 */
+.composer-attach { flex: 0 0 auto; width: 40px; height: 44px; }
+/* 拖图进来的时候整块输入区亮一下，让用户知道松手会发生什么 */
+.composer.is-drop { background: var(--accent-soft); outline: 2px dashed #c9b6f7; outline-offset: -6px; border-radius: var(--radius); }
+
+/* ── 大图预览 ──────────────────────────────────────────────────────────────── */
+
+.chat-lightbox { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 40px; background: rgba(30, 27, 46, .72); }
+.chat-lightbox-body { display: flex; flex-direction: column; gap: 8px; max-width: min(94vw, 1100px); max-height: 92vh; }
+.chat-lightbox-body img { max-width: 100%; max-height: calc(92vh - 40px); object-fit: contain; border-radius: var(--radius); background: var(--surface); }
+/* 视频结果也要能点开（问题 3）。以前只写了 img，视频落进来就是裂图 */
+.chat-lightbox-body video { max-width: 100%; max-height: calc(92vh - 40px); border-radius: var(--radius); background: #000; }
+.chat-lightbox-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; font-size: 12px; color: #fff; background: rgba(36, 31, 56, .85); border-radius: 10px; }

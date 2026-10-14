@@ -10,6 +10,7 @@ const spawnMock = vi.hoisted(() => vi.fn(() => ({ on: () => undefined, unref: ()
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
 import { createApp, type AppContext } from "../src/server/app";
+import type { Task } from "../src/shared/types";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -869,5 +870,260 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect(assets).toHaveLength(1);
     expect(assets[0].mimeType).toBe("video/mp4");
     await fs.access(path.join(assets[0].baseDir, assets[0].relativePath));
+  });
+});
+
+/**
+ * gemini 渠道的输出尺寸（需求.md 问题 1）。
+ *
+ * 现场：大脑写了 `size: "2K"`，gemini 只认 `imageConfig.imageSize`，参数被静默丢掉，
+ * 上游回 400 `Unsupported resolution`。这几条测试盯的就是**假中转站收到的请求体**——
+ * 说得再好听，请求体里没有那个字段就是没修好。
+ */
+describe("gemini 渠道的输出尺寸", () => {
+  /** 假中转站：把收到的每个请求体记下来，响应形状由调用方给 */
+  async function startRelay(respond: (body: Record<string, unknown>, hit: number) => { status: number; payload: unknown }) {
+    const hits: Array<Record<string, unknown>> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+        hits.push(body);
+        const reply = respond(body, hits.length);
+        res.writeHead(reply.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(reply.payload));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    return { hits, baseUrl: `http://127.0.0.1:${address.port}` };
+  }
+
+  async function bootGemini(baseUrl: string) {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-gemini-size-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const created = await request(app).post("/api/channels").send({
+      name: "Gemini Mock", baseUrl, adapterType: "gemini-content", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1beta/models/{model}:generateContent",
+      models: ["gemini-image"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    return { app, channelId: created.body.data.id as string };
+  }
+
+  /** extractImageCandidates 不挑适配器，OpenAI 那套 b64_json 形状在 gemini 渠道一样认 */
+  const imageOk = { data: [{ b64_json: pngBase64 }] };
+  const resolutionError = {
+    status: 400,
+    payload: { error: { message: "Unsupported resolution: check the imageSize parameter (case-sensitive, e.g. 1K, 2K, 4K)" } },
+  };
+
+  async function settle(app: ReturnType<typeof createApp>["app"], taskId: string) {
+    let task: Task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    for (let index = 0; index < 40 && !["succeeded", "failed", "cancelled", "expired"].includes(task.status); index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    }
+    return task;
+  }
+
+  it("没指定尺寸时请求体里带上默认的 2K，并且这份 body 会被记进 effectiveParameters", async () => {
+    const relay = await startRelay(() => ({ status: 200, payload: imageOk }));
+    const { app, channelId } = await bootGemini(relay.baseUrl);
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "gemini-image", prompt: "一只戴草帽的橘猫", aspectRatio: "2:3" })
+      .expect(202);
+    const task = await settle(app, created.body.data.id as string);
+
+    expect(task.status).toBe("succeeded");
+    const body = relay.hits[0] as { generationConfig: { imageConfig: Record<string, unknown> } };
+    expect(body.generationConfig.imageConfig).toMatchObject({ imageSize: "2K", aspectRatio: "2:3" });
+
+    // 参数核对面板读的就是 task.effectiveParameters，所以这份也得带上——
+    // 否则卡片上会显示「尺寸：未发出」，把已经修好的事说成坏的
+    const effective = task.effectiveParameters as { generationConfig: { imageConfig: Record<string, unknown> } };
+    expect(effective.generationConfig.imageConfig.imageSize).toBe("2K");
+  });
+
+  it("设置里改成 1K 之后补的就是 1K", async () => {
+    const relay = await startRelay(() => ({ status: 200, payload: imageOk }));
+    const { app, channelId } = await bootGemini(relay.baseUrl);
+
+    const settings = await request(app).patch("/api/settings").send({ geminiImageSize: "1K" }).expect(200);
+    expect(settings.body.data.geminiImageSize).toBe("1K");
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "gemini-image", prompt: "test" }).expect(202);
+    await settle(app, created.body.data.id as string);
+    expect((relay.hits[0] as { generationConfig: { imageConfig: Record<string, unknown> } }).generationConfig.imageConfig.imageSize).toBe("1K");
+  });
+
+  it("请求方明确指定了尺寸就原样发出，不被默认值盖掉", async () => {
+    const relay = await startRelay(() => ({ status: 200, payload: imageOk }));
+    const { app, channelId } = await bootGemini(relay.baseUrl);
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "gemini-image", prompt: "test", imageSize: "4K" }).expect(202);
+    await settle(app, created.body.data.id as string);
+    expect((relay.hits[0] as { generationConfig: { imageConfig: Record<string, unknown> } }).generationConfig.imageConfig.imageSize).toBe("4K");
+  });
+
+  it("上游拿参数拒了也照实说出来，不再退化成一句「中转接口返回错误」", async () => {
+    const relay = await startRelay(() => resolutionError);
+    const { app, channelId } = await bootGemini(relay.baseUrl);
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "gemini-image", prompt: "test" }).expect(202);
+    const task = await settle(app, created.body.data.id as string);
+
+    expect(task.status).toBe("failed");
+    // 这句原文是 isParameterRejection 的判据，也是用户在卡片上看到的那行
+    expect(task.errorMessage).toContain("Unsupported resolution");
+  });
+
+  it("别家渠道不会被硬塞一个 imageConfig：它们不认这个参数", async () => {
+    const relay = await startRelay(() => ({ status: 200, payload: imageOk }));
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-openai-size-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const created = await request(app).post("/api/channels").send({
+      name: "OpenAI Mock", baseUrl: relay.baseUrl, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+
+    const task = await request(app).post("/api/generations")
+      .send({ channelId: created.body.data.id, model: "mock-image", prompt: "test", size: "1024x1024" })
+      .expect(202);
+    await settle(app, task.body.data.id as string);
+
+    expect(relay.hits[0]).toMatchObject({ size: "1024x1024" });
+    expect(relay.hits[0]).not.toHaveProperty("generationConfig");
+    expect(relay.hits[0]).not.toHaveProperty("imageSize");
+  });
+});
+
+/**
+ * 工作台结果面板的「请求参数」（需求.md 问题 1 D）。
+ *
+ * 上一组盯的是「请求体里到底有没有」；这一组盯的是**用户能不能在界面上看见**，
+ * 而且要看得住：面板上写「已发出」，`effectiveParameters` 里就得真有那个值；
+ * 写「未发出」，请求体里就得真的没有。核对结果是纯展示数据，但**编出来的展示数据
+ * 比没有更糟**——用户会照着它去改提示词。
+ */
+describe("工作台结果面板的请求参数", () => {
+  const imageOk = { status: 200, payload: { data: [{ b64_json: pngBase64 }] } };
+
+  async function startRelay(reply: { status: number; payload: unknown }) {
+    const hits: Array<Record<string, unknown>> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        hits.push(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>);
+        res.writeHead(reply.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(reply.payload));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    return { hits, baseUrl: `http://127.0.0.1:${address.port}` };
+  }
+
+  async function boot(baseUrl: string, adapterType: "gemini-content" | "openai-images") {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-params-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const created = await request(app).post("/api/channels").send({
+      name: "Mock", baseUrl, adapterType, authType: "none", authHeaderName: "", secretEnv: "",
+      endpoint: adapterType === "gemini-content" ? "/v1beta/models/{model}:generateContent" : "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    return { app, channelId: created.body.data.id as string };
+  }
+
+  async function settle(app: ReturnType<typeof createApp>["app"], taskId: string) {
+    let task: Task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    for (let index = 0; index < 40 && !["succeeded", "failed", "cancelled", "expired"].includes(task.status); index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      task = (await request(app).get(`/api/generations/${taskId}`).expect(200)).body.data;
+    }
+    return task;
+  }
+
+  it("gemini 补上的 2K 在工作台看得见，而且和真正出网的值一致", async () => {
+    const relay = await startRelay(imageOk);
+    const { app, channelId } = await boot(relay.baseUrl, "gemini-content");
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "mock-image", prompt: "一只戴草帽的橘猫", aspectRatio: "2:3" })
+      .expect(202);
+    const task = await settle(app, created.body.data.id as string);
+
+    expect(task.status).toBe("succeeded");
+    expect(task.parameterNotes).toEqual([
+      { label: "宽高比", value: "2:3", status: "applied" },
+      { label: "尺寸", value: "2K", status: "applied" },
+    ]);
+    // 「已发出」不是嘴上说说：同一个值必须能在 effectiveParameters 的嵌套路径里读到
+    const effective = task.effectiveParameters as { generationConfig: { imageConfig: Record<string, unknown> } };
+    expect(effective.generationConfig.imageConfig).toMatchObject({ imageSize: "2K", aspectRatio: "2:3" });
+
+    // 列表接口（历史、右侧「最近」）走的是另一条查询，忘了 join 适配器就会整列消失
+    const listed = (await request(app).get("/api/generations").expect(200)).body.data as Task[];
+    expect(listed.find((item) => item.id === task.id)?.parameterNotes).toEqual(task.parameterNotes);
+  });
+
+  it("失败的任务也带着参数：被吞掉的那个标成「未发出」，这就是用户要盯的那一行", async () => {
+    const relay = await startRelay({
+      status: 400,
+      payload: { error: { message: "Unsupported resolution: check the imageSize parameter" } },
+    });
+    const { app, channelId } = await boot(relay.baseUrl, "gemini-content");
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "mock-image", prompt: "test", size: "1024x1024" })
+      .expect(202);
+    const task = await settle(app, created.body.data.id as string);
+
+    expect(task.status).toBe("failed");
+    // gemini 不认 size，写多少都发不出去 —— 得让用户看见，而不是只留一句上游报错
+    expect(task.parameterNotes?.find((note) => note.status === "dropped")).toMatchObject({
+      label: "尺寸(size)", value: "1024x1024",
+    });
+    expect(relay.hits[0]).not.toHaveProperty("size");
+  });
+
+  it("OpenAI 系只列真的对得上的那几项，不凭空多给一行", async () => {
+    const relay = await startRelay(imageOk);
+    const { app, channelId } = await boot(relay.baseUrl, "openai-images");
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "mock-image", prompt: "test", size: "1024x1024" })
+      .expect(202);
+    const task = await settle(app, created.body.data.id as string);
+
+    expect(task.parameterNotes).toEqual([{ label: "尺寸", value: "1024x1024", status: "applied" }]);
+  });
+
+  it("渠道被删掉之后不再对账：认不出适配器就不给结论，好过猜一个", async () => {
+    const relay = await startRelay(imageOk);
+    const { app, channelId } = await boot(relay.baseUrl, "gemini-content");
+
+    const created = await request(app).post("/api/generations")
+      .send({ channelId, model: "mock-image", prompt: "test" }).expect(202);
+    const task = await settle(app, created.body.data.id as string);
+    expect(task.parameterNotes?.length).toBeGreaterThan(0);
+
+    await request(app).delete(`/api/channels/${channelId}`).expect(200);
+    const after = (await request(app).get(`/api/generations/${task.id}`).expect(200)).body.data as Task;
+    expect(after.channelName).toBe("已删除渠道");
+    expect(after.parameterNotes).toBeUndefined();
   });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LoaderCircle, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
+  ImagePlus, KeyRound, LoaderCircle, MessageSquarePlus, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
   Sparkles, Square, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { api, isTauriRuntime } from "./api";
@@ -9,19 +9,19 @@ import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
+import { ChatView } from "./ChatView";
 import { LazyVideoThumb } from "./LazyVideoThumb";
+import { ParamChips } from "./ParamChips";
 import { useFileDrop } from "./useFileDrop";
 import { VideoGenerateView } from "./VideoGenerateView";
-import { isVideoAdapter, isVideoTask } from "../shared/types";
-import type { Asset, Channel, ClearScope, Diagnostic, Task, TaskStatus } from "../shared/types";
+import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, isVideoTask } from "../shared/types";
+import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 
-type View = "generate" | "video" | "channels" | "history";
+type View = "generate" | "video" | "chat" | "channels" | "history";
 export type Toast = { kind: "success" | "error"; message: string };
 type ReferenceImageState = { file: File; previewUrl: string };
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
-const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_REFERENCE_IMAGES = 8;
 const DRAFT_STORAGE_PREFIX = "vector-image:generation-draft:";
 const openAiSizeGroups = [
   { label: "方形", sizes: ["1024x1024", "2048x2048"] },
@@ -192,7 +192,8 @@ export function App() {
   const [defaultAssetsPath, setDefaultAssetsPath] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
 
-  const imageChannels = channels.filter((channel) => !isVideoAdapter(channel.adapterType));
+  // 对话渠道只是 Agent 的大脑，不出图也不出视频，所以生图 / 视频工作台都要排除它
+  const imageChannels = channels.filter((channel) => isImageAdapter(channel.adapterType));
   const videoChannels = channels.filter((channel) => isVideoAdapter(channel.adapterType));
   const imageTasks = tasks.filter((task) => !isVideoTask(task, channels));
   const videoTasks = tasks.filter((task) => isVideoTask(task, channels));
@@ -210,7 +211,7 @@ export function App() {
         setTasks(data.tasks);
         setAssetsPath(data.service.assetsPath);
         setDefaultAssetsPath(data.service.defaultAssetsPath);
-        const images = data.channels.filter((item) => !isVideoAdapter(item.adapterType));
+        const images = data.channels.filter((item) => isImageAdapter(item.adapterType));
         const videos = data.channels.filter((item) => isVideoAdapter(item.adapterType));
         const firstImage = images.find((item) => item.id === selectedChannelId && item.enabled)
           ?? images.find((item) => item.enabled)
@@ -308,7 +309,7 @@ export function App() {
   /** 渠道消失后，把该工作台的选择退回到同类型的下一个渠道 */
   function dropChannel(id: string, remaining: Channel[]) {
     if (selectedChannelId === id) {
-      const next = remaining.find((item) => !isVideoAdapter(item.adapterType));
+      const next = remaining.find((item) => isImageAdapter(item.adapterType));
       setSelectedChannelId(next?.id ?? "");
       setSelectedModel(next?.models[0] ?? "");
     }
@@ -385,6 +386,7 @@ export function App() {
         <nav className="topnav" aria-label="主导航">
           <NavButton active={view === "generate"} icon={<Sparkles size={16} />} label="生图工作台" onClick={() => setView("generate")} />
           <NavButton active={view === "video"} icon={<Film size={16} />} label="视频工作台" onClick={() => setView("video")} />
+          <NavButton active={view === "chat"} icon={<MessageSquarePlus size={16} />} label="对话创作" onClick={() => setView("chat")} />
           <NavButton active={view === "channels"} icon={<Server size={16} />} label="渠道配置" onClick={() => setView("channels")} />
           <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" unread={historyUnread} onClick={() => setView("history")} />
         </nav>
@@ -416,6 +418,9 @@ export function App() {
             onToast={showToast}
             onDiagnostics={setDiagnosticTask}
           />
+        ) : null}
+        {!loading && view === "chat" ? (
+          <ChatView channels={channels} onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)} />
         ) : null}
         {!loading && view === "channels" ? (
           <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
@@ -481,7 +486,7 @@ export function App() {
         />
       ) : null}
       {assetDirOpen ? (
-        <AssetDirDialog
+        <SettingsDialog
           assetsDir={assetsPath}
           defaultAssetsDir={defaultAssetsPath}
           onClose={() => setAssetDirOpen(false)}
@@ -570,7 +575,10 @@ function GenerateView(props: {
     try {
       const task = await api.generate({
         channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(), negativePrompt: negativePrompt.trim() || undefined,
-        size: requestedSize,
+        // 尺寸只有 OpenAI 系适配器认（`openAiImageParameters`）；gemini 和视频渠道收到它只会
+        // 丢掉，然后在新加的「请求参数」里留一条扎眼的「未发出」——那是我们自己多发的，
+        // 不该让用户以为是他的配置有问题
+        size: isOpenAi ? requestedSize : undefined,
         aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
         count,
         quality: quality === "auto" ? undefined : quality,
@@ -782,6 +790,17 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
         {task && !busy && task.status !== "failed" && !task.assets.length ? <EmptyResult /> : null}
         {activeAsset ? <figure className="stage-image"><img src={api.assetUrl(activeAsset.url)} alt="生成结果" title="双击放大" onDoubleClick={() => setPreviewAsset(activeAsset)} /></figure> : null}
       </div>
+      {/*
+        请求参数（需求.md 问题 1 D）：和 Agent 工具卡片同一个核对结果，只是这里折叠起来。
+        失败时默认展开——参数被吞掉正是失败的常见原因，这时候再让用户多点一次是添乱。
+        `open` 只在「从没展开过」到 true 时被 React 写一次，用户手动收起不会被抢回来。
+      */}
+      {task?.parameterNotes?.length ? (
+        <details className="result-params" open={task.status === "failed"}>
+          <summary>请求参数</summary>
+          <ParamChips notes={task.parameterNotes} />
+        </details>
+      ) : null}
       {activeAsset ? (
         <div className="result-actions">
           <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
@@ -906,7 +925,7 @@ function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDelet
           ) : null}
           {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : "视频"}记录`} onClick={() => onClear(filter === "all" ? "all" : filter)}><Trash2 size={16} />清空</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
-          <button className="secondary-button" title="更改素材保存目录" onClick={onOpenAssetSettings}><Settings2 size={16} />目录设置</button>
+          <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
         </div>
       </div>
@@ -1065,12 +1084,16 @@ function ClearHistoryDialog({ mode, count, label, onClose, onConfirm }: {
 }
 
 /**
- * 素材目录设置。
+ * 设置：素材目录 + gemini 渠道的缺省输出尺寸。
  *
  * 目录由桌面版的原生选择器挑，服务端只负责校验和落库；切换只影响之后生成的
  * 产物，历史记录里的旧产物按各自记录保存的目录读取，不会被搬动。
+ *
+ * 输出尺寸这一项是需求.md 问题 1 的产物：gemini 系站点要求请求体里必须带
+ * `imageConfig.imageSize`，缺了上游直接回「Unsupported resolution」。补默认值
+ * 时必须让用户看得见、也改得动——所以它在这儿，而不是藏在某个常量里。
  */
-function AssetDirDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToast }: {
+function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToast }: {
   assetsDir: string;
   defaultAssetsDir: string;
   onClose: () => void;
@@ -1080,6 +1103,24 @@ function AssetDirDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToa
   const [busy, setBusy] = useState(false);
   const isDefault = assetsDir === defaultAssetsDir;
   const canPick = isTauriRuntime();
+  const [imageSize, setImageSize] = useState<ImageSizeValue | null>(null);
+
+  useEffect(() => {
+    void api.settings().then((current) => setImageSize(current.geminiImageSize)).catch(() => undefined);
+  }, []);
+
+  async function applyImageSize(next: ImageSizeValue) {
+    setBusy(true);
+    try {
+      const result = await api.updateSettings({ geminiImageSize: next });
+      setImageSize(result.geminiImageSize);
+      onToast("success", `gemini 渠道的缺省尺寸已改为 ${result.geminiImageSize}`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "尺寸设置更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function apply(next: string) {
     setBusy(true);
@@ -1115,32 +1156,61 @@ function AssetDirDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToa
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-      <div className="modal narrow" role="dialog" aria-modal="true" aria-label="素材目录">
+      <div className="modal narrow" role="dialog" aria-modal="true" aria-label="设置">
         <div className="modal-header">
-          <div><Settings2 size={18} /><h2>素材目录</h2></div>
+          <div><Settings2 size={18} /><h2>设置</h2></div>
           <button className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={18} /></button>
         </div>
         <div className="modal-body">
-          <p className="modal-lead">生成的图片和视频保存到下面这个目录。{isDefault ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
-          <div className="settings-path">{assetsDir || "（未获取到）"}</div>
-          <div className="settings-actions">
-            <button className="secondary-button" onClick={() => void choose()} disabled={busy || !canPick}>
-              <FolderOpen size={16} />更改目录
-            </button>
-            <button className="secondary-button" onClick={() => void reveal()} disabled={busy}>
-              <Eye size={16} />打开目录
-            </button>
-            <button className="secondary-button" onClick={() => void apply("")} disabled={busy || isDefault}>
-              <RotateCcw size={16} />恢复默认
-            </button>
+          <div className="settings-section">
+            <h3>素材目录</h3>
+            <p className="modal-lead">生成的图片和视频保存到下面这个目录。{isDefault ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
+            <div className="settings-path">{assetsDir || "（未获取到）"}</div>
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={() => void choose()} disabled={busy || !canPick}>
+                <FolderOpen size={16} />更改目录
+              </button>
+              <button className="secondary-button" onClick={() => void reveal()} disabled={busy}>
+                <Eye size={16} />打开目录
+              </button>
+              <button className="secondary-button" onClick={() => void apply("")} disabled={busy || isDefault}>
+                <RotateCcw size={16} />恢复默认
+              </button>
+            </div>
+            <div className="modal-note">
+              <AlertCircle size={15} />
+              <span>
+                {canPick
+                  ? "更改目录只影响之后生成的产物。历史记录里的旧图片、视频仍从原来的目录读取，不会被搬动，也不会失效。"
+                  : "只有桌面版支持用原生对话框选择目录；Web 开发模式下这里不可用。"}
+              </span>
+            </div>
           </div>
-          <div className="modal-note">
-            <AlertCircle size={15} />
-            <span>
-              {canPick
-                ? "更改目录只影响之后生成的产物。历史记录里的旧图片、视频仍从原来的目录读取，不会被搬动，也不会失效。"
-                : "只有桌面版支持用原生对话框选择目录；Web 开发模式下这里不可用。"}
-            </span>
+
+          <div className="settings-section">
+            <h3>gemini 渠道的输出尺寸</h3>
+            <p className="modal-lead">
+              这类站点要求请求体里必须带 <code>imageConfig.imageSize</code>，缺了直接回「Unsupported resolution」。
+              你和助手都没指定尺寸时，就用这里的值补上——工具卡片上会标出「尺寸：{imageSize ?? "2K"}（默认）」，
+              不让你猜它到底发了什么。
+            </p>
+            <div className="settings-segment">
+              {IMAGE_SIZE_VALUES.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`secondary-button ${imageSize === value ? "is-on" : ""}`}
+                  disabled={busy || imageSize === null}
+                  onClick={() => void applyImageSize(value)}
+                >
+                  {value}{value === "2K" ? "（推荐）" : ""}
+                </button>
+              ))}
+            </div>
+            <div className="modal-note">
+              <AlertCircle size={15} />
+              <span>只影响 gemini 系的渠道，别的渠道不认这个参数。尺寸越大越贵、也越慢，2K 是这类站点最稳的一档。</span>
+            </div>
           </div>
         </div>
         <div className="modal-footer">

@@ -10,4 +10,5 @@ export const adapterLabels: Record<AdapterType, string> = {
   "wan-video": "万相视频",
   "grok-video": "Grok 视频",
   "seedance-video": "Seedance 视频",
+  "openai-chat": "对话模型（大脑）",
 };

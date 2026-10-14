@@ -81,3 +81,40 @@ export function redactHeaders(headers: Record<string, string>) {
 export function safeFileName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100) || "image";
 }
+
+/**
+ * 把用户给的文件名洗成一个**能安全显示给人和大脑**的短名字。
+ *
+ * 和 `safeFileName` 是两件事，别合并：那个管磁盘上的名字，只留 ASCII 是为了
+ * 文件系统友好；这个管用户看到的那句话——这个 app 的用户十个里有九个文件名是中文，
+ * 用 `safeFileName` 洗一遍会把「验证用图.png」变成「____________.png」，
+ * 等于对用户说了句废话。所以这里**留着 Unicode**，只洗掉真正危险的那几样：
+ * 路径分隔符（客户端可能把整条路径塞在 filename 里）、控制字符、开头的点、超长。
+ *
+ * 顺带修一个 busboy 的老毛病：浏览器在 multipart 头里按 UTF-8 写文件名，
+ * 而 busboy 默认按 latin1 解，于是到了这里「猫」已经变成「ç«」了。
+ * 所以读之前先把 latin1 的字符串**当字节收回来重解一次**——不然上面那句
+ * 「留着 Unicode」根本没机会被执行，用户看到的是更花的乱码。
+ */
+export function displayFileName(name: string) {
+  const base = decodeUploadName(name).split(/[\\/]/).pop() ?? "";
+  const cleaned = base
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .trim();
+  return cleaned.slice(0, 120) || "图片";
+}
+
+/**
+ * 把 busboy 按 latin1 解出来的文件名还原成 UTF-8。
+ *
+ * 只在**整串都落在 latin1 范围里**时才尝试：真的中文（每个字都 ≥ U+0100）说明
+ * 上游已经解对了，再按 latin1 收字节只会把它弄坏。收回来解不干净的
+ * （解出了 U+FFFD）也说明原本就是 latin1 文本，退回原样。
+ */
+function decodeUploadName(name: string) {
+  if ([...name].some((char) => char.charCodeAt(0) >= 0x100)) return name;
+  const decoded = Buffer.from(name, "latin1").toString("utf8");
+  return decoded.includes("�") ? name : decoded;
+}

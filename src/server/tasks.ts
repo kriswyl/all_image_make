@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { isVideoAdapter as isVideoAdapterType } from "../shared/types.js";
+import { DEFAULT_IMAGE_SIZE, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isVideoAdapter as isVideoAdapterType, normalizeImageSize } from "../shared/types.js";
 import type { GenerationInput, ReferenceImageInput, Task } from "../shared/types.js";
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
@@ -15,10 +15,11 @@ import {
   type VideoCandidate,
 } from "./adapters.js";
 import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
+import { writeThumbnail } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
-const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+// 参考图的张数和体积都住在 shared/types.ts（前端校验、上传出口、这里三处共用一份）
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 8000;
 const VIDEO_MAX_POLLS = 100;
@@ -45,6 +46,29 @@ const VIDEO_POLL_DELAY_MS = (() => {
   return Number.isFinite(raw) && raw >= 0 ? raw : VIDEO_POLL_INTERVAL_MS;
 })();
 
+/**
+ * gemini-content 要求 `generationConfig.imageConfig.imageSize` 必填，缺了上游直接 400
+ * （`Unsupported resolution: check the imageSize parameter`）。这里补上默认值。
+ *
+ * **为什么补在这一层而不是适配器或 Agent 工具里**：适配器是无 db 的纯函数，拿不到设置；
+ * 而 Agent 工具只是 `POST /api/generations` 的一个调用方——生图工作台走的是同一条路，
+ * 有完全一样的毛病。补在 `create()` 里，Agent、工作台、重试、崩溃恢复一次全修好。
+ *
+ * 请求方明确写了的原样发出去（上游不认就让补救重试去兜），只有**我们自己补的**才洗干净：
+ * 落库的是设置表里那个字符串，可能是手写的脏值。
+ *
+ * @param defaultSize 设置里的 `geminiImageSize`；空/非法就退回 DEFAULT_IMAGE_SIZE
+ */
+export function resolveImageSize(
+  adapterType: string,
+  requested: string | undefined,
+  defaultSize?: string | null,
+): string | undefined {
+  if (requested) return requested;
+  if (adapterType !== "gemini-content") return undefined;
+  return normalizeImageSize(defaultSize) ?? DEFAULT_IMAGE_SIZE;
+}
+
 /** 视频任务的状态查询路径。提交路径在 adapters.ts，两处都要跟着官方文档改 */
 export function videoPollEndpoint(adapterType: string, remoteTaskId: string) {
   if (adapterType === "wan-video") return `/api/v1/tasks/${remoteTaskId}`;
@@ -68,10 +92,97 @@ export interface ReferenceImageUpload {
   fileName: string;
 }
 
+/** 任务的终态。Agent 的 `waitFor` 和续跑都盯着这一份 */
+export const TERMINAL_TASK_STATUSES = ["succeeded", "failed", "cancelled", "expired"] as const;
+
+export function isTerminalStatus(status: string): boolean {
+  return (TERMINAL_TASK_STATUSES as readonly string[]).includes(status);
+}
+
+export interface TaskEvent {
+  kind: "progress" | "finished";
+  task: Task;
+}
+
+export type TaskListener = (event: TaskEvent) => void;
+
 export class TaskRunner {
   private readonly running = new Set<string>();
+  /**
+   * 任务事件订阅者。
+   *
+   * 只加这一个出口、不改动已有的写库流程：生成历史页照旧靠轮询，
+   * Agent 用它等图片任务结束、把视频进度推给对话界面。
+   */
+  private readonly listeners = new Set<TaskListener>();
 
   constructor(private readonly db: AppDatabase, private readonly sessionKeys: KeyStore) {}
+
+  onTaskEvent(listener: TaskListener): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private emitEvent(event: TaskEvent) {
+    for (const listener of this.listeners) {
+      // 订阅者自己的异常不能反过来把任务跑挂
+      try {
+        listener(event);
+      } catch {
+        // 忽略
+      }
+    }
+  }
+
+  /** 写库 + 广播，所有状态变更都从这里走，事件就不会漏 */
+  private updateTask(taskId: string, patch: Parameters<AppDatabase["updateTask"]>[1]) {
+    this.db.updateTask(taskId, patch);
+    const task = this.db.getTaskView(taskId);
+    if (task) this.emitEvent({ kind: isTerminalStatus(task.status) ? "finished" : "progress", task });
+  }
+
+  /**
+   * 等一个任务进入终态。
+   *
+   * 图片生成是同步请求，Agent 直接等完再回话最省事：拿到真实产物后大脑才能说
+   * 「画好了」，画布指针也才能在同一轮内挪过去（§10.1）。视频不能这么等，
+   * 那条路走 `create()` + `async: true`，靠完成事件续跑（§12.2）。
+   */
+  async waitFor(taskId: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<Task> {
+    const { timeoutMs = 15 * 60_000, signal } = options;
+    const current = this.db.getTaskView(taskId);
+    if (!current) throw new AppError("TASK_NOT_FOUND", "任务不存在", 404);
+    if (isTerminalStatus(current.status)) return current;
+
+    return new Promise<Task>((resolve, reject) => {
+      const cleanup = () => {
+        this.listeners.delete(onEvent);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onEvent = (event: TaskEvent) => {
+        if (event.task.id !== taskId || event.kind !== "finished") return;
+        cleanup();
+        resolve(event.task);
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(new AppError("TASK_ABORTED", "已取消等待", 499));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new AppError("TASK_WAIT_TIMEOUT", "等待生成结果超时", 504));
+      }, timeoutMs);
+      this.listeners.add(onEvent);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // 订阅之前任务可能已经结束，事件早就发过了，必须再查一次
+      const settled = this.db.getTaskView(taskId);
+      if (settled && isTerminalStatus(settled.status)) {
+        cleanup();
+        resolve(settled);
+      }
+    });
+  }
 
   async create(input: GenerationInput, uploads: ReferenceImageUpload[] = []): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
@@ -89,6 +200,8 @@ export class TaskRunner {
         400,
       );
     }
+    // 补默认值要早于落库：落进 tasks.input 的那份才是重试 / 崩溃恢复会重放的
+    input.imageSize = resolveImageSize(channel.adapterType, input.imageSize, this.db.getSetting("geminiImageSize"));
     const id = crypto.randomUUID();
     const sources = uploads.length ? uploads : referenceInputs(input).map((image) => ({
       bytes: Buffer.from(image.base64, "base64"), mimeType: image.mimeType, fileName: image.fileName,
@@ -107,10 +220,10 @@ export class TaskRunner {
       const channel = this.requireChannel(task.channelId);
       const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
       const key = this.resolveKey(channel);
-      this.db.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
+      this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
-      this.db.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
+      this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared);
 
       // Check if this is an async video generation (返回task_id需要轮询)
@@ -119,7 +232,7 @@ export class TaskRunner {
 
       if (isVideoAdapter && asyncTaskId) {
         // 先记下上游 task id：进程重启后靠它接着轮询，而不是把任务判死
-        this.db.updateTask(taskId, { remoteTaskId: asyncTaskId });
+        this.updateTask(taskId, { remoteTaskId: asyncTaskId });
         await this.pollVideoTask(taskId, asyncTaskId, channel, key);
         return;
       }
@@ -128,7 +241,7 @@ export class TaskRunner {
       const images = extractImageCandidates(result.payload);
       if (images.length) {
         await this.saveImages(taskId, images, channel);
-        this.db.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
+        this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
         return;
       }
 
@@ -137,7 +250,7 @@ export class TaskRunner {
       const current = this.db.getTaskRow(taskId);
       if (current?.status !== "cancelled") {
         const normalized = normalizeError(error);
-        this.db.updateTask(taskId, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
+        this.updateTask(taskId, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
       }
     } finally {
       this.running.delete(taskId);
@@ -147,7 +260,7 @@ export class TaskRunner {
   cancel(taskId: string) {
     const task = this.requireTask(taskId);
     if (["succeeded", "failed", "cancelled", "expired"].includes(task.status)) return this.db.getTaskView(taskId)!;
-    this.db.updateTask(taskId, { status: "cancelled", finishedAt: new Date().toISOString() });
+    this.updateTask(taskId, { status: "cancelled", finishedAt: new Date().toISOString() });
     return this.db.getTaskView(taskId)!;
   }
 
@@ -193,7 +306,7 @@ export class TaskRunner {
   }
 
   private markFailed(taskId: string, code: string, message: string) {
-    this.db.updateTask(taskId, { status: "failed", errorCode: code, errorMessage: message, finishedAt: new Date().toISOString() });
+    this.updateTask(taskId, { status: "failed", errorCode: code, errorMessage: message, finishedAt: new Date().toISOString() });
   }
 
   private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>) {
@@ -233,7 +346,7 @@ export class TaskRunner {
     key: string,
     options: { immediate?: boolean } = {},
   ) {
-    this.db.updateTask(localTaskId, { status: "running", remoteTaskId });
+    this.updateTask(localTaskId, { status: "running", remoteTaskId });
     // 提交路径走 joinEndpoint（会吃掉 Base URL 的尾斜杠），轮询这里必须一致，
     // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
     const url = joinEndpoint(channel.baseUrl, videoPollEndpoint(channel.adapterType, remoteTaskId));
@@ -303,7 +416,7 @@ export class TaskRunner {
 
         const status = this.extractVideoStatus(payload);
         const progress = this.extractVideoProgress(payload);
-        if (progress !== null) this.db.updateTask(localTaskId, { progress });
+        if (progress !== null) this.updateTask(localTaskId, { progress });
 
         // 先判失败：只有明确的失败状态才算失败，unknown / pending / running 都继续轮询
         if (status && VIDEO_FAILURE_STATUSES.includes(status)) {
@@ -331,7 +444,7 @@ export class TaskRunner {
           }
           // 下载失败时 saveVideos 会把视频链接带进报错，方便手动打开核对
           await this.saveVideos(localTaskId, chosen, channel);
-          this.db.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
+          this.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
         }
 
@@ -457,9 +570,12 @@ export class TaskRunner {
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
       const absolutePath = path.join(baseDir, fileName);
       await fs.writeFile(absolutePath, resolved.bytes);
+      // 缩略图在这里就生成好（§11.4）：Agent 续跑时马上要拿它喂大脑和画布徽章，
+      // 「用的时候再缩」会让每一轮都白等一次解码。失败不抛异常，静默留空
+      const thumbPath = await writeThumbnail(this.db, id, resolved.bytes);
       this.db.insertAsset({
         id, taskId, fileName, mimeType: resolved.mimeType, byteSize: resolved.bytes.length,
-        relativePath: fileName, baseDir, sha256,
+        relativePath: fileName, baseDir, sha256, thumbPath,
       });
       saved += 1;
     }
@@ -468,7 +584,11 @@ export class TaskRunner {
 
   private async persistInputImages(taskId: string, input: GenerationInput, sources: ReferenceImageUpload[]): Promise<StoredGenerationInput> {
     if (!sources.length) return { ...input, referenceImage: undefined, referenceImages: undefined };
-    if (sources.length > 8) throw new AppError("REFERENCE_IMAGE_LIMIT", "参考图最多上传 8 张", 400);
+    // 上限取常量而不是写死 8：画布（最多 MAX_CANVAS_IMAGES 张）整组都会走到这里，
+    // 两处写死两个 8 的话，改一处就会出现「前端让选 12 张、这里按 8 张拒收」
+    if (sources.length > MAX_REFERENCE_IMAGES) {
+      throw new AppError("REFERENCE_IMAGE_LIMIT", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`, 400);
+    }
     for (const source of sources) {
       if (!source.bytes.length || source.bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
         throw new AppError("REFERENCE_IMAGE_TOO_LARGE", "单张参考图不能超过 10 MB", 400);
@@ -553,7 +673,7 @@ function truncatePayload(payload: unknown) {
   return { truncated: true, preview: json.slice(0, 50000) };
 }
 
-function extensionForMime(mimeType: string) {
+export function extensionForMime(mimeType: string) {
   if (mimeType.includes("jpeg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";
   if (mimeType.includes("gif")) return "gif";
@@ -570,7 +690,7 @@ function inlineMediaSize(input: GenerationInput) {
   return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
 }
 
-function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
+export function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
   if (mimeType === "image/png") {
     return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   }

@@ -1,6 +1,6 @@
 {
   "name": "image-relay-studio",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -25,6 +25,7 @@
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "express": "^5.1.0",
+    "jimp": "^1.6.1",
     "lucide-react": "^0.468.0",
     "multer": "^2.2.0",
     "react": "^19.1.1",

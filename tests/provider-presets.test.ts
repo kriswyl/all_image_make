@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildChannelDrafts, findConflictChannels, findProviderPreset,
+  adapterDefaultEndpoint, buildChannelDrafts, findConflictChannels, findProviderPreset,
   normalizeBaseUrl, PROVIDER_PRESETS,
 } from "../src/shared/provider-presets";
 import type { Channel } from "../src/shared/types";
@@ -34,7 +34,17 @@ describe("provider presets", () => {
       "tiantoken-wan-video",
       "tiantoken-grok-video",
       "tiantoken-seedance",
+      "tiantoken-chat",
     ]);
+  });
+
+  it("exposes the chat brain as an openai-chat unit, not a generation unit", () => {
+    const chat = findProviderPreset("tiantoken-chat")!;
+    expect(chat.baseUrl).toBe("https://api.tiantoken.com");
+    expect(chat.units.map((unit) => unit.adapterType)).toEqual(["openai-chat"]);
+    expect(chat.units[0].secretEnv).toBe("TIANTOKEN_CHAT_API_KEY");
+    // 大脑默认路径必须和 openai-chat 服务端默认值一致，否则渠道建出来会打错地址
+    expect(chat.units[0].endpoint ?? adapterDefaultEndpoint("openai-chat").endpoint).toBe("/v1/chat/completions");
   });
 
   it("points video presets at tiantoken relay", () => {

@@ -2,6 +2,13 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset } from "../shared/types.js";
+import { isImageAsset } from "../shared/types.js";
+// 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
+import { auditParameters } from "./diagnose.js";
+import type {
+  AgentPlan, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
+  ConversationStatus, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
+} from "../shared/agent-types.js";
 
 export interface DbChannel {
   id: string;
@@ -34,10 +41,26 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+/**
+ * 画布列 → `string[]`。这一列有三种"不是正常数组"的可能：NULL（加列之前就存在、又没被回填到的老行）、
+ * 坏 JSON、以及被人手工改成别的形状。三种都当成**空画布**——一行坏数据不该让会话列表或大脑上下文炸掉。
+ */
+function canvasIdsFromRow(value: unknown): string[] {
+  const parsed = parseJson<unknown>(value, []);
+  return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+}
+
 export class AppDatabase {
   readonly dataDir: string;
   readonly filePath: string;
   readonly inputsDir: string;
+  /**
+   * 缩略图目录（AGENT_PLAN.md §11.4）。
+   *
+   * 刻意放在数据目录而不是可配置的素材目录：缩略图是派生数据不是产物，
+   * 用户改了素材目录后它跟着跑没有意义，而且历史产物跨目录读取时反而会失效。
+   */
+  readonly thumbsDir: string;
   /** 默认产物目录。用户改过素材目录后，历史记录里旧产物仍指向这个目录 */
   readonly defaultAssetsDir: string;
   private currentAssetsDir: string;
@@ -53,8 +76,10 @@ export class AppDatabase {
     this.dataDir = dataDir;
     this.defaultAssetsDir = path.join(dataDir, "assets");
     this.inputsDir = path.join(dataDir, "inputs");
+    this.thumbsDir = path.join(dataDir, "thumbs");
     fs.mkdirSync(this.defaultAssetsDir, { recursive: true });
     fs.mkdirSync(this.inputsDir, { recursive: true });
+    fs.mkdirSync(this.thumbsDir, { recursive: true });
     this.filePath = path.join(dataDir, "app.db");
     this.db = new DatabaseSync(this.filePath);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
@@ -90,7 +115,10 @@ export class AppDatabase {
         error_message TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
-        finished_at TEXT
+        finished_at TEXT,
+        -- 'generate' 是正常生成；'upload' 是用户在对话框里自己传的图（需求.md 问题 4），
+        -- 它借这条表占一个 task_id 给 assets 指，但**不是**一次生成
+        origin TEXT NOT NULL DEFAULT 'generate'
       );
       CREATE INDEX IF NOT EXISTS tasks_created_idx ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS tasks_remote_idx ON tasks(channel_id, remote_task_id);
@@ -121,6 +149,45 @@ export class AppDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      -- 对话式 Agent（AGENT_PLAN.md §5）。产物不复制，靠 task_id / asset_id 指向现有表
+      CREATE TABLE IF NOT EXISTS conversations (
+        id                   TEXT PRIMARY KEY,
+        title                TEXT NOT NULL,
+        brain_channel_id     TEXT NOT NULL,
+        brain_model          TEXT NOT NULL,
+        -- 已废弃：老版本的单图画布指针。只被下面那次回填读一次，新代码不读也不写。
+        -- 留着这列的另一个原因：回填要 SELECT 它，从建表语句里删掉的话，新库上跑回填会直接 no such column
+        current_asset_id     TEXT,
+        -- 画布：有序产物 id 的 JSON 数组（[0] 是主图，上限见 MAX_CANVAS_IMAGES）。
+        -- NULL 是「还没迁移过」（只可能出现在加列之前就存在的老会话上），'[]' 才是「画布是空的」
+        canvas_asset_ids     TEXT,
+        status               TEXT NOT NULL DEFAULT 'idle',
+        video_confirm_policy TEXT NOT NULL DEFAULT 'auto_only',
+        vision_enabled       INTEGER NOT NULL DEFAULT 1,
+        auto_continue_count  INTEGER NOT NULL DEFAULT 0,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS messages (
+        id               TEXT PRIMARY KEY,
+        conversation_id  TEXT NOT NULL,
+        seq              INTEGER NOT NULL,
+        role             TEXT NOT NULL,
+        content          TEXT,
+        plan_json        TEXT,
+        tool_name        TEXT,
+        tool_args_json   TEXT,
+        tool_result_json TEXT,
+        confirm_json     TEXT,
+        task_id          TEXT,
+        asset_id         TEXT,
+        status           TEXT NOT NULL DEFAULT 'ok',
+        error_message    TEXT,
+        created_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
+      CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
+      CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
     `);
     // Migration: add duration column to assets if it doesn't exist
     const columnsResult = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
@@ -135,6 +202,44 @@ export class AppDatabase {
     }
     // 新生成的记录自带 base_dir；加列前留下的行回填成默认目录
     this.db.prepare("UPDATE assets SET base_dir = ? WHERE base_dir = ''").run(this.defaultAssetsDir);
+    // Migration: 看图改（AGENT_PLAN.md §11）用的缩略图。存的是相对 thumbs/ 的文件名，
+    // 不是绝对路径——数据目录被搬走时它跟着走
+    const hasThumbPath = columnsResult.some((col) => col.name === "thumb_path");
+    if (!hasThumbPath) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN thumb_path TEXT NOT NULL DEFAULT ''");
+    }
+    // messages 建表早于「视频确认卡片」，补上待确认计划的列（§13.6 ①）
+    const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    if (!messageColumns.some((col) => col.name === "confirm_json")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN confirm_json TEXT");
+    }
+    // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
+    // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
+    const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    if (!taskColumns.some((col) => col.name === "origin")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'generate'");
+    }
+    // 画布从一根指针改成一组图（有序列表）：加列 + 把老指针搬进来
+    const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
+    if (!conversationColumns.some((col) => col.name === "canvas_asset_ids")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN canvas_asset_ids TEXT");
+    }
+    /**
+     * 回填**键在 `IS NULL` 上，而不是键在「刚加完列」上**，两个原因：
+     *
+     * 1. 这个项目没有 git 兜底。万一 ALTER 成功、回填跑到一半进程被杀，下次启动还得能补上。
+     * 2. 一旦写成 `[]` 就再也不会被回填——所以用户清空画布之后重启，老指针**不会**把画布复活。
+     *
+     * JSON 在 JS 这边拼，不用 SQLite 的 json_array()：省一个对 JSON1 扩展的依赖，
+     * 也和文件里 parseJson 的读写方向对称。
+     */
+    const legacyCanvas = this.db
+      .prepare("SELECT id, current_asset_id FROM conversations WHERE canvas_asset_ids IS NULL")
+      .all() as Array<{ id: string; current_asset_id: string | null }>;
+    const writeCanvas = this.db.prepare("UPDATE conversations SET canvas_asset_ids = ? WHERE id = ?");
+    for (const row of legacyCanvas) {
+      writeCanvas.run(JSON.stringify(row.current_asset_id ? [row.current_asset_id] : []), row.id);
+    }
 
     this.currentAssetsDir = this.resolveAssetsDir();
     fs.mkdirSync(this.currentAssetsDir, { recursive: true });
@@ -244,7 +349,12 @@ export class AppDatabase {
    * 参考图留在 inputs/，返回给调用方的待删列表为空。
    */
   deleteTask(id: string, options: { keepFiles?: boolean } = {}): { assets: StoredFileRef[]; inputs: string[] } {
-    const assets = this.listAssets(id).map((asset) => ({ baseDir: asset.baseDir, relativePath: asset.relativePath }));
+    const assetRows = this.listAssets(id);
+    const assets: StoredFileRef[] = assetRows.map((asset) => ({ baseDir: asset.baseDir, relativePath: asset.relativePath }));
+    // 缩略图跟着产物一起清理，否则删完历史 thumbs/ 会无声地一直涨
+    assets.push(...assetRows
+      .filter((asset) => asset.thumbPath)
+      .map((asset) => ({ baseDir: this.thumbsDir, relativePath: asset.thumbPath })));
     const inputs = this.collectInputImagePaths(id);
     this.db.prepare("DELETE FROM diagnostics WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM assets WHERE task_id = ?").run(id);
@@ -283,12 +393,21 @@ export class AppDatabase {
     return stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string");
   }
 
-  createTask(input: { id: string; channelId: string; model: string; prompt: string; input: unknown }): TaskRow {
+  createTask(input: {
+    id: string; channelId: string; model: string; prompt: string; input: unknown;
+    /** 默认就是一次正常生成；上传素材那条传 `"upload"` */
+    origin?: TaskOrigin;
+    /** 上传的图生下来就是完成的，没有排队这一步 */
+    status?: TaskStatus;
+  }): TaskRow {
     const createdAt = now();
     this.db.prepare(`
-      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at)
-      VALUES (?, ?, ?, ?, 'queued', ?, ?)
-    `).run(input.id, input.channelId, input.model, input.prompt, JSON.stringify(input.input), createdAt);
+      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at, origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id, input.channelId, input.model, input.prompt,
+      input.status ?? "queued", JSON.stringify(input.input), createdAt, input.origin ?? "generate",
+    );
     return this.getTaskRow(input.id)!;
   }
 
@@ -299,16 +418,18 @@ export class AppDatabase {
 
   listTaskRows(limit = 40): TaskRow[] {
     const rows = this.db.prepare(`
-      SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name
+      SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name,
+             channels.adapter_type AS channel_adapter_type
       FROM tasks LEFT JOIN channels ON channels.id = tasks.channel_id
+      WHERE tasks.origin = 'generate'
       ORDER BY tasks.created_at DESC LIMIT ?
     `).all(limit) as DbRow[];
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  /** 清空历史要把整个表过一遍，不受列表分页限制 */
+  /** 清空历史要把整个表过一遍，不受列表分页限制。上传素材不算历史，跟着会话一起走 */
   listAllTaskRows(): TaskRow[] {
-    const rows = this.db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all() as DbRow[];
+    const rows = this.db.prepare("SELECT * FROM tasks WHERE origin = 'generate' ORDER BY created_at DESC").all() as DbRow[];
     return rows.map((row) => this.taskFromRow(row));
   }
 
@@ -345,11 +466,24 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  insertAsset(asset: { id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string; baseDir: string; sha256: string; duration?: number | null }) {
+  insertAsset(asset: {
+    id: string; taskId: string; fileName: string; mimeType: string; byteSize: number;
+    relativePath: string; baseDir: string; sha256: string; duration?: number | null;
+    /** 相对 thumbs/ 的文件名。缩略图生成失败时留空，Agent 那边会现缩现存 */
+    thumbPath?: string | null;
+  }) {
     this.db.prepare(`
-      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, base_dir, sha256, duration, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath, asset.baseDir, asset.sha256, asset.duration ?? null, now());
+      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, base_dir, sha256, duration, thumb_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath,
+      asset.baseDir, asset.sha256, asset.duration ?? null, asset.thumbPath ?? "", now(),
+    );
+  }
+
+  /** 懒生成缩略图后回填（§11.4 的「使用时懒生成」），老产物走这条 */
+  setAssetThumbPath(assetId: string, thumbPath: string) {
+    this.db.prepare("UPDATE assets SET thumb_path = ? WHERE id = ?").run(thumbPath, assetId);
   }
 
   listAssets(taskId: string): AssetRow[] {
@@ -363,13 +497,33 @@ export class AppDatabase {
     return row ? this.assetFromRow(row) : null;
   }
 
+  /**
+   * 当前画布那一组图，**顺序就是 `canvasAssetIds` 的顺序（[0] 是主图）**。
+   *
+   * 这里要**过滤掉已经不存在的 id 和非图片**：历史页删掉一个任务会连带删掉它的 assets，
+   * 而画布里可能还留着它的 id。老的单指针靠 `getAsset` 返回 null 自然兜住了，
+   * 变成列表之后必须显式过滤——否则「画布 3 张」实际只剩 2 张，大脑还会拿到 undefined。
+   *
+   * 只过滤、**不回写库**：读的时候顺手改数据是 bug 的温床，剪枝等下一次显式写画布时自然收敛。
+   */
+  canvasImages(conversation: Conversation): AssetRow[] {
+    const images: AssetRow[] = [];
+    for (const id of conversation.canvasAssetIds) {
+      const asset = this.getAsset(id);
+      if (asset && asset.mimeType.startsWith("image/")) images.push(asset);
+    }
+    return images;
+  }
+
   private assetFromRow(row: DbRow): AssetRow {
     return {
       id: String(row.id), taskId: String(row.task_id), fileName: String(row.file_name), mimeType: String(row.mime_type),
       byteSize: Number(row.byte_size), relativePath: String(row.relative_path),
       baseDir: row.base_dir == null || row.base_dir === "" ? this.defaultAssetsDir : String(row.base_dir),
       sha256: String(row.sha256),
-      duration: row.duration == null ? null : Number(row.duration), createdAt: String(row.created_at),
+      duration: row.duration == null ? null : Number(row.duration),
+      thumbPath: row.thumb_path == null ? "" : String(row.thumb_path),
+      createdAt: String(row.created_at),
     };
   }
 
@@ -390,9 +544,262 @@ export class AppDatabase {
     }));
   }
 
+  // ── 对话式 Agent（AGENT_PLAN.md §5） ──────────────────────────────────────
+
+  createConversation(input: {
+    title: string; brainChannelId: string; brainModel: string;
+    videoConfirmPolicy: VideoConfirmPolicy; visionEnabled: boolean;
+  }): Conversation {
+    const id = crypto.randomUUID();
+    const at = now();
+    this.db.prepare(`
+      INSERT INTO conversations
+      (id, title, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
+       video_confirm_policy, vision_enabled, auto_continue_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, 0, ?, ?)
+    `).run(id, input.title, input.brainChannelId, input.brainModel, input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, at, at);
+    return this.getConversation(id)!;
+  }
+
+  getConversation(id: string): Conversation | null {
+    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? this.conversationFromRow(row) : null;
+  }
+
+  listConversations(): Conversation[] {
+    const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as DbRow[];
+    return rows.map((row) => this.conversationFromRow(row));
+  }
+
+  /** 只改传进来的字段；`canvasAssetIds: []` 是「清空画布」，和「没传」是两回事 */
+  updateConversation(id: string, patch: ConversationPatch): Conversation | null {
+    const fields: string[] = [];
+    const values: Array<string | number | null> = [];
+    const mapping: Record<string, string> = {
+      title: "title",
+      brainChannelId: "brain_channel_id",
+      brainModel: "brain_model",
+      videoConfirmPolicy: "video_confirm_policy",
+    };
+    for (const [key, column] of Object.entries(mapping)) {
+      if (!(key in patch)) continue;
+      fields.push(`${column} = ?`);
+      values.push((patch as Record<string, unknown>)[key] as string | null);
+    }
+    // 画布是数组，不能走上面那个把值强转成 string | null 的循环——得像 visionEnabled 一样单开一支
+    if ("canvasAssetIds" in patch && patch.canvasAssetIds) {
+      fields.push("canvas_asset_ids = ?");
+      values.push(JSON.stringify(patch.canvasAssetIds));
+    }
+    if ("visionEnabled" in patch) {
+      fields.push("vision_enabled = ?");
+      values.push(patch.visionEnabled ? 1 : 0);
+    }
+    if (!fields.length) return this.getConversation(id);
+    fields.push("updated_at = ?");
+    values.push(now(), id);
+    this.db.prepare(`UPDATE conversations SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return this.getConversation(id);
+  }
+
+  /** 会话状态机（§12.3）与自动续跑计数；不给 updated_at 让列表顺序被内部状态变化打乱 */
+  setConversationStatus(id: string, status: ConversationStatus, options: { touch?: boolean } = {}) {
+    if (options.touch === false) {
+      this.db.prepare("UPDATE conversations SET status = ? WHERE id = ?").run(status, id);
+      return;
+    }
+    this.db.prepare("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?").run(status, now(), id);
+  }
+
+  bumpAutoContinue(id: string) {
+    this.db.prepare("UPDATE conversations SET auto_continue_count = auto_continue_count + 1, updated_at = ? WHERE id = ?").run(now(), id);
+  }
+
+  resetAutoContinue(id: string) {
+    this.db.prepare("UPDATE conversations SET auto_continue_count = 0 WHERE id = ?").run(id);
+  }
+
+  /**
+   * 删除会话。
+   *
+   * 生成出来的产物**留着**——它们是「生成历史」里的记录，会话删了用户还能在那边找到。
+   * 但自己上传的图不属于历史，会话一没就没人能引用它了，所以跟着一起清盘：
+   * 否则素材目录里会静默地留下一堆永远看不见的文件。
+   */
+  deleteConversation(id: string): { assets: StoredFileRef[] } {
+    const uploads = this.db.prepare(`
+      SELECT DISTINCT tasks.id AS id FROM messages
+      JOIN assets ON assets.id = messages.asset_id
+      JOIN tasks ON tasks.id = assets.task_id
+      WHERE messages.conversation_id = ? AND tasks.origin = 'upload'
+    `).all(id) as DbRow[];
+
+    const assets: StoredFileRef[] = [];
+    for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
+    this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+    return { assets };
+  }
+
+  listMessages(conversationId: string, limit = 400): ChatMessage[] {
+    // 取最近 N 条再正序返回：对话长了以后不能整个表读进内存
+    const rows = this.db.prepare(
+      "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?",
+    ).all(conversationId, limit) as DbRow[];
+    return rows.reverse().map((row) => this.messageFromRow(row));
+  }
+
+  getMessage(id: string): ChatMessage | null {
+    const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? this.messageFromRow(row) : null;
+  }
+
+  appendMessage(input: {
+    conversationId: string; role: MessageRole; content?: string | null;
+    plan?: AgentPlan | null; toolName?: string | null;
+    toolArgs?: Record<string, unknown> | null; toolResult?: ToolResult | null;
+    confirm?: ConfirmPreview | null; taskId?: string | null; assetId?: string | null;
+    status?: MessageStatus; errorMessage?: string | null;
+  }): ChatMessage {
+    const row = this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE conversation_id = ?")
+      .get(input.conversationId) as DbRow;
+    const seq = Number(row.next);
+    const id = crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO messages
+      (id, conversation_id, seq, role, content, plan_json, tool_name, tool_args_json,
+       tool_result_json, confirm_json, task_id, asset_id, status, error_message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, input.conversationId, seq, input.role,
+      input.content ?? null,
+      input.plan ? JSON.stringify(input.plan) : null,
+      input.toolName ?? null,
+      input.toolArgs ? JSON.stringify(input.toolArgs) : null,
+      input.toolResult ? JSON.stringify(input.toolResult) : null,
+      input.confirm ? JSON.stringify(input.confirm) : null,
+      input.taskId ?? null, input.assetId ?? null,
+      input.status ?? "ok", input.errorMessage ?? null, now(),
+    );
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now(), input.conversationId);
+    return this.getMessage(id)!;
+  }
+
+  updateMessage(id: string, patch: Partial<Pick<ChatMessage, "content" | "status" | "errorMessage" | "taskId" | "assetId">> & {
+    toolResult?: ToolResult | null; confirm?: ConfirmPreview | null; toolArgs?: Record<string, unknown> | null;
+  }) {
+    const fields: string[] = [];
+    const values: Array<string | null> = [];
+    const mapping: Record<string, string> = {
+      content: "content", status: "status", errorMessage: "error_message",
+      taskId: "task_id", assetId: "asset_id",
+    };
+    for (const [key, column] of Object.entries(mapping)) {
+      if (!(key in patch)) continue;
+      fields.push(`${column} = ?`);
+      values.push(((patch as Record<string, unknown>)[key] ?? null) as string | null);
+    }
+    if ("toolResult" in patch) {
+      fields.push("tool_result_json = ?");
+      values.push(patch.toolResult ? JSON.stringify(patch.toolResult) : null);
+    }
+    if ("confirm" in patch) {
+      fields.push("confirm_json = ?");
+      values.push(patch.confirm ? JSON.stringify(patch.confirm) : null);
+    }
+    if ("toolArgs" in patch) {
+      fields.push("tool_args_json = ?");
+      values.push(patch.toolArgs ? JSON.stringify(patch.toolArgs) : null);
+    }
+    if (!fields.length) return;
+    values.push(id);
+    this.db.prepare(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  /** 待确认的消息。用户发新消息时要把它们标成「已被取代」并让出 pending 状态 */
+  listPendingMessages(conversationId: string): ChatMessage[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM messages WHERE conversation_id = ? AND status = 'pending' ORDER BY seq ASC",
+    ).all(conversationId) as DbRow[];
+    return rows.map((row) => this.messageFromRow(row));
+  }
+
+  /** 视频任务完成后靠它找回会话（§9.1）；一个任务只会属于一个会话 */
+  findConversationByTask(taskId: string): Conversation | null {
+    const row = this.db.prepare(
+      "SELECT conversations.* FROM conversations JOIN messages ON messages.conversation_id = conversations.id WHERE messages.task_id = ? ORDER BY messages.seq DESC LIMIT 1",
+    ).get(taskId) as DbRow | undefined;
+    return row ? this.conversationFromRow(row) : null;
+  }
+
+  /** 会话里产出过图片的产物，按顺序排列，供「设为当前」回溯（§10.1 规则 3） */
+  listConversationAssets(conversationId: string): Array<{ asset: AssetRow; round: number; prompt: string; source: TaskOrigin }> {
+    const rows = this.db.prepare(`
+      SELECT assets.*, messages.seq AS message_seq, messages.content AS message_content,
+             COALESCE(tasks.origin, 'generate') AS asset_origin
+      FROM messages
+      JOIN assets ON assets.id = messages.asset_id
+      LEFT JOIN tasks ON tasks.id = assets.task_id
+      WHERE messages.conversation_id = ? AND messages.asset_id IS NOT NULL
+      ORDER BY messages.seq ASC
+    `).all(conversationId) as DbRow[];
+    let round = 0;
+    let lastSeq: number | null = null;
+    return rows.map((row) => {
+      const seq = Number(row.message_seq);
+      if (seq !== lastSeq) { round += 1; lastSeq = seq; }
+      return {
+        asset: this.assetFromRow(row), round, prompt: String(row.message_content ?? ""),
+        // 生成的和上传的可预期行为不一样（上传的没有提示词），前端据此加个来源标记
+        source: (row.asset_origin == null ? "generate" : String(row.asset_origin)) as TaskOrigin,
+      };
+    });
+  }
+
+  private conversationFromRow(row: DbRow): Conversation {
+    return {
+      id: String(row.id), title: String(row.title),
+      brainChannelId: String(row.brain_channel_id), brainModel: String(row.brain_model),
+      // JSON 坏了或者还是 NULL（没迁移到的老行）都当成空画布，别让一行坏数据炸掉整个会话列表
+      canvasAssetIds: canvasIdsFromRow(row.canvas_asset_ids),
+      status: String(row.status) as ConversationStatus,
+      videoConfirmPolicy: String(row.video_confirm_policy) as VideoConfirmPolicy,
+      visionEnabled: Boolean(row.vision_enabled),
+      autoContinueCount: Number(row.auto_continue_count),
+      taskCount: this.countConversationTasks(String(row.id)),
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    };
+  }
+
+  private messageFromRow(row: DbRow): ChatMessage {
+    return {
+      id: String(row.id), conversationId: String(row.conversation_id), seq: Number(row.seq),
+      role: String(row.role) as MessageRole,
+      content: row.content == null ? null : String(row.content),
+      plan: parseJson<AgentPlan | null>(row.plan_json, null),
+      toolName: row.tool_name == null ? null : String(row.tool_name) as ChatMessage["toolName"],
+      toolArgs: parseJson<Record<string, unknown> | null>(row.tool_args_json, null),
+      toolResult: parseJson<ToolResult | null>(row.tool_result_json, null),
+      confirm: parseJson<ConfirmPreview | null>(row.confirm_json, null),
+      taskId: row.task_id == null ? null : String(row.task_id),
+      assetId: row.asset_id == null ? null : String(row.asset_id),
+      status: String(row.status) as MessageStatus,
+      errorMessage: row.error_message == null ? null : String(row.error_message),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private countConversationTasks(conversationId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS total FROM messages WHERE conversation_id = ? AND task_id IS NOT NULL",
+    ).get(conversationId) as DbRow;
+    return Number(row.total);
+  }
+
   getTaskView(id: string): Task | null {
     const row = this.db.prepare(`
-      SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name
+      SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name,
+             channels.adapter_type AS channel_adapter_type
       FROM tasks LEFT JOIN channels ON channels.id = tasks.channel_id WHERE tasks.id = ?
     `).get(id) as DbRow | undefined;
     if (!row) return null;
@@ -405,13 +812,29 @@ export class AppDatabase {
   }
 
   private taskView(task: TaskRow): Task {
+    // 工作台也要「看得见」（需求.md 问题 1 D）：核对用的是任务自己落库的两份原料——
+    // input_json 是请求时写的，effective_json 是**发送前**就存下的脱敏请求体。
+    // 适配器认不出来（渠道已删除、上传素材的空 channel_id）就不硬猜，如实不给这一项。
+    const parameterNotes = task.channelAdapterType
+      ? auditParameters(task.channelAdapterType, parseJson<Record<string, unknown>>(task.inputJson, {}), parseJson<Record<string, unknown> | null>(task.effectiveJson, null))
+      : [];
     return {
       id: task.id, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
       status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
-      attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage, assets: this.listAssets(task.id).map((asset) => ({
-        id: asset.id, taskId: asset.taskId, fileName: asset.fileName, mimeType: asset.mimeType, byteSize: asset.byteSize,
-        url: `/api/assets/${asset.id}/file`, duration: asset.duration, createdAt: asset.createdAt,
-      })), createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,
+      ...(parameterNotes.length ? { parameterNotes } : {}),
+      attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
+      assets: this.listAssets(task.id).map((asset) => this.assetView(asset)),
+      createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,
+    };
+  }
+
+  /** AssetRow → 前端用的 Asset。Agent 的画布徽章、附件条也走这一份，别各写一遍 */
+  assetView(asset: AssetRow): Asset {
+    return {
+      id: asset.id, taskId: asset.taskId, fileName: asset.fileName, mimeType: asset.mimeType, byteSize: asset.byteSize,
+      url: `/api/assets/${asset.id}/file`,
+      thumbUrl: isImageAsset(asset) ? `/api/assets/${asset.id}/thumb` : null,
+      duration: asset.duration, createdAt: asset.createdAt,
     };
   }
 
@@ -427,29 +850,45 @@ export class AppDatabase {
   private taskFromRow(row: DbRow): TaskRow {
     return {
       id: String(row.id), channelId: String(row.channel_id), channelName: row.channel_name == null ? null : String(row.channel_name),
+      channelAdapterType: row.channel_adapter_type == null ? null : String(row.channel_adapter_type) as AdapterType,
       model: String(row.model), prompt: String(row.prompt), status: String(row.status) as TaskStatus,
       progress: row.progress == null ? null : Number(row.progress),
       remoteTaskId: row.remote_task_id == null ? null : String(row.remote_task_id),
       inputJson: String(row.input_json), effectiveJson: row.effective_json == null ? null : String(row.effective_json), attemptCount: Number(row.attempt_count),
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
+      origin: (row.origin == null ? "generate" : String(row.origin)) as TaskOrigin,
     };
   }
 }
 
+/**
+ * `generate` = 走 runner 的真实生成；`upload` = 用户在对话框里自己传的图（需求.md 问题 4）。
+ * 后者只是为了给 `assets.task_id` 找个可指的主键，**不是**一次生成，
+ * 所以历史列表、清空历史、诊断入口都按 `generate` 过滤。
+ */
+export type TaskOrigin = "generate" | "upload";
+
 export interface TaskRow {
-  id: string; channelId: string; channelName: string | null; model: string; prompt: string; status: TaskStatus; progress: number | null;
+  id: string; channelId: string; channelName: string | null;
+  /** 渠道适配器，参数核对要用它选映射表；`SELECT *` 那种查询拿不到，所以可空 */
+  channelAdapterType: AdapterType | null;
+  model: string; prompt: string; status: TaskStatus; progress: number | null;
   /** 上游异步任务 id：重启后用它接着轮询，不用从头发起 */
   remoteTaskId: string | null;
   inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
   errorMessage: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
+  origin: TaskOrigin;
 }
 
 export interface AssetRow {
   id: string; taskId: string; fileName: string; mimeType: string; byteSize: number; relativePath: string;
   /** 该产物所在目录：用户换过素材目录后，老记录仍指向写入时的目录 */
   baseDir: string;
-  sha256: string; duration: number | null; createdAt: string;
+  sha256: string; duration: number | null;
+  /** 相对 thumbs/ 的缩略图文件名，空串表示还没生成 */
+  thumbPath: string;
+  createdAt: string;
 }
 
 /** 待清理的落盘文件：目录随记录走，不能用当前素材目录去猜 */
