@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { createZip } from "./zip-archive.mjs";
 
 const projectDir = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
@@ -24,13 +24,4 @@ const excludedPaths = [
   "./src-tauri/resources/server",
   "./src-tauri/target",
 ];
-const excludeArgs = excludedPaths.map((excludedPath) => `--exclude=${excludedPath}`);
-const tar = spawnSync(
-  "tar.exe",
-  ["-a", "-c", "-f", zipPath, ...excludeArgs, "."],
-  { cwd: projectDir, stdio: "inherit" },
-);
-if (tar.error) throw tar.error;
-if (tar.status !== 0) throw new Error(`tar exited with ${tar.status}`);
-
-console.log(`Created ${zipPath}`);
+createZip({ zipPath, cwd: projectDir, paths: ["."], excludes: excludedPaths });

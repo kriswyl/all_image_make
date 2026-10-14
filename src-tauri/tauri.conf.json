@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "益达工作台",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",

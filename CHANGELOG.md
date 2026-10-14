@@ -13,6 +13,18 @@
 
 ---
 
+## v2.1.1 — 2026-10-14
+
+### 修复
+
+- **v2.1.0 的安装包装完打不开**：后端启动即报 `ERR_MODULE_NOT_FOUND: Cannot find package 'jimp'`，进程退出码 1，应用直接关掉。`scripts/prepare-tauri.mjs` 决定往包里放哪些 `node_modules`，用的是一份**手写名单** `["express", "multer", "zod"]`；`jimp` 是服务端的直接依赖（`src/server/vision.ts` 引它）却不在名单里，于是从没被拷进安装包。这个毛病**在 web 开发模式下永远复现不出来**——那儿加载的是项目根的 `node_modules`，什么都在，只有装出来的包会炸；v2.0.x 的包里同样没有 jimp，但那时没有任何服务端代码引它，所以一直是潜伏状态，2.1.0 新增的 `vision.ts` 是第一处引用，把它变成了启动必崩。
+  现在改成**从编译产物里扫真实 import** 推导依赖：扫 `dist/server/**/*.js` 的裸模块说明符，要求每个都声明在 `package.json` 的 `dependencies` 里，否则**打包当场失败**，而不是等用户装完才发现。直接依赖本地缺盘也从静默跳过改成硬错误（传递依赖缺失仍只警告，`optionalDependencies` 本来就可能因平台缺席）。打进 `resources/server/node_modules` 的包由 83 个增加到 160 个。
+- **便携包和源码包其实不是 zip，是一份未压缩的 tar**（v2.0.0 起一直如此，只是没人拆开看过）。`package-portable.mjs` / `package-source.mjs` 调的是 `tar.exe -a -c -f x.zip`，指望 `-a` 按扩展名压成 zip——那是 **bsdtar** 的行为；而 PATH 里排在前面的是 Git Bash 自带的 **GNU tar**，它根本做不出 zip，`-a` 被忽略，于是**静默产出一份未压缩的 tar 还顶着 `.zip` 的名字**。文件头是 `e7 9b 8a e8` 而不是 `PK\x03\x04`，`unzip` 直接报「找不到 central directory」，体积也比正常大三倍。现在两个脚本都从 `%SystemRoot%\System32\tar.exe`（bsdtar）取 tar 并按绝对路径调用，写完校验文件头必须是 `PK`，不是就报错终止。2.1.1 的便携包因此从 217 MB 降到约 70 MB。
+- **便携包解压路径超过 Windows 的 260 字符上限，资源管理器根本解不开**。上面那个修复把 jimp 带进来之后，`@jimp/plugin-print` 等包里的一堆 jest 快照（`src/__image_snapshots__/index-node-test-ts-write-text-over-image-…-1-snap.png`，光文件名就上百字符）让解压后的路径涨到 **269 字符**，`Expand-Archive` 和资源管理器会以 `DirectoryNotFoundException` 失败——而 Info-ZIP 解得开，所以这个毛病只在用户那边出现。现在打包时剪掉 `__image_snapshots__` 和 `*.map`（一共 5.4MB，运行时都不需要），最长相对路径由 175 掉回 102，并在打包时断言不超过 180。`src/` **不能**一起剪：`debug` 和 `gifwrap` 的 `package.json` 里 `main` 就是 `src/index.js`，而 Express 依赖 debug。
+  **光剪源树还不够**：Tauri 把 `src-tauri/resources` 拷到 `target/release/resources` 时是**增量**的，只新增和覆盖、从不删除，而便携包/安装包读的正是那份副本——于是源树干净、包里却仍是上一轮的 42 条快照和 227 字符的长路径，第一次 2.1.1 构建就是这样（`target/release/resources/server` 比源树多 294 个文件，全是快照和 `.map`）。`prepare-tauri.mjs` 现在每次构建前先删掉那份旧副本，逼 Tauri 从当前源树重拷；`package-portable.mjs` 在拷贝完成后对**便携目录本身**再查一遍（快照数、最长相对路径），因为这才是用户解压出来的东西。
+
+---
+
 ## v2.1.0 — 2026-10-14
 
 ### 新增
