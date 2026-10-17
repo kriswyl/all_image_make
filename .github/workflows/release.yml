@@ -148,6 +148,9 @@ jobs:
   #    自动更新只在 Windows 安装版上启用；便携版客户端会自己识别并只提示下载。
   build-windows:
     runs-on: windows-latest
+    # 签名私钥可以放在仓库级 secrets，也可以放在这个环境的 secrets 里。
+    # 声明 environment 后，作业能同时读到两者（同名时环境级优先）。
+    environment: image_key
     steps:
       - uses: actions/checkout@v4
         with:

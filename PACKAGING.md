@@ -66,9 +66,8 @@ Tauri 的更新包用 minisign 签名，公钥钉死在 `src-tauri/tauri.conf.js
 - 私钥位置：`%USERPROFILE%\.tauri\chatcanvas-updater.key`（无密码，2026-10-17 生成）
 - 公钥备份：同目录的 `.key.pub`
 - 私钥**不进仓库、不进 `.env`、不写进任何交接文档**。请另外备份到密码管理器或 U 盘
-- GitHub Actions 需要两个 secret（Settings → Secrets and variables → Actions）：
-  - `TAURI_SIGNING_PRIVATE_KEY`：`chatcanvas-updater.key` 的完整内容
-  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：留空即可（生成时未设密码）
+- GitHub Actions 需要一个 secret：`TAURI_SIGNING_PRIVATE_KEY` = `chatcanvas-updater.key` 的完整内容。放在 **repository secrets**（Settings → Secrets and variables → Actions → Repository secrets）或 **`image_key` 环境的 secrets** 都可以——`release.yml` 的 `build-windows` 已声明 `environment: image_key`，两种来源都能读到。
+- **不要创建 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`**：GitHub 不允许空值 secret，而这个私钥生成时没有密码。工作流里缺失的 secret 会解析成空字符串，正好对应“无密码”。
 
 `npm run tauri:build`（安装包）会自动从上面的固定位置读取私钥；找不到会直接报错并给出生成命令。`npm run tauri:build:exe`（便携版，`--no-bundle`）不需要私钥。
 
