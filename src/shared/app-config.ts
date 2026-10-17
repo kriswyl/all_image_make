@@ -1,3 +1,3 @@
-export const APP_VERSION = "2.1.1";
+export const APP_VERSION = "2.2.0";
 export const VECTORENGINE_KEY_ENV = "VECTORENGINE_API_KEY";
 export const VECTORENGINE_KEY_PLACEHOLDER = "{向量引擎key}";

@@ -25,6 +25,7 @@ function message(role: MessageRole, overrides: Partial<ChatMessage> = {}): ChatM
     confirm: null,
     taskId: null,
     assetId: null,
+    assetRefs: [],
     status: "ok",
     errorMessage: null,
     createdAt: "",

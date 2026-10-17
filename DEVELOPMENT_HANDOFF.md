@@ -1,8 +1,8 @@
-# 益达工作台开发交接背景
+# ezcanvas 开发交接背景
 
 ## 项目目标
 
-这是一个 Windows 桌面图片 / 视频生成客户端（当前版本 `2.1.1`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
+这是一个 Windows 桌面图片 / 视频生成客户端（当前版本 `2.2.0`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
 
 ## 当前架构
 
@@ -31,7 +31,7 @@
 - 参考图保存在数据目录的 `inputs/`，任务 JSON 和诊断记录不会保存上传 Base64；OpenAI Images 默认使用 `/v1/images/edits` multipart 请求。
 - 生成表单会在本机自动保存提示词、渠道、模型和全部参数，页面切换或应用重启后继续保留。
 - 结果图支持双击放大；桌面版下载使用原生保存对话框，可选择目录和文件名。
-- 产品显示名为“益达工作台”，桌面图标和界面 Logo 来自 `src-tauri/icons/` 与 `src/client/public/app-logo.png`。
+- 产品名 **ezcanvas**，中文名「易画」；界面上的品牌位（侧栏、窗口标题、安装包名）统一用 ezcanvas，中文叙述里用「易画」。图标母版在 `design/`，6 款候选见 `design/ezcanvas-icons.html`，选定后替换 `src-tauri/icons/` 与 `src/client/ApertureMark.tsx`（站点图标 `src/client/public/app-icon.svg`）。
 
 ### 视频生成
 
@@ -123,7 +123,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/益达工作台-v2.1.1-portable-win-x64/` 和 `artifacts/益达工作台-v2.1.1-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
+输出位于 `artifacts/ezcanvas-v2.2.0-portable-win-x64/` 和 `artifacts/ezcanvas-v2.2.0-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
 
 生成用于换电脑继续开发的源码包：
 
@@ -131,7 +131,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/益达工作台-v2.1.1-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/ezcanvas-v2.2.0-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 
@@ -153,5 +153,5 @@ Tauri 版本默认使用：
 ## 给下一次 Codex 对话的提示词
 
 ```text
-继续开发益达工作台。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md、VIDEO_HANDOFF.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录、视频轮询与重启恢复、Tauri sidecar 能力。
+继续开发 ezcanvas。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md、VIDEO_HANDOFF.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录、视频轮询与重启恢复、Tauri sidecar 能力。
 ```

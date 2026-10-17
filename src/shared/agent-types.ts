@@ -72,6 +72,15 @@ export interface PlannedCall {
  */
 export const MAX_BATCH_CALLS = 8;
 
+/**
+ * 新建会话时的占位名，同时是**自动命名的判据**：
+ * 标题还等于它，说明用户没改过名，可以用第一条指令的前几个字顶替。
+ */
+export const DEFAULT_CONVERSATION_TITLE = "新对话";
+
+/** 自动取前几个字。20 个字在侧栏里正好一行放得下，再多就要截断显示 */
+export const AUTO_TITLE_MAX_CHARS = 20;
+
 /** 大脑必须输出的那一个 JSON 对象（§7 输出格式） */
 export interface AgentPlan {
   tool: AgentToolName;
@@ -87,6 +96,17 @@ export interface AgentPlan {
    * 只有多调用时才多出这个字段，而多调用本来就只能走新的那两条路径。
    */
   calls?: PlannedCall[];
+  /**
+   * 这一批图要**保持一致性**时由大脑写上。
+   *
+   * - `character`：同一人物（脸、发型、服装保持一样）
+   * - `style`：同一画风（人物可以不同）
+   *
+   * 执行器不会把它们同时发出去，而是**先生成第 1 张当基准**，再以它为参考图
+   * 并行生成其余几张——并行的文字描述再像，也保证不了同一张脸。
+   * 第 1 张本身也是用户要的结果之一，所以张数不变、费用不变。
+   */
+  consistency?: "character" | "style";
 }
 
 /**
@@ -250,6 +270,13 @@ export interface ConfirmPreview {
   prompt: string;
   model: string;
   channelName: string;
+  /**
+   * 渠道的适配器类型。
+   *
+   * 卡片上的时长范围、分辨率档位、音频/提示词扩展开关都得跟着它走。只给渠道名和模型名的话，
+   * 前端只能写死一套参数范围——于是给 Grok 摆出「带音频」，它根本不认这个参数。
+   */
+  adapterType?: string;
   mode?: string;
   duration?: number;
   resolution?: string;
@@ -271,6 +298,11 @@ export interface ConfirmPreview {
    * 卡片上不写出 N 的话，用户点「确认生成」根本不知道自己同意了多少钱。
    */
   count?: number;
+  /**
+   * 这一批要保持一致：`character` 同一人物 / `style` 同一画风。
+   * 卡片据此说明「先生成基准图，再并行改」，而不是「一次并行提交 N 个」。
+   */
+  consistency?: "character" | "style";
   message: string;
 }
 
@@ -289,6 +321,14 @@ export interface ChatMessage {
   confirm: ConfirmPreview | null;
   taskId: string | null;
   assetId: string | null;
+  /**
+   * 这条消息引用的一组产物。
+   *
+   * 用户把自己已经生成的图从画布/消息里拖进输入框再发送时，光有文字看不出他指的是哪几张，
+   * 所以连同这句话一起记下来，气泡上照原样摆出来。`assetId` 是「产出/上传的那一张」，
+   * 两者不重叠。
+   */
+  assetRefs: string[];
   status: MessageStatus;
   errorMessage: string | null;
   createdAt: string;
@@ -311,6 +351,13 @@ export interface Conversation {
   videoConfirmPolicy: VideoConfirmPolicy;
   /** §11.7 看图改开关，关掉就完全退化成盲改 */
   visionEnabled: boolean;
+  /**
+   * 原话直发：大脑必须**逐字**使用用户那句话当提示词，不许增删改写。
+   *
+   * 平时它会把口语扩写成完整画面（默认就该这样，效果更好），但有些用户是带着
+   * 自己攒了很久的提示词来的，被「优化」一下反而不是他要的。这个开关交给他自己决定。
+   */
+  verbatimPrompt: boolean;
   autoContinueCount: number;
   /** 本会话已经提交过的生成任务数，用于 §16 的任务软上限 */
   taskCount: number;
@@ -318,8 +365,24 @@ export interface Conversation {
   updatedAt: string;
 }
 
+/** 本会话的大脑海量用量（每次调用累加；上下文取最近一次请求的输入大小） */
+export interface ConversationUsage {
+  /** 最近一次大脑请求的 prompt_tokens——这就是「现在上下文有多大」最准的近似 */
+  contextTokens: number;
+  /** 本会话所有大脑调用的输入 token 合计 */
+  promptTokens: number;
+  /** 本会话所有大脑调用的输出 token 合计 */
+  completionTokens: number;
+  /** 其中推理 token（已包含在 completionTokens 里，单独列出来便于排查） */
+  reasoningTokens: number;
+  /** 记过几次调用——0 表示这个会话还没跟大脑说过话 */
+  calls: number;
+}
+
 export interface ConversationView extends Conversation {
   messages: ChatMessage[];
+  /** token 用量；状态行用它，接口不可用时全 0 */
+  usage: ConversationUsage;
   /**
    * 画布那一组图的详情，顺序同 `canvasAssetIds`（`[0]` 是主图），已滤掉查不到的 id 和非图片。
    *
@@ -386,6 +449,14 @@ export type AgentStreamEvent =
   | { type: "message"; message: ChatMessage }
   /** §13 等待用户确认 */
   | { type: "confirm"; messageId: string; preview: ConfirmPreview }
+  /**
+   * 丢掉已经流式显示的半截内容。
+   *
+   * 只在「这一轮要重来」时发：身份跑偏后的纠正、JSON 解析失败的纠正。
+   * 不发的话，前端会把第一次跑偏的正文和重试后的正文拼在一起，用户看到的
+   * 是一段前后矛盾的独白。
+   */
+  | { type: "reset" }
   /** 视频进度转发 */
   | { type: "progress"; taskId: string; status: string; progress: number | null }
   | { type: "error"; message: string }
@@ -398,6 +469,7 @@ export interface ConversationInput {
   brainModel?: string;
   videoConfirmPolicy?: VideoConfirmPolicy;
   visionEnabled?: boolean;
+  verbatimPrompt?: boolean;
 }
 
 export interface ConversationPatch {
@@ -406,6 +478,7 @@ export interface ConversationPatch {
   brainModel?: string;
   videoConfirmPolicy?: VideoConfirmPolicy;
   visionEnabled?: boolean;
+  verbatimPrompt?: boolean;
   /**
    * 手动设/清画布（§10.1 规则 3 的「设为当前」）：有序的一组图 id，`[0]` 是主图。
    * 空数组 = 清空画布，和「没传这个键」是两回事。

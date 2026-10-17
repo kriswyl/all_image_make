@@ -339,10 +339,10 @@ fn report_startup_failure(app: &tauri::AppHandle, error: String) {
     handle
       .dialog()
       .message(format!(
-        "后端服务启动失败，应用即将退出。\n\n原因：{error}\n\n排查建议：\n1. macOS：若正从安装镜像（DMG）直接运行，请先把应用拖入「应用程序」文件夹再打开；并在「终端」执行 xattr -cr /Applications/益达工作台.app 后重试\n2. 查看详细日志：macOS 在 ~/Library/Logs/com.imagerelay.studio/，Windows 在 %LOCALAPPDATA%\\com.imagerelay.studio\\logs\\"
+        "后端服务启动失败，应用即将退出。\n\n原因：{error}\n\n排查建议：\n1. macOS：若正从安装镜像（DMG）直接运行，请先把应用拖入「应用程序」文件夹再打开；并在「终端」执行 xattr -cr /Applications/ezcanvas.app 后重试\n2. 查看详细日志：macOS 在 ~/Library/Logs/com.imagerelay.studio/，Windows 在 %LOCALAPPDATA%\\com.imagerelay.studio\\logs\\"
       ))
       .kind(MessageDialogKind::Error)
-      .title("益达工作台启动失败")
+      .title("ezcanvas 启动失败")
       .blocking_show();
     handle.exit(1);
   });

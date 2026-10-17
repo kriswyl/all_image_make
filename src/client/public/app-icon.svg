@@ -1,0 +1,14 @@
+<!--
+  ezcanvas 站点图标：透明底 + z，笔画颜色跟着浏览器主题走。
+
+  viewBox 特意裁到 z 的包围盒（5.1 起、13.8 宽），而不是留 24 的画布——站点图标只有 16px，
+  没空间浪费在留白上。任务栏那枚 .ico 是一张死图、没法跟随主题，所以那边只能挑一个颜色（现在是白色）；
+  SVG 站点图标可以读 prefers-color-scheme，浅色标签栏走黑、深色走白，两边都不发虚。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="5.1 5.1 13.8 13.8" fill="none"
+     stroke="#0d0d0d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+  <style>
+    @media (prefers-color-scheme: dark) { svg { stroke: #ffffff } }
+  </style>
+  <path d="M6.4 6.4h11.2L6.4 17.6h11.2"/>
+</svg>

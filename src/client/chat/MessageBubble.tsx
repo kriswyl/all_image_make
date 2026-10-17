@@ -2,7 +2,7 @@
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
 import { AlertCircle, Info } from "lucide-react";
-import type { ChatMessage } from "../../shared/agent-types";
+import { assetRef, type ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
 
 /**
@@ -13,29 +13,35 @@ import { api } from "../api";
  * 不该成为用户看不见自己那张图的原因（和 AssetStrip 一样的回退）。
  */
 export function UserBubble({ message, onPreview }: { message: ChatMessage; onPreview?: (assetId: string) => void }) {
-  const assetId = message.assetId;
+  // 产出/上传的那一张走 assetId，从画布拖进来的那几张走 assetRefs，两者不重叠
+  const thumbs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
   return (
     <div className="chat-row chat-row-user">
       <div className="chat-bubble chat-bubble-user">
-        {assetId ? (
-          <button
-            type="button"
-            className="chat-bubble-thumb"
-            title="点开看"
-            onClick={() => onPreview?.(assetId)}
-          >
-            <img
-              src={api.assetUrl(`/api/assets/${assetId}/thumb`)}
-              alt=""
-              loading="lazy"
-              onError={(event) => {
-                const image = event.currentTarget;
-                if (image.dataset.fallback === "1") return;
-                image.dataset.fallback = "1";
-                image.src = api.assetUrl(`/api/assets/${assetId}/file`);
-              }}
-            />
-          </button>
+        {thumbs.length ? (
+          <div className="chat-bubble-thumbs">
+            {thumbs.map((assetId) => (
+              <button
+                key={assetId}
+                type="button"
+                className="chat-bubble-thumb"
+                title={`${assetRef(assetId)} · 点开看`}
+                onClick={() => onPreview?.(assetId)}
+              >
+                <img
+                  src={api.assetUrl(`/api/assets/${assetId}/thumb`)}
+                  alt=""
+                  loading="lazy"
+                  onError={(event) => {
+                    const image = event.currentTarget;
+                    if (image.dataset.fallback === "1") return;
+                    image.dataset.fallback = "1";
+                    image.src = api.assetUrl(`/api/assets/${assetId}/file`);
+                  }}
+                />
+              </button>
+            ))}
+          </div>
         ) : null}
         {message.content}
       </div>
@@ -43,15 +49,50 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
   );
 }
 
-export function AssistantBubble({ message }: { message: ChatMessage }) {
+/**
+ * 助手正文。底部可以挂一排「可选回答」按钮（`ask` 工具带 options 时的形态）。
+ *
+ * 以前 ask 的 options 是**直接丢掉**的：落库只取 `text ?? question ?? say`，
+ * 模型问「你要 A 还是 B」，用户面前只有一句话，得自己把答案再打一遍。
+ * 选项本来就在 `plan.args.options` 里存着，渲染出来即可。
+ */
+export function AssistantBubble({
+  message,
+  options = [],
+  disabled = false,
+  onPick,
+}: {
+  message: ChatMessage;
+  /** 可点的答案；只有「还没被回答的那一条」才由外面传进来 */
+  options?: string[];
+  disabled?: boolean;
+  onPick?: (option: string) => void;
+}) {
   // 批量那一轮的表头行可能没有 `say`（`say` 在协议里是可选的），只带着 plan.calls。
   // 它要落库——大脑回放时得看见自己请求过什么——但没必要在界面上占一个空气泡。
-  if (!message.content?.trim()) return null;
+  if (!message.content?.trim() && !options.length) return null;
   return (
     <div className="chat-row chat-row-assistant">
-      <div className={`chat-bubble chat-bubble-assistant ${message.status === "error" ? "is-error" : ""}`}>
-        {message.content}
-      </div>
+      {message.content?.trim() ? (
+        <div className={`chat-bubble chat-bubble-assistant ${message.status === "error" ? "is-error" : ""}`}>
+          {message.content}
+        </div>
+      ) : null}
+      {options.length ? (
+        <div className="chat-options" role="group" aria-label="可选回答">
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              className="chat-option"
+              disabled={disabled}
+              onClick={() => onPick?.(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

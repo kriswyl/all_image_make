@@ -74,7 +74,13 @@ export const optimizePromptSchema = z.object({
 export const generateVideoSchema = z.object({
   prompt: nonEmpty(20000),
   modelHint: z.string().trim().max(80).optional(),
-  mode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference", "video-edit", "video-extend"]).optional(),
+  /*
+   * `.catch(undefined)` 是给大脑兜底的：提示词里列了合法值，但它偶尔还是会自己发明一个
+   * （「image-to-video」这类）。校验整轮失败的话，代价是重新问一次大脑、用户多等一个来回，
+   * 而 mode 本来就有「按画布自动判断」的默认路径——丢掉这个字段即可，不必让整次调用失败。
+   * 最终用的是哪个 mode，确认卡和结果里都会照实写出来。
+   */
+  mode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference", "video-edit", "video-extend"]).optional().catch(undefined),
   duration: z.coerce.number().int().min(1).max(30).optional(),
   resolution: z.string().trim().max(10).optional(),
   audio: z.coerce.boolean().optional(),
@@ -112,6 +118,13 @@ export interface ToolContext {
    * 大脑没点名（或点了个不存在的名字）时用它们，而不是碰运气取类目里第一个。
    */
   defaultAliases: { image?: string; video?: string };
+  /**
+   * 「原话直发」时用户那句话的**原文**，没开就是 null。
+   *
+   * 为什么不让模型自己遵守提示词里那条规则：它有时听有时不听，用户看到的就是
+   * 「这个开关有时候不生效」。这里由服务端**直接替换**掉 prompt 参数，模型怎么写都不影响结果。
+   */
+  verbatimPrompt: string | null;
   emit: (event: AgentStreamEvent) => void;
   signal?: AbortSignal;
 }
@@ -181,6 +194,10 @@ function canvasPrimary(db: AppDatabase, conversation: Conversation): AssetRow | 
  * （一个 `{"prompt": "..."}`，不是工具计划），塞进主循环会让 JSON 协议变复杂。
  */
 async function optimizePrompt(ctx: ToolContext, args: OptimizePromptArgs): Promise<ToolOutcome> {
+  // 开了原话直发还来优化，就是和用户的要求对着干——直接说清，别白花一次大脑调用
+  if (ctx.verbatimPrompt) {
+    return failResult("这个会话开着「原话直发」，提示词要逐字用用户的原话，不做优化", "VERBATIM_PROMPT");
+  }
   const conversation = ctx.conversation;
   const channel = ctx.db.getChannel(conversation.brainChannelId);
   if (!channel || !channel.enabled) return failResult("大脑渠道不可用，无法优化提示词", "BRAIN_UNAVAILABLE");
@@ -203,6 +220,8 @@ async function optimizePrompt(ctx: ToolContext, args: OptimizePromptArgs): Promi
   ];
   try {
     const result = await callBrain({ channel, key, model: conversation.brainModel, messages, signal: ctx.signal });
+    // 优化提示词也是一次真花钱的大脑调用，账本里不能漏
+    if (result.usage) ctx.db.recordBrainCall(conversation.id, result.usage);
     const parsed = parseLooseJson(result.content) as { prompt?: unknown } | null;
     const optimized = typeof parsed?.prompt === "string" && parsed.prompt.trim() ? parsed.prompt.trim() : result.content.trim();
     if (!optimized) return failResult("优化提示词没有返回内容", "EMPTY_RESPONSE");
@@ -328,7 +347,7 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   const input: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
-    prompt: args.prompt,
+    prompt: ctx.verbatimPrompt ?? args.prompt,
     duration: args.duration ?? defaults.duration,
     resolution: args.resolution ?? defaults.resolution,
     audio: args.audio ?? defaults.audio,
@@ -451,7 +470,8 @@ async function generateImage(ctx: ToolContext, args: GenerateImageArgs, isEdit: 
   const input: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
-    prompt: args.prompt,
+    // 原话直发时用用户的原话，不用大脑改写过的版本
+    prompt: ctx.verbatimPrompt ?? args.prompt,
     size: args.size,
     aspectRatio: args.aspectRatio,
     imageSize: args.imageSize,

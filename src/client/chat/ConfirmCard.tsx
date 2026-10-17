@@ -9,6 +9,7 @@
 import { AlertCircle, Check, Film, Image as ImageIcon, X } from "lucide-react";
 import { useState } from "react";
 import { assetRef, type ChatMessage, type ConfirmPreview, type GenerateVideoArgs } from "../../shared/agent-types";
+import { VIDEO_CAPABILITIES, type VideoAdapter } from "../../shared/video-capabilities";
 
 const MODE_LABELS: Record<string, string> = {
   "text-to-video": "文生视频",
@@ -39,7 +40,21 @@ export function ConfirmCard({
   // 否则用户点「确认生成」时根本不知道自己一次同意了多少钱
   const batchCount = preview.count ?? 1;
   const args = (message.toolArgs ?? {}) as Partial<GenerateVideoArgs>;
-  const [duration, setDuration] = useState(String(preview.duration ?? args.duration ?? 5));
+  /**
+   * 参数范围跟着**渠道**走，不是写死一套。
+   * 写死的后果很具体：Grok 只支持 1–15 秒、且不认音频和提示词扩展，
+   * 卡片却给它摆出「1–30 秒」和「带音频」——用户在卡片上改的每个字都可能让上游报错。
+   */
+  const caps = isVideo && preview.adapterType
+    ? VIDEO_CAPABILITIES[preview.adapterType as VideoAdapter]
+    : undefined;
+  const durations = caps?.durations ?? { min: 1, max: 30, fixed: null, default: 5 };
+  // 当前值不在档位表里（换了渠道、大脑写了个不常规的值）也要留一项，否则一进卡片就被悄悄改掉
+  const resolutionOptions = caps
+    ? [...caps.resolutions, ...(preview.resolution && !caps.resolutions.includes(preview.resolution) ? [preview.resolution] : [])]
+    : [];
+
+  const [duration, setDuration] = useState(String(preview.duration ?? args.duration ?? durations.default));
   const [resolution, setResolution] = useState(preview.resolution ?? args.resolution ?? "");
   const [audio, setAudio] = useState<boolean>(preview.audio ?? args.audio ?? false);
   const [promptExtend, setPromptExtend] = useState<boolean>(preview.promptExtend ?? args.promptExtend ?? true);
@@ -47,10 +62,13 @@ export function ConfirmCard({
   function approve() {
     const patch: Partial<GenerateVideoArgs> = {};
     if (isVideo) {
-      patch.promptExtend = promptExtend;
-      patch.audio = audio;
+      // 渠道不认的开关不发：发过去也只会被丢掉，还不如别让它出现在请求参数里
+      patch.promptExtend = caps ? caps.supportsPromptExtend && promptExtend : promptExtend;
+      patch.audio = caps ? caps.supportsAudio && audio : audio;
       const parsed = Number(duration);
-      if (Number.isFinite(parsed) && parsed > 0) patch.duration = Math.min(30, Math.round(parsed));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        patch.duration = Math.max(durations.min, Math.min(durations.max, Math.round(parsed)));
+      }
       if (resolution.trim()) patch.resolution = resolution.trim();
     }
     onApprove(patch);
@@ -77,7 +95,9 @@ export function ConfirmCard({
         {message.content ? <p className="confirm-card-say">{message.content}</p> : null}
         {batchCount > 1 ? (
           <div className="confirm-card-batch">
-            这次会一次并行提交 {batchCount} 个任务（{batchCount} 笔费用），下面显示的是第 1 个的提示词。
+            {preview.consistency
+              ? `这次要生成 ${batchCount} 张：先生成第 1 张基准图，再以它为准并行生成其余 ${batchCount - 1} 张（共 ${batchCount} 笔费用）。下面显示的是第 1 张的提示词。`
+              : `这次会一次并行提交 ${batchCount} 个任务（${batchCount} 笔费用），下面显示的是第 1 个的提示词。`}
           </div>
         ) : null}
         {preview.prompt ? <div className="confirm-card-prompt">{preview.prompt}</div> : null}
@@ -87,27 +107,45 @@ export function ConfirmCard({
             <div className="confirm-card-fields">
               <label className="confirm-field">
                 <span>时长</span>
-                <input
-                  type="number" min={1} max={30} step={1} value={duration}
-                  onChange={(event) => setDuration(event.target.value)} disabled={busy}
-                />
+                {durations.fixed != null ? (
+                  <input type="text" value={`${durations.fixed} 秒（固定）`} disabled />
+                ) : (
+                  <input
+                    type="number" min={durations.min} max={durations.max} step={1} value={duration}
+                    onChange={(event) => setDuration(event.target.value)} disabled={busy}
+                  />
+                )}
                 <em>秒</em>
+                {/* 范围写在旁边：这个渠道到底能从几秒到几秒，不该让用户去试 */}
+                {durations.fixed == null ? <em className="confirm-field-range">{durations.min}–{durations.max}</em> : null}
               </label>
               <label className="confirm-field">
                 <span>分辨率</span>
-                <input
-                  type="text" value={resolution} placeholder="默认"
-                  onChange={(event) => setResolution(event.target.value)} disabled={busy}
-                />
+                {resolutionOptions.length ? (
+                  <select value={resolution} onChange={(event) => setResolution(event.target.value)} disabled={busy}>
+                    <option value="">按渠道默认</option>
+                    {resolutionOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type="text" value={resolution} placeholder="默认"
+                    onChange={(event) => setResolution(event.target.value)} disabled={busy}
+                  />
+                )}
               </label>
-              <label className="confirm-check">
-                <input type="checkbox" checked={audio} onChange={(event) => setAudio(event.target.checked)} disabled={busy} />
-                <span>带音频</span>
-              </label>
-              <label className="confirm-check">
-                <input type="checkbox" checked={promptExtend} onChange={(event) => setPromptExtend(event.target.checked)} disabled={busy} />
-                <span>自动扩展提示词</span>
-              </label>
+              {/* 渠道不认的开关直接不出现：给 Grok 摆一个「带音频」，勾了也是白勾 */}
+              {!caps || caps.supportsAudio ? (
+                <label className="confirm-check">
+                  <input type="checkbox" checked={audio} onChange={(event) => setAudio(event.target.checked)} disabled={busy} />
+                  <span>带音频</span>
+                </label>
+              ) : null}
+              {!caps || caps.supportsPromptExtend ? (
+                <label className="confirm-check">
+                  <input type="checkbox" checked={promptExtend} onChange={(event) => setPromptExtend(event.target.checked)} disabled={busy} />
+                  <span>自动扩展提示词</span>
+                </label>
+              ) : null}
             </div>
             <div className="confirm-card-meta">
               {MODE_LABELS[preview.mode ?? ""] ?? preview.mode ?? "按渠道默认"}

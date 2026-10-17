@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
-import { BATCHABLE_TOOLS, parsePlan, resolveBatch } from "../src/server/agent";
+import { BATCHABLE_TOOLS, extractPlanText, looksLikeIdentityDrift, parsePlan, resolveBatch } from "../src/server/agent";
 import { MAX_BATCH_CALLS, planCalls, type PlannedCall } from "../src/shared/agent-types";
 import { createApp } from "../src/server/app";
 
@@ -73,6 +73,50 @@ describe("parsePlan / calls 形状", () => {
     expect(planCalls(null)).toEqual([]);
     expect(planCalls(undefined)).toEqual([]);
   });
+
+  it("一致性标记：认出常用写法，单调用时丢掉", () => {
+    const batch = (consistency: unknown) => parsePlan(JSON.stringify({
+      calls: [image("A"), image("B")], consistency,
+    }));
+    expect(batch("character")?.consistency).toBe("character");
+    expect(batch("style")?.consistency).toBe("style");
+    // 模型常见的变体也要认：true / same_style
+    expect(batch(true)?.consistency).toBe("character");
+    expect(batch("same_style")?.consistency).toBe("style");
+    // 认不出的写法当成没写，别让整份计划作废
+    expect(batch("nonsense")).not.toHaveProperty("consistency");
+    // 单张没有一致性可言
+    expect(parsePlan(JSON.stringify({ calls: [image("A")], consistency: "character" }))).not.toHaveProperty("consistency");
+  });
+});
+
+describe("空 reply 的正文提取", () => {
+  it("从 args 的常见字段里取，认得出模型换了字段名的情况", () => {
+    expect(extractPlanText({ tool: "reply", args: { text: "你好" } }, "x")).toBe("你好");
+    expect(extractPlanText({ tool: "reply", args: { message: "在的" } }, "x")).toBe("在的");
+    expect(extractPlanText({ tool: "reply", args: { content: "画什么？" } }, "x")).toBe("画什么？");
+    expect(extractPlanText({ tool: "ask", args: { question: "要几比几？" } }, "x")).toBe("要几比几？");
+  });
+
+  it("args 为空时，用 JSON 外面的自然语言兜底", () => {
+    // 模型先把话说了，再补一个空工具计划
+    expect(extractPlanText(
+      { tool: "reply", args: {} },
+      '你好呀！我在。\n{"tool":"reply","args":{}}',
+    )).toBe("你好呀！我在。");
+    // 只有空 JSON、没有正文 → 真的为空，交给纠正重试
+    expect(extractPlanText({ tool: "reply", args: {} }, '{"tool":"reply","args":{}}')).toBe("");
+  });
+});
+
+describe("身份跑偏检测（中转站注入 Claude Code 提示词）", () => {
+  it("认出几种典型说法，不误伤正常回复", () => {
+    expect(looksLikeIdentityDrift("我是 Claude Code，Anthropic 的命令行工具助手")).toBe(true);
+    expect(looksLikeIdentityDrift("我不具备图像生成功能")).toBe(true);
+    expect(looksLikeIdentityDrift("I cannot generate images.")).toBe(true);
+    expect(looksLikeIdentityDrift("好嘞，这就给你画一位美女～")).toBe(false);
+    expect(looksLikeIdentityDrift('{"tool":"generate_image","args":{"prompt":"猫"}}')).toBe(false);
+  });
 });
 
 describe("resolveBatch：卡片上问几个，就只提交几个", () => {
@@ -112,8 +156,10 @@ describe("resolveBatch：卡片上问几个，就只提交几个", () => {
 });
 
 /** 假中转站：同时演大脑和生图。返回的是「怎么把这次 e2e 搭起来」用得到的把手 */
-async function startMock(plansByCall: unknown[]) {
+async function startMock(plansByCall: unknown[], options: { failPrompts?: string[] } = {}) {
   const imagePrompts: string[] = [];
+  /** 每次产图请求：提示词 + 带了几张参考图。一致性批量靠它验证「第 2 张起真的带了基准图」 */
+  const imageRequests: Array<{ prompt: string; references: number }> = [];
   let inflight = 0;
   let maxInflight = 0;
   let chatCalls = 0;
@@ -127,18 +173,40 @@ async function startMock(plansByCall: unknown[]) {
         const plan = plansByCall[Math.min(chatCalls, plansByCall.length - 1)];
         chatCalls += 1;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+        // 带上 usage：状态行的账本全靠它，测试里也要能断言真的记上了
+        res.end(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 5 } },
+        }));
         return;
       }
-      const prompt = (JSON.parse(body) as { prompt: string }).prompt;
+      const contentType = String(req.headers["content-type"] ?? "");
+      let prompt: string;
+      let references = 0;
+      if (contentType.includes("multipart/form-data")) {
+        // openai-images 带参考图时走 /v1/images/edits + multipart
+        prompt = body.match(/name="prompt"\r\n\r\n([\s\S]*?)\r\n--/)?.[1] ?? "";
+        references = (body.match(/name="image(?:\[\])?"/g) ?? []).length;
+      } else {
+        prompt = (JSON.parse(body) as { prompt: string }).prompt;
+      }
       imagePrompts.push(prompt);
+      imageRequests.push({ prompt, references });
       inflight += 1;
       maxInflight = Math.max(maxInflight, inflight);
+      const fail = options.failPrompts?.includes(prompt);
       // 故意让「第 1 张」最慢：完成顺序和计划顺序**不一样**，才能验出画布是
-      // 按计划顺序落回来的，而不是「谁先跑完算谁」
-      const delay = prompt === "第1张" ? 180 : 10;
+      // 按计划顺序落回来的，而不是「谁先跑完算谁」。
+      // 带参考图的一致性请求给足时间，让「其余几张同时在飞」真的观测得到
+      // （参考图要先解码/缩放，10ms 会短到第一张已经回来、第二张还没发出去）。
+      const delay = prompt === "第1张" ? 180 : prompt.includes("以参考图") ? 160 : 10;
       setTimeout(() => {
         inflight -= 1;
+        if (fail) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "mock failure" } }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
       }, delay);
@@ -170,6 +238,7 @@ async function startMock(plansByCall: unknown[]) {
   return {
     app, context, conversationId,
     imagePrompts,
+    imageRequests,
     getMaxInflight: () => maxInflight,
     getChatCalls: () => chatCalls,
   };
@@ -187,10 +256,14 @@ type View = {
   canvasAssetIds: string[];
   messages: ToolRow[];
   sessionImages: Array<{ asset: { id: string }; prompt: string }>;
+  usage: { contextTokens: number; promptTokens: number; completionTokens: number; reasoningTokens: number; calls: number };
 };
 
 async function settle(app: ReturnType<typeof createApp>["app"], conversationId: string, until: (view: View) => boolean, tries = 120): Promise<View> {
-  let view: View = { status: "", taskCount: 0, canvasAssetIds: [], messages: [], sessionImages: [] };
+  let view: View = {
+    status: "", taskCount: 0, canvasAssetIds: [], messages: [], sessionImages: [],
+    usage: { contextTokens: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, calls: 0 },
+  };
   for (let attempt = 0; attempt < tries; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
@@ -234,8 +307,94 @@ describe("批量并行，端到端", () => {
 
     // 4 个任务就是 4 笔额度，自动记上（数的是 messages.task_id）
     expect(view.taskCount).toBe(4);
+    // token 账本：规划 + 收尾各一次大脑调用；上下文取最近一次的 prompt_tokens
+    expect(view.usage.calls).toBe(2);
+    expect(view.usage.promptTokens).toBe(200);
+    expect(view.usage.completionTokens).toBe(40);
+    expect(view.usage.reasoningTokens).toBe(10);
+    expect(view.usage.contextTokens).toBe(100);
     // 批量没有确认这一环：一批图片不该被拦，拦了就白等一次
     expect(view.messages.some((row) => row.confirm)).toBe(false);
+  });
+
+  it("要同一人物时：先生成基准图，其余几张以它为参考并行生成", async () => {
+    const mock = await startMock([
+      { calls: [image("第1张"), image("第2张"), image("第3张")], consistency: "character", say: "画三张。" },
+      { tool: "reply", args: { text: "三张都好了。" }, say: "三张都好了。" },
+    ]);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "画三张同一个人" }).expect(202);
+    const view = await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.filter((row) => row.role === "tool").length >= 3);
+
+    const cards = view.messages.filter((row) => row.role === "tool");
+    expect(cards).toHaveLength(3);
+    expect(cards.every((row) => row.toolResult?.ok === true)).toBe(true);
+
+    // 第 1 张是基准，不带参考图；第 2、3 张各带 1 张（就是基准图）
+    expect(mock.imageRequests.map((item) => item.references)).toEqual([0, 1, 1]);
+    expect(mock.imageRequests[0]!.prompt).toBe("第1张");
+    // 各自的场景描述没有被丢掉，只是前面多了「保持同一人物」的约束。
+    // 并行发出的顺序不保证，所以按集合看，不按下标。
+    const restPrompts = mock.imageRequests.slice(1).map((item) => item.prompt);
+    expect(restPrompts.every((prompt) => prompt.startsWith("以参考图中的同一位人物为准"))).toBe(true);
+    expect(restPrompts.some((prompt) => prompt.endsWith("第2张"))).toBe(true);
+    expect(restPrompts.some((prompt) => prompt.endsWith("第3张"))).toBe(true);
+    // 基准图出来之后，其余两张是**并行**的
+    expect(mock.getMaxInflight()).toBeGreaterThanOrEqual(2);
+    // 3 张就是 3 笔，基准图本身也是结果之一，不多收一份钱
+    expect(view.taskCount).toBe(3);
+    expect(view.sessionImages).toHaveLength(3);
+  });
+
+  it("基准图失败时，其余几张退回普通并行，不会整批白跑", async () => {
+    const mock = await startMock([
+      { calls: [image("第1张"), image("第2张"), image("第3张")], consistency: "character", say: "画三张。" },
+      { tool: "reply", args: { text: "第 1 张失败了，另外两张好了。" }, say: "第 1 张失败了，另外两张好了。" },
+    ], { failPrompts: ["第1张"] });
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "画三张同一个人" }).expect(202);
+    const view = await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.filter((row) => row.role === "tool").length >= 3);
+
+    const cards = view.messages.filter((row) => row.role === "tool");
+    expect(cards).toHaveLength(3);
+    expect(cards[0]!.toolResult?.ok).toBe(false);
+    // 基准图没出来，剩下两张不能带着「一张不存在的参考图」发，也不能干脆不发
+    expect(cards[1]!.toolResult?.ok).toBe(true);
+    expect(cards[2]!.toolResult?.ok).toBe(true);
+    expect(mock.imageRequests.slice(1).every((item) => item.references === 0)).toBe(true);
+  });
+
+  it("模型给了空 reply 时：纠正一次，不落空气泡", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: {} },
+      { tool: "reply", args: { text: "你好呀，我是语布。" } },
+    ]);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "你好" }).expect(202);
+    const view = await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.length >= 2);
+
+    const assistant = view.messages.filter((row) => row.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0]!.content).toBe("你好呀，我是语布。");
+    // 空 reply + 纠正后的一次 = 两次大脑调用；第一句正文没有丢
+    expect(mock.getChatCalls()).toBe(2);
+    expect(view.messages.some((row) => row.role === "assistant" && row.content === "")).toBe(false);
+  });
+
+  it("中转站注入 Claude Code 身份时：纠正一次，接着把图画出来", async () => {
+    const mock = await startMock([
+      "我是 Claude Code，Anthropic 的命令行工具助手。我不具备图像生成功能。",
+      { tool: "generate_image", args: { prompt: "猫" }, say: "画猫。" },
+      { tool: "reply", args: { text: "画好了。" }, say: "画好了。" },
+    ]);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "画一只猫" }).expect(202);
+    const view = await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.some((row) => row.role === "tool"));
+
+    // 第一次跑偏 → 身份纠正一次 → 拿到正常计划；收尾再问一次大脑
+    expect(mock.getChatCalls()).toBe(3);
+    expect(mock.imagePrompts).toEqual(["猫"]);
+    expect(view.messages.find((row) => row.role === "tool")?.toolResult?.ok).toBe(true);
   });
 
   it("一批里混进生视频：只跑第一个，并明说原因", async () => {

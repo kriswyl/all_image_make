@@ -6,6 +6,7 @@ import type { GenerationInput, ReferenceImageInput, Task } from "../shared/types
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
   RemoteApiError,
+  applyAuth,
   buildGenerationRequest,
   extractImageCandidates,
   extractVideoCandidates,
@@ -533,7 +534,8 @@ export class TaskRunner {
 
   private async fetchVideoBytes(url: string, channel: DbChannel): Promise<Buffer> {
     try {
-      const response = await safeFetch(url, { method: "GET" }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+      const headers = this.assetDownloadHeaders(url, channel, "*/*");
+      const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
       if (!response.ok) {
         throw new AppError(
           "VIDEO_DOWNLOAD_FAILED",
@@ -632,13 +634,43 @@ export class TaskRunner {
     return { ...input, referenceImage: undefined, referenceImages: hydratedImages };
   }
 
+  /**
+   * 下载产物用的请求头。
+   *
+   * 中转站自带的资产地址（形如 `https://gateway.example/v1/images/assets/<uuid>`）通常要带 key
+   * 才肯给图，不带就是 403——用户看到的现象正是「响应体里明明有 url，却一直拿不到图片」。
+   * 但 key **只能发给渠道自己那台主机**：产物地址也可能是公开的 OSS / CDN，
+   * 往那儿带 Authorization 等于把密钥送给第三方。
+   *
+   * `query` 鉴权不在这里重放：那个类型要把 key 拼进 URL，而我们只是去取一个别人给的地址，
+   * 拼错了反而会把地址弄坏。这类网关的资产地址一般本来就是公开的。
+   */
+  private assetDownloadHeaders(url: string, channel: DbChannel, accept: string): Record<string, string> {
+    const headers: Record<string, string> = { Accept: accept };
+    if (channel.authType === "none" || channel.authType === "query") return headers;
+    let host = "";
+    let channelHost = "";
+    try {
+      host = new URL(url).host;
+      channelHost = new URL(channel.baseUrl).host;
+    } catch {
+      return headers;
+    }
+    if (!host || host !== channelHost) return headers;
+    const key = this.sessionKeys.get(channel.id) || (channel.secretEnv ? process.env[channel.secretEnv] : "");
+    if (!key) return headers;
+    applyAuth(url, headers, channel, key);
+    return headers;
+  }
+
   private async resolveImage(image: ImageCandidate, channel: DbChannel) {
     if (image.base64) {
       const clean = image.base64.replace(/^data:image\/[^;]+;base64,/, "").replace(/\s/g, "");
       return { bytes: Buffer.from(clean, "base64"), mimeType: image.mimeType ?? "image/png" };
     }
     if (!image.url) throw new AppError("ASSET_INVALID", "图片响应缺少 URL 或 Base64", 502);
-    const response = await safeFetch(image.url, { method: "GET", headers: { Accept: "image/*" } }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+    const headers = this.assetDownloadHeaders(image.url, channel, "image/*");
+    const response = await safeFetch(image.url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
     if (!response.ok) throw new AppError("ASSET_DOWNLOAD_FAILED", `图片下载失败：HTTP ${response.status}`, 502);
     const contentLength = Number(response.headers.get("content-length") ?? 0);
     if (contentLength > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);

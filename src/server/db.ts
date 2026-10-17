@@ -7,7 +7,7 @@ import { isImageAsset } from "../shared/types.js";
 import { auditParameters } from "./diagnose.js";
 import type {
   AgentPlan, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
-  ConversationStatus, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
+  ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 
 export interface DbChannel {
@@ -164,6 +164,7 @@ export class AppDatabase {
         status               TEXT NOT NULL DEFAULT 'idle',
         video_confirm_policy TEXT NOT NULL DEFAULT 'auto_only',
         vision_enabled       INTEGER NOT NULL DEFAULT 1,
+        verbatim_prompt      INTEGER NOT NULL DEFAULT 0,
         auto_continue_count  INTEGER NOT NULL DEFAULT 0,
         created_at           TEXT NOT NULL,
         updated_at           TEXT NOT NULL
@@ -188,6 +189,18 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
+      -- 一次大脑调用的 token 用量。单独一张表而不是塞进 messages：
+      -- 解析重试、身份纠正这些「同一个消息对应的额外调用」也要算进账里，
+      -- 挂在消息上反而得在一堆执行路径里手动累加。
+      CREATE TABLE IF NOT EXISTS brain_calls (
+        id                TEXT PRIMARY KEY,
+        conversation_id   TEXT NOT NULL,
+        prompt_tokens     INTEGER NOT NULL,
+        completion_tokens INTEGER NOT NULL,
+        reasoning_tokens  INTEGER NOT NULL,
+        created_at        TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS brain_calls_conv_idx ON brain_calls(conversation_id, created_at);
     `);
     // Migration: add duration column to assets if it doesn't exist
     const columnsResult = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
@@ -213,6 +226,11 @@ export class AppDatabase {
     if (!messageColumns.some((col) => col.name === "confirm_json")) {
       this.db.exec("ALTER TABLE messages ADD COLUMN confirm_json TEXT");
     }
+    // 一条用户消息可以引用**多张**已有产物（从画布或消息里拖进输入框的那几张）。
+    // asset_id 是个单列，装不下，所以单开一个 JSON 数组；老行读出来就是空数组。
+    if (!messageColumns.some((col) => col.name === "asset_refs")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN asset_refs TEXT");
+    }
     // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
     // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
     const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
@@ -223,6 +241,10 @@ export class AppDatabase {
     const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
     if (!conversationColumns.some((col) => col.name === "canvas_asset_ids")) {
       this.db.exec("ALTER TABLE conversations ADD COLUMN canvas_asset_ids TEXT");
+    }
+    // 「原话直发」：有时候用户就是要自己那句话原样发出去，不许大脑润色（需求.md 问题 1）
+    if (!conversationColumns.some((col) => col.name === "verbatim_prompt")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN verbatim_prompt INTEGER NOT NULL DEFAULT 0");
     }
     /**
      * 回填**键在 `IS NULL` 上，而不是键在「刚加完列」上**，两个原因：
@@ -548,16 +570,19 @@ export class AppDatabase {
 
   createConversation(input: {
     title: string; brainChannelId: string; brainModel: string;
-    videoConfirmPolicy: VideoConfirmPolicy; visionEnabled: boolean;
+    videoConfirmPolicy: VideoConfirmPolicy; visionEnabled: boolean; verbatimPrompt: boolean;
   }): Conversation {
     const id = crypto.randomUUID();
     const at = now();
     this.db.prepare(`
       INSERT INTO conversations
       (id, title, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
-       video_confirm_policy, vision_enabled, auto_continue_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, 0, ?, ?)
-    `).run(id, input.title, input.brainChannelId, input.brainModel, input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, at, at);
+       video_confirm_policy, vision_enabled, verbatim_prompt, auto_continue_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 0, ?, ?)
+    `).run(
+      id, input.title, input.brainChannelId, input.brainModel,
+      input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, at, at,
+    );
     return this.getConversation(id)!;
   }
 
@@ -569,6 +594,48 @@ export class AppDatabase {
   listConversations(): Conversation[] {
     const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as DbRow[];
     return rows.map((row) => this.conversationFromRow(row));
+  }
+
+  /**
+   * 把卡在 `running` 的会话收回 `idle`，返回改动了几条。
+   *
+   * 一轮的处理只活在内存里（`AgentService.activeTurns`），进程一没它就没了，
+   * 而 `status` 已经落库成 `running`——界面于是永远在转圈（用户看到的就是
+   * 「任务失败了还在转圈」）。启动时收拾一次即可，进程内的异常路径由
+   * `startTurn` 的 finally 兜着。
+   */
+  resetConversationsStuckInRunning(): number {
+    const result = this.db.prepare("UPDATE conversations SET status = 'idle' WHERE status = 'running'").run();
+    return Number(result.changes ?? 0);
+  }
+
+  /**
+   * 一条消息都没有的会话 id。
+   *
+   * 新建会话时用它清掉上一条没动过的空壳——点几下「新对话」就堆几条，
+   * 侧栏会被一串「新对话」刷屏。空会话没有消息，也就没有产物和上传图，删掉不丢东西。
+   */
+  emptyConversationIds(): string[] {
+    const rows = this.db.prepare(
+      `SELECT conversations.id AS id FROM conversations
+       WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id)`,
+    ).all() as DbRow[];
+    return rows.map((row) => String(row.id));
+  }
+
+  /**
+   * 这个会话里用户最后说的那句话。
+   *
+   * 「原话直发」用它当提示词——必须是**用户的原话**，不能是大脑改写过的版本。
+   * 上传图片那类消息（role=user、内容是「上传了图片 x.png」）也在这里，但它们从来不是最后一条：
+   * 发图时要求必须带一句话，那句话排在后头。
+   */
+  lastUserText(conversationId: string): string | null {
+    const row = this.db.prepare(
+      "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND content IS NOT NULL ORDER BY seq DESC LIMIT 1",
+    ).get(conversationId) as DbRow | undefined;
+    const text = row ? String(row.content).trim() : "";
+    return text || null;
   }
 
   /** 只改传进来的字段；`canvasAssetIds: []` 是「清空画布」，和「没传」是两回事 */
@@ -594,6 +661,10 @@ export class AppDatabase {
     if ("visionEnabled" in patch) {
       fields.push("vision_enabled = ?");
       values.push(patch.visionEnabled ? 1 : 0);
+    }
+    if ("verbatimPrompt" in patch) {
+      fields.push("verbatim_prompt = ?");
+      values.push(patch.verbatimPrompt ? 1 : 0);
     }
     if (!fields.length) return this.getConversation(id);
     fields.push("updated_at = ?");
@@ -637,8 +708,45 @@ export class AppDatabase {
     const assets: StoredFileRef[] = [];
     for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
     this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };
+  }
+
+  /**
+   * 记一次大脑调用的 token 用量。
+   *
+   * 只记拿到 usage 的调用：中转站没回这个字段时（部分站点忽略 stream_options）
+   * 不写 0，否则「记过 3 次」会变成一句假话。
+   */
+  recordBrainCall(conversationId: string, usage: { promptTokens: number; completionTokens: number; reasoningTokens: number }) {
+    this.db.prepare(`
+      INSERT INTO brain_calls (id, conversation_id, prompt_tokens, completion_tokens, reasoning_tokens, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(crypto.randomUUID(), conversationId, usage.promptTokens, usage.completionTokens, usage.reasoningTokens, now());
+  }
+
+  /** 会话的 token 账本：累计输入/输出，以及**最近一次**请求的输入大小（≈ 当前上下文） */
+  conversationUsage(conversationId: string): ConversationUsage {
+    const totals = this.db.prepare(`
+      SELECT COALESCE(SUM(prompt_tokens), 0) AS prompt,
+             COALESCE(SUM(completion_tokens), 0) AS completion,
+             COALESCE(SUM(reasoning_tokens), 0) AS reasoning,
+             COUNT(*) AS calls
+      FROM brain_calls WHERE conversation_id = ?
+    `).get(conversationId) as DbRow;
+    // rowid 兜底：同一毫秒内的两次调用 created_at 可能一模一样
+    const last = this.db.prepare(`
+      SELECT prompt_tokens FROM brain_calls WHERE conversation_id = ?
+      ORDER BY created_at DESC, rowid DESC LIMIT 1
+    `).get(conversationId) as DbRow | undefined;
+    return {
+      contextTokens: last ? Number(last.prompt_tokens) : 0,
+      promptTokens: Number(totals.prompt),
+      completionTokens: Number(totals.completion),
+      reasoningTokens: Number(totals.reasoning),
+      calls: Number(totals.calls),
+    };
   }
 
   listMessages(conversationId: string, limit = 400): ChatMessage[] {
@@ -659,6 +767,8 @@ export class AppDatabase {
     plan?: AgentPlan | null; toolName?: string | null;
     toolArgs?: Record<string, unknown> | null; toolResult?: ToolResult | null;
     confirm?: ConfirmPreview | null; taskId?: string | null; assetId?: string | null;
+    /** 这条消息引用的一组产物（用户从输入框拖进来的那些图） */
+    assetRefs?: string[] | null;
     status?: MessageStatus; errorMessage?: string | null;
   }): ChatMessage {
     const row = this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE conversation_id = ?")
@@ -668,8 +778,8 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO messages
       (id, conversation_id, seq, role, content, plan_json, tool_name, tool_args_json,
-       tool_result_json, confirm_json, task_id, asset_id, status, error_message, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       tool_result_json, confirm_json, task_id, asset_id, asset_refs, status, error_message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.conversationId, seq, input.role,
       input.content ?? null,
@@ -679,6 +789,7 @@ export class AppDatabase {
       input.toolResult ? JSON.stringify(input.toolResult) : null,
       input.confirm ? JSON.stringify(input.confirm) : null,
       input.taskId ?? null, input.assetId ?? null,
+      input.assetRefs?.length ? JSON.stringify(input.assetRefs) : null,
       input.status ?? "ok", input.errorMessage ?? null, now(),
     );
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now(), input.conversationId);
@@ -743,17 +854,31 @@ export class AppDatabase {
       WHERE messages.conversation_id = ? AND messages.asset_id IS NOT NULL
       ORDER BY messages.seq ASC
     `).all(conversationId) as DbRow[];
+    /*
+     * 同一个产物可能被不止一条消息引用：产出它那条算一次，之后每次 set_canvas
+     * 也会落一条带 assetId 的消息。不去重的话，「本会话的图」里会出现两张一模一样的
+     * （用户看到的现象：在画布里来回切几次，同一张图就有了好几个副本）。
+     * 去重保留**最早**那条——只有它带着真正的提示词、轮次和来源。
+     *
+     * 轮次在去重之后才数：把重复那条也算进去的话，被跳过的 seq 会让后面的轮次号跳号。
+     */
+    const seen = new Set<string>();
     let round = 0;
     let lastSeq: number | null = null;
-    return rows.map((row) => {
+    const entries: Array<{ asset: AssetRow; round: number; prompt: string; source: TaskOrigin }> = [];
+    for (const row of rows) {
+      const id = String(row.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
       const seq = Number(row.message_seq);
       if (seq !== lastSeq) { round += 1; lastSeq = seq; }
-      return {
+      entries.push({
         asset: this.assetFromRow(row), round, prompt: String(row.message_content ?? ""),
         // 生成的和上传的可预期行为不一样（上传的没有提示词），前端据此加个来源标记
         source: (row.asset_origin == null ? "generate" : String(row.asset_origin)) as TaskOrigin,
-      };
-    });
+      });
+    }
+    return entries;
   }
 
   private conversationFromRow(row: DbRow): Conversation {
@@ -765,6 +890,7 @@ export class AppDatabase {
       status: String(row.status) as ConversationStatus,
       videoConfirmPolicy: String(row.video_confirm_policy) as VideoConfirmPolicy,
       visionEnabled: Boolean(row.vision_enabled),
+      verbatimPrompt: Boolean(row.verbatim_prompt),
       autoContinueCount: Number(row.auto_continue_count),
       taskCount: this.countConversationTasks(String(row.id)),
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),
@@ -783,6 +909,7 @@ export class AppDatabase {
       confirm: parseJson<ConfirmPreview | null>(row.confirm_json, null),
       taskId: row.task_id == null ? null : String(row.task_id),
       assetId: row.asset_id == null ? null : String(row.asset_id),
+      assetRefs: parseJson<string[]>(row.asset_refs, []),
       status: String(row.status) as MessageStatus,
       errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at),

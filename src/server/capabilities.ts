@@ -49,11 +49,32 @@ const ALIAS_PREFIXES: Array<{ pattern: RegExp; alias: string; kind?: CapabilityK
   { pattern: /qwen/i, alias: "qwen" },
 ];
 
+/**
+ * 模型 ID 里那段「版本 + 一个变体词」：`sd-2.5` → `2.5`，`sd-2.0-fast` → `2.0-fast`，
+ * `gemini-3-pro-image` → `3-pro`。
+ *
+ * 别名要带上版本，否则同一个前缀下的几个模型会变成 `seedance-1` / `seedance-2` 这种
+ * **按位置编号**的名字，和真实版本号对不上——用户按 `sd-2.5` 说，命中的却是 `sd-2.0`
+ * （实测就是这么错的），而且喂给大脑的清单里只有别名、没有版本，它自己也分不出来。
+ *
+ * **只取一段，不能整段照抄**：别名是给大脑看的标识，不是模型 ID 的搬运——
+ * 把真实模型 ID 原样写进清单，等于让它有机会把这个名字当真话说给用户
+ * （`tests/agent.test.ts` 里那条不许泄漏模型 ID 的断言守着这件事）。
+ * 尾巴 1–6 个字母就是要掐住「`gemini-3-pro-image` 只留 `3-pro`」。
+ */
+function versionTail(model: string) {
+  const match = model.match(/\d+(?:\.\d+)*(?:-[a-z]{1,6})?(?![a-z])/i);
+  return match ? match[0].toLowerCase() : "";
+}
+
 /** 认不出前缀就用模型 ID 本身当别名，去掉杂字符并截断 */
 function aliasBaseFor(model: string, kind: CapabilityKind) {
   for (const { pattern, alias, kind: only } of ALIAS_PREFIXES) {
     if (only && only !== kind) continue;
-    if (pattern.test(model)) return alias;
+    if (!pattern.test(model)) continue;
+    // 前缀认出来了还要带上版本，`seedance` + `2.5` = `seedance-2.5`
+    const tail = versionTail(model);
+    return tail ? `${alias}-${tail}` : alias;
   }
   return model.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 20) || "model";
 }
@@ -171,13 +192,24 @@ export interface AliasResolution {
 }
 
 /**
- * 大脑可能给出 `Gemini`、` gemini `、`gemini-3-pro-image` 这类变体，
- * 所以先精确匹配，再退化到「去掉序号后缀」匹配，最后才是「包含」匹配。
+ * 大脑和用户都可能把别名写成各种样子：`Gemini`、` gemini `、`seedance2.5`、
+ * 甚至直接说真实模型 ID `sd-2.5`。所以分四档找，从紧到松：
+ *
+ * 1. 原样
+ * 2. **忽略分隔符**——`seedance2.5` 要能命中 `seedance-2.5`（用户就是这么打字的）
+ * 3. 去掉末尾序号后缀（老别名 seedance-1/2/3 还留在用户设置和旧记录里）
+ * 4. 子串包含，最后连真实模型 ID 一起找
  */
+function loose(value: string) {
+  return value.toLowerCase().replace(/[\s\-_.]/g, "");
+}
+
 function matchAlias(candidates: CapabilityAlias[], normalized: string) {
+  const looseWant = loose(normalized);
   return candidates.find((item) => item.alias === normalized)
+    ?? candidates.find((item) => loose(item.alias) === looseWant)
     ?? candidates.find((item) => item.alias.replace(/-\d+$/, "") === normalized.replace(/-\d+$/, ""))
-    ?? candidates.find((item) => item.alias.includes(normalized) || item.model.toLowerCase().includes(normalized));
+    ?? candidates.find((item) => loose(item.alias).includes(looseWant) || loose(item.model).includes(looseWant));
 }
 
 /**

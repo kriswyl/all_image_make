@@ -116,7 +116,7 @@ function runSetCanvas(mock: Awaited<ReturnType<typeof startMock>>, args: Record<
   const conversation = mock.context.db.getConversation(mock.conversationId)!;
   return runAgentTool("set_canvas", args, {
     db: mock.context.db, runner: mock.context.runner, sessionKeys: mock.context.sessionKeys,
-    conversation, aliases: [], defaultAliases: {}, emit: () => undefined,
+    conversation, aliases: [], defaultAliases: {}, verbatimPrompt: null, emit: () => undefined,
   }).then((outcome) => outcome.result);
 }
 

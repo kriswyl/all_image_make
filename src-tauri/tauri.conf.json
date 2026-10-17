@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "益达工作台",
-  "version": "2.1.1",
+  "productName": "ezcanvas",
+  "version": "2.2.0",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -12,12 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "益达工作台",
+        "title": "ChatCanvas",
         "width": 1280,
         "height": 820,
         "minWidth": 980,
         "minHeight": 680,
         "resizable": true,
+        "decorations": false,
         "fullscreen": false,
         "center": true,
         "dragDropEnabled": false

@@ -17,7 +17,7 @@ import { AgentService } from "./agent.js";
 import { buildCapabilityAliases, buildCapabilityManifest } from "./capabilities.js";
 import { readThumbBytes, writeThumbnail } from "./vision.js";
 import {
-  VIDEO_CONFIRM_POLICIES, assetRef,
+  VIDEO_CONFIRM_POLICIES, assetRef, DEFAULT_CONVERSATION_TITLE,
   type AgentStreamEvent, type ConversationInput, type ConversationPatch, type VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
@@ -87,6 +87,7 @@ const conversationCreateSchema = z.object({
   brainModel: z.string().trim().min(1).max(200).optional(),
   videoConfirmPolicy: z.enum(VIDEO_CONFIRM_POLICIES).optional(),
   visionEnabled: z.boolean().optional(),
+  verbatimPrompt: z.boolean().optional(),
 });
 
 const conversationPatchSchema = z.object({
@@ -95,6 +96,7 @@ const conversationPatchSchema = z.object({
   brainModel: z.string().trim().min(1).max(200).optional(),
   videoConfirmPolicy: z.enum(VIDEO_CONFIRM_POLICIES).optional(),
   visionEnabled: z.boolean().optional(),
+  verbatimPrompt: z.boolean().optional(),
   /** 画布整组替换，`[0]` 是主图；`[]` 是清空画布 */
   canvasAssetIds: z.array(z.string().uuid()).max(MAX_CANVAS_IMAGES).optional(),
   /**
@@ -108,6 +110,11 @@ const conversationPatchSchema = z.object({
 const messageCreateSchema = z.object({
   /** 文本消息；图片附件在 M1 之后补，届时放宽成可选 */
   text: z.string().trim().min(1).max(20000),
+  /**
+   * 这句话引用的一组已有产物（用户从画布/消息里把图拖进输入框）。
+   * 上限和画布同一个数：这些图发送前会被并进画布，多出来的本来就进不去。
+   */
+  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
 });
 
 const confirmSchema = z.object({
@@ -424,7 +431,8 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({
       manifest: buildCapabilityManifest(buildCapabilityAliases(db.listChannels())),
       aliases: buildCapabilityAliases(db.listChannels()).map((alias) => ({
-        alias: alias.alias, kind: alias.kind, model: alias.model, channelName: alias.channelName,
+        alias: alias.alias, kind: alias.kind, model: alias.model,
+        channelName: alias.channelName, channelId: alias.channelId,
       })),
     }));
   });
@@ -443,13 +451,25 @@ export function createApp(options: { dataDir?: string } = {}) {
 
   app.post("/api/conversations", (req, res) => {
     const input = conversationCreateSchema.parse(req.body ?? {}) as ConversationInput;
+    /*
+     * 新建之前先把之前没动过的空会话删掉。
+     *
+     * 「点一下新对话就多一条新会话」是想要的行为，但空壳会越堆越多（用户的实际现象：
+     * 侧栏一屏全是「新对话」）。空会话没有任何消息，也就没有产物、没有上传图，删了不丢东西。
+     * 正在跑的那条跳过：一轮开始时会立刻落用户消息，正常情况下这里轮不到它。
+     */
+    for (const staleId of db.emptyConversationIds()) {
+      if (agent.isRunning(staleId)) continue;
+      db.deleteConversation(staleId);
+    }
     const brain = pickBrainChannel(db, input.brainChannelId, input.brainModel);
     const conversation = db.createConversation({
-      title: input.title?.trim() || "新对话",
+      title: input.title?.trim() || DEFAULT_CONVERSATION_TITLE,
       brainChannelId: brain.channelId,
       brainModel: brain.model,
       videoConfirmPolicy: input.videoConfirmPolicy ?? readAgentDefaults(db).videoConfirmPolicy,
       visionEnabled: input.visionEnabled ?? readAgentDefaults(db).visionEnabled,
+      verbatimPrompt: input.verbatimPrompt ?? false,
     });
     res.status(201).json(ok(agent.buildView(conversation.id)));
   });
@@ -505,7 +525,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const input = messageCreateSchema.parse(req.body ?? {});
-    agent.startTurn(id, input.text, "user");
+    agent.startTurn(id, input.text, "user", input.assetRefs ?? []);
     res.status(202).json(ok({ accepted: true }));
   });
 

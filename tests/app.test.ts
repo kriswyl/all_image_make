@@ -1127,3 +1127,120 @@ describe("工作台结果面板的请求参数", () => {
     expect(after.parameterNotes).toBeUndefined();
   });
 });
+
+describe("产物下载的鉴权", () => {
+  /**
+   * 用户的实际现象：响应体里明明有 url，图却一直拿不到。
+   *
+   * 因为中转站自带的资产地址（`/v1/images/assets/<uuid>` 这种）要带 key 才肯给图，
+   * 而下载那一路上原来**一个鉴权头都没带**。这里同时钉住另一半：
+   * key 只能发给渠道自己那台主机——产物地址也可能是公开 CDN，
+   * 往别处带 Authorization 等于把密钥送出去。
+   */
+  it("渠道自己主机上的产物带 key 去取，别的主机绝不带", async () => {
+    const png = Buffer.from(pngBase64, "base64");
+    const assetAuth: Array<string | undefined> = [];
+    let port = 0;
+
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/v1/images/generations" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        // 资产地址就用这台机器（模拟网关自己托管产物）
+        res.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${port}/v1/images/assets/abc` }] }));
+        return;
+      }
+      if (req.url === "/v1/images/assets/abc") {
+        assetAuth.push(req.headers.authorization);
+        // 不带 key 就 403，和真实网关一个脾气
+        if (req.headers.authorization !== "Bearer sk-relay-key") {
+          res.writeHead(403).end();
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(png);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mockServer.close(() => resolve()); }));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    port = address.port;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-asset-auth-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channel = (await request(app).post("/api/channels").send({
+      name: "Gateway", baseUrl: `http://127.0.0.1:${port}`, adapterType: "openai-images", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(channel.id, "sk-relay-key");
+
+    const created = (await request(app).post("/api/generations").send({
+      channelId: channel.id, model: "mock-image", prompt: "test", size: "1024x1024", count: 1,
+    }).expect(202)).body.data as Task;
+    let task = created;
+    for (let index = 0; index < 30 && task.status !== "succeeded" && task.status !== "failed"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await request(app).get(`/api/generations/${task.id}`).expect(200)).body.data as Task;
+    }
+    expect(task.errorMessage ?? "").toBe("");
+    expect(task.status).toBe("succeeded");
+    expect(task.assets).toHaveLength(1);
+    // 关键：取图那一下确实把 key 带上了
+    expect(assetAuth).toEqual(["Bearer sk-relay-key"]);
+  });
+
+  it("产物地址在别的主机上时不带 key", async () => {
+    const png = Buffer.from(pngBase64, "base64");
+    const assetAuth: Array<string | undefined> = [];
+    let port = 0;
+
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/v1/images/generations" && req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        // 换一个主机名指向同一台服务：主机串不同就不该带 key
+        res.end(JSON.stringify({ data: [{ url: `http://localhost:${port}/cdn/abc.png` }] }));
+        return;
+      }
+      if (req.url === "/cdn/abc.png") {
+        assetAuth.push(req.headers.authorization);
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(png);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mockServer.close(() => resolve()); }));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    port = address.port;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-asset-cdn-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const channel = (await request(app).post("/api/channels").send({
+      name: "Gateway", baseUrl: `http://127.0.0.1:${port}`, adapterType: "openai-images", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(channel.id, "sk-relay-key");
+
+    const created = (await request(app).post("/api/generations").send({
+      channelId: channel.id, model: "mock-image", prompt: "test", size: "1024x1024", count: 1,
+    }).expect(202)).body.data as Task;
+    let task = created;
+    for (let index = 0; index < 30 && task.status !== "succeeded" && task.status !== "failed"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      task = (await request(app).get(`/api/generations/${task.id}`).expect(200)).body.data as Task;
+    }
+    expect(task.status).toBe("succeeded");
+    // 图拿到了，但一个字节的密钥都没发给这台「别的主机」
+    expect(assetAuth).toEqual([undefined]);
+  });
+});

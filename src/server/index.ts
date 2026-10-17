@@ -9,9 +9,12 @@ const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path
 const { app, context } = createApp({ dataDir });
 
 const server = app.listen(port, "127.0.0.1", () => {
-  console.log(`益达工作台 API: http://127.0.0.1:${port}`);
+  console.log(`ChatCanvas API: http://127.0.0.1:${port}`);
   // 已拿到上游 task id 的视频任务会在这里接着轮询，不阻塞启动
   void context.runner.resume();
+  // 上一进程留下的 running 会话已经不存在了，收回 idle，否则界面永远转圈
+  const recovered = context.agent.recoverStaleConversations();
+  if (recovered) console.log(`收拾了 ${recovered} 条卡在「进行中」的会话`);
 });
 
 function shutdown() {

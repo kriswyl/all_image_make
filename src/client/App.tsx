@@ -1,19 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Activity, AlertCircle, CheckCircle2, ChevronRight, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LoaderCircle, MessageSquarePlus, Plus, RefreshCw, RotateCcw, Server, Settings2, SlidersHorizontal,
-  Sparkles, Square, Trash2, Upload, Wand2, X,
+  Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
+  ImagePlus, KeyRound, LoaderCircle, Minus, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Trash2, Upload, Wand2, X,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, isTauriRuntime } from "./api";
+import { BrandMark } from "./BrandMark";
 import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
 import { ChatView } from "./ChatView";
+import { ChannelPicker } from "./chat/ChannelPicker";
+import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
 import { ParamChips } from "./ParamChips";
 import { useFileDrop } from "./useFileDrop";
 import { VideoGenerateView } from "./VideoGenerateView";
+import { WelcomeView } from "./WelcomeView";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, isVideoTask } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 
@@ -23,6 +28,11 @@ type ReferenceImageState = { file: File; previewUrl: string };
 
 const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
 const DRAFT_STORAGE_PREFIX = "vector-image:generation-draft:";
+/** 侧栏宽度：可拖，落进 localStorage；190 是不把「生成历史」挤成两行的下限 */
+const SIDEBAR_WIDTH_KEY = "yida.sidebar-width";
+const SIDEBAR_DEFAULT_WIDTH = 236;
+const SIDEBAR_MIN_WIDTH = 190;
+const SIDEBAR_MAX_WIDTH = 420;
 const openAiSizeGroups = [
   { label: "方形", sizes: ["1024x1024", "2048x2048"] },
   { label: "横向", sizes: ["1280x720", "1536x1024", "1600x1200", "2048x1152", "3840x2160"] },
@@ -164,6 +174,13 @@ function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => v
 
 export function App() {
   const [view, setView] = useState<View>("generate");
+  /**
+   * 新用户向导：一个渠道都没有时占住主区，直到用户真的配好渠道、
+   * 或者点「先自己看看」主动跳过。跳过的选择记在本机，免得每次开都弹。
+   */
+  const [welcomeDismissed, setWelcomeDismissed] = useState(() => {
+    try { return window.localStorage.getItem("yida.welcome-dismissed") === "1"; } catch { return false; }
+  });
   const [channels, setChannels] = useState<Channel[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -191,6 +208,105 @@ export function App() {
   const [assetsPath, setAssetsPath] = useState("");
   const [defaultAssetsPath, setDefaultAssetsPath] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
+  /** 侧栏里给会话列表留的挂载点：DOM 节点要等挂载后才拿得到，所以用 state 兜一层 */
+  const sidebarRecentRef = useRef<HTMLDivElement>(null);
+  const [sidebarRecentEl, setSidebarRecentEl] = useState<HTMLElement | null>(null);
+  useEffect(() => { setSidebarRecentEl(sidebarRecentRef.current); }, []);
+  /** 侧栏头部的工作区菜单与搜索：搜索词透给 ChatView，用它过滤侧栏里的会话列表 */
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  /** 每点一次「新对话」加一；ChatView 盯着它建新会话（0 是初始值，不动手） */
+  const [newChatSignal, setNewChatSignal] = useState(0);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 侧栏收起（对齐 Codex）。
+   *
+   * 收起后主区左上角会留一个展开按钮——不能只靠 Ctrl+B，否则忘了快捷键的人
+   * 会以为界面坏了。状态存本机，下次打开还是上次的样子。
+   */
+  const [sidebarHidden, setSidebarHidden] = usePersistentState("sidebarHidden", false);
+  const toggleSidebar = () => setSidebarHidden((hidden) => !hidden);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.key.toLowerCase() !== "b") return;
+      event.preventDefault();
+      setSidebarHidden((hidden) => !hidden);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setSidebarHidden]);
+
+  /**
+   * 自绘标题栏（decorations: false 之后）。
+   *
+   * 用 `isDecorated()` 探测而不是写死一个开关：现在正在跑的那套窗口还是原生标题栏，
+   * 配置改完要重启 Tauri 才生效；探测一下，重启前界面不会突然多出第二层标题栏。
+   */
+  const [customChrome, setCustomChrome] = useState(false);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void getCurrentWindow().isDecorated()
+      .then((decorated) => setCustomChrome(!decorated))
+      .catch(() => setCustomChrome(false));
+  }, []);
+
+  /** 侧栏宽度：拖右边缘调，存 localStorage（下次打开还是这个宽度） */
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return stored >= SIDEBAR_MIN_WIDTH && stored <= SIDEBAR_MAX_WIDTH ? stored : SIDEBAR_DEFAULT_WIDTH;
+  });
+  useEffect(() => {
+    // 存不下也只是下次回到默认宽度，拖拽本身照常
+    try { window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)); } catch { /* 忽略 */ }
+  }, [sidebarWidth]);
+
+  /** 只在拖动期间挂全局监听：不拖的时候不留常驻的 pointermove */
+  function startSidebarResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const onMove = (move: PointerEvent) => {
+      setSidebarWidth(Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + move.clientX - startX)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop);
+  }
+
+  // 点别处收起菜单。判定范围要连头部按钮一起包进来，否则点自己会先关再开、等于点不动
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!workspaceMenuRef.current?.contains(event.target as Node)) setWorkspaceMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [workspaceMenuOpen]);
+
+  function dismissWelcome() {
+    setWelcomeDismissed(true);
+    try { window.localStorage.setItem("yida.welcome-dismissed", "1"); } catch { /* 存不下也只是下次再显示一遍 */ }
+  }
+
+  /** 打开素材目录：和生成历史页那个按钮走同一条接口 */
+  async function revealMedia() {
+    try {
+      const result = await api.revealMedia();
+      showToast("success", `已打开素材目录：${result.opened}`);
+    } catch (error) {
+      showToast("error", error instanceof Error ? error.message : "打开素材目录失败");
+    }
+  }
+
+
+  /** 一个渠道都没有、用户也还没说「先自己看看」——这时候主区留给新用户向导 */
+  const showWelcome = !channels.length && !welcomeDismissed;
 
   // 对话渠道只是 Agent 的大脑，不出图也不出视频，所以生图 / 视频工作台都要排除它
   const imageChannels = channels.filter((channel) => isImageAdapter(channel.adapterType));
@@ -377,28 +493,180 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <button className="brand" onClick={() => setView("generate")} aria-label="益达工作台">
-          <span className="brand-mark"><img src="/app-logo.png" alt="" /></span>
-          <span>益达工作台</span>
-        </button>
-        <nav className="topnav" aria-label="主导航">
-          <NavButton active={view === "generate"} icon={<Sparkles size={16} />} label="生图工作台" onClick={() => setView("generate")} />
-          <NavButton active={view === "video"} icon={<Film size={16} />} label="视频工作台" onClick={() => setView("video")} />
-          <NavButton active={view === "chat"} icon={<MessageSquarePlus size={16} />} label="对话创作" onClick={() => setView("chat")} />
-          <NavButton active={view === "channels"} icon={<Server size={16} />} label="渠道配置" onClick={() => setView("channels")} />
-          <NavButton active={view === "history"} icon={<History size={16} />} label="生成历史" unread={historyUnread} onClick={() => setView("history")} />
+    <div
+      className={`app-shell ${sidebarHidden ? "is-sidebar-hidden" : ""} ${customChrome ? "has-custom-chrome" : ""}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
+    >
+      {/* decorations:false 之后自己画的标题栏。开关放在这里，和 Codex 一样在窗口左上角 */}
+      {customChrome ? (
+        <div className="titlebar" data-tauri-drag-region>
+          <button
+            type="button"
+            className="titlebar-toggle"
+            title={sidebarHidden ? "展开侧边栏（Ctrl+B）" : "收起侧边栏（Ctrl+B）"}
+            aria-label={sidebarHidden ? "展开侧边栏" : "收起侧边栏"}
+            onClick={toggleSidebar}
+          >
+            {sidebarHidden ? <PanelLeft size={15} /> : <PanelLeftClose size={15} />}
+          </button>
+          <span
+            className="titlebar-title"
+            data-tauri-drag-region
+            onDoubleClick={() => void getCurrentWindow().toggleMaximize()}
+          >
+            ChatCanvas
+          </span>
+          <div
+            className="titlebar-drag"
+            data-tauri-drag-region
+            onDoubleClick={() => void getCurrentWindow().toggleMaximize()}
+          />
+          <div className="titlebar-controls">
+            <button type="button" className="titlebar-control" title="最小化" aria-label="最小化"
+              onClick={() => void getCurrentWindow().minimize()}>
+              <Minus size={14} />
+            </button>
+            <button type="button" className="titlebar-control" title="最大化 / 还原" aria-label="最大化或还原"
+              onClick={() => void getCurrentWindow().toggleMaximize()}>
+              <Square size={10} />
+            </button>
+            <button type="button" className="titlebar-control titlebar-close" title="关闭" aria-label="关闭"
+              onClick={() => void getCurrentWindow().close()}>
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <aside className="sidebar">
+        {/* 头部对齐 Codex：粗体工作区名 + 一个下拉箭头，右边是搜索——箭头点开是真菜单，不是装饰 */}
+        <div className="sidebar-workspace" ref={workspaceMenuRef}>
+          <div className="sidebar-head">
+            {/* 自绘标题栏之后，开关已经挪到窗口左上角；这里就不再重复一个 */}
+            {!customChrome ? (
+              <button
+                type="button"
+                className="icon-button compact sidebar-collapse"
+                title="收起侧边栏（Ctrl+B）"
+                aria-label="收起侧边栏"
+                onClick={() => setSidebarHidden(true)}
+              >
+                <PanelLeftClose size={15} />
+              </button>
+            ) : null}
+            <button className="brand" onClick={() => setWorkspaceMenuOpen((open) => !open)} aria-expanded={workspaceMenuOpen}>
+              <span className="brand-mark"><BrandMark size={18} /></span>
+              {/* 两行：英文主名在上，中文名「语布」压成小字在下。代价是侧栏高 10px */}
+              <span className="brand-text">
+                <span className="brand-name">ChatCanvas</span>
+                <span className="brand-sub">语布</span>
+              </span>
+              <ChevronDown size={14} className="brand-chevron" />
+            </button>
+            <button
+              className={`icon-button compact ${searchOpen ? "is-on" : ""}`}
+              title="搜索会话"
+              aria-label="搜索会话"
+              onClick={() => {
+                setWorkspaceMenuOpen(false);
+                setSearchOpen((open) => !open);
+                if (searchOpen) setSearchQuery("");
+              }}
+            >
+              <Search size={15} />
+            </button>
+          </div>
+
+          {workspaceMenuOpen ? (
+            <div className="sidebar-menu">
+              <button type="button" className="sidebar-menu-item" onClick={() => { setWorkspaceMenuOpen(false); setAssetDirOpen(true); }}>
+                <Settings2 size={14} />设置
+              </button>
+              <button type="button" className="sidebar-menu-item" onClick={() => { setWorkspaceMenuOpen(false); void revealMedia(); }}>
+                <FolderOpen size={14} />打开素材目录
+              </button>
+              <span className="sidebar-menu-note">ChatCanvas v{APP_VERSION}</span>
+            </div>
+          ) : null}
+        </div>
+
+        {searchOpen ? (
+          <input
+            className="sidebar-search"
+            autoFocus
+            value={searchQuery}
+            placeholder="搜索会话标题或内容"
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+        ) : null}
+
+        {/* 名字对齐 Codex 的短名：两三个字，不带「工作台」这种前缀 */}
+        <nav className="sidebar-nav" aria-label="主导航">
+          {/*
+            「新对话」点一下就真的开一条新的（不是切回上次那条）。用递增的计数当信号，
+            不去碰 ChatView 里的会话状态——那边自己知道怎么建，建完会刷新列表。
+            上一次没动过的空会话由服务端在新建时顺手删掉。
+          */}
+          <NavButton
+            active={view === "chat"}
+            icon={<SquarePen size={16} />}
+            label="新对话"
+            onClick={() => { dismissWelcome(); setView("chat"); setNewChatSignal((value) => value + 1); }}
+          />
+          <NavButton active={view === "generate"} icon={<ImageIcon size={16} />} label="生图" onClick={() => { dismissWelcome(); setView("generate"); }} />
+          <NavButton active={view === "video"} icon={<Film size={16} />} label="生视频" onClick={() => { dismissWelcome(); setView("video"); }} />
+          <NavButton active={view === "history"} icon={<History size={16} />} label="历史" unread={historyUnread} onClick={() => { dismissWelcome(); setView("history"); }} />
+          <NavButton active={view === "channels"} icon={<Plug size={16} />} label="渠道" onClick={() => { dismissWelcome(); setView("channels"); }} />
         </nav>
-        <div className="topbar-status">
+
+        {/*
+          会话列表的挂载点。列表本身在 ChatView 手里（数据和 SSE 都在那儿），
+          用 `createPortal` 塞进来——这样导航只剩侧栏一层，不用把会话状态再往上提一遍。
+          不在对话页时这里是空的，「最近」这一组自然就不出现。
+        */}
+        <div className="sidebar-recent" ref={sidebarRecentRef} />
+
+        <div className="sidebar-foot">
           <span className="status-dot" />
+          <span>本地运行</span>
           <span className="version">v{APP_VERSION}</span>
         </div>
-      </header>
 
-      <main className="workspace">
+        {/* 拖这条边调宽窄。用 role=separator + 键盘左右键，纯鼠标操作对键盘用户是死路 */}
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整侧栏宽度"
+          aria-valuenow={sidebarWidth}
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          tabIndex={0}
+          onPointerDown={startSidebarResize}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const step = event.key === "ArrowLeft" ? -16 : 16;
+            setSidebarWidth((width) => Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width + step)));
+          }}
+        />
+      </aside>
+
+      <main className={`workspace ${sidebarHidden ? "is-sidebar-hidden" : ""}`}>
+        {sidebarHidden && !customChrome ? (
+          <button
+            type="button"
+            className="sidebar-expand"
+            title="展开侧边栏（Ctrl+B）"
+            aria-label="展开侧边栏"
+            onClick={() => setSidebarHidden(false)}
+          >
+            <PanelLeft size={16} />
+          </button>
+        ) : null}
         {loading ? <LoadingScreen /> : null}
-        {!loading && view === "generate" ? (
+        {!loading && showWelcome ? <WelcomeView onStart={() => setWizardOpen(true)} onSkip={dismissWelcome} /> : null}
+        {!loading && !showWelcome && view === "generate" ? (
           <GenerateView
             channels={imageChannels}
             selectedChannelId={selectedChannelId}
@@ -419,13 +687,21 @@ export function App() {
             onDiagnostics={setDiagnosticTask}
           />
         ) : null}
-        {!loading && view === "chat" ? (
-          <ChatView channels={channels} onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)} />
+        {!loading && !showWelcome && view === "chat" ? (
+          <ChatView
+            channels={channels}
+            sidebarHost={sidebarRecentEl}
+            sidebarFilter={searchOpen ? searchQuery : ""}
+            newChatSignal={newChatSignal}
+            onNewChatHandled={() => setNewChatSignal(0)}
+            onConfigureChannel={setEditorChannel}
+            onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)}
+          />
         ) : null}
-        {!loading && view === "channels" ? (
+        {!loading && !showWelcome && view === "channels" ? (
           <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
         ) : null}
-        {!loading && view === "video" ? (
+        {!loading && !showWelcome && view === "video" ? (
           <VideoGenerateView
             channels={videoChannels}
             selectedChannelId={videoChannelId}
@@ -446,7 +722,7 @@ export function App() {
             onDiagnostics={setDiagnosticTask}
           />
         ) : null}
-        {!loading && view === "history" ? (
+        {!loading && !showWelcome && view === "history" ? (
           <HistoryView
             channels={channels}
             tasks={tasks}
@@ -606,14 +882,34 @@ function GenerateView(props: {
   return (
     <div className="page generate-page">
       <div className="page-header">
-        <div><h1>生成工作台</h1><span className="page-kicker">{referenceImages.length ? "IMAGE TO IMAGE" : "TEXT TO IMAGE"}</span></div>
+        <div><h1>生图</h1><span className="page-kicker">{referenceImages.length ? "IMAGE TO IMAGE" : "TEXT TO IMAGE"}</span></div>
         <div className="header-selects">
-          <label><span>渠道</span><select value={props.selectedChannelId} onChange={(event) => props.onChannelChange(event.target.value)}>
-            <option value="">选择渠道</option>{props.channels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select></label>
-          <label><span>模型</span><select value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)} disabled={!channel}>
-            <option value="">选择模型</option>{channel?.models.map((model) => <option key={model} value={model}>{model}</option>)}
-          </select></label>
+          <label><span>渠道</span>
+            <ChannelPicker
+              className="header-picker header-channel-picker"
+              placeholder="选择渠道"
+              value={props.selectedChannelId}
+              onChange={props.onChannelChange}
+              options={props.channels.filter((item) => item.enabled).map((item) => ({
+                value: item.id, name: item.name, baseUrl: item.baseUrl,
+              }))}
+            />
+          </label>
+          <label><span>模型</span>
+            <ModelPicker
+              className="header-picker header-model-picker"
+              kind="image"
+              menuPlacement="down"
+              placeholder="选择模型"
+              ariaLabel="生图模型"
+              value={props.selectedModel}
+              disabled={!channel}
+              onChange={props.onModelChange}
+              options={(channel?.models ?? []).map((model) => ({
+                value: model, model, channelName: channel?.name ?? "",
+              }))}
+            />
+          </label>
         </div>
       </div>
 

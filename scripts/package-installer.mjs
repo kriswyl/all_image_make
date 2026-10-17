@@ -11,10 +11,10 @@ const source = path.join(
   "release",
   "bundle",
   "nsis",
-  `益达工作台_${version}_x64-setup.exe`,
+  `ezcanvas_${version}_x64-setup.exe`,
 );
 const artifactDir = path.join(projectDir, "artifacts");
-const target = path.join(artifactDir, `益达工作台-v${version}-win-x64-setup.exe`);
+const target = path.join(artifactDir, `ezcanvas-v${version}-win-x64-setup.exe`);
 
 if (!fs.existsSync(source)) throw new Error(`Missing installer: ${source}. Run npm run tauri:build first.`);
 fs.mkdirSync(artifactDir, { recursive: true });

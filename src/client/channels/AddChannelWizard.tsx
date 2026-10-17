@@ -6,9 +6,27 @@ import {
   buildChannelDrafts, findConflictChannels, findProviderPreset,
   PROVIDER_PRESETS, type ChannelDraft, type UnitSelection,
 } from "../../shared/provider-presets";
-import type { Channel } from "../../shared/types";
+import { isChatAdapter, isVideoAdapter, type Channel } from "../../shared/types";
 
 type SaveMode = "create" | "skip";
+
+/**
+ * 渠道单元按用途分三组。
+ *
+ * 一个中转站常常同时卖三类密钥（生图、视频、对话），平铺十来张卡片时
+ * 「我要找的那个视频模型组在哪」全靠肉眼扫。分组之后一眼定位。
+ */
+const UNIT_GROUPS = [
+  { kind: "image", label: "生图" },
+  { kind: "video", label: "视频" },
+  { kind: "chat", label: "对话（当大脑用）" },
+] as const;
+
+function unitGroupOf(adapterType: string) {
+  if (isChatAdapter(adapterType as never)) return "chat";
+  if (isVideoAdapter(adapterType as never)) return "video";
+  return "image";
+}
 type RowResult = { status: "saving" | "done" | "error"; message?: string };
 type TestResult = { status: "testing" | "ok" | "error"; message?: string };
 
@@ -157,8 +175,17 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
         </ol>
         <div className="modal-body wizard-body">
           {step === 0 ? (
-            <div className="preset-grid">
-              {PROVIDER_PRESETS.map((item, index) => (
+            <>
+              {/* 模板按用途分组：站点在每张卡片自己身上写着（「词元流墟-万相视频」），
+                  但平铺成一格一格时，想找「哪个是视频」还是得逐张读——分一层就一眼定位 */}
+              {UNIT_GROUPS.map((group) => {
+                const items = PROVIDER_PRESETS.filter((item) => unitGroupOf(item.units[0]?.adapterType ?? "") === group.kind);
+                if (!items.length) return null;
+                return (
+                  <section key={group.kind} className="preset-group">
+                    <h3 className="unit-group-title">{group.label}<span>{items.length}</span></h3>
+                    <div className="preset-grid">
+              {items.map((item, index) => (
                 <button type="button" key={item.id} className={`preset-card ${providerId === item.id ? "selected" : ""}`} onClick={() => selectProvider(item.id)}>
                   {/* 有站点品牌图标的用图标，没有的退回通用 Server 图标 + 配色 */}
                   <span className={`preset-icon ${item.logo ? "has-logo" : `tone-${index % 3}`}`}>
@@ -169,13 +196,19 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                   <span className="preset-tags">{item.units.map((unit) => <span key={unit.id} className="preset-tag">{unit.label}</span>)}</span>
                 </button>
               ))}
+                    </div>
+                  </section>
+                );
+              })}
+              <div className="preset-grid">
               <button type="button" className="preset-card preset-custom" onClick={onCustom}>
                 <span className="preset-icon tone-2"><SlidersHorizontal size={21} /></span>
                 <span className="preset-title">自定义配置</span>
                 <span className="preset-url">任意 Base URL</span>
                 <span className="preset-desc">手动填写站点、协议、路径与模型，适合非标准中转站</span>
               </button>
-            </div>
+              </div>
+            </>
           ) : null}
 
           {step === 1 && preset ? (

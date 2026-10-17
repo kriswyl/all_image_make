@@ -58,10 +58,10 @@ describe("conversations.current_asset_id → canvas_asset_ids 迁移", () => {
     const dir = await tempDir();
     const boot = newDb(dir);
     const withCanvas = boot.createConversation({
-      title: "有画布", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "有画布", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     const withoutCanvas = boot.createConversation({
-      title: "没画布", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "没画布", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     // 「还没迁移过」在库里就是 NULL，得手写——createConversation 建出来的已经是 '[]' 了
     rewindToLegacy(path.join(dir, "app.db"), {
@@ -81,7 +81,7 @@ describe("conversations.current_asset_id → canvas_asset_ids 迁移", () => {
     const dir = await tempDir();
     const boot = newDb(dir);
     const conversation = boot.createConversation({
-      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     rewindToLegacy(path.join(dir, "app.db"), { [conversation.id]: "11111111-1111-4111-8111-111111111111" });
     boot.close();
@@ -97,7 +97,7 @@ describe("conversations.current_asset_id → canvas_asset_ids 迁移", () => {
     const dir = await tempDir();
     const boot = newDb(dir);
     const conversation = boot.createConversation({
-      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     rewindToLegacy(path.join(dir, "app.db"), { [conversation.id]: "22222222-2222-4222-8222-222222222222" });
     boot.close();
@@ -121,7 +121,7 @@ describe("conversations.current_asset_id → canvas_asset_ids 迁移", () => {
     const dir = await tempDir();
     const boot = newDb(dir);
     const conversation = boot.createConversation({
-      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     boot.close();
     const raw = new DatabaseSync(path.join(dir, "app.db"));
@@ -138,7 +138,7 @@ describe("db.canvasImages", () => {
     const dir = await tempDir();
     const db = newDb(dir);
     const conversation = db.createConversation({
-      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true,
+      title: "会话", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     const insert = (id: string, mimeType: string) => {
       db.createTask({ id: `task-${id}`, channelId: "", model: "", prompt: "p", input: {}, origin: "upload", status: "succeeded" });

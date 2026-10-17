@@ -16,6 +16,7 @@ import { ImageOff, Layers, Upload, X } from "lucide-react";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { api } from "../api";
+import { ASSET_DRAG_TYPE } from "../useFileDrop";
 
 /** 缩略图 404 时退回原图；缩略图只是省流量，不该成为图裂的原因 */
 function fallbackToFull(event: React.SyntheticEvent<HTMLImageElement>, asset: Asset) {
@@ -110,9 +111,12 @@ export function AssetStrip({
                 <button
                   type="button"
                   className="asset-strip-thumb"
-                  title={`${assetRef(asset.id)} · ${origin} · ${action}`}
+                  title={`${assetRef(asset.id)} · ${origin} · ${action}（也可以直接拖到下面的输入框）`}
                   onClick={() => onToggle(asset.id)}
                   onDoubleClick={() => onPreview(asset.id)}
+                  // 拖进输入框：带的是产物 id，不是文件——它已经在会话里了，不必再传一遍
+                  draggable
+                  onDragStart={(event) => event.dataTransfer.setData(ASSET_DRAG_TYPE, asset.id)}
                 >
                   <Thumb asset={asset} size={44} />
                   {/* 来源标记：上传的和生成的放在一起，不给标记就分不出哪张是要花钱的产物 */}

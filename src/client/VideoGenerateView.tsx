@@ -4,12 +4,15 @@ import {
   Link as LinkIcon, LoaderCircle, Plus, RotateCcw, Settings2, SlidersHorizontal, Square, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
+import { ChannelPicker } from "./chat/ChannelPicker";
+import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
 import { useFileDrop } from "./useFileDrop";
 import type {
   Asset, Channel, SeedanceMediaInput, SeedanceMediaRole, SeedanceVideoMode,
   Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
 } from "../shared/types";
+import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
 import type { ReferenceController } from "./App";
 
 type Toast = { kind: "success" | "error"; message: string };
@@ -20,66 +23,7 @@ const statusLabels: Record<TaskStatus, string> = {
   failed: "失败", cancelled: "已取消", expired: "已超时",
 };
 
-interface VideoCapability {
-  label: string;
-  maxReferenceImages: number;
-  durations: { min: number; max: number; fixed: number | null; default: number };
-  resolutions: string[];
-  aspectRatios: string[];
-  /** 宽高比在请求体里的字段名：Grok 是 aspect_ratio，万相是 ratio */
-  ratioField: "aspectRatio" | "ratio";
-  supportsPromptExtend: boolean;
-  supportsSeed: boolean;
-  supportsWatermark: boolean;
-  supportsAudio: boolean;
-  /** 万相支持 duration = -1 的智能时长 */
-  supportsSmartDuration: boolean;
-}
 
-/** 各家视频接口的能力差异集中在这里，UI 按此渲染 */
-const VIDEO_CAPABILITIES: Record<"grok-video" | "wan-video" | "seedance-video", VideoCapability> = {
-  "grok-video": {
-    label: "Grok Imagine",
-    maxReferenceImages: 7,
-    durations: { min: 1, max: 15, fixed: null, default: 8 },
-    resolutions: ["480p", "720p", "1080p"],
-    aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
-    ratioField: "aspectRatio",
-    supportsPromptExtend: false,
-    supportsSeed: false,
-    supportsWatermark: false,
-    supportsAudio: false,
-    supportsSmartDuration: false,
-  },
-  "wan-video": {
-    label: "通义万相",
-    maxReferenceImages: 10,
-    durations: { min: 2, max: 30, fixed: null, default: 5 },
-    resolutions: ["480P", "720P", "1080P"],
-    aspectRatios: ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
-    ratioField: "ratio",
-    supportsPromptExtend: true,
-    supportsSeed: true,
-    supportsWatermark: true,
-    supportsAudio: true,
-    supportsSmartDuration: true,
-  },
-  "seedance-video": {
-    label: "豆包 Seedance",
-    maxReferenceImages: 10,
-    durations: { min: 4, max: 30, fixed: null, default: 5 },
-    resolutions: ["480p", "720p", "1080p"],
-    aspectRatios: ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
-    ratioField: "ratio",
-    supportsPromptExtend: false,
-    supportsSeed: true,
-    supportsWatermark: true,
-    supportsAudio: true,
-    supportsSmartDuration: true,
-  },
-};
-
-type VideoAdapter = keyof typeof VIDEO_CAPABILITIES;
 
 /**
  * 万相 7 种模式的输入槽定义，对应官方文档的「请求示例」分类。
@@ -425,18 +369,36 @@ export function VideoGenerateView(props: {
     <div className="page generate-page">
       <div className="page-header">
         <div>
-          <h1>视频工作台</h1>
+          <h1>生视频</h1>
           <span className="page-kicker">{modeSpec ? modeSpec.label : "VIDEO GENERATION"}</span>
         </div>
         <div className="header-selects">
-          <label><span>渠道</span><select value={props.selectedChannelId} onChange={(event) => props.onChannelChange(event.target.value)}>
-            <option value="">选择渠道</option>
-            {props.channels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select></label>
-          <label><span>模型</span><select value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)} disabled={!channel}>
-            <option value="">选择模型</option>
-            {channel?.models.map((model) => <option key={model} value={model}>{model}</option>)}
-          </select></label>
+          <label><span>渠道</span>
+            <ChannelPicker
+              className="header-picker header-channel-picker"
+              placeholder="选择渠道"
+              value={props.selectedChannelId}
+              onChange={props.onChannelChange}
+              options={props.channels.filter((item) => item.enabled).map((item) => ({
+                value: item.id, name: item.name, baseUrl: item.baseUrl,
+              }))}
+            />
+          </label>
+          <label><span>模型</span>
+            <ModelPicker
+              className="header-picker header-model-picker"
+              kind="video"
+              menuPlacement="down"
+              placeholder="选择模型"
+              ariaLabel="生视频模型"
+              value={props.selectedModel}
+              disabled={!channel}
+              onChange={props.onModelChange}
+              options={(channel?.models ?? []).map((model) => ({
+                value: model, model, channelName: channel?.name ?? "",
+              }))}
+            />
+          </label>
         </div>
       </div>
 

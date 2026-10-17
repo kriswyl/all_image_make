@@ -8,6 +8,7 @@
 import { AlertCircle, CheckCircle2, ChevronDown, Film, Image as ImageIcon, Layers, LoaderCircle, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { ASSET_DRAG_TYPE } from "../useFileDrop";
 import { LazyVideoThumb } from "../LazyVideoThumb";
 import { ParamChips } from "../ParamChips";
 import {
@@ -57,12 +58,15 @@ export function ToolCard({
   message,
   result,
   progress,
+  stale = false,
   assets = [],
   onPreview,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
   progress?: TaskProgress;
+  /** 会话已经不在跑了、这一行又没等到结果——那就是这一轮被中断了（进度条也不该再转） */
+  stale?: boolean;
   /** 本会话的全部素材（图 + 视频），用来把 assetId 还原成 mimeType 和缩略图 */
   assets?: CanvasAsset[];
   onPreview?: (assetId: string) => void;
@@ -71,7 +75,15 @@ export function ToolCard({
   const tool = message.toolName ?? "reply";
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
   const payload = result?.toolResult ?? null;
-  const isPending = !result || result.status === "pending";
+  /*
+   * 「等结果」和「等一个永远不会来的结果」是两件事。
+   *
+   * 进程重启会把正在跑的那一轮带走，库里只剩一条没有结果的计划行——继续转圈
+   * 会让用户一直等一件不会发生的事（实际反馈就是「任务失败了还在转圈」）。
+   * 会话已经不在跑、结果又缺，就按「没跑完」如实显示。
+   */
+  const orphaned = !result && stale;
+  const isPending = !orphaned && (!result || result.status === "pending");
   const failed = (result && result.status === "error") || payload?.ok === false;
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
@@ -90,63 +102,89 @@ export function ToolCard({
     // 这一轮刚落的库、还没走过那次全量刷新：退回 ToolResult 里带的那份
     : payload?.mimeType?.startsWith("video/") ?? false;
 
+  /**
+   * 胶囊上那一小串参数：优先写提示词，没有提示词就写这次动了哪张画布。
+   * 压成单行——胶囊是一行高的东西，多行会把「他说了什么」挤没。
+   */
+  const pillArg = (prompt
+    ?? (typeof args.assetId === "string" ? assetRef(args.assetId) : null)
+    ?? result?.content
+    ?? "").replace(/\s+/g, " ").trim();
+
   return (
     <div className="chat-row chat-row-assistant">
-      <div className={`tool-card ${failed ? "is-error" : ""} ${isPending ? "is-pending" : ""}`}>
-        <div className="tool-card-head">
-          <span className="tool-card-icon"><Icon size={14} /></span>
-          <span className="tool-card-title">{agentToolLabels[tool]}</span>
-          <span className="tool-card-status">
-            {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
-              : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
-          </span>
-        </div>
+      {/* 助手说的那句话单独成一段正文，不再塞进卡片里——Codex 里正文和工具调用是两件事 */}
+      {message.content ? <div className="tool-card-say">{message.content}</div> : null}
 
-        {message.content ? <div className="tool-card-say">{message.content}</div> : null}
-        {prompt ? <div className="tool-card-prompt">{prompt}</div> : null}
+      <div className={`tool-card ${failed ? "is-error" : ""} ${isPending ? "is-pending" : ""}`}>
+        {/*
+          一行胶囊：图标 + 工具名 + 参数摘要 + 状态，点一下才展开细节。
+          原来那张卡片一上来就把提示词、参数、诊断链接全摊开，一条消息占掉半个屏。
+        */}
+        <button type="button" className="tool-pill" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          <span className="tool-pill-icon"><Icon size={13} /></span>
+          <span className="tool-pill-name">{agentToolLabels[tool]}</span>
+          {pillArg ? <span className="tool-pill-arg">{pillArg}</span> : null}
+          <span className="tool-pill-status">
+            {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
+              : orphaned ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+          </span>
+          <ChevronDown size={13} className={`tool-pill-chevron ${open ? "flip" : ""}`} />
+        </button>
 
         {isPending && progress?.progress != null ? (
           <div className="tool-card-bar"><span style={{ width: `${Math.max(2, Math.min(100, progress.progress))}%` }} /></div>
         ) : null}
 
+        {orphaned ? <div className="tool-card-result">这一轮被中断了，没有拿到结果（你可以直接再说一次）。</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
 
         {assetId && onPreview ? (
-          <button type="button" className="tool-card-thumb" onClick={() => onPreview(assetId)} title="点开看">
+          <button
+            type="button"
+            className="tool-card-thumb"
+            onClick={() => onPreview(assetId)}
+            title={isVideoResult ? "点开看" : "点开看（也可以直接拖到下面的输入框）"}
+            // 图片能拖进输入框当参考，视频不行——画布只收图片
+            {...(isVideoResult ? {} : {
+              draggable: true,
+              onDragStart: (event: React.DragEvent) => event.dataTransfer.setData(ASSET_DRAG_TYPE, assetId),
+            })}
+          >
             <ResultThumb assetId={assetId} asset={produced} isVideo={isVideoResult} />
           </button>
         ) : null}
 
+        {/* 请求参数核对留在正面（问题 1）：它本来就是「发出去没有」这件事的证据，不该藏进折叠里 */}
         {paramNotes.length ? <ParamChips notes={paramNotes} /> : null}
 
-        <div className="tool-card-foot">
-          {detail.length ? (
-            <button type="button" className="link-btn" onClick={() => setOpen((value) => !value)}>
-              <ChevronDown size={12} className={open ? "flip" : ""} />参数
-            </button>
-          ) : null}
-          {assetId && onPreview ? (
-            <button type="button" className="link-btn" onClick={() => onPreview(assetId)}>
-              <ImageIcon size={12} />查看结果
-            </button>
-          ) : null}
-          {result?.taskId ? (
-            <button
-              type="button"
-              className="link-btn"
-              onClick={() => { window.open(api.assetUrl(`/api/generations/${result.taskId}/diagnostics`), "_blank"); }}
-            >
-              诊断
-            </button>
-          ) : null}
-        </div>
-
-        {open && detail.length ? (
-          <dl className="tool-card-detail">
-            {detail.map(([key, value]) => (
-              <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
-            ))}
-          </dl>
+        {open ? (
+          <div className="tool-card-body">
+            {prompt ? <div className="tool-card-prompt">{prompt}</div> : null}
+            {detail.length ? (
+              <dl className="tool-card-detail">
+                {detail.map(([key, value]) => (
+                  <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+                ))}
+              </dl>
+            ) : null}
+            <div className="tool-card-foot">
+              {assetId && onPreview ? (
+                <button type="button" className="link-btn" onClick={() => onPreview(assetId)}>
+                  <ImageIcon size={12} />查看结果
+                </button>
+              ) : null}
+              {result?.taskId ? (
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => { window.open(api.assetUrl(`/api/generations/${result.taskId}/diagnostics`), "_blank"); }}
+                >
+                  诊断
+                </button>
+              ) : null}
+            </div>
+          </div>
         ) : null}
       </div>
     </div>

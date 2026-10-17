@@ -130,7 +130,7 @@ export const api = {
   /** §6 能力清单原文：和喂给大脑的是同一份，展示给用户看不会「说的和做的不一样」 */
   capabilities: () => request<{
     manifest: string;
-    aliases: Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string }>;
+    aliases: Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string; channelId: string }>;
   }>("/api/agent/capabilities"),
   conversations: () => request<Array<ConversationSummary & { running: boolean }>>("/api/conversations"),
   conversation: (id: string) => request<ConversationView & { running: boolean }>(`/api/conversations/${id}`),
@@ -147,9 +147,9 @@ export const api = {
    * 发一条消息。**立即返回**，模型输出走 `openConversationStream`。
    * 卡在这里等会撞上前端自己的超时——一趟生图几十秒，连接等不起。
    */
-  sendMessage: (id: string, text: string) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
+  sendMessage: (id: string, text: string, assetRefs: string[] = []) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(assetRefs.length ? { text, assetRefs } : { text }),
   }),
   interruptConversation: (id: string) => request<{ interrupted: boolean }>(`/api/conversations/${id}/interrupt`, { method: "POST" }),
   /**

@@ -18,6 +18,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   canvasAfterProducing, mergeConfirmArgs, parsePlan, repairPlan, salvagePlan, shouldConfirm,
 } from "../src/server/agent";
+import { DEFAULT_CONVERSATION_TITLE } from "../src/shared/agent-types";
+import { TOOL_SCHEMAS } from "../src/server/agent-tools";
 import {
   buildCapabilityAliases, buildCapabilityManifest, describeAliasChoice, resolveAlias,
 } from "../src/server/capabilities";
@@ -114,9 +116,11 @@ describe("alias layer", () => {
     expect(aliases.find((item) => item.model === "sd-xl")?.alias).toMatch(/^sd/);
   });
 
-  it("numbers same-prefix models and skips disabled channels", () => {
+  it("把版本写进别名，不再按位置编号", () => {
+    // 老做法是 seedance-1 / seedance-2（按出现顺序编号），和真实版本号对不上：
+    // 用户按 sd-2.5 说，命中的却是 sd-2.0。别名要自带版本。
     const seedance = aliases.filter((item) => item.model.startsWith("sd-2"));
-    expect(seedance.map((item) => item.alias).sort()).toEqual(["seedance-1", "seedance-2"]);
+    expect(seedance.map((item) => item.alias).sort()).toEqual(["seedance-2.0", "seedance-2.5"]);
     expect(aliases.some((item) => item.model === "flux-pro")).toBe(false);
     expect(aliases.some((item) => item.model === "deepseek-v4-1-flash")).toBe(false);
   });
@@ -126,9 +130,16 @@ describe("alias layer", () => {
     expect(exact?.model).toBe("gemini-3-pro-image");
     expect(exact?.usedFallback).toBe(false);
     expect(resolveAlias(aliases, "  GEMINI  ", "image")?.model).toBe("gemini-3-pro-image");
-    // 带序号和不带序号要能互相命中
-    expect(resolveAlias(aliases, "seedance-2", "video")?.model).toBe("sd-2.0");
     expect(resolveAlias(aliases, "seedance", "video")?.usedFallback).toBe(false);
+  });
+
+  it("用户说版本号或直接说真实模型 ID 都要命中", () => {
+    // 用户原话就是「用 seedance2.5」——没有分隔符
+    expect(resolveAlias(aliases, "seedance2.5", "video")?.model).toBe("sd-2.5");
+    expect(resolveAlias(aliases, "seedance-2.5", "video")?.model).toBe("sd-2.5");
+    // 直接报真实模型 ID 也得认（他截图里说的就是 sd-2.5）
+    expect(resolveAlias(aliases, "sd-2.5", "video")?.model).toBe("sd-2.5");
+    expect(resolveAlias(aliases, "sd-2.0", "video")?.model).toBe("sd-2.0");
   });
 
   it("falls back to the category default and says so when the hint is nonsense", () => {
@@ -281,7 +292,7 @@ describe("confirm args round-trip", () => {
 
     const conversation = db.createConversation({
       title: "画一只猫", brainChannelId: "c1", brainModel: "m1",
-      videoConfirmPolicy: "auto_only", visionEnabled: true,
+      videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
     const message = db.appendMessage({
       conversationId: conversation.id, role: "assistant", toolName: "generate_video",
@@ -518,7 +529,7 @@ describe("conversation media split", () => {
 
     const conversation = context.db.createConversation({
       title: "猫", brainChannelId: "c1", brainModel: "m1",
-      videoConfirmPolicy: "auto_only", visionEnabled: true,
+      videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
 
     // assets.task_id 没有外键，所以这里不必造一条真的 task 行
@@ -540,5 +551,523 @@ describe("conversation media split", () => {
     expect(view.mediaAssets.map((item) => item.asset.id)).toEqual(["img00001", "vid00001"]);
     // 而且视频的 mimeType 必须真的能拿到，光有 assetId 不够
     expect(view.mediaAssets.find((item) => item.asset.id === "vid00001")?.asset.mimeType).toBe("video/mp4");
+  });
+});
+
+describe("会话自动命名（对齐 Codex）", () => {
+  /**
+   * 会话名取第一条指令的前 20 个字。这里钉两件事：默认名会被顶替、超长要截断；
+   * 以及**用户改过名之后不能再被覆盖**——后者是这条规则唯一的真实风险，
+   * 覆盖了就等于「重命名」这个功能白点，而且每发一条消息名字都会被改回去。
+   */
+  it("把第一条指令当前几个字，但绝不覆盖用户改过的名字", async () => {
+    const mock = http.createServer((req, res) => {
+      req.on("data", () => undefined);
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        // 大脑只会「回一句话」：这条测试关心的是会话名，不是生成链路
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify({ tool: "reply", args: { text: "好" } }) } }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-title-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain-secret-value");
+
+    /** 发一条消息，等到这一轮跑完再返回 */
+    async function sendAndSettle(conversationId: string, text: string) {
+      await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text }).expect(202);
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+        if (view.status === "idle") return view as { title: string };
+      }
+      throw new Error("这一轮没跑完");
+    }
+
+    async function newConversation() {
+      return (await request(app).post("/api/conversations").send({}).expect(201)).body.data;
+    }
+
+    // 短指令：原样当名字
+    const shortOne = await newConversation();
+    expect(shortOne.title).toBe(DEFAULT_CONVERSATION_TITLE);
+    expect((await sendAndSettle(shortOne.id, "画一只戴草帽的橘猫站在向日葵地里")).title).toBe("画一只戴草帽的橘猫站在向日葵地里");
+
+    // 长指令：截到 20 个字再加省略号，多行也折成一行
+    const longOne = await newConversation();
+    const longText = "帮我画一张赛博朋克夜景\n要有霓虹灯和雨，构图参考 Blade Runner，画幅 16:9";
+    const longTitle = (await sendAndSettle(longOne.id, longText)).title;
+    expect(longTitle).toBe(`${longText.replace(/\s+/g, " ").slice(0, 20)}…`);
+    expect(longTitle).not.toContain("\n");
+
+    // 改过名的不动：这才是「重命名」不失效的保证
+    const renamed = await newConversation();
+    await request(app).patch(`/api/conversations/${renamed.id}`).send({ title: "我的项目" }).expect(200);
+    expect((await sendAndSettle(renamed.id, "再画一张")).title).toBe("我的项目");
+  });
+});
+
+describe("generate_video 的 mode 兜底", () => {
+  /**
+   * 用户的实际现象：每次调 wan，第一次必报错，重试一次才成。
+   * 根因是提示词里只列了参数名、没列合法值，大脑自己去发明（「image-to-video」这类），
+   * 校验不通过 → 整轮失败 → 重新问一次大脑。这里钉住「写错也不该让整轮失败」。
+   */
+  it("不认识的值只丢掉这个字段，不让整次调用失败", () => {
+    const bad = TOOL_SCHEMAS.generate_video.safeParse({ prompt: "做一个 2 秒视频", mode: "image-to-video" });
+    expect(bad.success).toBe(true);
+    expect(bad.success ? bad.data.mode : "unreachable").toBeUndefined();
+    // 合法值照旧
+    const good = TOOL_SCHEMAS.generate_video.safeParse({ prompt: "x", mode: "first-frame" });
+    expect(good.success ? good.data.mode : null).toBe("first-frame");
+    // 别的字段该报错还是要报错，别为了兜 mode 把整个 schema 变成来者不拒
+    expect(TOOL_SCHEMAS.generate_video.safeParse({ mode: "first-frame" }).success).toBe(false);
+  });
+});
+
+describe("本会话的图不重复", () => {
+  /**
+   * 用户的实际现象：在画布里来回切几次，同一张图就多出好几个副本。
+   * 根因是 listConversationAssets 走 messages JOIN assets——产出它那条算一次，
+   * 之后每次 set_canvas 也会落一条带 assetId 的消息。
+   */
+  it("同一个产物被多条消息引用时只出现一次，轮次号也不跳", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-dupe-"));
+    const { context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const conversation = context.db.createConversation({
+      title: "去重", brainChannelId: "c1", brainModel: "m1",
+      videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
+    });
+    const addAsset = (id: string) => context.db.insertAsset({
+      id, taskId: "task-1", fileName: `${id}.png`, mimeType: "image/png", byteSize: 1,
+      relativePath: `${id}.png`, baseDir: context.db.assetsDir, sha256: id, thumbPath: "",
+    });
+    const reference = (id: string, content: string) => context.db.appendMessage({
+      conversationId: conversation.id, role: "tool", content, assetId: id, taskId: "task-1",
+    });
+
+    addAsset("img00001");
+    reference("img00001", "生图完成");
+    // 第二次引用同一个产物：set_canvas 那一类消息也会带上 assetId
+    reference("img00001", "已设为当前画布");
+    addAsset("img00002");
+    reference("img00002", "生图完成");
+
+    const view = context.agent.buildView(conversation.id)!;
+    expect(view.sessionImages.map((item) => item.asset.id)).toEqual(["img00001", "img00002"]);
+    // 第 2 张要是第 2 轮，不能因为中间那条重复引用跳到第 3 轮
+    expect(view.sessionImages.map((item) => item.round)).toEqual([1, 2]);
+  });
+});
+
+describe("空会话不堆积", () => {
+  /**
+   * 用户的实际现象：侧栏一屏全是「新对话」——点一下「新对话」就多一条，
+   * 但真正用过的没几条。空会话没有任何消息，也就没有产物和上传图，新建时顺手清掉不会丢东西。
+   */
+  it("新建时清掉之前没动过的空会话，动过的留下", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-empty-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    // 建会话要先有一个能当大脑的对话渠道。这条测试不真的发消息，所以不需要真能连通的地址；
+    // 但地址得是回环（allowPrivateNetwork 才会跳过 DNS 检查），否则光建档就先失败了
+    await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: "http://127.0.0.1:1/v1", adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["mock-brain"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+
+    const first = (await request(app).post("/api/conversations").send({}).expect(201)).body.data;
+    const second = (await request(app).post("/api/conversations").send({}).expect(201)).body.data;
+    const afterTwo = (await request(app).get("/api/conversations").expect(200)).body.data;
+    // 第一条还没用就被第二条顶掉了
+    expect(afterTwo.map((item: { id: string }) => item.id)).toEqual([second.id]);
+    expect(first.id).not.toBe(second.id);
+
+    // 有消息的那条不算空壳，后面再建也不能动它
+    context.db.appendMessage({ conversationId: second.id, role: "user", content: "画一只猫" });
+    const third = (await request(app).post("/api/conversations").send({}).expect(201)).body.data;
+    const afterThree = (await request(app).get("/api/conversations").expect(200)).body.data;
+    expect(afterThree.map((item: { id: string }) => item.id).sort()).toEqual([second.id, third.id].sort());
+  });
+});
+
+describe("视频做完，对话里有回音", () => {
+  /**
+   * 用户的实际反馈：「视频生成完了，好像并没有提醒」。
+   *
+   * 这条链路上有两件事都得成立：结果要**写回那条消息**（胶囊变成产物），
+   * 而且要**自动起一轮**让大脑说一句「做好了」——只写库不吭声，
+   * 用户对着一个已经跑完的界面是看不出区别的。测试把两步一起钉住。
+   */
+  it("任务结束会把结果写回消息，并让大脑接着说一句", async () => {
+    let mockOrigin = "";
+    let pollCount = 0;
+    let videoSucceeded = false;
+    let chatCalls = 0;
+
+    const mock = http.createServer((req, res) => {
+      if (req.url?.includes("/chat/completions")) {
+        req.on("data", () => undefined);
+        req.on("end", () => {
+          chatCalls += 1;
+          // 第一次让它去生视频；之后按「视频好了没有」如实回话——
+          // 这样「做完之后的回音」一定是任务完成带来的，而不是第一轮就编出来的
+          const plan = chatCalls === 1
+            ? { tool: "generate_video", args: { prompt: "一只猫在跑", duration: 5 }, say: "这就去做。" }
+            : { tool: "reply", args: { text: videoSucceeded ? "视频做好了。" : "还在做，稍等。" }, say: videoSucceeded ? "视频做好了。" : "还在做，稍等。" };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+        });
+        return;
+      }
+      if (req.url === "/api/v3/contents/generations/tasks" && req.method === "POST") {
+        req.on("data", () => undefined);
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: "cgt-1" }));
+        });
+        return;
+      }
+      if (req.url === "/api/v3/contents/generations/tasks/cgt-1" && req.method === "GET") {
+        pollCount += 1;
+        const done = pollCount >= 2;
+        if (done) videoSucceeded = true;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(done
+          ? { id: "cgt-1", status: "succeeded", content: { video_url: `${mockOrigin}/out.mp4` } }
+          : { id: "cgt-1", status: "running" }));
+        return;
+      }
+      if (req.url === "/out.mp4" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fake-mp4-bytes"));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    mockOrigin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-video-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: mockOrigin, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain");
+    (await request(app).post("/api/channels").send({
+      name: "Seedance", baseUrl: mockOrigin, adapterType: "seedance-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      models: ["sd-2.5"], allowPrivateNetwork: true, enabled: true, apiKey: "sk-video",
+    }).expect(201));
+
+    // 直接生成，不弹确认卡片：这条测试只关心「做完之后有没有回音」
+    const conversationId = (await request(app).post("/api/conversations").send({ videoConfirmPolicy: "never" }).expect(201)).body.data.id as string;
+    await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text: "用 seedance 做一个 5 秒视频" }).expect(202);
+
+    type Msg = { role: string; content: string | null; toolName: string | null; assetId: string | null };
+    let view: { status: string; messages: Msg[] } = { status: "", messages: [] };
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (view.status === "waiting_task") break;
+    }
+    expect(view.status).toBe("waiting_task");
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (view.messages.some((message) => (message.content ?? "").includes("视频做好了"))) break;
+    }
+
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+    // 结果写回了那条消息：胶囊要靠 assetId 才能变成产物缩略图
+    const videoMessage = view.messages.find((message) => message.role === "tool" && message.toolName === "generate_video");
+    expect(videoMessage?.assetId).toBeTruthy();
+    // 而且大脑真的被叫回来说了一句
+    expect(view.messages.some((message) => (message.content ?? "").includes("视频做好了"))).toBe(true);
+  });
+});
+
+describe("提交即失败也不会丢", () => {
+  /**
+   * 提交那一步就失败（渠道没配 key、上游直接拒）时，任务会比工具消息**先**结束。
+   * 这一条钉住那个时间窗：事件到达时那行消息还不存在，`handleTaskEvent` 按 taskId
+   * 找不到人接手，事情就会彻底丢掉——消息停在 pending、会话卡在 waiting_task，
+   * 用户等不到任何回音。修法是落库之后再自查一次任务的终态。
+   *
+   * 这条测试当初是**先把 bug 复现出来**才写的：没修之前它会失败在「状态停在 pending」。
+   */
+  it("任务比消息先结束：失败照样写回消息，会话收回 idle", async () => {
+    const mock = http.createServer((req, res) => {
+      req.on("data", () => undefined);
+      req.on("end", () => {
+        if (req.url?.includes("/chat/completions")) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify({ tool: "generate_video", args: { prompt: "一只猫在跑", duration: 5 }, say: "这就去做。" }) } }] }));
+          return;
+        }
+        // 这条链路走不到这里：没有 key，请求根本发不出去
+        res.writeHead(500).end();
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-video-fail-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: origin, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain");
+    // 故意不给 key
+    (await request(app).post("/api/channels").send({
+      name: "Seedance", baseUrl: origin, adapterType: "seedance-video", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      models: ["sd-2.5"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201));
+
+    const conversationId = (await request(app).post("/api/conversations").send({ videoConfirmPolicy: "never" }).expect(201)).body.data.id as string;
+    await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text: "用 seedance 做一个 5 秒视频" }).expect(202);
+
+    type Msg = { role: string; content: string | null; toolName: string | null; status: string };
+    let view: { status: string; messages: Msg[] } = { status: "", messages: [] };
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (view.status === "idle" && view.messages.some((message) => message.role === "tool")) break;
+    }
+
+    const videoMessage = view.messages.find((message) => message.role === "tool" && message.toolName === "generate_video");
+    // 关键：不能停在 pending——那就是「用户等不到任何回音」的样子
+    expect(videoMessage?.status).toBe("error");
+    expect(videoMessage?.content ?? "").not.toContain("已提交");
+    expect(view.status).toBe("idle");
+  });
+});
+
+describe("引用已有产物", () => {
+  /**
+   * 用户从画布/消息里把已生成的图拖进输入框再发送时，只留一句文字是看不出他指的是哪几张的。
+   * 引用的那几张要跟着**同一条消息**记下来（不是各开一条消息），气泡上照原样摆出来。
+   */
+  it("拖进来的图跟着这句话一起记，同一条消息", async () => {
+    const mock = http.createServer((req, res) => {
+      req.on("data", () => undefined);
+      req.on("end", () => {
+        // 大脑故意报错：这条测试只看用户消息有没有把引用记下来，
+        // 用最省的方式跑完一轮（不会真的生成任何东西）
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "nope" } }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-refs-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: origin, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain");
+
+    const conversationId = (await request(app).post("/api/conversations").send({}).expect(201)).body.data.id as string;
+    await request(app).post(`/api/conversations/${conversationId}/messages`)
+      .send({ text: "把这两张合起来", assetRefs: ["img-aaa", "img-bbb"] })
+      .expect(202);
+
+    type Msg = { role: string; content: string | null; assetRefs: string[] };
+    let view: { messages: Msg[] } = { messages: [] };
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (view.messages.some((message) => message.content === "把这两张合起来")) break;
+    }
+
+    const userMessage = view.messages.find((message) => message.content === "把这两张合起来");
+    expect(userMessage?.assetRefs).toEqual(["img-aaa", "img-bbb"]);
+    // 一条消息装下全部引用，不是每张单开一条
+    expect(view.messages.filter((message) => message.role === "user")).toHaveLength(1);
+  });
+});
+
+describe("原话直发", () => {
+  /**
+   * 用户反馈「这个开关有时候切换不生效」。根因是它原本只写在系统提示词里——
+   * 模型听不听全看心情。现在服务端在工具层直接把 prompt 换成用户那句话，
+   * 大脑写什么都影响不了结果。这条测试就是钉住这件事：**请求体里必须是用户的原话**。
+   */
+  it("开了之后，出网的提示词是用户原话，大脑改写过的那版被丢掉", async () => {
+    const imageBodies: string[] = [];
+    let chatCalls = 0;
+
+    const mock = http.createServer((req, res) => {
+      if (req.url?.includes("/chat/completions")) {
+        req.on("data", () => undefined);
+        req.on("end", () => {
+          chatCalls += 1;
+          // 大脑**故意**改写：写成一段很具体的画面描述
+          const plan = chatCalls === 1
+            ? { tool: "generate_image", args: { prompt: "一只戴着草帽的橘色虎斑猫，坐在向日葵地里，逆光，胶片颗粒" }, say: "这就画。" }
+            : { tool: "reply", args: { text: "画好了。" }, say: "画好了。" };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+        });
+        return;
+      }
+      if (req.url === "/v1/images/generations" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          imageBodies.push(Buffer.concat(chunks).toString("utf8"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-verbatim-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: origin, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain");
+    (await request(app).post("/api/channels").send({
+      name: "Images", baseUrl: origin, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201));
+
+    const conversationId = (await request(app).post("/api/conversations").send({ verbatimPrompt: true }).expect(201)).body.data.id as string;
+    const userSaid = "一只戴草帽的橘猫，水彩风";
+    await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text: userSaid }).expect(202);
+
+    // 等到这一轮真的落定：图传回来了不算完，任务还要落盘、写库、大脑还要收尾。
+    // 不等就结束的话 teardown 会先把库关了，后台任务撞上去就是一句 "database is not open"
+    let settled = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (imageBodies.length && view.status === "idle") { settled = true; break; }
+    }
+    expect(settled).toBe(true);
+
+    expect(imageBodies).toHaveLength(1);
+    expect(imageBodies[0]).toContain(userSaid);
+    expect(imageBodies[0]).not.toContain("向日葵地里");
+  });
+
+  /** 关掉的时候照旧：润色是默认行为，效果更好 */
+  it("没开的时候仍然用大脑改写过的版本", async () => {
+    const imageBodies: string[] = [];
+    let chatCalls = 0;
+    const mock = http.createServer((req, res) => {
+      if (req.url?.includes("/chat/completions")) {
+        req.on("data", () => undefined);
+        req.on("end", () => {
+          chatCalls += 1;
+          const plan = chatCalls === 1
+            ? { tool: "generate_image", args: { prompt: "扩写过的画面描述" }, say: "这就画。" }
+            : { tool: "reply", args: { text: "画好了。" }, say: "画好了。" };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+        });
+        return;
+      }
+      if (req.url === "/v1/images/generations" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          imageBodies.push(Buffer.concat(chunks).toString("utf8"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-polish-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: origin, adapterType: "openai-chat", authType: "bearer",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["deepseek-v4-1-flash"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    context.sessionKeys.set(brain.id, "sk-brain");
+    (await request(app).post("/api/channels").send({
+      name: "Images", baseUrl: origin, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201));
+
+    const conversationId = (await request(app).post("/api/conversations").send({}).expect(201)).body.data.id as string;
+    await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text: "一只猫" }).expect(202);
+
+    // 等到这一轮真的落定：图传回来了不算完，任务还要落盘、写库、大脑还要收尾。
+    // 不等就结束的话 teardown 会先把库关了，后台任务撞上去就是一句 "database is not open"
+    let settled = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data;
+      if (imageBodies.length && view.status === "idle") { settled = true; break; }
+    }
+    expect(settled).toBe(true);
+    expect(imageBodies).toHaveLength(1);
+    expect(imageBodies[0]).toContain("扩写过的画面描述");
   });
 });

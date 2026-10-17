@@ -4,98 +4,142 @@
  * 回车发送、Shift+回车换行——对话式界面里最省的交互，用户不用挪手去点按钮。
  * 正在跑的时候按钮变成「停止」：一堂生图要几十秒，没有中断入口用户只能干等。
  *
- * 自己带的图也在这里进（需求.md 问题 4）：点左边的图片按钮挑文件，
- * 或者直接把图拖进来。两种入口都通向同一条上传路径——上传后它就是一个**一等素材**，
- * 能当画布、能当参考图，不是发完就丢的附件。
+ * 图片是**先待在框里、发送时才上传**的（对齐 Codex）：+ 或拖拽进来只是挂成待发附件，
+ * 在输入框上方以缩略图排开，可以逐张删掉；点发送才真的传上去、才进画布。
+ * 以前是拖进来就立刻上传，用户还没想好要不要用它，画布就已经被换掉了。
+ *
+ * 结构对齐 Codex：整块是一个圆角输入容器，上面写字、下面一行放控件——
+ * 左边是附件和会话级设置（`leftSlot`），右边是模型选择和发送（`rightSlot`）。
+ * 槽位由 ChatView 传进来：会话的大脑模型、视频确认策略这些开关属于会话，
+ * 摆在这一行才符合「输入框下面挂着的都是我这次要用的设定」这个直觉。
  */
-import { CornerDownLeft, ImagePlus, LoaderCircle, Send, Square, Sparkles } from "lucide-react";
-import { useRef, useState } from "react";
+import { ArrowUp, CornerDownLeft, LoaderCircle, Plus, Square, X } from "lucide-react";
+import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
+import { api } from "../api";
 import { useFileDrop } from "../useFileDrop";
 
-/** 空会话时的引导。写的是这个能力**真正**能做的事，不是泛泛的「试试看」 */
-const STARTERS = [
-  "画一只戴草帽的橘猫，水彩风",
-  "把这张图的手改成握着咖啡杯",
-  "把刚才那张变成 5 秒的视频，镜头慢慢推近",
-  "帮我写一段赛博朋克夜景的提示词，要出图",
-];
+/**
+ * 待发附件。两种来源：
+ * - `file`：从资源管理器拖/选进来的本地文件，发送时才真的上传
+ * - `assetId`：会话里**已经生成**的图，被拖进来当参考——不用上传，发送时并进画布
+ */
+type PendingImage = { url: string; name: string; file?: File; assetId?: string };
+
+/** 和输入框同宽的图片白名单，和服务端那道真正的把关（看字节头）不是一回事 */
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp)$/i;
 
 export function Composer({
   running,
   uploading,
   disabled,
   placeholder,
+  leftSlot,
+  rightSlot,
+  statusSlot,
   onSend,
-  onUpload,
   onInterrupt,
 }: {
   running: boolean;
-  /** 图上正在传：按钮转圈、别再放进去第二批 */
+  /** 图正在上传：按钮转圈，这期间不许再放进来 */
   uploading?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  onSend: (text: string) => void;
-  onUpload: (files: File[]) => void;
+  /** 左下角：会话级设置（视频确认策略等） */
+  leftSlot?: ReactNode;
+  /** 右下角：模型选择，排在发送键左边 */
+  rightSlot?: ReactNode;
+  /** 底部状态行的右侧：token 用量 / 上下文大小，和「正在处理」并排 */
+  statusSlot?: ReactNode;
+  /**
+   * 回车或点发送：把文字和**这一刻**挂着的图一起交出去。
+   * `files` 是本地文件（这时才上传），`assetIds` 是拖进来的已有产物（不用上传，并进画布）。
+   */
+  onSend: (text: string, files: File[], assetIds: string[]) => void;
   onInterrupt: () => void;
 }) {
   const [text, setText] = useState("");
+  const [pending, setPending] = useState<PendingImage[]>([]);
+  const [reject, setReject] = useState<string | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // 一轮正在跑的时候不让传：画布会在中途被换掉，大脑看到的和用户以为的对不上
   const blocked = running || Boolean(disabled) || Boolean(uploading);
-  const { active, dropProps } = useFileDrop(!blocked, onUpload);
+
+  // 组件卸载时把没发出去的预览地址收掉，否则每挂一张图就漏一个 blob
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  useEffect(() => () => { pendingRef.current.forEach((item) => URL.revokeObjectURL(item.url)); }, []);
+
+  function addFiles(files: File[], assetIds: string[] = []) {
+    const images = files.filter((file) => file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name));
+    // 页内拖过来的产物不用再过格式和大小那两关：它本来就已经在会话里了
+    const fromCanvas = assetIds.filter((id) => !pending.some((item) => item.assetId === id));
+    if (!images.length && !fromCanvas.length) {
+      // 拖了文件但没一张是图，才提示；拖的是别的东西就当没发生
+      if (files.length) setReject("只支持 PNG、JPEG 或 WebP 图片");
+      return;
+    }
+    if (pending.length + images.length + fromCanvas.length > MAX_REFERENCE_IMAGES) {
+      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张`);
+      return;
+    }
+    const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
+    if (oversized) { setReject(`${oversized.name} 超过 10 MB`); return; }
+    setReject(null);
+    setPending((current) => [
+      ...current,
+      ...images.map((file) => ({ file, name: file.name, url: URL.createObjectURL(file) })),
+      ...fromCanvas.map((assetId) => ({ assetId, name: assetId, url: api.assetUrl(`/api/assets/${assetId}/thumb`) })),
+    ]);
+  }
+
+  function removePending(item: PendingImage) {
+    // 只有本地文件才有 blob 地址要回收；产物那张指向的是服务端缩略图
+    if (item.file) URL.revokeObjectURL(item.url);
+    setPending((current) => current.filter((entry) => entry !== item));
+  }
+
+  const { active, dropProps } = useFileDrop(!blocked, addFiles);
 
   function submit() {
     const value = text.trim();
-    if (!value || running || disabled) return;
+    // 图必须跟着一句话走：助手拿到一张没有说明的图，只能瞎猜要拿它做什么
+    if (!value || running || disabled || uploading) return;
+    const files = pending.filter((item) => item.file).map((item) => item.file!);
+    const assetIds = pending.filter((item) => item.assetId).map((item) => item.assetId!);
     setText("");
-    onSend(value);
+    setPending([]);
+    setReject(null);
+    // 交出去之后由 ChatView 负责上传/并入画布，blob 地址在这里就没用了
+    pending.forEach((item) => { if (item.file) URL.revokeObjectURL(item.url); });
+    onSend(value, files, assetIds);
     // 高度被撑开过的话收回去，否则下一条消息的输入框还是大的
     if (areaRef.current) areaRef.current.style.height = "auto";
   }
 
   return (
     <div className={`composer ${active ? "is-drop" : ""}`} {...dropProps}>
-      {!text ? (
-        <div className="composer-starters">
-          {STARTERS.map((starter) => (
-            <button
-              key={starter}
-              type="button"
-              className="composer-starter"
-              disabled={running || disabled}
-              onClick={() => { setText(starter); areaRef.current?.focus(); }}
-            >
-              <Sparkles size={11} />{starter}
-            </button>
-          ))}
-        </div>
-      ) : null}
-
-      <div className="composer-row">
-        <button
-          type="button"
-          className="icon-button composer-attach"
-          title="传一张图进来（也可以直接把图拖到这个框里）"
-          disabled={blocked}
-          onClick={() => fileRef.current?.click()}
-        >
-          {uploading ? <LoaderCircle size={16} className="spin" /> : <ImagePlus size={16} />}
-        </button>
-        {/* 系统文件对话框只能按 MIME 提示过滤，真正的把关在服务端（字节头要对得上） */}
-        <input
-          ref={fileRef}
-          className="file-input"
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          multiple
-          onChange={(event) => {
-            const files = Array.from(event.target.files ?? []);
-            // 清掉 value：同一个文件连选两次也要能触发第二次 change
-            event.target.value = "";
-            if (files.length) onUpload(files);
-          }}
-        />
+      <div className="composer-box">
+        {pending.length ? (
+          <div className="composer-attachments">
+            {pending.map((item) => (
+              <div key={item.url} className="composer-attachment" title={item.file ? item.name : `${item.name} · 已在会话里`}>
+                <img src={item.url} alt={item.name} />
+                <button
+                  type="button"
+                  className="composer-attachment-remove"
+                  title="移除这张"
+                  aria-label={`移除 ${item.name}`}
+                  onClick={() => removePending(item)}
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         <textarea
           ref={areaRef}
@@ -104,7 +148,7 @@ export function Composer({
           value={text}
           maxLength={20000}
           disabled={disabled}
-          placeholder={placeholder ?? "说你想画什么，要改哪张图，或者传一张图进来…"}
+          placeholder={placeholder ?? "与助手协作：说你想画什么，或者要改哪张图…"}
           onChange={(event) => {
             setText(event.target.value);
             // 跟着内容长高，最多 40vh 后自己出滚动条
@@ -120,29 +164,73 @@ export function Composer({
             submit();
           }}
         />
-        {running ? (
-          <button type="button" className="secondary-button composer-stop" onClick={onInterrupt} title="停下当前这一轮">
-            <Square size={13} />停止
-          </button>
-        ) : (
+
+        <div className="composer-bar">
           <button
             type="button"
-            className="primary-button composer-send"
-            onClick={submit}
-            disabled={!text.trim() || disabled}
-            title="发送（回车）"
+            className={`composer-attach ${pending.length ? "is-on" : ""}`}
+            title="传一张图进来（也可以直接把图拖到这个框里）"
+            disabled={blocked}
+            onClick={() => fileRef.current?.click()}
           >
-            <Send size={14} />发送
+            {uploading ? <LoaderCircle size={14} className="spin" /> : <Plus size={15} />}
           </button>
-        )}
+          {/* 系统文件对话框只能按 MIME 提示过滤，真正的把关在服务端（字节头要对得上） */}
+          <input
+            ref={fileRef}
+            className="file-input"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              // 清掉 value：同一个文件连选两次也要能触发第二次 change
+              event.target.value = "";
+              if (files.length) addFiles(files);
+            }}
+          />
+
+          {leftSlot}
+
+          <div className="composer-bar-right">
+            {rightSlot}
+            {running ? (
+              <button type="button" className="secondary-button composer-stop" onClick={onInterrupt} title="停下当前这一轮">
+                <Square size={13} />停止
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="composer-send"
+                onClick={submit}
+                disabled={!text.trim() || disabled}
+                title="发送（回车）"
+                aria-label="发送"
+              >
+                <ArrowUp size={16} />
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="composer-hint">
         <CornerDownLeft size={11} />
         <span>回车发送 · Shift + 回车换行</span>
-        {uploading ? <span className="composer-hint-run">正在上传图片…</span>
-          : running ? <span className="composer-hint-run">助手正在处理…</span> : null}
+        {/* 两种来源要说清各自会发生什么：本地文件是「发送时上传」，拖进来的产物是「引用它」 */}
+        {pending.some((item) => item.file) ? (
+          <span className="composer-hint-pending">{pending.filter((item) => item.file).length} 张本地图将在发送时上传</span>
+        ) : null}
+        {pending.some((item) => item.assetId) ? (
+          <span className="composer-hint-pending">{pending.filter((item) => item.assetId).length} 张引用自本会话，会一起进画布</span>
+        ) : null}
+        <div className="composer-hint-right">
+          {statusSlot}
+          {uploading ? <span className="composer-hint-run">正在上传图片…</span>
+            : running ? <span className="composer-hint-run">助手正在处理…</span> : null}
+        </div>
       </div>
+      {reject ? <div className="composer-reject" role="alert">{reject}</div> : null}
     </div>
   );
 }

@@ -12,13 +12,14 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Eye, EyeOff, Film, Info, ListTree, LoaderCircle, MessageSquarePlus, Trash2, Wand2, X,
+  Brain, Eye, EyeOff, Film, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
 import type { Asset, Channel } from "../shared/types";
 import {
-  assetRef, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, type AgentStreamEvent,
+  assetRef, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent,
   type ChatMessage, type ConversationStatus, type ConversationSummary,
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
@@ -27,10 +28,32 @@ import { AssetStrip } from "./chat/AssetStrip";
 import { Composer } from "./chat/Composer";
 import { ConfirmCard } from "./chat/ConfirmCard";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
+import { ModelLogo } from "./chat/ModelLogo";
+import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
+
+/**
+ * 从 `ask` 的消息里取出可点的选项。
+ *
+ * 选项一直存在库里（`plan.args.options`），以前只是落库时被丢掉了，
+ * 于是模型问「你要 A 还是 B」，用户面前只有一句话。这里把它们捞回来渲染成按钮。
+ */
+function readAskOptions(message: ChatMessage): string[] {
+  if (message.plan?.tool !== "ask") return [];
+  const options = message.plan.args?.options;
+  if (!Array.isArray(options)) return [];
+  return options.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 8);
+}
+
+/** token 数太长了，状态行只放得下 k / M 两种缩写；完整数值挂在 tooltip 上 */
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+}
 
 function upsert(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
   const index = messages.findIndex((item) => item.id === incoming.id);
@@ -49,9 +72,24 @@ const CANVAS_PATCH_DEBOUNCE_MS = 250;
 
 export function ChatView({
   channels,
+  sidebarHost,
+  sidebarFilter = "",
+  newChatSignal = 0,
+  onNewChatHandled,
+  onConfigureChannel,
   onToast,
 }: {
   channels: Channel[];
+  /** 全局侧栏里挂会话列表的节点（还没挂载完时为 null，此时不渲染列表） */
+  sidebarHost: HTMLElement | null;
+  /** 侧栏搜索框里的词：按标题和最后一条消息过滤会话列表，空串表示不过滤 */
+  sidebarFilter?: string;
+  /** 大于 0 表示侧栏刚点了「新对话」，值本身不重要，只看它变没变 */
+  newChatSignal?: number;
+  /** 处理完就把它归零，免得下次挂载又建一条（挂载时信号还留着的话会重复触发） */
+  onNewChatHandled?: () => void;
+  /** 模型面板里的「调整」：直接把那个渠道的编辑弹窗打开 */
+  onConfigureChannel?: (channel: Channel) => void;
   onToast: (kind: "ok" | "error", text: string) => void;
 }) {
   const brains = useMemo(() => channels.filter((channel) => isChatAdapter(channel.adapterType) && channel.enabled), [channels]);
@@ -63,18 +101,60 @@ export function ChatView({
   const [reasoning, setReasoning] = useState("");
   const [draft, setDraft] = useState("");
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
-  const [capabilities, setCapabilities] = useState<Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string }>>([]);
+  const [capabilities, setCapabilities] = useState<Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string; channelId: string }>>([]);
   /** 默认生图 / 生视频模型（需求.md 问题 5），空串表示不指定、用类目里第一个 */
   const [defaults, setDefaults] = useState({ image: "", video: "" });
   const [preview, setPreview] = useState<string | null>(null);
+  /** 画布条默认收起：平时只靠对话，需要挑图时从会话头那个开关展开 */
+  const [canvasOpen, setCanvasOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  /** 消息流的实际内容高度：图片异步加载时消息条数不变，只能靠它感知「版面又长高了」 */
+  const threadInnerRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 大脑候选：所有启用的对话渠道 × 它们的模型。
+   *
+   * 末尾补上「当前这一条」——渠道被停用或改了模型列表之后，它已经不在候选里了，
+   * 但选择器上必须还显示得出来，否则用户看到一个空白按钮，不知道自己在用什么。
+   */
+  const brainOptions = useMemo<ModelOption[]>(() => {
+    const options = brains.flatMap((channel) => channel.models.map((model) => ({
+      value: `${channel.id}::${model}`, model, channelName: channel.name,
+    })));
+    if (!view) return options;
+    const currentValue = `${view.brainChannelId}::${view.brainModel}`;
+    if (options.some((item) => item.value === currentValue)) return options;
+    return [...options, { value: currentValue, model: `${view.brainModel}（不可用）`, channelName: "当前设置" }];
+  }, [brains, view?.brainChannelId, view?.brainModel]);
 
   const running = status === "running";
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+
+  /**
+   * 最后一条「用户/助手」消息的 id。
+   *
+   * 只有它可能是「还没被回答的问题」——用它来判断 ask 的选项按钮该不该出现。
+   * 系统提示（自动续跑停下之类）不算回答，所以要跳过。
+   */
+  const lastAnswerableId = useMemo(() => {
+    const messages = view?.messages ?? [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (message.role === "user" || message.role === "assistant") return message.id;
+    }
+    return null;
+  }, [view?.messages]);
+
+  /** 侧栏搜索：标题和最后一条消息都算，记得住哪句就搜得到 */
+  const filteredList = useMemo(() => {
+    const query = sidebarFilter.trim().toLowerCase();
+    if (!query) return list;
+    return list.filter((item) => `${item.title} ${item.lastMessage}`.toLowerCase().includes(query));
+  }, [list, sidebarFilter]);
 
   /**
    * `onToast` 是 App 里现写的箭头函数，**每次 App 渲染都是新的函数身份**。
@@ -84,7 +164,40 @@ export function ChatView({
    */
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
+  /**
+   * 模型面板是个原生 `<details>`：点外面它不会自己收（浏览器不管这个）。
+   * 用户遇到的就是「这个页面打开后点其他地方关不掉」。这里的处理是**直接改 DOM 的 open**，
+   * 不引入一份受控状态——面板里还有两个 select 和长列表，没必要为开关多绕一圈 state。
+   */
+  const capsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const closeOnOutside = (event: MouseEvent) => {
+      const node = capsRef.current;
+      if (!node?.open) return;
+      if (event.target instanceof Node && node.contains(event.target)) return;
+      node.open = false;
+    };
+    document.addEventListener("mousedown", closeOnOutside);
+    return () => document.removeEventListener("mousedown", closeOnOutside);
+  }, []);
   const toast = useCallback((kind: "ok" | "error", text: string) => onToastRef.current(kind, text), []);
+
+  /**
+   * 侧栏的「新对话」：点一下要真的开一条新会话，而不是切回上次那条。
+   *
+   * 处理完立刻把信号归零。不归零的话，切到别的视图再切回来、组件重新挂载时，
+   * 那个还留着的信号会让它又建一条——用户会看见侧栏自己多出一条空会话。
+   * `createConversation` 是组件内的函数声明（会被提升），故意不进依赖数组：
+   * 它每次渲染都是新身份，放进去等于信号一来就重跑。
+   */
+  const onNewChatHandledRef = useRef(onNewChatHandled);
+  onNewChatHandledRef.current = onNewChatHandled;
+  useEffect(() => {
+    if (newChatSignal <= 0) return;
+    onNewChatHandledRef.current?.();
+    void createConversation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newChatSignal]);
 
   // ── 数据加载 ───────────────────────────────────────────────────────────────
 
@@ -103,11 +216,26 @@ export function ChatView({
     }
   }, [toastError]);
 
+  /**
+   * 「最后发出的写/读赢」的序号。
+   *
+   * 之前只有「切走了就别写回」这一道保护，挡不住**同一会话**里乱序的两份快照：
+   * 用户点一下「原话直发」（PATCH），正好撞上 SSE 的 done 触发的那次 GET——
+   * 那次 GET 是在 PATCH 落库**之前**发出的，拿回来的是旧值，却后到、于是把开关又摁了回去。
+   * 用户的感受就是「这个开关有时候切换不生效」。
+   *
+   * 每次发起写或读都领一个号，回来时号不是最新的就丢掉。
+   */
+  const viewSeq = useRef(0);
+
   const reloadView = useCallback(async (id: string) => {
+    const seq = ++viewSeq.current;
     try {
       const next = await api.conversation(id);
       // 期间用户可能已经切走了，别把旧会话的内容写回来
       if (activeIdRef.current !== id) return;
+      // 有更新的读/写发出去了，这份是旧快照
+      if (seq !== viewSeq.current) return;
       setView(next);
       setStatus(next.running ? "running" : next.status);
     } catch (error) {
@@ -164,6 +292,11 @@ export function ChatView({
         case "token":
           setDraft((current) => current + event.text);
           break;
+        case "reset":
+          // 这一轮要重来：把上一段的流式内容丢掉，别和重试后的正文拼在一起
+          setReasoning("");
+          setDraft("");
+          break;
         case "status":
           setStatus(event.status);
           break;
@@ -202,13 +335,58 @@ export function ChatView({
     // toast / reloadList / reloadView 现在都是身份稳定的，这个 effect 只在换会话时重开
   }, [activeId, reloadView, reloadList, toast]);
 
-  // 新消息进来滚到底；用户手动往上翻的时候不打扰（只在贴近底部时跟随）
+  /**
+   * 滚动跟随。
+   *
+   * 「强制到底」的标记用会话 id 表示，**不自动清除**：内容是一路异步到的
+   * （先来消息、再来缩略图），提前清掉就会停在半路——这正是以前「切会话有时
+   * 不滚到最新」的原因（新会话比旧会话长时，旧位置不算贴近底部）。
+   * 现在只有三种情况会松开：换会话、发送新指令（重新锁上）、用户自己往上翻。
+   * 同一会话里的新消息仍然只在贴近底部时跟随，用户正翻历史时不打扰。
+   */
+  const forcedScrollConversation = useRef<string | null>(null);
+  useEffect(() => { forcedScrollConversation.current = activeId; }, [activeId]);
+
   useEffect(() => {
     const node = threadRef.current;
     if (!node) return;
+    const forced = Boolean(activeId) && forcedScrollConversation.current === activeId;
     const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 160;
-    if (nearBottom) node.scrollTop = node.scrollHeight;
-  }, [view?.messages.length, draft, reasoning]);
+    if (forced || nearBottom) node.scrollTop = node.scrollHeight;
+    // 依赖里带 view.id：切会话时旧视图还在，等新视图真正挂上要再滚一次
+  }, [activeId, view?.id, view?.messages.length, draft, reasoning, status]);
+
+  /**
+   * 图片 / 缩略图加载完会让内容变高，但消息数组没变。
+   * 观察内层内容的高度，强制模式下每次都重新贴到底——否则切进一个带图的会话，
+   * 图出来之后人又会被留在半空。
+   */
+  useEffect(() => {
+    const node = threadRef.current;
+    const inner = threadInnerRef.current;
+    if (!node || !inner) return;
+    const observer = new ResizeObserver(() => {
+      if (forcedScrollConversation.current === activeId) node.scrollTop = node.scrollHeight;
+    });
+    observer.observe(inner);
+    return () => observer.disconnect();
+    // view.id 要进依赖：首次进来时 view 还是 null，内层节点根本不存在；
+    // 只盯 activeId 的话观察器永远挂不上去
+  }, [activeId, view?.id]);
+
+  /** 用户主动往回翻 = 不再跟着最新消息走（往下滚不解除，只有向上才解除） */
+  const touchY = useRef(0);
+  function onThreadWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if (event.deltaY < 0) forcedScrollConversation.current = null;
+  }
+  function onThreadTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    touchY.current = event.touches[0]?.clientY ?? 0;
+  }
+  function onThreadTouchMove(event: React.TouchEvent<HTMLDivElement>) {
+    const y = event.touches[0]?.clientY ?? touchY.current;
+    // 手指往下划（clientY 变大）= 在看更早的消息
+    if (y > touchY.current + 4) forcedScrollConversation.current = null;
+  }
 
   // ── 操作 ───────────────────────────────────────────────────────────────────
 
@@ -223,12 +401,14 @@ export function ChatView({
     }
   }
 
-  async function send(text: string) {
+  async function send(text: string, assetRefs: string[] = []) {
     if (!activeId) return;
+    // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
+    forcedScrollConversation.current = activeId;
     setReasoning("");
     setDraft("");
     try {
-      await api.sendMessage(activeId, text);
+      await api.sendMessage(activeId, text, assetRefs);
       setStatus("running");
     } catch (error) {
       toastError(error);
@@ -243,8 +423,11 @@ export function ChatView({
 
   async function patch(patchBody: Parameters<typeof api.updateConversation>[1]) {
     if (!activeId) return;
+    // 先领号：这一下写出去之后，在途的旧 GET 就作废了（见 viewSeq 的注释）
+    const seq = ++viewSeq.current;
     try {
       const next = await api.updateConversation(activeId, patchBody);
+      if (seq !== viewSeq.current) return;
       setView(next);
     } catch (error) {
       toastError(error);
@@ -302,25 +485,69 @@ export function ChatView({
    * 服务端把新图顺手设成了当前画布并返回整份视图，所以这里直接就位——
    * 用户传完马上就能说「把这张图的手改成握着咖啡杯」，中间不用再点一次「设为当前」。
    */
-  async function uploadImages(files: File[]) {
-    if (!activeId || !files.length || uploading) return;
+  /**
+   * 把图上传进会话（上传成功即成为当前画布）。
+   *
+   * 返回是否成功：发送那条路上要看它决定「图没传上去，这句话还要不要发」——
+   * 图传失败还把话发出去，助手会对着上一张图改，用户看到的结果和说的完全不是一件事。
+   */
+  async function uploadImages(files: File[]): Promise<boolean> {
+    if (!activeId || !files.length || uploading) return false;
     // 先在本地挡住明显不合规的：让用户当场知道哪里不对，比发出去等一个 400 强
     const images = files.filter((file) => file.type.startsWith("image/"));
-    if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return; }
-    if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return; }
+    if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return false; }
+    if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return false; }
     const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
-    if (oversized) { toast("error", `${oversized.name} 超过 10 MB`); return; }
+    if (oversized) { toast("error", `${oversized.name} 超过 10 MB`); return false; }
 
     setUploading(true);
     try {
       setView(await api.uploadConversationImages(activeId, images));
       await reloadList();
       toast("ok", images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，现在是当前画布");
+      return true;
     } catch (error) {
       toastError(error);
+      return false;
     } finally {
       setUploading(false);
     }
+  }
+
+  /**
+   * 立刻落画布（不走 250ms 防抖）。
+   *
+   * 平时连点是靠防抖合并的，但发送这一下必须**落定之后**才发消息：
+   * 防抖还没触发就发出去，助手读到的还是旧画布——用户拖进来的图等于白拖。
+   */
+  async function flushCanvas(ids: string[]) {
+    if (!activeId) return;
+    if (canvasPatchTimer.current) { clearTimeout(canvasPatchTimer.current); canvasPatchTimer.current = null; }
+    setView((current) => (current ? { ...current, canvasAssetIds: ids } : current));
+    try {
+      await api.updateConversation(activeId, { canvasAssetIds: ids });
+    } catch (error) {
+      toastError(error);
+      await reloadView(activeId);
+    }
+  }
+
+  /**
+   * 发送：先把输入框里挂着的图交出去，再把这句发出去。
+   *
+   * 顺序不能反——图要在这句话之前成为当前画布，助手这一轮才看得见它。
+   * 本地文件上传失败就不发，用户重新挑一张即可，别让助手对着上一张改；
+   * 拖进来的既有产物不用上传，并进画布就行。
+   */
+  async function sendWithFiles(text: string, files: File[], assetIds: string[]) {
+    if (files.length && !(await uploadImages(files))) return;
+    if (assetIds.length && view) {
+      // 并进画布而不是替换：用户拖第二张进来通常是想「这两张一起改」
+      const merged = [...new Set([...view.canvasAssetIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
+      await flushCanvas(merged);
+    }
+    // 引用的是哪几张也记在这句话上：画布条默认收着，只留文字的话回头根本看不出指的是哪张
+    await send(text, assetIds);
   }
 
   async function removeConversation(id: string) {
@@ -411,40 +638,42 @@ export function ChatView({
 
   return (
     <div className="chat-view">
-      <aside className="chat-sidebar">
-        <div className="chat-sidebar-head">
-          <button type="button" className="primary-button" onClick={() => void createConversation()}>
-            <MessageSquarePlus size={14} />新建会话
-          </button>
-        </div>
-        <div className="chat-sidebar-list">
-          {list.length ? list.map((item) => (
-            <div key={item.id} className={`chat-conv ${item.id === activeId ? "is-active" : ""}`}>
-              <button type="button" className="chat-conv-main" onClick={() => setActiveId(item.id)}>
-                <span className="chat-conv-title">{item.title || "新会话"}</span>
-                <span className="chat-conv-sub">{item.lastMessage || "还没有消息"}</span>
-                <span className="chat-conv-meta">
-                  {item.running ? <em className="chat-conv-run"><LoaderCircle size={10} className="spin" />进行中</em> : null}
-                  {item.messageCount} 条 · {new Date(item.updatedAt).toLocaleDateString("zh-CN")}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="icon-button compact danger chat-conv-del"
-                title="删除会话"
-                onClick={() => void removeConversation(item.id)}
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          )) : (
-            <div className="chat-sidebar-empty">
-              <Info size={13} />
-              <span>还没有会话。点上面「新建会话」开始，然后用一句话让它画图或改图。</span>
-            </div>
-          )}
-        </div>
-      </aside>
+      {/*
+        会话列表搬进全局侧栏（portal 到 App 的 .sidebar-recent）。
+        列表数据和 SSE 都长在这个组件里，把状态整个往上提的代价远大于挂一个 portal 节点；
+        换来的是导航只剩侧栏一层——原来是「顶栏 + 页内侧栏」叠两层，Codex 只有一层。
+      */}
+      {sidebarHost ? createPortal(
+        <div className="sidebar-group">
+          <div className="sidebar-group-title">
+            <span>最近</span>
+            <button type="button" className="sidebar-group-add" title="新建会话" aria-label="新建会话" onClick={() => void createConversation()}>
+              <Plus size={13} />
+            </button>
+          </div>
+          <div className="sidebar-conv-list">
+            {filteredList.length ? filteredList.map((item) => (
+              <div key={item.id} className={`sidebar-conv ${item.id === activeId ? "is-active" : ""}`}>
+                <button type="button" className="sidebar-conv-main" title={item.lastMessage || item.title} onClick={() => setActiveId(item.id)}>
+                  <span className="sidebar-conv-title">{item.title || DEFAULT_CONVERSATION_TITLE}</span>
+                  {item.running ? <LoaderCircle size={11} className="spin" /> : null}
+                </button>
+                <button
+                  type="button"
+                  className="icon-button compact danger sidebar-conv-del"
+                  title="删除会话"
+                  onClick={() => void removeConversation(item.id)}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            )) : (
+              <p className="sidebar-conv-empty">
+                {sidebarFilter.trim() ? "没有匹配的会话。" : "还没有会话。点上面的「新对话」开始，然后用一句话让它画图或改图。"}
+              </p>
+            )}
+          </div>
+        </div>, sidebarHost) : null}
 
       <section className="chat-main">
         {!view ? (
@@ -479,41 +708,19 @@ export function ChatView({
                 value={view.title}
                 placeholder="未命名会话"
                 onChange={(event) => setView({ ...view, title: event.target.value })}
-                onBlur={(event) => void patch({ title: event.target.value.trim() || "新会话" })}
+                onBlur={(event) => void patch({ title: event.target.value.trim() || DEFAULT_CONVERSATION_TITLE })}
               />
+              {/* 头部只留「这个会话是什么」；模型、确认策略这些「我这次要用什么」都在输入框那一行 */}
               <div className="chat-header-controls">
-                <label className="chat-control" title="这个会话用哪个模型当大脑">
-                  <Brain size={13} />
-                  <select
-                    value={`${view.brainChannelId}::${view.brainModel}`}
-                    onChange={(event) => {
-                      const [brainChannelId, brainModel] = event.target.value.split("::");
-                      void patch({ brainChannelId: brainChannelId ?? "", brainModel: brainModel ?? "" });
-                    }}
-                  >
-                    {brains.flatMap((channel) => channel.models.map((model) => (
-                      <option key={`${channel.id}::${model}`} value={`${channel.id}::${model}`}>
-                        {channel.name} · {model}
-                      </option>
-                    )))}
-                    {/* 当前组合不在可用列表里（渠道被停用/改了模型）也要能显示出来 */}
-                    {!brains.some((channel) => channel.id === view.brainChannelId && channel.models.includes(view.brainModel)) ? (
-                      <option value={`${view.brainChannelId}::${view.brainModel}`}>{view.brainModel}（不可用）</option>
-                    ) : null}
-                  </select>
-                </label>
-
-                <label className="chat-control" title="生成视频前要不要先问一句">
-                  <Film size={13} />
-                  <select
-                    value={view.videoConfirmPolicy}
-                    onChange={(event) => void patch({ videoConfirmPolicy: event.target.value as VideoConfirmPolicy })}
-                  >
-                    {VIDEO_CONFIRM_POLICIES.map((policy) => (
-                      <option key={policy} value={policy}>{videoConfirmPolicyLabels[policy]}</option>
-                    ))}
-                  </select>
-                </label>
+                <button
+                  type="button"
+                  className={`chat-control chat-toggle ${canvasOpen ? "is-on" : ""}`}
+                  title={canvasOpen ? "收起画布条" : "展开画布条：挑哪几张一起改图、哪张当视频首帧"}
+                  onClick={() => setCanvasOpen((open) => !open)}
+                >
+                  <Layers size={13} />
+                  画布 {canvasImages.length}
+                </button>
 
                 <button
                   type="button"
@@ -526,10 +733,11 @@ export function ChatView({
                 </button>
 
                 {capabilities.length ? (
-                  <details className="chat-caps">
-                    <summary title="助手现在能调哪些模型"><ListTree size={13} />可用模型</summary>
+                  <details className="chat-caps" ref={capsRef}>
+                    <summary title="助手现在能调哪些模型"><ListTree size={13} />图片 · 视频模型</summary>
                     <div className="chat-caps-body">
                       <div className="chat-caps-defaults">
+                        <div className="chat-caps-defaults-grid">
                         <label>
                           <span>默认生图模型</span>
                           <select
@@ -556,34 +764,91 @@ export function ChatView({
                             ))}
                           </select>
                         </label>
+                        </div>
                         <p className="chat-caps-hint">
-                          助手没说用哪个模型时，就用这里的。你在对话里点名了就以你说的为准。
+                          助手没说用哪个模型时，就用这里的——也可以直接点下面列表里的那一行。
                         </p>
                       </div>
-                      {capabilities.map((cap) => {
-                        const effective = cap.alias === effectiveAlias(
-                          cap.kind === "video" ? defaults.video : defaults.image,
-                          cap.kind === "video" ? videoAliases : imageAliases,
-                        );
-                        return (
-                          <div key={`${cap.kind}-${cap.alias}`} className={`chat-caps-item ${effective ? "is-default" : ""}`}>
-                            <em>{cap.kind === "video" ? "视频" : "图片"}</em>
-                            <span className="chat-caps-alias">
-                              <strong>{cap.alias}</strong>
-                              {effective ? <i className="chat-caps-flag">默认</i> : null}
-                            </span>
-                            <span>{cap.channelName} · {cap.model}</span>
-                          </div>
-                        );
-                      })}
-                      <p className="chat-caps-note">这些是替大脑挑模型的简称——你在对话里说「用 Gemini 画」就够了，不必记真实模型 ID。</p>
+                      {/* 生图和视频分两列：混在一列里，找一个视频模型要滑过一屏图片模型 */}
+                      <div className="chat-caps-columns">
+                        {(["image", "video"] as const).map((kind) => {
+                          const items = capabilities.filter((cap) => cap.kind === kind);
+                          const label = kind === "video" ? "生视频" : "生图";
+                          return (
+                            <section key={kind} className="chat-caps-column">
+                              <h4>{label}模型{items.length ? `（${items.length}）` : ""}</h4>
+                              {items.length ? items.map((cap) => {
+                                const effective = cap.alias === effectiveAlias(
+                                  kind === "video" ? defaults.video : defaults.image,
+                                  kind === "video" ? videoAliases : imageAliases,
+                                );
+                                return (
+                                  /*
+                                    整行可点 = 把这个模型设成该类目的默认。
+                                    用 div 而不是 button：里面还嵌着「调整」那个 button，
+                                    按钮套按钮是非法 HTML，点哪一个都不可靠。
+                                  */
+                                  <div
+                                    key={`${cap.kind}-${cap.alias}`}
+                                    className={`chat-caps-item ${effective ? "is-default" : ""}`}
+                                    role="button"
+                                    tabIndex={0}
+                                    title={effective ? "当前默认" : `点一下把 ${cap.model} 设为默认`}
+                                    onClick={() => { if (!effective) void setDefaultAlias(cap.kind, cap.alias); }}
+                                    onKeyDown={(event) => {
+                                      if (event.key !== "Enter" && event.key !== " ") return;
+                                      event.preventDefault();
+                                      if (!effective) void setDefaultAlias(cap.kind, cap.alias);
+                                    }}
+                                  >
+                                    {/* 认不出厂商时这一格就是空的，但版式靠它对齐，所以留同宽的空位 */}
+                                    <span className="chat-caps-logo">
+                                      <ModelLogo model={cap.model} kind={cap.kind} />
+                                    </span>
+                                    <span className="chat-caps-model">
+                                      <strong title={cap.model}>{cap.model}</strong>
+                                      {effective ? <i className="chat-caps-flag">默认</i> : null}
+                                    </span>
+                                    <span className="chat-caps-meta">{cap.channelName} · 叫「{cap.alias}」</span>
+                                    {/* 就在这儿改：看到模型不对，下一步就是想动它所属的渠道 */}
+                                    {onConfigureChannel && cap.channelId ? (
+                                      <button
+                                        type="button"
+                                        className="chat-caps-adjust"
+                                        title="调整这个渠道的配置"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          const channel = channels.find((item) => item.id === cap.channelId);
+                                          if (channel) onConfigureChannel(channel);
+                                        }}
+                                      >
+                                        调整
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                );
+                              }) : (
+                                <p className="chat-caps-empty">还没有可用的{label}模型——到「渠道」里接一个。</p>
+                              )}
+                            </section>
+                          );
+                        })}
+                      </div>
+                      <p className="chat-caps-note">上面是真名，下面那个是对话里用的简称——你在对话里说「用 Gemini 画」就够了，不必记真实模型 ID。</p>
                     </div>
                   </details>
                 ) : null}
               </div>
             </header>
 
-            <div className="chat-thread" ref={threadRef}>
+            <div
+              className="chat-thread"
+              ref={threadRef}
+              onWheel={onThreadWheel}
+              onTouchStart={onThreadTouchStart}
+              onTouchMove={onThreadTouchMove}
+            >
+              <div className="chat-thread-inner" ref={threadInnerRef}>
               {!rows.length && !hasStream ? (
                 <div className="chat-thread-empty">
                   <p>说一句话开始。它会自己决定是画图、改图、优化提示词，还是接着上一张生成视频。</p>
@@ -593,7 +858,19 @@ export function ChatView({
               {rows.map((row) => {
                 if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message} onPreview={setPreview} />;
                 if (row.kind === "note") return <SystemNote key={row.message.id} message={row.message} />;
-                if (row.kind === "assistant") return <AssistantBubble key={row.message.id} message={row.message} />;
+                if (row.kind === "assistant") {
+                  // 「还没被回答的那一条」才给按钮：翻回去看老记录时，那些选项早就失效了
+                  const options = row.message.id === lastAnswerableId ? readAskOptions(row.message) : [];
+                  return (
+                    <AssistantBubble
+                      key={row.message.id}
+                      message={row.message}
+                      options={options}
+                      disabled={running}
+                      onPick={(text) => void send(text)}
+                    />
+                  );
+                }
                 if (row.kind === "confirm") {
                   // 卡片上的参数是用户能改的；改完随确认一起提交
                   return (
@@ -614,6 +891,7 @@ export function ChatView({
                     message={row.message}
                     result={row.result}
                     progress={taskId ? progress[taskId] : undefined}
+                    stale={!running}
                     assets={mediaAssets}
                     onPreview={setPreview}
                   />
@@ -625,22 +903,30 @@ export function ChatView({
               {status === "waiting_task" ? (
                 <div className="chat-note"><LoaderCircle size={13} className="spin" /><span>视频在后台生成，好了我接着处理</span></div>
               ) : null}
-            </div>
-
-            <div className="chat-canvas">
-              {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是主图。
-                  标题行那枚药丸负责说清画布和这一行的关系，详情挂 tooltip */}
-              <div className="canvas-panel">
-                <AssetStrip
-                  assets={sessionImages}
-                  canvasIds={canvasImages.map((asset) => asset.id)}
-                  onToggle={toggleCanvas}
-                  onPreview={setPreview}
-                  onPromote={promoteCanvas}
-                  onClear={() => writeCanvas([])}
-                />
               </div>
             </div>
+
+            {/*
+              画布条默认收起（Codex 里根本没有这一条——它靠「接着上一张说」和「把图拖进输入框」
+              完成同一件事）。开关放在会话头，徽标上带着张数，需要挑图时点一下就有。
+              没有图的时候整条不出现：一条「还没有图」的空条只会占地方。
+            */}
+            {canvasOpen && sessionImages.length ? (
+              <div className="chat-canvas">
+                {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是主图。
+                    标题行那枚药丸负责说清画布和这一行的关系，详情挂 tooltip */}
+                <div className="canvas-panel">
+                  <AssetStrip
+                    assets={sessionImages}
+                    canvasIds={canvasImages.map((asset) => asset.id)}
+                    onToggle={toggleCanvas}
+                    onPreview={setPreview}
+                    onPromote={promoteCanvas}
+                    onClear={() => writeCanvas([])}
+                  />
+                </div>
+              </div>
+            ) : null}
 
             <Composer
               running={running}
@@ -648,8 +934,66 @@ export function ChatView({
               placeholder={canvasImages.length
                 ? `当前画布 ${canvasImages.length > 1 ? `${canvasImages.length} 张（主图 ${assetRef(canvasImages[0]!.id)}）` : assetRef(canvasImages[0]!.id)}，直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
-              onSend={(text) => void send(text)}
-              onUpload={(files) => void uploadImages(files)}
+              leftSlot={(
+                <>
+                  {/*
+                    「原话直发」：平时大脑会把口语扩写成完整画面（默认就该这样，效果更好），
+                    但有些人是带着自己攒了很久的提示词来的，被「优化」一下反而不是他要的。
+                    开关交给他自己，开了就是逐字透传。
+                  */}
+                  <button
+                    type="button"
+                    className={`chat-control chat-toggle ${view.verbatimPrompt ? "is-on" : ""}`}
+                    title={view.verbatimPrompt
+                      ? "正在原话直发：你写什么就发什么，助手不润色"
+                      : "开启后助手把你的话原样当提示词发出去，不润色、不扩写"}
+                    onClick={() => void patch({ verbatimPrompt: !view.verbatimPrompt })}
+                  >
+                    <PenLine size={13} />
+                    原话直发
+                  </button>
+                  <label className="chat-control" title="生成视频前要不要先问一句">
+                    <Film size={13} />
+                    <select
+                      value={view.videoConfirmPolicy}
+                      onChange={(event) => void patch({ videoConfirmPolicy: event.target.value as VideoConfirmPolicy })}
+                    >
+                      {VIDEO_CONFIRM_POLICIES.map((policy) => (
+                        <option key={policy} value={policy}>{videoConfirmPolicyLabels[policy]}</option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+              rightSlot={(
+                <ModelPicker
+                  options={brainOptions}
+                  value={`${view.brainChannelId}::${view.brainModel}`}
+                  onChange={(next) => {
+                    const [brainChannelId, brainModel] = next.split("::");
+                    void patch({ brainChannelId: brainChannelId ?? "", brainModel: brainModel ?? "" });
+                  }}
+                />
+              )}
+              statusSlot={view.usage?.calls ? (
+                <span
+                  className="composer-stats"
+                  title={[
+                    `上下文：最近一次大脑请求的输入 ${view.usage.contextTokens.toLocaleString()} tokens`,
+                    `本会话累计输入 ${view.usage.promptTokens.toLocaleString()} tokens`,
+                    `本会话累计输出 ${view.usage.completionTokens.toLocaleString()} tokens`,
+                    view.usage.reasoningTokens
+                      ? `其中推理 ${view.usage.reasoningTokens.toLocaleString()} tokens（已包含在输出里）`
+                      : "",
+                    `共 ${view.usage.calls} 次大脑调用`,
+                  ].filter(Boolean).join("\n")}
+                >
+                  上下文 {formatTokenCount(view.usage.contextTokens)}
+                  <span className="composer-stats-sep">·</span>
+                  本会话 输入 {formatTokenCount(view.usage.promptTokens)} / 输出 {formatTokenCount(view.usage.completionTokens)}
+                </span>
+              ) : undefined}
+              onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
             />
           </>
