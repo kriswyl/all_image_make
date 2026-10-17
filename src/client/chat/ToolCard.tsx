@@ -139,22 +139,6 @@ export function ToolCard({
         {orphaned ? <div className="tool-card-result">这一轮被中断了，没有拿到结果（你可以直接再说一次）。</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
 
-        {assetId && onPreview ? (
-          <button
-            type="button"
-            className="tool-card-thumb"
-            onClick={() => onPreview(assetId)}
-            title={isVideoResult ? "点开看" : "点开看（也可以直接拖到下面的输入框）"}
-            // 图片能拖进输入框当参考，视频不行——画布只收图片
-            {...(isVideoResult ? {} : {
-              draggable: true,
-              onDragStart: (event: React.DragEvent) => event.dataTransfer.setData(ASSET_DRAG_TYPE, assetId),
-            })}
-          >
-            <ResultThumb assetId={assetId} asset={produced} isVideo={isVideoResult} />
-          </button>
-        ) : null}
-
         {/* 请求参数核对留在正面（问题 1）：它本来就是「发出去没有」这件事的证据，不该藏进折叠里 */}
         {paramNotes.length ? <ParamChips notes={paramNotes} /> : null}
 
@@ -185,6 +169,26 @@ export function ToolCard({
               ) : null}
             </div>
           </div>
+        ) : null}
+
+        {/*
+          结果图放在卡片最底部：先读完「做了什么、参数是什么」，最后才看图。
+          缩略图仍然属于这张卡片，所以拖进输入框当参考图的行为不变。
+        */}
+        {assetId && onPreview ? (
+          <button
+            type="button"
+            className="tool-card-thumb"
+            onClick={() => onPreview(assetId)}
+            title={isVideoResult ? "点开看" : "点开看（也可以直接拖到下面的输入框）"}
+            // 图片能拖进输入框当参考，视频不行——画布只收图片
+            {...(isVideoResult ? {} : {
+              draggable: true,
+              onDragStart: (event: React.DragEvent) => event.dataTransfer.setData(ASSET_DRAG_TYPE, assetId),
+            })}
+          >
+            <ResultThumb assetId={assetId} asset={produced} isVideo={isVideoResult} />
+          </button>
         ) : null}
       </div>
     </div>

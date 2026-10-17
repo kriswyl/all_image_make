@@ -13,6 +13,19 @@
 
 ---
 
+## v2.2.1 — 2026-10-17
+
+### 修复
+
+- **自绘标题栏拖不动，最小化 / 最大化 / 关闭按钮也没反应**。`decorations: false` 之后这些动作走的是 `core:window` 的 `start-dragging`、`minimize`、`toggle-maximize`、`close` 命令，而 `core:default` 里不包含它们，调用被权限系统拒绝后前端只拿到一个静默失败的 Promise。已在 `src-tauri/capabilities/default.json` 里显式放行这四个权限。
+- 工具卡片里的结果图移到卡片最底部：先读完“做了什么、用了什么参数”，最后才看图；拖进输入框当参考图的行为不变。
+
+### 变更
+
+- **安装名、快捷方式和卸载列表里的显示名从 `ezcanvas` 改为 `ChatCanvas`**（Tauri `productName`）。数据目录由 identifier 决定，仍然是 `%APPDATA%\com.imagerelay.studio\data`，升级后渠道、历史、会话和画布都在。2.2.0 及更早的 `ezcanvas` 安装会和新版并存一次，安装新版后手动卸载旧的即可。
+
+---
+
 ## v2.2.0 — 2026-10-17
 
 ### 新增

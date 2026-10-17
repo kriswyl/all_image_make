@@ -1,8 +1,10 @@
-# ezcanvas（易画）
+# ChatCanvas（语布）
 
-当前发布版本为 `2.2.0`。完整打包步骤、版本更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)，各版本改动见 [`CHANGELOG.md`](CHANGELOG.md)。
+当前发布版本为 `2.2.1`。完整打包步骤、版本更新、自动更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)，各版本改动见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 一个面向**图片 / 视频生成中转 API** 的本地客户端，附带 Tauri 桌面版。前端负责渠道配置、参数输入、结果与历史查看；后端统一处理鉴权、协议适配、异步轮询、素材落盘与脱敏诊断。
+
+> 品牌名是 **ChatCanvas / 语布**，`productName` 从 2.2.1 起也改成了 `ChatCanvas`。数据目录由 bundle identifier（`com.imagerelay.studio`）决定，改名不受影响；2.2.0 及更早的安装叫 `ezcanvas`，升级到 2.2.1 后会有一次新旧两套安装并存，手动卸载旧的 `ezcanvas` 即可。
 
 ## 功能
 
@@ -50,11 +52,15 @@
 
 几个刻意的设计：
 
-- **助手看不到真实模型 ID 和渠道 ID**，只看到 `gemini` / `wan` / `seedance-1` 这类简称，由服务端解析成真实配置。这样它不会编造出不存在的模型名，你也不用把密钥信息交给它
+- **助手看不到真实模型 ID 和渠道 ID**，只看到 `gemini` / `wan` / `seedance-2.5` 这类带版本号的简称，由服务端解析成真实配置。这样它不会编造出不存在的模型名，你也不用把密钥信息交给它
 - **画布是一组图（最多 8 张）**：出图成功后画布自动换成新图；对话界面下方一行放着本会话的全部图（每张只出现一次），**点一下就能加入 / 移出画布**——被选中的会在缩略图左上角带上序号（① 是**主图**，也可以点「设为主图」把它提到第一位；生视频用它当首帧）
 - **视频确认可以关**：默认只在「自动续跑」时才问一句，卡片上能直接改时长 / 分辨率 / 音频，改完随确认一起提交
 - **可以随时打断**；生图已经发出去的情况下，助手会告诉你图还在后台画，画完会进「生成历史」，不必重新生成
-- 助手能做的事只有生成和维护画布，**没有批量生成 / 清空历史 / 改渠道配置这类破坏性能力**
+- **一次可以并行提交多个生成任务**（最多 8 个）：说「跑三张不同风格」时同时发出去，超过上限的会如实说明有几个没提交
+- **对话里可以直接上传图片**（按钮或拖拽）：上传的图立刻能当画布、有缩略图，但不进「生成历史」、不占会话任务额度
+- **全局默认生图 / 生视频模型**：在大脑没点名时使用你设的默认模型；你在对话里点名的仍以你为准
+- 图片先挂在输入框上，**发送时才真正上传**；空会话会按第一条消息自动命名
+- 助手能做的事只有生成、改图和维护画布，**没有清空历史 / 改渠道配置这类破坏性能力**
 
 ### 通用
 
@@ -83,6 +89,16 @@
 中转站通常按模型系列分别售卖密钥，因此这些单元互不共用 Key。也可以选择「自定义配置」手动填写任意 Base URL。
 
 ## 界面
+
+界面按 Codex 桌面版重做，全部使用黑白灰配色（强调色就是黑色）：
+
+- **自绘标题栏**（`decorations: false`）：最小化 / 最大化 / 关闭和窗口拖拽区由应用自己画，侧栏开关在左上角
+- **侧栏外壳**：新对话、生图、生视频、历史、渠道五个入口；会话列表独立滚动，不会被长列表挤出视野
+- **侧栏可拖拽调宽**（190–420px），`Ctrl+B` 收起 / 展开，宽度记在 localStorage
+- **模型与渠道选择器带厂商 / 站点图标**，选完直接显示在输入框上方
+- **composer 下方有 token 账本**：当前上下文占用 + 本会话的输入 / 输出用量
+- **画布条默认收起**，需要时从会话头部的「画布 N」展开；点击缩略图即可加入 / 移出画布
+- 字体为拉丁 Inter + 中文 Noto Sans SC；等宽字体只用于真正的代码 / 数据框
 
 五个工作区：**生图工作台**、**视频工作台**、**对话创作**、**渠道配置**、**生成历史**。生图和视频两个工作台共用顶部的渠道 / 模型选择器和参数面板，右侧为结果区；对话创作是左侧会话列表 + 右侧消息流的对话式界面；渠道配置页管理渠道并执行连接测试；生成历史页汇总全部任务与产物，并能按类型清空历史、更改产物保存目录。
 
@@ -127,15 +143,32 @@ npm run tauri:build:exe
 
 主程序位于 `src-tauri/target/release/image_relay_studio.exe`。直接分发时必须同时保留同目录的 `node.exe` 与 `resources/`；正常分发建议使用 `npm run tauri:build` 生成 NSIS 安装包。第一次构建需要 Rust、Visual Studio C++ Build Tools 和 WebView2；NSIS 首次打包还需要能够访问 GitHub 下载 Tauri 官方工具。
 
+`npm run tauri:build` 会产出自动更新签名（`setup.exe.sig`），因此需要本机存在 `%USERPROFILE%\.tauri\chatcanvas-updater.key`；找不到时构建会直接报错并给出生成命令。只打便携版用 `npm run tauri:build:exe`，不需要私钥。`npm run release:installer` 是“测试 + 打包 + 整理产物”的组合命令。
+
 将当前 release 产物整理为便携目录和 ZIP：
 
 ```powershell
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/ezcanvas-v2.2.0-portable-win-x64.zip`。
+输出位于 `artifacts/chatcanvas-v2.2.1-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成产物默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。生成产物（图片和视频）的目录可以在历史页改成任意位置，改完只影响之后生成的文件。
+
+## 自动更新
+
+**Windows 安装版**支持自动更新：
+
+1. 启动 5 秒后静默检查 `updater` tag 上的 `latest.json`，失败不打扰用户
+2. 有新版本时侧栏版本号旁出现圆点，点开可以看到版本号和更新说明
+3. 点「下载并安装」后先下载并校验签名；**下载完成才停掉内置后端**，然后安装并自动重启
+4. 下载或校验失败时应用继续以当前版本正常运行
+
+**Windows 便携版**（目录里有 `.portable` 标记）只提示新版本并打开下载页，不会自动装成安装版；**macOS 和网页版**也只提示，不自动安装。
+
+更新包使用 minisign 签名，公钥钉在 `src-tauri/tauri.conf.json`，私钥只存在本机 `%USERPROFILE%\.tauri\chatcanvas-updater.key` 和 GitHub Actions secret 中。**私钥丢失后，已安装用户将无法再自动更新**——务必备份，详见 [`PACKAGING.md`](PACKAGING.md#自动更新与发布)。
+
+已经安装了 2.1.x 的用户需要手动安装一次 2.2.x；从 2.2.0 起后续版本可以自动更新。
 
 ## 密钥配置
 
@@ -195,4 +228,4 @@ npm run build
 - 视频渠道的真实联调覆盖有限，详见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)
 - 对话创作依赖的「大脑」模型由你自己提供；不同中转站对 JSON 输出和图片输入的支持差异较大，助手的表现会随之波动，详见 [`AGENT_PLAN.md`](AGENT_PLAN.md) §15 的降级路径
 
-对话创作的完整设计（数据模型、工具清单、系统提示词、状态机、护栏）见 [`AGENT_PLAN.md`](AGENT_PLAN.md)。更完整的设计和接口说明见上一级目录的 `IMAGE_GENERATION_RELAY_APP_DEVELOPMENT.md`。
+对话创作的完整设计（数据模型、工具清单、系统提示词、状态机、护栏）见 [`AGENT_PLAN.md`](AGENT_PLAN.md)；视频协议细节见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)；开发交接背景见 [`DEVELOPMENT_HANDOFF.md`](DEVELOPMENT_HANDOFF.md)。

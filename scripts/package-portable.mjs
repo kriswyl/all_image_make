@@ -7,7 +7,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.js
 const version = String(packageJson.version);
 const releaseDir = path.join(projectDir, "src-tauri", "target", "release");
 const artifactDir = path.join(projectDir, "artifacts");
-const artifactName = `ezcanvas-v${version}-portable-win-x64`;
+const artifactName = `chatcanvas-v${version}-portable-win-x64`;
 const portableDir = path.join(artifactDir, artifactName);
 const zipPath = path.join(artifactDir, `${artifactName}.zip`);
 
@@ -77,7 +77,7 @@ fs.writeFileSync(path.join(portableDir, ".portable"), "", "utf8");
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [
-    `ezcanvas v${version} portable Windows build`,
+    `ChatCanvas v${version} portable Windows build`,
     "",
     "Run image_relay_studio.exe. Keep node.exe and resources\\ next to it.",
     "First launch: use the add-channel wizard to create channels, then fill in each model group's API key.",

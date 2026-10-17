@@ -1,6 +1,10 @@
-# ezcanvas 打包文档
+# ChatCanvas（语布）打包文档
 
-当前发布版本为 `2.2.0`。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
+> 从 2.2.1 起 `productName` 是 `ChatCanvas`，安装包和快捷方式都显示这个名字。数据目录由 identifier（`com.imagerelay.studio`）决定，不受改名影响。
+>
+> **一次性迁移**：2.2.0 及更早版本以 `ezcanvas` 安装（安装目录可能被用户改到别处）。升级到 2.2.1 时 NSIS 会按新名字装到新的默认目录，旧 `ezcanvas` 那份不会被自动删除——安装新版后手动卸载旧的 `ezcanvas` 即可，用户数据不会丢。
+
+当前发布版本为 `2.2.1`。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
 
 ## 环境准备
 
@@ -29,8 +33,8 @@ npm run release:portable
 命令会依次运行测试、前端和 Node 服务端构建、Tauri sidecar 准备以及压缩。输出位置：
 
 ```text
-artifacts/ezcanvas-v2.2.0-portable-win-x64/
-artifacts/ezcanvas-v2.2.0-portable-win-x64.zip
+artifacts/chatcanvas-v2.2.1-portable-win-x64/
+artifacts/chatcanvas-v2.2.1-portable-win-x64.zip
 ```
 
 目录名里的版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，改版本号后自动跟着变。
@@ -48,7 +52,7 @@ npm run release:installer
 便于分发的安装程序输出为：
 
 ```text
-artifacts/ezcanvas-v2.2.0-win-x64-setup.exe
+artifacts/chatcanvas-v2.2.1-win-x64-setup.exe
 ```
 
 Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`。
@@ -88,7 +92,7 @@ https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json
 不要改成 `releases/latest/download/`：只要最新那个 Release 恰好缺 Windows 资产，全体用户的检查更新就会一起 404。
 
 ```powershell
-npm run version:set -- 2.2.1
+npm run version:set -- 2.2.2
 npm test
 git add -A
 git commit -m "Release 2.2.1: ..."
@@ -103,7 +107,7 @@ git push origin v2.2.1
 - **Windows 便携版**：目录里有 `.portable` 标记，更新面板只提示 + 打开下载页，不会自动装成安装版。
 - **macOS / 网页版**：只提示，不自动安装。
 
-首次接入自动更新后，已经装了 2.1.x 的用户不会自动升级（那个版本里没有更新器），需要手动装一次 2.2.0 及以后版本；之后的版本就能自动更新了。
+首次接入自动更新后，已经装了 2.1.x 的用户不会自动升级（那个版本里没有更新器），需要手动装一次 2.2.1 及以后版本；之后的版本就能自动更新了。
 
 ## 更新版本号
 

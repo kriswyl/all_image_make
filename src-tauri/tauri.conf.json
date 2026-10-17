@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "ezcanvas",
-  "version": "2.2.0",
+  "productName": "ChatCanvas",
+  "version": "2.2.1",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
