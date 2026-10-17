@@ -17,6 +17,7 @@ import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
 import { ParamChips } from "./ParamChips";
 import { useFileDrop } from "./useFileDrop";
+import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { WelcomeView } from "./WelcomeView";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, isVideoTask } from "../shared/types";
@@ -629,7 +630,7 @@ export function App() {
         <div className="sidebar-foot">
           <span className="status-dot" />
           <span>本地运行</span>
-          <span className="version">v{APP_VERSION}</span>
+          <UpdateStatus />
         </div>
 
         {/* 拖这条边调宽窄。用 role=separator + 键盘左右键，纯鼠标操作对键盘用户是死路 */}

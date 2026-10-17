@@ -67,6 +67,13 @@ if (longestEntry > MAX_RELATIVE_PATH) {
     `便携包里最长的相对路径有 ${longestEntry} 字符（上限 ${MAX_RELATIVE_PATH}），解压后会超过 Windows 的 260 字符上限，资源管理器和 Expand-Archive 都解不开。`,
   );
 }
+/**
+ * 便携版标记。Rust 侧 `is_portable_build` 只看 exe 旁边有没有这个文件，
+ * 有就说明「更新时不能自动装 NSIS」——否则会自动装进 %LOCALAPPDATA%，
+ * 用户原来的便携目录还在，同一台机器上出现两个版本、共用一份数据目录。
+ */
+fs.writeFileSync(path.join(portableDir, ".portable"), "", "utf8");
+
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [

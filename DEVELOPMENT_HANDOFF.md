@@ -31,6 +31,7 @@
 - 参考图保存在数据目录的 `inputs/`，任务 JSON 和诊断记录不会保存上传 Base64；OpenAI Images 默认使用 `/v1/images/edits` multipart 请求。
 - 生成表单会在本机自动保存提示词、渠道、模型和全部参数，页面切换或应用重启后继续保留。
 - 结果图支持双击放大；桌面版下载使用原生保存对话框，可选择目录和文件名。
+- **自动更新（仅 Windows 安装版）**：启动后静默检查 `updater` tag 上的 `latest.json`，侧栏版本号旁出现圆点时点开即可下载安装。安装前会先停掉内置后端（`prepare_for_update`），下载失败不影响当前版本继续使用。便携版只提示并跳下载页，macOS 只提示。签名私钥在 `%USERPROFILE%\.tauri\chatcanvas-updater.key`，**丢了就再也无法给已装用户推送更新**，详见 `PACKAGING.md`。
 - 产品名 **ezcanvas**，中文名「易画」；界面上的品牌位（侧栏、窗口标题、安装包名）统一用 ezcanvas，中文叙述里用「易画」。图标母版在 `design/`，6 款候选见 `design/ezcanvas-icons.html`，选定后替换 `src-tauri/icons/` 与 `src/client/ApertureMark.tsx`（站点图标 `src/client/public/app-icon.svg`）。
 
 ### 视频生成
@@ -69,6 +70,9 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/VideoGenerateView.tsx`：视频工作台和模式选择器。
 - `src/client/useFileDrop.ts`：参考图上传区的拖放交互（图片页与视频页共用）。
 - `src/client/api.ts`：前端 API 客户端和桌面 API 地址切换。
+- `src/client/updater.ts`、`src/client/UpdateStatus.tsx`：自动更新的前端封装和侧栏底部面板。
+- `scripts/write-latest-json.ts`：生成 Tauri 更新清单（`latest.json`），纯函数部分有单测。
+- `.github/workflows/release.yml`：macOS + Windows 构建、建 Release、维护 `updater` tag。
 - `src/server/app.ts`：Express 路由和请求校验。
 - `src/server/adapters.ts`：各渠道请求适配。
 - `src/server/tasks.ts`：任务执行、视频轮询与重启恢复、产物落盘。

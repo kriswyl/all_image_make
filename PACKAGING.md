@@ -57,6 +57,55 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 
 如果 Tauri 下载 NSIS 工具失败，先使用便携版命令完成发布；网络恢复后再次运行安装包命令即可。
 
+## 自动更新与发布
+
+### 签名密钥（只有一对，丢了不可恢复）
+
+Tauri 的更新包用 minisign 签名，公钥钉死在 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 里。**私钥一旦丢失，已经装出去的用户就再也收不到更新**——不是重新生成一对能解决的。
+
+- 私钥位置：`%USERPROFILE%\.tauri\chatcanvas-updater.key`（无密码，2026-10-17 生成）
+- 公钥备份：同目录的 `.key.pub`
+- 私钥**不进仓库、不进 `.env`、不写进任何交接文档**。请另外备份到密码管理器或 U 盘
+- GitHub Actions 需要两个 secret（Settings → Secrets and variables → Actions）：
+  - `TAURI_SIGNING_PRIVATE_KEY`：`chatcanvas-updater.key` 的完整内容
+  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：留空即可（生成时未设密码）
+
+`npm run tauri:build`（安装包）会自动从上面的固定位置读取私钥；找不到会直接报错并给出生成命令。`npm run tauri:build:exe`（便携版，`--no-bundle`）不需要私钥。
+
+### 发版流程
+
+推送 `vX.Y.Z` tag 会触发 `.github/workflows/release.yml`：
+
+1. `build-macos`：构建 dmg 并冒烟测试（macOS 这版不参与自动更新）
+2. `build-windows`：构建 NSIS 安装包并签名（Tauri 2 把安装器 exe 本身作为更新包，产出 `setup.exe` + `setup.exe.sig`）
+3. `publish`：等两边产物齐了再建 Release、上传全部附件，生成 `latest.json`，再更新到固定的 `updater` tag
+
+更新检查地址是固定的：
+
+```text
+https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json
+```
+
+不要改成 `releases/latest/download/`：只要最新那个 Release 恰好缺 Windows 资产，全体用户的检查更新就会一起 404。
+
+```powershell
+npm run version:set -- 2.2.1
+npm test
+git add -A
+git commit -m "Release 2.2.1: ..."
+git push
+git tag v2.2.1
+git push origin v2.2.1
+```
+
+### 客户端行为
+
+- **Windows 安装版**：启动 5 秒后静默检查；有新版时侧栏版本号旁出现圆点。用户点「下载并安装」后才下载，下载完成再停掉内置后端、安装并自动重启。下载失败不影响当前使用。
+- **Windows 便携版**：目录里有 `.portable` 标记，更新面板只提示 + 打开下载页，不会自动装成安装版。
+- **macOS / 网页版**：只提示，不自动安装。
+
+首次接入自动更新后，已经装了 2.1.x 的用户不会自动升级（那个版本里没有更新器），需要手动装一次 2.2.0 及以后版本；之后的版本就能自动更新了。
+
 ## 更新版本号
 
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：

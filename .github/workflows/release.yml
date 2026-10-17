@@ -1,0 +1,272 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      # 打 tag 推送会自动触发；这里用于「tag 已存在但上一次没能建 release」
+      # 的补挂场景：填上已有的 tag，会按该 tag 的源码重建并挂到它的 Release 上
+      release_tag:
+        description: "要挂 Release 的 tag（如 v2.2.0）；留空则只出构建产物"
+        required: false
+        type: string
+  push:
+    tags: ["v*"]
+
+# 建 Release、传附件、更新 latest.json 都需要写权限。
+# 不声明的话 GITHUB_TOKEN 只读，会在 create-a-release 上报
+# "Resource not accessible by integration"（403）——v2.0.0 就是这么失败的
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+
+jobs:
+  # ── macOS：仍然只出 dmg。这版不参与自动更新（ad-hoc 签名下自动替换
+  #    .app 会被 Gatekeeper 判成篡改），客户端只提示 + 跳下载页。
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 注意用 github.event.inputs 而不是 inputs：inputs 上下文只在
+          # workflow_dispatch / workflow_call 下存在，push 事件下引用它会让
+          # GitHub 在解析阶段就报 Unrecognized named-value: 'inputs'，
+          # 把打 tag 这条正常路径一起弄坏
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      # APPLE_SIGNING_IDENTITY="-"：无 Apple 开发者证书时做 ad-hoc 签名，
+      # Apple Silicon 上未签名的 .app 会被系统判定为已损坏而无法启动
+      # 这版 macOS 不参与自动更新，因此显式关掉更新包产物：
+      # 否则 createUpdaterArtifacts 会要求 macOS 构建也带 minisign 私钥，
+      # 白白多出一份不会被使用的 .app.tar.gz。
+      - name: Build dmg
+        run: npx tauri build --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+
+      # 打印 .app/.dmg 实际布局，动态解析 .app 路径供后续步骤使用。
+      # tauri v2 在 macOS 上把 sidecar 命名为不带 triple 的 node。
+      # tauri --bundles dmg 打完会把中间产物 .app 删除，所以冒烟测试
+      # 需要挂载 dmg、取出 .app 再验证——这也最接近用户真实安装路径
+      - name: Smoke test bundled backend (from dmg)
+        run: |
+          set -euo pipefail
+          DMG="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)"
+          echo "dmg: $DMG"
+          MOUNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          APP="$(find "$MOUNT" -maxdepth 2 -name '*.app' -type d | head -1)"
+          echo "mounted app: $APP"
+          echo "=== Contents/MacOS ==="
+          ls -la "$APP/Contents/MacOS/"
+          # dmg 只读，把 .app 拷出来再跑
+          TEST_APP="$(mktemp -d)/ezcanvas.app"
+          cp -R "$APP" "$TEST_APP"
+          hdiutil detach "$MOUNT"
+          echo "FIXED_APP=$TEST_APP" >> "$GITHUB_ENV"
+
+          # 签名体检：hardened runtime 下 node 的 V8 需要 allow-jit 授权，
+          # 否则 mmap PROT_EXEC 被拒，报 "Failed to reserve virtual memory"
+          NODE_BIN="$TEST_APP/Contents/MacOS/node"
+          if [ ! -f "$NODE_BIN" ]; then
+            NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
+          fi
+          echo "node binary: $NODE_BIN"
+          echo "=== node codesign flags ==="
+          codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags=" || true
+          ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null || true)"
+          echo "=== node entitlements ==="
+          echo "$ENTITLEMENTS"
+          IS_HARDENED="$(codesign -dvv "$NODE_BIN" 2>&1 | grep -c 'CodeDirectory flags=.*runtime' || true)"
+          HAS_JIT="$(printf '%s' "$ENTITLEMENTS" | grep -c allow-jit || true)"
+          if [ "$IS_HARDENED" -ge 1 ] && [ "$HAS_JIT" -eq 0 ]; then
+            echo "::warning::node sidecar 在 hardened runtime 下缺少 allow-jit，重签为普通 ad-hoc 并重打 dmg"
+            codesign --force --deep --sign - "$TEST_APP"
+            echo "RESIGNED=1" >> "$GITHUB_ENV"
+          fi
+
+          SCRIPT="$TEST_APP/Contents/Resources/server/server/index.js"
+          if [ ! -f "$SCRIPT" ]; then
+            SCRIPT="$TEST_APP/Contents/Resources/resources/server/server/index.js"
+          fi
+          echo "backend script: $SCRIPT"
+          ls -la "$SCRIPT"
+          DATA_DIR="$(mktemp -d)"
+          PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
+          NODE_PID=$!
+          trap 'kill "$NODE_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:17892/api/health; then
+              echo ""
+              echo "SMOKE_OK"
+              exit 0
+            fi
+            if ! kill -0 "$NODE_PID" 2>/dev/null; then
+              echo "SMOKE_FAILED: node exited early"
+              wait "$NODE_PID" || echo "node exit code: $?"
+              exit 1
+            fi
+            sleep 0.5
+          done
+          echo "SMOKE_FAILED: backend not healthy after 20s"
+          exit 1
+
+      # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行
+      - name: Repack dmg after re-sign
+        if: env.RESIGNED == '1'
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+          rm -f "$DMG_DIR"/*.dmg
+          hdiutil create -volname "ezcanvas" -srcfolder "${FIXED_APP:?}" -ov -format UDZO "$DMG_DIR/ezcanvas_${VERSION}_aarch64.dmg"
+          ls -la "$DMG_DIR"
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # ── Windows：安装版 + Tauri 更新包（.nsis.zip + .sig）。
+  #    自动更新只在 Windows 安装版上启用；便携版客户端会自己识别并只提示下载。
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 私钥丢了就再也无法给已装用户推送更新，所以它只存在两处：
+      # 本机 %USERPROFILE%\.tauri\chatcanvas-updater.key，以及这个仓库 secret。
+      - name: Check updater signing secret
+        shell: bash
+        env:
+          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$UPDATER_KEY" ]; then
+            echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY。请在仓库 Settings → Secrets and variables → Actions 里添加更新签名私钥（chatcanvas-updater.key 的完整内容）。"
+            exit 1
+          fi
+
+      - name: Build NSIS installer + updater artifacts
+        run: npx tauri build --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/release/bundle/nsis/*.sig
+          if-no-files-found: error
+
+  # ── 发布：等两边的产物都到齐再建 Release，保证 latest.json 里的 URL
+  #    指向的资产此刻已经存在。顺序反过来的话，中间那段时间检查更新的用户
+  #    会拿到一个下载 404 的地址。
+  publish:
+    needs: [build-macos, build-windows]
+    # 手动触发且没填 release_tag 时只出产物、不建 Release：
+    # 否则 github.ref_name 是分支名，会把 main 当成版本 tag 发出去
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: dist/macos
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-nsis
+          path: dist/windows
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/macos/*.dmg
+            dist/windows/*.exe
+            dist/windows/*.nsis.zip
+            dist/windows/*.sig
+          fail_on_unmatched_files: false
+
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # Tauri 2 在 NSIS 下直接把**安装器 exe 本身**作为更新包并签名
+          # （本地 2.11 实测只产出 setup.exe + setup.exe.sig，没有 .nsis.zip）。
+          # 老版本/其它配置若产出 zip，则优先用 zip。
+          ARTIFACT="$(find dist/windows -name '*.nsis.zip' | head -1)"
+          if [ -z "$ARTIFACT" ]; then ARTIFACT="$(find dist/windows -name '*-setup.exe' | head -1)"; fi
+          if [ -z "$ARTIFACT" ]; then echo "::error::没找到 Windows 更新包"; exit 1; fi
+          if [ ! -f "${ARTIFACT}.sig" ]; then echo "::error::没找到 ${ARTIFACT}.sig"; exit 1; fi
+          npx tsx scripts/write-latest-json.ts \
+            --version "$VERSION" \
+            --file-name "$(basename "$ARTIFACT")" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}" \
+            --signature "${ARTIFACT}.sig" \
+            --out latest.json
+          cat latest.json
+
+      # 更新的地址是固定的 updater tag，而不是「最新 Release」：
+      # 只要最新那个 Release 恰好缺了 Windows 资产，/releases/latest/download/
+      # 就会 404，全体用户的检查更新一起失效。固定 tag 与这件事解耦。
+      - name: Update updater manifest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: updater
+          name: updater
+          body: "自动更新清单（latest.json），由 Release workflow 维护，请勿手动修改。"
+          files: latest.json
+          make_latest: false
+          fail_on_unmatched_files: true

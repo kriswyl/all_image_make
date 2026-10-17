@@ -332,6 +332,40 @@ fn stop_backend(app: &tauri::AppHandle) {
   }
 }
 
+/// 安装更新前必须先让内置后端退出。
+///
+/// `resources/server/**` 和其中的 `node.exe` 正被后端子进程占着，而 NSIS 安装时
+/// 父进程（桌面端）还活着——`EXIT_WITH_PARENT` 只在父进程死后才生效，等不到那一刻。
+/// 所以这里显式结束 sidecar，并等到 17892 真的释放再让前端开始安装。
+#[tauri::command]
+fn prepare_for_update(app: tauri::AppHandle) -> Result<(), String> {
+  log::info!("preparing for update: stopping backend");
+  stop_backend(&app);
+  let deadline = Instant::now() + Duration::from_secs(15);
+  while Instant::now() < deadline {
+    if !port_open(Duration::from_millis(200)) {
+      log::info!("backend stopped, port {BACKEND_PORT} released");
+      return Ok(());
+    }
+    thread::sleep(Duration::from_millis(150));
+  }
+  Err(format!(
+    "内置后端仍占用端口 {BACKEND_PORT}，更新包无法安全覆盖文件。请先关闭应用，再手动安装新版本。"
+  ))
+}
+
+/// 便携版的判定：可执行文件旁边有 `.portable` 标记。
+///
+/// 便携版不能走自动安装——NSIS 会装进 `%LOCALAPPDATA%`，用户原来的便携目录还在，
+/// 同一台机器上会出现两个版本、却共用同一份数据目录，比不更新更难排查。
+#[tauri::command]
+fn is_portable_build() -> bool {
+  std::env::current_exe()
+    .ok()
+    .and_then(|exe| exe.parent().map(|dir| dir.join(".portable").exists()))
+    .unwrap_or(false)
+}
+
 fn report_startup_failure(app: &tauri::AppHandle, error: String) {
   log::error!("backend startup failed: {error}");
   let handle = app.clone();
@@ -358,6 +392,12 @@ pub fn run_app() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_shell::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
+    .plugin(tauri_plugin_process::init())
+    .invoke_handler(tauri::generate_handler![
+      prepare_for_update,
+      is_portable_build
+    ])
     .manage(BackendState(Mutex::new(None)))
     .setup(|app| {
       if !cfg!(debug_assertions) {

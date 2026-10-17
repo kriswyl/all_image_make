@@ -11,6 +11,9 @@
     "dialog:allow-open",
     "fs:allow-write-file",
     "shell:allow-spawn",
-    "shell:allow-kill"
+    "shell:allow-kill",
+    "shell:allow-open",
+    "updater:default",
+    "process:allow-restart"
   ]
 }
