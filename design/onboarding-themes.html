@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ChatCanvas 引导配色预览</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+    transition: background .4s ease, color .4s ease;
+  }
+
+  /* ── 主题变量 ─────────────────────────────────────────────────────────── */
+  body[data-theme="a"] {
+    --bg: #f1f4ef;
+    --ink: #1c1e1c;
+    --muted: #606861;
+    --faint: #8d958e;
+    --glass: rgba(255, 255, 255, .74);
+    --glass-border: rgba(255, 255, 255, 1);
+    --glass-shadow: 0 18px 46px rgba(35, 48, 40, .16);
+    --bubble-text: #1c1e1c;
+    --bubble-sub: rgba(28, 30, 28, .48);
+    --card: rgba(255, 255, 255, .9);
+    --card-border: #d9ded7;
+    --card-shadow: 0 26px 70px rgba(35, 48, 40, .18);
+    --accent: #1c1e1c;
+    --accent-text: #fff;
+    --ring: #1c1e1c;
+    --ring-glow: rgba(47, 111, 94, .22);
+    --veil: rgba(226, 233, 226, .42);
+    --scan: rgba(47, 111, 94, .48);
+    --aurora-1: rgba(176, 219, 198, .68);
+    --aurora-2: rgba(198, 194, 238, .58);
+    --aurora-3: rgba(247, 214, 194, .56);
+    --serif: "Inter", "Noto Sans SC", sans-serif;
+  }
+  body[data-theme="b"] {
+    --bg: #f4f1ea;
+    --ink: #1f211f;
+    --muted: #6f6a5f;
+    --faint: #a59d8d;
+    --glass: rgba(255, 253, 248, .42);
+    --glass-border: rgba(31, 33, 31, .22);
+    --glass-shadow: 0 14px 34px rgba(55, 48, 36, .08);
+    --bubble-text: #1f211f;
+    --bubble-sub: rgba(31, 33, 31, .46);
+    --card: #fbf9f4;
+    --card-border: #1f211f;
+    --card-shadow: 0 24px 60px rgba(60, 50, 35, .16);
+    --accent: #c4472d;
+    --accent-text: #fff;
+    --ring: #1f211f;
+    --ring-glow: rgba(196, 71, 45, .16);
+    --veil: rgba(244, 241, 234, .55);
+    --scan: rgba(31, 33, 31, .3);
+    --aurora-1: rgba(232, 224, 207, .5);
+    --aurora-2: rgba(220, 215, 198, .4);
+    --aurora-3: rgba(240, 226, 205, .5);
+    --serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  }
+  body[data-theme="c"] {
+    --bg: #f3e9dc;
+    --ink: #2b211a;
+    --muted: #7a6a5c;
+    --faint: #a89684;
+    --glass: rgba(255, 250, 244, .48);
+    --glass-border: rgba(180, 85, 47, .24);
+    --glass-shadow: 0 18px 44px rgba(92, 62, 40, .13);
+    --bubble-text: #2b211a;
+    --bubble-sub: rgba(43, 33, 26, .46);
+    --card: rgba(255, 250, 243, .8);
+    --card-border: rgba(180, 85, 47, .3);
+    --card-shadow: 0 28px 70px rgba(92, 62, 40, .17);
+    --accent: #b4552f;
+    --accent-text: #fff;
+    --ring: #b4552f;
+    --ring-glow: rgba(180, 85, 47, .2);
+    --veil: rgba(243, 233, 220, .55);
+    --scan: rgba(180, 85, 47, .4);
+    --aurora-1: rgba(240, 198, 165, .5);
+    --aurora-2: rgba(190, 200, 164, .45);
+    --aurora-3: rgba(246, 214, 190, .5);
+    --serif: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  }
+
+  .scene {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    color: var(--ink);
+    background: var(--bg);
+  }
+
+  /* 背景光晕 / 纸纹 */
+  .aurora { position: absolute; inset: -12%; pointer-events: none; overflow: hidden; }
+  .aurora i {
+    position: absolute;
+    width: 58vmax;
+    height: 58vmax;
+    border-radius: 50%;
+    filter: blur(80px);
+    animation: drift 22s ease-in-out infinite alternate;
+  }
+  .aurora i:nth-child(1) { top: -20%; left: -10%; background: radial-gradient(circle, var(--aurora-1), transparent 68%); }
+  .aurora i:nth-child(2) { right: -16%; bottom: -24%; background: radial-gradient(circle, var(--aurora-2), transparent 68%); animation-duration: 28s; animation-delay: -7s; }
+  .aurora i:nth-child(3) { top: 22%; right: 12%; width: 40vmax; height: 40vmax; background: radial-gradient(circle, var(--aurora-3), transparent 70%); animation-duration: 19s; animation-delay: -12s; }
+  @keyframes drift {
+    0% { transform: translate3d(-2%, -2%, 0) scale(1); }
+    50% { transform: translate3d(3%, 3%, 0) scale(1.08); }
+    100% { transform: translate3d(-1%, 3%, 0) scale(.97); }
+  }
+  body[data-theme="b"] .aurora i { filter: blur(100px); opacity: .85; }
+  body[data-theme="b"] .scene::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: .35;
+    background-image: repeating-linear-gradient(0deg, rgba(90, 78, 58, .05) 0 1px, transparent 1px 4px);
+    mix-blend-mode: multiply;
+  }
+  .grain {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: .18;
+    background-image: radial-gradient(rgba(30, 30, 25, .22) .5px, transparent .6px);
+    background-size: 5px 5px;
+    mask-image: linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent);
+  }
+
+  /* 顶部 */
+  .chrome {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 8;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 24px 34px;
+    pointer-events: none;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 12px; letter-spacing: .02em; color: var(--muted); }
+  .mark {
+    display: grid; width: 26px; height: 26px; place-items: center;
+    color: var(--accent-text); background: var(--accent); border-radius: 8px;
+    font-family: var(--serif); font-size: 14px; font-weight: 700;
+  }
+  .brand em { color: var(--faint); font-style: normal; font-size: 10px; letter-spacing: .14em; }
+  .theme-label {
+    position: absolute; top: 92px; left: 34px; z-index: 8;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 10.5px; color: var(--muted); letter-spacing: .06em;
+  }
+  .theme-label b { display: inline-grid; width: 18px; height: 18px; place-items: center; color: var(--accent-text); background: var(--accent); border-radius: 50%; font-size: 9px; }
+  .progress { display: flex; gap: 6px; }
+  .progress i { width: 18px; height: 3px; background: color-mix(in srgb, var(--ink) 14%, transparent); border-radius: 99px; }
+  .progress i.on { width: 30px; background: var(--ring); box-shadow: 0 0 12px var(--ring-glow); }
+
+  /* 场景标题 */
+  .head { position: absolute; top: 132px; left: 34px; z-index: 4; }
+  .head .eyebrow { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .22em; }
+  .head h1 { margin: 5px 0 2px; font-family: var(--serif); font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
+  .head p { margin: 0; color: var(--muted); font-size: 11.5px; }
+
+  /* 气泡 */
+  .bubble-field { position: absolute; inset: 0; z-index: 3; }
+  .bubble {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    text-align: center;
+    color: var(--bubble-text);
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    border-radius: 50%;
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    transform: translate(-50%, -50%);
+    animation: float 9s ease-in-out infinite;
+    transition: transform .3s cubic-bezier(.2, 1.6, .4, 1), box-shadow .3s ease, border-color .3s ease;
+  }
+  .bubble:hover { animation-play-state: paused; transform: translate(-50%, -50%) scale(1.06); border-color: var(--ring); }
+  @keyframes float {
+    0%, 100% { margin-top: 0; }
+    50% { margin-top: -12px; }
+  }
+  .bubble .ico {
+    display: grid; width: 32px; height: 32px; place-items: center;
+    color: var(--accent-text); background: var(--accent); border-radius: 50%;
+    font-family: var(--serif); font-size: 12px; font-weight: 700; opacity: .88;
+  }
+  .bubble .name { max-width: 88%; font-size: 11.5px; font-weight: 700; line-height: 1.25; word-break: break-all; }
+  .bubble .sub { color: var(--bubble-sub); font-size: 9.5px; }
+  .bubble.recommended { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring), var(--glass-shadow); }
+  .bubble.selected::after {
+    content: "✓";
+    position: absolute; top: 8%; right: 8%;
+    display: grid; width: 22px; height: 22px; place-items: center;
+    color: var(--accent-text); background: var(--accent); border-radius: 50%;
+    font-size: 11px; font-weight: 800;
+  }
+  body[data-theme="b"] .bubble { border-width: 1px; box-shadow: 0 10px 26px rgba(55, 48, 36, .07); }
+  body[data-theme="b"] .bubble.selected { box-shadow: 0 0 0 2px #fbf9f4, 0 0 0 3px var(--ink), 0 12px 30px rgba(55, 48, 36, .1); }
+  body[data-theme="b"] .bubble.selected::after { content: "印"; border-radius: 4px; background: var(--accent); font-family: var(--serif); }
+  body[data-theme="c"] .bubble .name { font-family: var(--serif); }
+  body[data-theme="c"] .bubble.selected { box-shadow: 0 0 0 2px var(--accent), 0 16px 38px rgba(92, 62, 40, .16); }
+
+  .b1 { left: 17%; top: 32%; width: 158px; height: 158px; animation-duration: 10s; }
+  .b2 { left: 42%; top: 24%; width: 138px; height: 138px; animation-duration: 8.5s; animation-delay: -2s; }
+  .b3 { left: 65%; top: 24%; width: 150px; height: 150px; animation-duration: 11s; animation-delay: -4s; }
+  .b4 { left: 15%; top: 62%; width: 168px; height: 168px; animation-duration: 9.5s; animation-delay: -1s; }
+  .b5 { left: 35%; top: 73%; width: 122px; height: 122px; animation-duration: 7.5s; animation-delay: -3s; }
+  .b6 { left: 55%; top: 73%; width: 134px; height: 134px; animation-duration: 10.5s; animation-delay: -5s; }
+  .b7 { left: 78%; top: 53%; width: 184px; height: 184px; animation-duration: 12s; animation-delay: -6s; }
+
+  /* 聚光灯 */
+  .veil {
+    position: absolute; inset: 0; z-index: 4; pointer-events: none;
+    background: var(--veil);
+    mask-image: radial-gradient(circle at 78% 53%, transparent 0, transparent 128px, #000 170px);
+    -webkit-mask-image: radial-gradient(circle at 78% 53%, transparent 0, transparent 128px, #000 170px);
+  }
+  .spot-ring {
+    position: absolute; left: 78%; top: 53%; z-index: 5;
+    width: 250px; height: 250px; transform: translate(-50%, -50%);
+    border: 1px solid var(--ring); border-radius: 50%;
+    box-shadow: 0 0 0 16px var(--ring-glow), 0 0 40px var(--ring-glow);
+    opacity: .28; pointer-events: none;
+    animation: breathe 3.4s ease-in-out infinite;
+  }
+  @keyframes breathe { 0%, 100% { transform: translate(-50%, -50%) scale(.96); opacity: .2; } 50% { transform: translate(-50%, -50%) scale(1.04); opacity: .34; } }
+
+  /* 引导卡 */
+  .guide {
+    position: absolute; left: 45%; top: 39%; z-index: 7;
+    width: 330px;
+    padding: 20px 20px 16px;
+    color: var(--ink);
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 18px;
+    box-shadow: var(--card-shadow);
+    backdrop-filter: blur(22px) saturate(150%);
+    -webkit-backdrop-filter: blur(22px) saturate(150%);
+    overflow: hidden;
+    animation: guideIn .55s cubic-bezier(.2, 1.2, .4, 1) both;
+  }
+  @keyframes guideIn { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: none; } }
+  .scan { position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--scan), transparent); animation: scan 4.2s linear infinite; }
+  @keyframes scan { 0% { top: 0; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
+  .close {
+    position: absolute; top: 9px; right: 9px;
+    display: grid; width: 24px; height: 24px; place-items: center;
+    color: var(--faint); background: transparent; border: 0; border-radius: 50%;
+    font-size: 15px; cursor: pointer;
+  }
+  .close:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+  .kicker { display: block; margin-bottom: 8px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .2em; }
+  .guide h2 { margin: 0 0 7px; font-family: var(--serif); font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
+  .guide p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.7; }
+  .guide-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 15px; }
+  .guide-foot span { color: var(--faint); font-size: 10.5px; }
+  .primary, .ghost, .link, .cta { font: inherit; cursor: pointer; }
+  .primary, .cta {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    color: var(--accent-text); background: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 80%, #000);
+    border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    box-shadow: 0 10px 24px var(--ring-glow);
+    transition: transform .2s ease, filter .2s ease;
+  }
+  .primary { min-height: 38px; padding: 0 18px; }
+  .cta { min-height: 32px; padding: 0 13px; }
+  .primary:hover, .cta:hover { transform: translateY(-1px); filter: brightness(1.06); }
+  .ghost {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 34px; padding: 0 14px;
+    color: var(--muted); background: transparent;
+    border: 1px solid color-mix(in srgb, var(--ink) 14%, transparent);
+    border-radius: 999px; font-size: 11.5px;
+  }
+  .ghost:hover { color: var(--ink); border-color: var(--ink); }
+  .link { color: var(--faint); background: transparent; border: 0; font-size: 11px; }
+  .link:hover { color: var(--ink); }
+  .controls {
+    position: absolute; left: 34px; right: 34px; bottom: 30px; z-index: 8;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .controls .right { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+  .skip {
+    position: absolute; right: 34px; bottom: 82px; z-index: 8;
+    color: var(--faint); background: transparent; border: 0; font-size: 11px; cursor: pointer;
+  }
+  .skip:hover { color: var(--ink); }
+
+  /* 主题切换 */
+  .switch {
+    position: absolute; left: 50%; bottom: 20px; z-index: 20; transform: translateX(-50%);
+    display: flex; gap: 4px; padding: 4px;
+    background: color-mix(in srgb, var(--card) 82%, transparent);
+    border: 1px solid var(--card-border); border-radius: 999px;
+    box-shadow: var(--card-shadow);
+    backdrop-filter: blur(16px);
+    font-size: 10.5px;
+  }
+  .switch button {
+    padding: 6px 12px; color: var(--muted); background: transparent;
+    border: 0; border-radius: 999px; font: inherit; cursor: pointer;
+  }
+  .switch button.on { color: var(--accent-text); background: var(--accent); }
+
+  @media (max-width: 900px) {
+    .guide { left: 6%; top: auto; bottom: 110px; width: min(330px, 88vw); }
+    .b7 { left: 72%; }
+    .veil { mask-image: radial-gradient(circle at 72% 53%, transparent 0, transparent 110px, #000 150px); }
+    .spot-ring { left: 72%; width: 220px; height: 220px; }
+  }
+</style>
+</head>
+<body data-theme="a">
+<div class="scene">
+  <div class="aurora"><i></i><i></i><i></i></div>
+  <div class="grain"></div>
+
+  <header class="chrome">
+    <div class="brand"><span class="mark">C</span> ChatCanvas <em>引导预览</em></div>
+    <div class="progress"><i class="on"></i><i></i><i></i><i></i></div>
+  </header>
+  <div class="theme-label" id="themeLabel"><b>A</b> 晨雾玻璃 · 轻盈、安静、和浅色工作台一致</div>
+
+  <div class="head">
+    <span class="eyebrow">STEP 01</span>
+    <h1>对话大脑</h1>
+    <p>点亮一颗，或者先跳过</p>
+  </div>
+
+  <div class="bubble-field">
+    <div class="bubble b1"><span class="ico">G</span><span class="name">grok-4.7</span><span class="sub">对话模型</span></div>
+    <div class="bubble b2"><span class="ico">O</span><span class="name">gpt-5.6-sol</span><span class="sub">对话模型</span></div>
+    <div class="bubble b3"><span class="ico">C</span><span class="name">claude-sonnet-5-5</span><span class="sub">对话模型</span></div>
+    <div class="bubble b4"><span class="ico">Q</span><span class="name">qwen3.8-max</span><span class="sub">对话模型</span></div>
+    <div class="bubble b5"><span class="ico">G</span><span class="name">glm-5.3</span><span class="sub">对话模型</span></div>
+    <div class="bubble b6"><span class="ico">D</span><span class="name">deepseek-v4-pro</span><span class="sub">对话模型</span></div>
+    <div class="bubble b7 recommended selected"><span class="ico">D</span><span class="name">deepseek-v4-1-flash</span><span class="sub">对话模型</span></div>
+  </div>
+
+  <div class="veil"></div>
+  <div class="spot-ring"></div>
+
+  <aside class="guide">
+    <span class="scan"></span>
+    <button class="close" title="关掉提示">×</button>
+    <span class="kicker">GUIDE · 01</span>
+    <h2>选择你的对话大脑</h2>
+    <p>推荐点亮这颗悬浮气泡。它负责理解你的话。</p>
+    <div class="guide-foot"><span>已选 1</span><button class="cta">继续 →</button></div>
+  </aside>
+
+  <footer class="controls">
+    <button class="ghost">← 上一步</button>
+    <div class="right"><button class="link">跳过这一类</button><button class="primary">下一步 →</button></div>
+  </footer>
+  <button class="skip">跳过引导 →</button>
+
+  <div class="switch" id="switch">
+    <button data-theme="a" class="on">A 晨雾玻璃</button>
+    <button data-theme="b">B 纸墨宇宙</button>
+    <button data-theme="c">C 暖砂画廊</button>
+  </div>
+</div>
+<script>
+  const themes = {
+    a: "<b>A</b> 晨雾玻璃 · 轻盈、安静、和浅色工作台一致",
+    b: "<b>B</b> 纸墨宇宙 · 墨线、纸纹、红印章，最有品牌辨识度",
+    c: "<b>C</b> 暖砂画廊 · 陶土与橄榄，贴近国风与绘画内容",
+  };
+  const params = new URLSearchParams(location.search);
+  const initial = params.get("theme") || "a";
+  if (themes[initial]) document.body.dataset.theme = initial;
+  if (params.get("shot") === "1") document.getElementById("switch").style.display = "none";
+
+  function sync() {
+    const theme = document.body.dataset.theme || "a";
+    document.getElementById("themeLabel").innerHTML = themes[theme];
+    for (const button of document.querySelectorAll("#switch button")) {
+      button.classList.toggle("on", button.dataset.theme === theme);
+    }
+  }
+  for (const button of document.querySelectorAll("#switch button")) {
+    button.addEventListener("click", () => {
+      document.body.dataset.theme = button.dataset.theme;
+      sync();
+    });
+  }
+  sync();
+</script>
+</body>
+</html>

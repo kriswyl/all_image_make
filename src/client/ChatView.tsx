@@ -77,6 +77,7 @@ export function ChatView({
   newChatSignal = 0,
   onNewChatHandled,
   onConfigureChannel,
+  onDiagnostics,
   onToast,
 }: {
   channels: Channel[];
@@ -90,6 +91,8 @@ export function ChatView({
   onNewChatHandled?: () => void;
   /** 模型面板里的「调整」：直接把那个渠道的编辑弹窗打开 */
   onConfigureChannel?: (channel: Channel) => void;
+  /** 工具卡片里的「诊断」：打开应用内诊断弹窗（Tauri 里 window.open 会被拦掉） */
+  onDiagnostics?: (taskId: string) => void;
   onToast: (kind: "ok" | "error", text: string) => void;
 }) {
   const brains = useMemo(() => channels.filter((channel) => isChatAdapter(channel.adapterType) && channel.enabled), [channels]);
@@ -459,7 +462,7 @@ export function ChatView({
     }, CANVAS_PATCH_DEBOUNCE_MS);
   }
 
-  /** 点一张图：在画布里就移出，不在就加到**末尾**（顺序就是主图顺序） */
+  /** 点一张图：在画布里就移出，不在就加到**末尾**（顺序就是画布序号） */
   function toggleCanvas(assetId: string) {
     if (!view) return;
     const ids = view.canvasAssetIds;
@@ -471,7 +474,7 @@ export function ChatView({
     writeCanvas(next);
   }
 
-  /** 把某张提到 `[0]`：主图决定视频首帧和助手默认改的那张 */
+  /** 把某张提到 `[0]`：只调整画布顺序；用哪张由用户指令和助手的选择决定 */
   function promoteCanvas(assetId: string) {
     if (!view) return;
     const ids = view.canvasAssetIds;
@@ -582,7 +585,7 @@ export function ChatView({
   const sessionImages = view?.sessionImages ?? [];
   const mediaAssets = view?.mediaAssets ?? [];
   /**
-   * 画布那一组（参与下一步），`[0]` 是主图——上区渲染它。
+   * 画布那一组（参与下一步），`[0]` 是第 1 张——上区渲染它。
    *
    * **从 `canvasAssetIds` 现算，不直接用服务端发来的 `canvasImages`。** 点选是乐观更新的
    * （`writeCanvas` 先改本地、250ms 后再发 PATCH），而 PATCH 的响应刻意不回灌 view——连点时
@@ -894,6 +897,7 @@ export function ChatView({
                     stale={!running}
                     assets={mediaAssets}
                     onPreview={setPreview}
+                    onDiagnostics={onDiagnostics}
                   />
                 );
               })}
@@ -913,7 +917,7 @@ export function ChatView({
             */}
             {canvasOpen && sessionImages.length ? (
               <div className="chat-canvas">
-                {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是主图。
+                {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是第 1 张。
                     标题行那枚药丸负责说清画布和这一行的关系，详情挂 tooltip */}
                 <div className="canvas-panel">
                   <AssetStrip
@@ -932,7 +936,7 @@ export function ChatView({
               running={running}
               uploading={uploading}
               placeholder={canvasImages.length
-                ? `当前画布 ${canvasImages.length > 1 ? `${canvasImages.length} 张（主图 ${assetRef(canvasImages[0]!.id)}）` : assetRef(canvasImages[0]!.id)}，直接说怎么改…`
+                ? `当前画布 ${canvasImages.length > 1 ? `${canvasImages.length} 张（第 1 张 ${assetRef(canvasImages[0]!.id)}）` : assetRef(canvasImages[0]!.id)}，直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
               leftSlot={(
                 <>

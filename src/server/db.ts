@@ -410,9 +410,15 @@ export class AppDatabase {
   private collectInputImagePaths(id: string): string[] {
     const row = this.db.prepare("SELECT input_json FROM tasks WHERE id = ?").get(id) as DbRow | undefined;
     if (!row) return [];
-    const input = parseJson<{ referenceImages?: Array<{ relativePath?: string }>; referenceImage?: { relativePath?: string } }>(row.input_json, {});
+    const input = parseJson<{
+      referenceImages?: Array<{ relativePath?: string }>;
+      referenceImage?: { relativePath?: string };
+      maskImage?: { relativePath?: string };
+    }>(row.input_json, {});
     const stored = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
-    return stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string");
+    // 局部重绘蒙版和参考图一样落在 inputs/，删任务时要一起收走
+    if (input.maskImage) stored.push(input.maskImage);
+    return [...new Set(stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string"))];
   }
 
   createTask(input: {

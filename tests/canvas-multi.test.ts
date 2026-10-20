@@ -38,7 +38,9 @@ function countPngParts(raw: Buffer) {
  * `plan` 决定大脑这一轮说什么；两个 `hits` 数组把**发出去的真实字节**留下来，
  * 因为「画布有几张」这件事只有在那里才看得见。
  */
-async function startMock(plan: unknown) {
+async function startMock(plan: unknown | unknown[]) {
+  // 允许按轮次给剧本：view_images / 「先问再生成」这类用例需要不止一个计划
+  const plans = Array.isArray(plan) ? plan : [plan];
   const imageHits: Array<{ url: string; raw: Buffer }> = [];
   const chatBodies: string[] = [];
   const videoHits: Buffer[] = [];
@@ -51,8 +53,10 @@ async function startMock(plan: unknown) {
       res.writeHead(200, { "Content-Type": "application/json" });
       if (req.url?.includes("/chat/completions")) {
         chatBodies.push(raw.toString("utf8"));
-        // 第一轮按剧本走，之后一律收尾——否则大脑会一直要图
-        const body = chatBodies.length === 1 ? plan : { tool: "reply", args: { text: "好了。" }, say: "好了。" };
+        // 有剧本就按轮次走，用完一律收尾——否则大脑会一直要图
+        const body = chatBodies.length <= plans.length
+          ? plans[chatBodies.length - 1]
+          : { tool: "reply", args: { text: "好了。" }, say: "好了。" };
         res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(body) } }] }));
         return;
       }
@@ -116,7 +120,7 @@ function runSetCanvas(mock: Awaited<ReturnType<typeof startMock>>, args: Record<
   const conversation = mock.context.db.getConversation(mock.conversationId)!;
   return runAgentTool("set_canvas", args, {
     db: mock.context.db, runner: mock.context.runner, sessionKeys: mock.context.sessionKeys,
-    conversation, aliases: [], defaultAliases: {}, verbatimPrompt: null, emit: () => undefined,
+    conversation, aliases: [], defaultAliases: {}, verbatimPrompt: null, turnAttachmentIds: [], emit: () => undefined,
   }).then((outcome) => outcome.result);
 }
 
@@ -193,25 +197,150 @@ describe("画布一组图，真的整组发出去", () => {
     expect(after.sessionImages).toHaveLength(3);
   });
 
-  it("生视频只吃主图一张：落库的任务里只有一个 first_frame", async () => {
-    const mock = await startMock({ tool: "generate_video", args: { prompt: "动起来" }, say: "生成视频。" });
+  it("生视频按 imageRefs 选图：只发指定的那一张 first_frame", async () => {
+    // 三张附带的图 + 一句「让它动起来」在语义上是模糊的（到底哪一张？），
+    // 服务器会拒绝没有 mode 的多图请求；这里模拟大脑已经问清楚并选中了第 2 张。
+    const plan: { tool: string; args: Record<string, unknown>; say: string } = {
+      tool: "generate_video", args: { prompt: "动起来", mode: "first-frame" }, say: "生成视频。",
+    };
+    const mock = await startMock(plan);
     const uploaded = await uploadImages(mock.app, mock.conversationId, 3);
+    plan.args.imageRefs = [uploaded[1]!.slice(0, 4)];
 
-    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "让它动起来" }).expect(202);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "让第二张动起来" }).expect(202);
     await settle(mock.app, mock.conversationId);
 
-    // 视频适配器的 first_frame 槽只有一个位置，画布其余几张没有地方可去
     const videoTask = mock.context.db.listTaskRows().find((row) => row.channelAdapterType === "wan-video");
     expect(videoTask).toBeTruthy();
     const input = JSON.parse(videoTask!.inputJson) as { wanVideoMedia?: Array<{ type: string }> };
     expect(input.wanVideoMedia).toHaveLength(1);
     expect(input.wanVideoMedia![0]!.type).toBe("first_frame");
-    // 用的必须是**主图**（画布第一张），不是随便挑一张
     expect(mock.videoHits).toHaveLength(1);
     const sent = JSON.parse(mock.videoHits[0]!.toString("utf8")) as { input: { media: Array<{ type: string; url: string }> } };
     expect(sent.input.media).toHaveLength(1);
     expect(sent.input.media[0]!.url).toContain(pngBase64.slice(0, 40));
-    expect(uploaded).toHaveLength(3);
+
+    // 工具结果里要留下「这次用了哪一张」，而不是笼统一句「用主图」
+    const row = mock.context.db.listMessages(mock.conversationId)
+      .find((item) => item.toolName === "generate_video" && item.toolResult);
+    const inputs = row?.toolResult?.data?.videoInputs as Array<{ assetId: string; role: string }> | undefined;
+    expect(inputs).toEqual([{ assetId: uploaded[1], role: "first_frame" }]);
+  });
+
+  it("本条消息附带的图优先于画布：只改附带的那一张，不再整组都发", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "edit_image", args: { prompt: "换成夜景" }, say: "改这张。" },
+      { tool: "reply", args: { text: "改好了。" }, say: "改好了。" },
+    ]);
+    const uploaded = await uploadImages(mock.app, mock.conversationId, 2);
+    // 先跑一轮，把「上传」那两条从本轮附件里隔开——模拟用户后来从会话里拖了一张图进来
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`)
+      .send({ text: "把这张图的背景换成夜景", assetRefs: [uploaded[1]] }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    const edit = mock.imageHits.find((hit) => hit.url.includes("/images/edits"));
+    expect(edit).toBeTruthy();
+    // 用户只附带了第 2 张，就只发第 2 张；画布上那张第 1 张不该被带进去
+    expect(countPngParts(edit!.raw)).toBe(1);
+    // 第二轮的大脑请求里，附带图被明确标成「本条消息附带的图片」
+    expect(mock.chatBodies[1]).toContain("本条消息附带的图片");
+  });
+
+  it("没有附带图、画布多于一张又没指定时，改图失败并要求先选图", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "edit_image", args: { prompt: "换成夜景" }, say: "改这张。" },
+      { tool: "reply", args: { text: "你要改哪一张？" }, say: "你要改哪一张？" },
+    ]);
+    await uploadImages(mock.app, mock.conversationId, 2);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "改成夜景" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    // 一次生成请求都不该发出去
+    expect(mock.imageHits).toHaveLength(0);
+    const row = mock.context.db.listMessages(mock.conversationId)
+      .find((item) => item.toolName === "edit_image" && item.toolResult);
+    expect(row?.toolResult?.ok).toBe(false);
+    expect(row?.toolResult?.error).toBe("IMAGE_SELECTION_INVALID");
+    expect(row?.toolResult?.summary).toContain("画布上有 2 张图");
+    expect(row?.toolResult?.summary).toContain("view_images");
+  });
+
+  it("两张图没写 mode 的生视频请求会被拒绝，让大脑先问用户", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "generate_video", args: { prompt: "用这两张做视频" }, say: "生成视频。" },
+      { tool: "reply", args: { text: "要首尾帧还是参考图？" }, say: "要首尾帧还是参考图？" },
+    ]);
+    const uploaded = await uploadImages(mock.app, mock.conversationId, 2);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`)
+      .send({ text: "用这两张做视频", assetRefs: uploaded }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    expect(mock.videoHits).toHaveLength(0);
+    expect(mock.context.db.listTaskRows().some((row) => row.channelAdapterType === "wan-video")).toBe(false);
+    const row = mock.context.db.listMessages(mock.conversationId)
+      .find((item) => item.toolName === "generate_video" && item.toolResult);
+    expect(row?.toolResult?.error).toBe("VIDEO_SELECTION_INVALID");
+    expect(row?.toolResult?.summary).toContain("ask");
+    expect(row?.toolResult?.summary).toContain("first-last-frame");
+    expect(row?.toolResult?.summary).toContain("reference");
+  });
+
+  it("首尾帧：两张图按顺序落成 first_frame + last_frame", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "generate_video", args: { prompt: "首尾帧", mode: "first-last-frame" }, say: "生成视频。" },
+    ]);
+    const uploaded = await uploadImages(mock.app, mock.conversationId, 2);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`)
+      .send({ text: "开头这张、结尾那张", assetRefs: [uploaded[0], uploaded[1]] }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    const videoTask = mock.context.db.listTaskRows().find((row) => row.channelAdapterType === "wan-video");
+    expect(videoTask).toBeTruthy();
+    const input = JSON.parse(videoTask!.inputJson) as {
+      wanVideoMode?: string; wanVideoMedia?: Array<{ type: string }>;
+    };
+    expect(input.wanVideoMode).toBe("first-last-frame");
+    expect(input.wanVideoMedia?.map((item) => item.type)).toEqual(["first_frame", "last_frame"]);
+  });
+
+  it("参考生视频：三张图都按 reference_image 发出去", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "generate_video", args: { prompt: "参考这三张", mode: "reference" }, say: "生成视频。" },
+    ]);
+    const uploaded = await uploadImages(mock.app, mock.conversationId, 3);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`)
+      .send({ text: "参考这三张生成视频", assetRefs: uploaded }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    const videoTask = mock.context.db.listTaskRows().find((row) => row.channelAdapterType === "wan-video");
+    expect(videoTask).toBeTruthy();
+    const input = JSON.parse(videoTask!.inputJson) as {
+      wanVideoMode?: string; wanVideoMedia?: Array<{ type: string }>;
+    };
+    expect(input.wanVideoMode).toBe("reference");
+    expect(input.wanVideoMedia?.map((item) => item.type)).toEqual([
+      "reference_image", "reference_image", "reference_image",
+    ]);
   });
 
   it("参考图总量封顶 8：画布 8 张 + 额外 2 张时，多的被丢掉并说出来", async () => {
@@ -241,9 +370,9 @@ describe("画布一组图，真的整组发出去", () => {
 });
 
 describe("大脑看到的东西", () => {
-  it("提示词里列全画布那一组，但视觉附件仍然只有主图一张", async () => {
-    // 整组参与是靠工具层发参考图实现的，不靠大脑「看见」每一张：
-    // 每多附一张就是每轮多一份图元。但状态行必须列全，否则大脑复述 ref 时没得抄。
+  it("本条消息附带了图时，视觉附件就是这几张，而不是画布主图", async () => {
+    // 这条钉住用户报的那个问题：附了一张图说「换背景」，助手却去改了画布主图。
+    // 现在附带的图会直接给大脑看，并且不再声称「用户说这张默认指主图」。
     const mock = await startMock({ tool: "reply", args: { text: "收到。" }, say: "收到。" });
     const uploaded = await uploadImages(mock.app, mock.conversationId, 2);
 
@@ -253,12 +382,36 @@ describe("大脑看到的东西", () => {
     const sent = mock.chatBodies[0]!;
     expect(sent).toContain(uploaded[0]!.slice(0, 4));
     expect(sent).toContain(uploaded[1]!.slice(0, 4));
-    // 主图要标出来——用户说「这张」时大脑得知道指哪个
-    expect(sent).toContain("主图");
-    // 一张图 = 一段 data URI，多附一张就会变成 2。
-    // 按 `data:image/` 数而不是钉死 png：大脑看的那张走 `assetThumbDataUri`，
-    // 而缩略图**一律重新编码成 JPEG**（`writeThumbnail`），钉死 png 会数出 0 张
-    expect(sent.split("data:image/").length - 1).toBe(1);
+    expect(sent).toContain("本条消息附带的图片");
+    // 「主图」这个说法不能再作为默认目标的依据
+    expect(sent).not.toContain("默认指它");
+    // 两张附带图 = 两段 data URI。按 `data:image/` 数而不是钉死 png：
+    // 缩略图**一律重新编码成 JPEG**（`writeThumbnail`），钉死 png 会数出 0 张
+    expect(sent.split("data:image/").length - 1).toBe(2);
+  });
+
+  it("没有附带图时，大脑可以调 view_images 再看画布；看过不留工具卡", async () => {
+    const mock = await startMock([
+      { tool: "reply", args: { text: "好。" }, say: "好。" },
+      { tool: "view_images", args: {}, say: "" },
+      { tool: "reply", args: { text: "看完了，第二张是夜景。" }, say: "看完了。" },
+    ]);
+    await uploadImages(mock.app, mock.conversationId, 2);
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "先别动" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    const before = mock.chatBodies.length;
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "画布上都是什么？" }).expect(202);
+    await settle(mock.app, mock.conversationId);
+
+    // view_images 会多问一趟大脑：第二轮请求里应该带着画布缩略图
+    expect(mock.chatBodies.length).toBeGreaterThanOrEqual(before + 2);
+    const observed = mock.chatBodies[before + 1]!;
+    expect(observed).toContain("view_images");
+    expect(observed).toContain("画布第 1 张");
+    expect(observed.split("data:image/").length - 1).toBe(2);
+    // 看图是内部动作，不该在对话里留下一条工具结果
+    expect(mock.context.db.listMessages(mock.conversationId).some((row) => row.toolName === "view_images")).toBe(false);
   });
 
   it("set_canvas 一次设一组：整组落库，主图是第一张", async () => {

@@ -8,17 +8,19 @@
  */
 import { AlertCircle, Check, Film, Image as ImageIcon, X } from "lucide-react";
 import { useState } from "react";
-import { assetRef, type ChatMessage, type ConfirmPreview, type GenerateVideoArgs } from "../../shared/agent-types";
-import { VIDEO_CAPABILITIES, type VideoAdapter } from "../../shared/video-capabilities";
+import { api } from "../api";
+import {
+  assetRef, type ChatMessage, type ConfirmPreview, type ConversationVideoRole, type GenerateVideoArgs,
+} from "../../shared/agent-types";
+import {
+  VIDEO_CAPABILITIES, videoModeLabel, type ConversationVideoMode, type VideoAdapter,
+} from "../../shared/video-capabilities";
 
-const MODE_LABELS: Record<string, string> = {
-  "text-to-video": "文生视频",
-  "first-frame": "首帧生视频",
-  "first-last-frame": "首尾帧生视频",
-  reference: "参考生视频",
-  "video-edit": "视频编辑",
-  "video-extend": "视频续写",
-};
+function roleLabel(role: ConversationVideoRole) {
+  if (role === "first_frame") return "首帧";
+  if (role === "last_frame") return "尾帧";
+  return "参考图";
+}
 
 export function ConfirmCard({
   message,
@@ -147,15 +149,41 @@ export function ConfirmCard({
                 </label>
               ) : null}
             </div>
+            {preview.videoInputs?.length ? (
+              <div className="confirm-card-inputs">
+                {preview.videoInputs.map((item, index) => (
+                  <div className="confirm-card-input" key={`${item.assetId}-${index}`}>
+                    <img
+                      src={api.assetUrl(`/api/assets/${item.assetId}/thumb`)}
+                      alt=""
+                      onError={(event) => {
+                        const image = event.currentTarget;
+                        if (image.dataset.fallback === "1") return;
+                        image.dataset.fallback = "1";
+                        image.src = api.assetUrl(`/api/assets/${item.assetId}/file`);
+                      }}
+                    />
+                    <span>{roleLabel(item.role)} · {assetRef(item.assetId)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="confirm-card-meta">
-              {MODE_LABELS[preview.mode ?? ""] ?? preview.mode ?? "按渠道默认"}
-              {preview.referenceAssetId
-                // 画布有多张时要说清只有主图进视频：视频的 first_frame 只有一个槽，
-                // 不写这句，用户会以为画布整组都发过去了
-                ? preview.referenceCount && preview.referenceCount > 1
-                  ? ` · 用画布主图 ${assetRef(preview.referenceAssetId)} 当首帧（画布共 ${preview.referenceCount} 张，其余不发给视频模型）`
-                  : " · 用当前画布当首帧"
-                : " · 纯文生视频"}
+              {preview.mode
+                ? videoModeLabel(preview.mode as ConversationVideoMode, preview.adapterType)
+                : "按渠道默认"}
+              {preview.videoInputs !== undefined
+                ? preview.videoInputs.length
+                  ? ` · 用 ${preview.videoInputs.length} 张图：${preview.videoInputs
+                    .map((item) => `${assetRef(item.assetId)}（${roleLabel(item.role)}）`)
+                    .join("、")}`
+                  : " · 纯文生视频"
+                : preview.referenceAssetId
+                  // 升级前的老卡片：当时的行为就是「画布主图当首帧」
+                  ? preview.referenceCount && preview.referenceCount > 1
+                    ? ` · 用画布主图 ${assetRef(preview.referenceAssetId)} 当首帧（画布共 ${preview.referenceCount} 张，其余不发给视频模型）`
+                    : " · 用当前画布当首帧"
+                  : " · 纯文生视频"}
             </div>
           </>
         ) : null}

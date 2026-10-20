@@ -2,7 +2,7 @@
  * 画布条（AGENT_PLAN.md §10）。
  *
  * **每张图只出现一次**：一行放着本会话的全部图，点一下给它打上「在画布里」的记号，
- * 记号带序号，① 是**主图**（生视频的首帧、发给大脑看的那张、确认卡上的缩略图都用它）。
+ * 记号带序号，① 是画布第 1 张（排序和展示用；助手会按用户指令选图，不再默认用它）。
  * 副标题那枚浅紫药丸说清这一行和画布的关系——「画布 3 张 · 一起当参考图 · 生视频用 #c904 当首帧」。
  *
  * 为什么不再分上下两段：一开始是「上段当前画布 / 下段本会话的图」两个框，好处是
@@ -51,12 +51,12 @@ export function AssetStrip({
   onClear,
 }: {
   assets: CanvasAsset[];
-  /** 画布里的图 id，**有序**——下标就是缩略图上的序号，`[0]` 是主图 */
+  /** 画布里的图 id，**有序**——下标就是缩略图上的序号，`[0]` 是第 1 张 */
   canvasIds: string[];
   /** 点一下：不在画布里就加到末尾，在画布里就移出 */
   onToggle: (assetId: string) => void;
   onPreview: (assetId: string) => void;
-  /** 把某张提到 `[0]`：主图决定视频首帧，必须能改 */
+  /** 把某张提到 `[0]`：只调整画布顺序；具体用哪张由用户指令和助手的选择决定 */
   onPromote: (assetId: string) => void;
   onClear: () => void;
 }) {
@@ -121,9 +121,9 @@ export function AssetStrip({
                   <Thumb asset={asset} size={44} />
                   {/* 来源标记：上传的和生成的放在一起，不给标记就分不出哪张是要花钱的产物 */}
                   {uploaded ? <span className="asset-strip-origin" title="你自己上传的图"><Upload size={9} /></span> : null}
-                  {/* 序号 = 画布里的位置，① 就是主图；不在画布里就没有序号，这也就是「标记」本身 */}
+                  {/* 序号 = 画布里的位置，① 就是第 1 张；不在画布里就没有序号，这也就是「标记」本身 */}
                   {inCanvas ? (
-                    <span className="asset-strip-order" title={primary ? "画布主图（第 1 张）" : `画布第 ${position + 1} 张`}>
+                    <span className="asset-strip-order" title={primary ? "画布第 1 张（只能用来排序；助手会按你的指令选图）" : `画布第 ${position + 1} 张`}>
                       {position + 1}
                     </span>
                   ) : null}
@@ -136,9 +136,9 @@ export function AssetStrip({
                       type="button"
                       className="asset-strip-promote"
                       onClick={() => onPromote(asset.id)}
-                      title="设为主图：生视频的首帧、给助手看的那张都用它"
+                      title="移到画布第 1 张（只影响排序；助手会按你的指令选图）"
                     >
-                      设为主图
+                      移到最前
                     </button>
                   ) : null}
                   {inCanvas ? (

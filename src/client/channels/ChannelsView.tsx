@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, ChevronDown, LoaderCircle, Plus, Server, Settings2, Trash2 } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, ChevronDown, LoaderCircle, Plus, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { adapterLabels } from "../labels";
 import { isChatAdapter, isVideoAdapter, type Channel } from "../../shared/types";
@@ -13,7 +13,15 @@ function channelModelKind(channel: Channel): ModelKind {
   return "image";
 }
 
-export function ChannelsView({ channels, onAdd, onEdit, onDelete, onToast }: { channels: Channel[]; onAdd: () => void; onEdit: (channel: Channel) => void; onDelete: (channel: Channel) => void; onToast: (kind: ToastKind, message: string) => void }) {
+export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, onToast }: {
+  channels: Channel[];
+  onAdd: () => void;
+  /** 按模型快速配置：先选模型，再自动归并成渠道配置 */
+  onQuickSetup?: () => void;
+  onEdit: (channel: Channel) => void;
+  onDelete: (channel: Channel) => void;
+  onToast: (kind: ToastKind, message: string) => void;
+}) {
   const [testing, setTesting] = useState<string | null>(null);
   /** 展开了模型清单的渠道（只读：改模型仍然走编辑弹窗，避免在列表里误删） */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -35,7 +43,13 @@ export function ChannelsView({ channels, onAdd, onEdit, onDelete, onToast }: { c
   }
   return (
     <div className="page">
-      <div className="page-header"><div><h1>渠道</h1><span className="page-kicker">CONNECTIONS</span></div><button className="primary-button" onClick={onAdd}><Plus size={17} />添加渠道</button></div>
+      <div className="page-header">
+        <div><h1>渠道</h1><span className="page-kicker">CONNECTIONS</span></div>
+        <div className="page-header-actions">
+          {onQuickSetup ? <button className="secondary-button" onClick={onQuickSetup}><Sparkles size={16} />按模型快速配置</button> : null}
+          <button className="primary-button" onClick={onAdd}><Plus size={17} />添加渠道</button>
+        </div>
+      </div>
       <div className="data-table-wrap">
         <table className="data-table">
           <thead><tr><th>名称</th><th>协议</th><th>模型</th><th>密钥</th><th>状态</th><th aria-label="操作" /></tr></thead>

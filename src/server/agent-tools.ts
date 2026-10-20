@@ -12,12 +12,16 @@
  */
 import { z } from "zod";
 import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../shared/types.js";
-import type { GenerationInput, WanVideoMode, SeedanceVideoMode } from "../shared/types.js";
+import type { GenerationInput, WanVideoMode, SeedanceVideoMode, VideoMediaType } from "../shared/types.js";
 import type {
-  AgentStreamEvent, AskArgs, Conversation, GenerateImageArgs, GenerateVideoArgs,
-  EditImageArgs, OptimizePromptArgs, ReplyArgs, SetCanvasArgs, ToolResult,
+  AgentStreamEvent, AskArgs, Conversation, ConversationVideoRole, GenerateImageArgs,
+  GenerateVideoArgs, EditImageArgs, OptimizePromptArgs, ReplyArgs, SetCanvasArgs, ToolResult,
 } from "../shared/agent-types.js";
 import { assetRef } from "../shared/agent-types.js";
+import {
+  VIDEO_CAPABILITIES, VIDEO_MODES_BY_ADAPTER, videoModeLabel,
+  type ConversationVideoMode, type VideoAdapter,
+} from "../shared/video-capabilities.js";
 import type { AppDatabase, AssetRow } from "./db.js";
 import type { TaskRunner, ReferenceImageUpload } from "./tasks.js";
 import { AppError } from "./tasks.js";
@@ -25,7 +29,7 @@ import type { CapabilityAlias } from "./capabilities.js";
 import { describeAliasChoice, resolveAlias } from "./capabilities.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "./diagnose.js";
 import { callBrain, type BrainMessage } from "./brain.js";
-import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE } from "./vision.js";
+import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
 
 /** §16：`extraReferences` 上限和现有 MAX_REFERENCE_IMAGES 对齐 */
@@ -47,15 +51,22 @@ export const generateImageSchema = z.object({
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
   count: z.coerce.number().int().min(1).max(8).optional(),
   fromScratch: z.coerce.boolean().optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
 });
 
 export const editImageSchema = z.object({
   prompt: nonEmpty(20000),
   modelHint: z.string().trim().max(80).optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
   extraReferences: z.array(z.string().trim().min(1).max(80)).max(MAX_EXTRA_REFERENCES).optional(),
   // 改图照样能定输出尺寸：改完的画面未必沿用原图的形状
   aspectRatio: z.string().trim().max(20).optional(),
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
+});
+
+export const viewImagesSchema = z.object({
+  // 不填 = 看整组当前画布。看图不生成、不花钱，所以上限就是画布上限
+  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
 });
 
 export const setCanvasSchema = z.object({
@@ -85,6 +96,7 @@ export const generateVideoSchema = z.object({
   resolution: z.string().trim().max(10).optional(),
   audio: z.coerce.boolean().optional(),
   promptExtend: z.coerce.boolean().optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
   imageFrom: z.enum(["current", "none"]).optional(),
 });
 
@@ -100,6 +112,7 @@ export const replySchema = z.object({
 export const TOOL_SCHEMAS = {
   generate_image: generateImageSchema,
   edit_image: editImageSchema,
+  view_images: viewImagesSchema,
   set_canvas: setCanvasSchema,
   optimize_prompt: optimizePromptSchema,
   generate_video: generateVideoSchema,
@@ -125,6 +138,14 @@ export interface ToolContext {
    * 「这个开关有时候不生效」。这里由服务端**直接替换**掉 prompt 参数，模型怎么写都不影响结果。
    */
   verbatimPrompt: string | null;
+  /**
+   * 用户这一条消息附带的图片（已解析成 assetId，按顺序）。
+   *
+   * 工具默认优先用它们：用户说「把这张图的背景换掉」时，指的就是这几张，
+   * 而不是画布第一张。跨轮续跑 / 确认后执行时是空数组——
+   * 那种时候参数里必须已经落着具体的 `imageRefs`。
+   */
+  turnAttachmentIds: string[];
   emit: (event: AgentStreamEvent) => void;
   signal?: AbortSignal;
 }
@@ -182,9 +203,208 @@ function canvasImages(db: AppDatabase, conversation: Conversation): AssetRow[] {
   return db.canvasImages(conversation);
 }
 
-/** 画布主图：生视频首帧、确认卡缩略图用它 */
-function canvasPrimary(db: AppDatabase, conversation: Conversation): AssetRow | null {
-  return canvasImages(db, conversation)[0] ?? null;
+/**
+ * 解析一组**显式**图片引用，保持顺序、不做去重。
+ *
+ * 位置本身就是语义（first-last-frame 的第 1 张是首帧、第 2 张是尾帧），
+ * 所以这里不能像 `resolveCanvasRefs` 那样去重、也不能静默跳过解析不出来的那张——
+ * 少一张就会把「两张首尾帧」变成「一张首帧」，用户花了钱却拿到另一个东西。
+ */
+export function resolveImageRefs(
+  db: AppDatabase,
+  conversationId: string,
+  refs: string[],
+): { assets: AssetRow[]; error?: string } {
+  const assets: AssetRow[] = [];
+  const problems: string[] = [];
+  for (const ref of refs) {
+    const found = resolveAssetRef(db, conversationId, ref);
+    if (!found) { problems.push(`找不到 ${ref}`); continue; }
+    if (!found.asset.mimeType.startsWith("image/")) { problems.push(`${ref} 不是图片`); continue; }
+    assets.push(found.asset);
+  }
+  return problems.length
+    ? { assets, error: `${problems.join("；")}。请用画布或会话里的图片编号（#xxxx）重新指定` }
+    : { assets };
+}
+
+/** 本条消息附带的图（已经是 assetId）。找不到/不是图片都算硬错误 */
+function attachmentAssets(db: AppDatabase, ids: string[]): { assets: AssetRow[]; error?: string } {
+  const assets: AssetRow[] = [];
+  for (const id of ids) {
+    const asset = db.getAsset(id);
+    if (!asset) return { assets, error: `本条消息附带的图片 ${assetRef(id)} 已经不在了，请让用户重新发一次` };
+    if (!asset.mimeType.startsWith("image/")) continue;
+    assets.push(asset);
+  }
+  return { assets };
+}
+
+/**
+ * 「这次到底用哪几张图」的统一兜底。
+ *
+ * 顺序是用户意图的优先级：
+ * 1. 大脑显式写了 `imageRefs` —— 它已经按指令选好了；
+ * 2. 本条消息附带的图 —— 用户说「这张/这几张」指的就是它们；
+ * 3. 画布只有一张 —— 没有歧义，直接用；
+ * 4. 画布多于一张 —— **不再默认主图/整组**，返回错误让大脑先 view_images 或 ask。
+ */
+function selectedImageAssets(
+  db: AppDatabase,
+  conversation: Conversation,
+  explicitRefs: string[] | undefined,
+  turnAttachmentIds: string[],
+): { assets: AssetRow[]; source: "refs" | "attachments" | "canvas" | "none"; error?: string } {
+  if (explicitRefs?.length) {
+    const resolved = resolveImageRefs(db, conversation.id, explicitRefs);
+    return resolved.error
+      ? { assets: [], source: "refs", error: resolved.error }
+      : { assets: resolved.assets, source: "refs" };
+  }
+  if (turnAttachmentIds.length) {
+    const resolved = attachmentAssets(db, turnAttachmentIds);
+    return resolved.error
+      ? { assets: [], source: "attachments", error: resolved.error }
+      : { assets: resolved.assets, source: "attachments" };
+  }
+  const canvas = canvasImages(db, conversation);
+  if (canvas.length === 1) return { assets: canvas, source: "canvas" };
+  if (canvas.length > 1) {
+    return {
+      assets: [],
+      source: "none",
+      error: `画布上有 ${canvas.length} 张图，不能默认挑一张。请先用 view_images 看清画面，再用 imageRefs 指定要用哪几张；拿不准就先 ask 用户`,
+    };
+  }
+  return { assets: [], source: "none" };
+}
+
+export interface VideoSelection {
+  mode: ConversationVideoMode;
+  assets: AssetRow[];
+  roles: ConversationVideoRole[];
+  notes: string[];
+}
+
+const VIDEO_MODE_ORDER: ConversationVideoMode[] = ["text-to-video", "first-frame", "first-last-frame", "reference"];
+
+function supportedModes(adapterType: string): ConversationVideoMode[] {
+  return VIDEO_MODES_BY_ADAPTER[adapterType as VideoAdapter] ?? ["text-to-video"];
+}
+
+function modeListLabel(adapterType: string) {
+  return supportedModes(adapterType).map((mode) => `${mode}（${videoModeLabel(mode, adapterType)}）`).join("、");
+}
+
+/**
+ * 把 `generate_video` 的参数解析成「哪种模式 + 哪几张图 + 谁是首帧/尾帧/参考图」。
+ *
+ * 这是执行器和确认卡共用的**唯一**判断入口：卡片上写的必须就是真正提交的那份，
+ * 否则用户点了「用这两张做首尾帧」，实际跑的却是别的组合。
+ */
+export function resolveVideoSelection(
+  db: AppDatabase,
+  conversation: Conversation,
+  args: GenerateVideoArgs,
+  adapterType: string,
+  turnAttachmentIds: string[],
+): { selection?: VideoSelection; error?: string } {
+  const supported = supportedModes(adapterType);
+  const requested = typeof args.mode === "string" ? args.mode.trim() : "";
+  const requestedMode = requested ? requested as ConversationVideoMode : undefined;
+  if (requestedMode && !VIDEO_MODE_ORDER.includes(requestedMode)) {
+    return { error: `视频模式 ${requested} 对话里不支持。可用的是：${modeListLabel(adapterType)}` };
+  }
+  if (requestedMode && !supported.includes(requestedMode)) {
+    return { error: `这个视频渠道不支持 ${videoModeLabel(requestedMode, adapterType)}。它支持：${modeListLabel(adapterType)}` };
+  }
+  // 明确说「文生视频」时不需要图：画布上有几张都不该拦住一句纯文字的视频
+  if (requestedMode === "text-to-video" || args.imageFrom === "none") {
+    if (args.imageRefs?.length) {
+      return { error: "文生视频不带图片，不能同时指定 imageRefs；要带图请用 first-frame / first-last-frame / reference" };
+    }
+    return { selection: { mode: "text-to-video", assets: [], roles: [], notes: [] } };
+  }
+  const explicitMode: Exclude<ConversationVideoMode, "text-to-video"> | undefined =
+    requestedMode as Exclude<ConversationVideoMode, "text-to-video"> | undefined;
+
+  let assets: AssetRow[] = [];
+  if (args.imageRefs?.length) {
+    const resolved = resolveImageRefs(db, conversation.id, args.imageRefs);
+    if (resolved.error) return { error: resolved.error };
+    assets = resolved.assets;
+  } else if (turnAttachmentIds.length) {
+    const resolved = attachmentAssets(db, turnAttachmentIds);
+    if (resolved.error) return { error: resolved.error };
+    assets = resolved.assets;
+  } else {
+    const canvas = canvasImages(db, conversation);
+    if (canvas.length === 1) {
+      // 只有一张时不存在选错的问题
+      assets = canvas;
+    } else if (canvas.length > 1 && args.imageFrom === "current") {
+      return {
+        error: `画布上有 ${canvas.length} 张图，不能默认挑一张。请先用 view_images 看清画面，再用 imageRefs 指定；拿不准就先 ask 用户`,
+      };
+    }
+    // 没点名、也没明确要当前画布 → 当成纯文生视频，不要擅自把画布塞进去
+  }
+
+  let mode: ConversationVideoMode | undefined = explicitMode;
+  if (!mode) {
+    if (!assets.length) mode = "text-to-video";
+    // Grok 只有图生/文生两种，多张图就是参考图，不存在「首尾帧 vs 参考」的歧义
+    else if (adapterType === "grok-video") mode = "reference";
+    else if (assets.length === 1) mode = "first-frame";
+    else {
+      return {
+        error: `这次要用 ${assets.length} 张图，但没说要哪种方式。首尾帧生视频和参考生视频都说得通，`
+          + "请先用 ask 问用户（给出「首尾帧」「参考图」两个选项），再在 mode 里写清 first-last-frame 或 reference。",
+      };
+    }
+  }
+  if (!mode) return { error: "没有确定视频模式，请先问用户" };
+
+  if (mode === "text-to-video") {
+    if (assets.length) {
+      return { error: "文生视频不带图片；要带图请用 first-frame / first-last-frame / reference" };
+    }
+    return { selection: { mode, assets: [], roles: [], notes: [] } };
+  }
+
+  if (!assets.length) {
+    return { error: `${videoModeLabel(mode, adapterType)}需要先用 imageRefs 指定图片（或用 view_images 看清画布后指定）` };
+  }
+  const cap = Math.min(MAX_REFERENCE_IMAGES, VIDEO_CAPABILITIES[adapterType as VideoAdapter]?.maxReferenceImages ?? MAX_REFERENCE_IMAGES);
+  if (assets.length > cap) {
+    return { error: `${videoModeLabel(mode, adapterType)}最多用 ${cap} 张图，这次给了 ${assets.length} 张` };
+  }
+  if (mode === "first-frame" && assets.length !== 1) {
+    return { error: `首帧生视频只接受 1 张图（这次 ${assets.length} 张）。两张请用 first-last-frame，多张参考请用 reference` };
+  }
+  if (mode === "first-last-frame") {
+    if (assets.length !== 2) return { error: `首尾帧生视频必须正好 2 张图（先首帧、后尾帧），这次 ${assets.length} 张` };
+    if (assets[0]!.id === assets[1]!.id) return { error: "首帧和尾帧不能是同一张图，请让用户换一张或改用参考生视频" };
+  }
+
+  const notes: string[] = [];
+  if (mode === "reference") {
+    // 参考图重复没有意义，去重能省体积；首尾帧不能去重（位置有语义，上面已单独拦）
+    const unique: AssetRow[] = [];
+    for (const asset of assets) {
+      if (unique.some((item) => item.id === asset.id)) { notes.push(`${assetRef(asset.id)} 重复，已去重`); continue; }
+      unique.push(asset);
+    }
+    assets = unique;
+  }
+  const roles: ConversationVideoRole[] = mode === "first-frame"
+    ? ["first_frame"]
+    : mode === "first-last-frame"
+      ? ["first_frame", "last_frame"]
+      : assets.map(() => "reference_image");
+  const unused = Math.max(0, canvasImages(db, conversation).length - new Set(assets.map((asset) => asset.id)).size);
+  if (unused > 0) notes.push(`画布上另外 ${unused} 张没有发给视频模型`);
+  return { selection: { mode, assets, roles, notes } };
 }
 
 /**
@@ -338,12 +558,12 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   const channel = ctx.db.getChannel(resolution.channelId);
   if (!channel) return failResult("解析到的视频渠道不存在", "CHANNEL_NOT_FOUND");
 
-  const wantsFrame = args.imageFrom !== "none";
-  // 首帧只取画布**主图**一张：视频适配器的 first_frame 槽就一个位置，
-  // 画布其余几张没有地方可去，不发（确认卡上会写清楚，免得用户以为整组都进了视频）
-  const frameAsset = wantsFrame ? canvasPrimary(ctx.db, ctx.conversation) : null;
+  const resolved = resolveVideoSelection(
+    ctx.db, ctx.conversation, args, channel.adapterType, ctx.turnAttachmentIds,
+  );
+  if (!resolved.selection) return failResult(resolved.error ?? "这次视频用哪几张图没定下来", "VIDEO_SELECTION_INVALID");
+  const selection = resolved.selection;
   const defaults = VIDEO_DEFAULTS[channel.adapterType] ?? { duration: 5, resolution: "720p", audio: false };
-  const mode = args.mode ?? (frameAsset ? "first-frame" : "text-to-video");
   const input: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
@@ -356,21 +576,39 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   };
   const uploads: ReferenceImageUpload[] = [];
 
-  if (frameAsset) {
+  if (selection.assets.length) {
+    // 多张图一起发时要按张数均分请求体预算，否则第二张就容易撞 1.4MB 的内联上限
+    const profile = videoInlineProfile(selection.assets.length);
+    const prepared: Array<{ bytes: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; fileName: string }> = [];
+    for (const [index, asset] of selection.assets.entries()) {
+      const encoded = await prepareImageBytes(ctx.db, asset, profile);
+      if (!encoded) {
+        return failResult(
+          `${assetRef(asset.id)} 读取失败，无法作为${selection.roles[index] === "first_frame" ? "首帧" : selection.roles[index] === "last_frame" ? "尾帧" : "参考图"}`,
+          "REFERENCE_IMAGE_MISSING",
+        );
+      }
+      prepared.push(encoded);
+    }
+
     if (channel.adapterType === "grok-video") {
-      // Grok 的请求体吃 reference_images，走 TaskRunner 的参考图入库通道
-      const prepared = await prepareImageBytes(ctx.db, frameAsset, VIDEO_FRAME_PROFILE);
-      if (prepared) uploads.push({ bytes: prepared.bytes, mimeType: prepared.mimeType, fileName: prepared.fileName });
+      // Grok 的请求体只吃 reference_images，没有首帧/尾帧的角色概念
+      for (const item of prepared) {
+        uploads.push({ bytes: item.bytes, mimeType: item.mimeType, fileName: item.fileName });
+      }
     } else {
-      const prepared = await prepareImageBytes(ctx.db, frameAsset, VIDEO_FRAME_PROFILE);
-      if (!prepared) return failResult("当前画布的图片无法读取，无法作为视频首帧", "REFERENCE_IMAGE_MISSING");
-      const dataUri = `data:${prepared.mimeType};base64,${prepared.bytes.toString("base64")}`;
+      const media = prepared.map((item, index) => {
+        const dataUri = `data:${item.mimeType};base64,${item.bytes.toString("base64")}`;
+        return { role: selection.roles[index]!, url: dataUri };
+      });
       if (channel.adapterType === "seedance-video") {
-        input.seedanceVideoMedia = [{ type: "image_url", url: dataUri, role: "first_frame" }];
-        input.seedanceVideoMode = (mode === "first-last-frame" ? "first-last-frame" : "first-frame") as SeedanceVideoMode;
+        input.seedanceVideoMedia = media.map((item) => ({ type: "image_url", url: item.url, role: item.role }));
+        input.seedanceVideoMode = selection.mode as SeedanceVideoMode;
+        // Seedance 的首帧/首尾帧只接受自适应比例（见 VIDEO_HANDOFF.md）
+        if (selection.mode === "first-frame" || selection.mode === "first-last-frame") input.ratio = "adaptive";
       } else {
-        input.wanVideoMedia = [{ type: "first_frame", url: dataUri }];
-        input.wanVideoMode = mode as WanVideoMode;
+        input.wanVideoMedia = media.map((item) => ({ type: item.role as VideoMediaType, url: item.url }));
+        input.wanVideoMode = selection.mode as WanVideoMode;
       }
     }
   } else if (channel.adapterType === "wan-video") {
@@ -384,14 +622,16 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
     const created = await ctx.runner.create(input, uploads);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
-    // 画布上还有别的图时要说一句：大脑不知道「首帧只有一个槽」这件事，
-    // 不告诉它，它下一轮就会跟用户保证「画布那三张都进去了」
-    const extraOnCanvas = frameAsset ? ctx.db.canvasImages(ctx.conversation).length - 1 : 0;
+    const imagePart = selection.assets.length
+      ? `${videoModeLabel(selection.mode, channel.adapterType)}，${selection.assets
+        .map((asset, index) => `${assetRef(asset.id)}（${roleLabel(selection.roles[index]!)}）`)
+        .join("、")}`
+      : "纯文生视频";
     const summary = [
       `已提交视频任务 ${created.id.slice(0, 8)}，模型 ${resolution.model}（${resolution.alias}）${choice ? `，${choice}` : ""}，`,
-      `${input.duration} 秒 ${input.resolution}`,
-      frameAsset ? `，首帧取自 ${assetRef(frameAsset.id)}` : "，纯文生视频",
-      extraOnCanvas > 0 ? `（画布上还有 ${extraOnCanvas} 张，视频只能用主图一张当首帧，那几张没发）` : "",
+      `${input.duration} 秒 ${input.resolution}，`,
+      imagePart,
+      selection.notes.length ? `（${selection.notes.join("；")}）` : "",
       "。视频要几分钟，完成后我会接着处理。",
     ].join("");
     return okResult(summary, {
@@ -400,6 +640,8 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
       data: {
         model: resolution.model, alias: resolution.alias,
         usedFallback: resolution.usedFallback, ...(choice ? { aliasNote: choice } : {}),
+        videoMode: selection.mode,
+        videoInputs: selection.assets.map((asset, index) => ({ assetId: asset.id, role: selection.roles[index] })),
       },
     });
   } catch (error) {
@@ -407,39 +649,58 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   }
 }
 
-async function generateImage(ctx: ToolContext, args: GenerateImageArgs, isEdit: boolean): Promise<ToolOutcome> {
+/** 卡片和工具结果里统一的人话角色名 */
+export function roleLabel(role: ConversationVideoRole) {
+  if (role === "first_frame") return "首帧";
+  if (role === "last_frame") return "尾帧";
+  return "参考图";
+}
+
+async function generateImage(
+  ctx: ToolContext,
+  args: GenerateImageArgs & Partial<EditImageArgs>,
+  isEdit: boolean,
+): Promise<ToolOutcome> {
   const resolution = resolveAlias(ctx.aliases, args.modelHint, "image", ctx.defaultAliases.image);
   if (!resolution) return failResult("还没有可用的生图渠道，请先到「渠道配置」添加", "NO_IMAGE_CHANNEL");
   const channel = ctx.db.getChannel(resolution.channelId);
   if (!channel) return failResult("解析到的生图渠道不存在", "CHANNEL_NOT_FOUND");
 
+  if (!isEdit && args.fromScratch === true && args.imageRefs?.length) {
+    return failResult("fromScratch 表示完全不参考任何图，不能同时指定 imageRefs；二选一", "INVALID_ARGS");
+  }
+
   const uploads: ReferenceImageUpload[] = [];
   const notes: string[] = [];
-  const canvas = canvasImages(ctx.db, ctx.conversation);
 
-  if (isEdit && !canvas.length) {
-    // edit_image 强制带上当前画布（§8），没有画布就没得改
-    return failResult("现在没有当前画布，没法改图。请先用 generate_image 画一张，或让用户上传参考图", "NO_CANVAS");
-  }
   /**
-   * 画布整组当参考图：它是用户**显式选出来**的，优先级最高。
+   * 用哪几张图：显式 `imageRefs` → 本条消息附带的图 → 画布只有一张。
    *
-   * 今天 edit_image 会发 画布(1) + extraReferences(最多 8) = 9 张，而落库时
-   * `persistInputImages` 的上限是 8，整个任务会以 REFERENCE_IMAGE_LIMIT 直接失败——
-   * 所以这里把**总张数**封顶，而不是各自封顶。画布优先，超出的 extra 记进 notes 说出来。
+   * 画布多于一张又没指定时**不再默认整组/主图**：那正是「改一张却动了两张」
+   * 和「用户附了图却改了主图」的来源。让它失败并提示先 view_images / ask，
+   * 多花一轮大脑调用，但不会花错一次生成的钱。
    */
-  const references: AssetRow[] = [];
-  // 改图必须带画布（上面已经拦过空画布）；生图默认也带，除非大脑明说 fromScratch
-  if (isEdit) references.push(...canvas);
-  else if (args.fromScratch !== true) references.push(...canvas);
+  const selected = selectedImageAssets(ctx.db, ctx.conversation, args.imageRefs, ctx.turnAttachmentIds);
+  if (isEdit && selected.error) return failResult(selected.error, "IMAGE_SELECTION_INVALID");
+  if (!isEdit && args.fromScratch !== true && selected.error) {
+    return failResult(selected.error, "IMAGE_SELECTION_INVALID");
+  }
 
-  const extraRefs = isEdit ? (args as EditImageArgs).extraReferences ?? [] : [];
+  const references: AssetRow[] = [];
+  if (isEdit) references.push(...selected.assets);
+  else if (args.fromScratch !== true) references.push(...selected.assets);
+  if (isEdit && !references.length) {
+    return failResult("现在没有可改的图。请先用 generate_image 画一张，或让用户上传/指定一张图", "NO_CANVAS");
+  }
+  // 显式选中的图必须全部可用：少一张就是在改另一组图
+  const requiredCount = references.length;
+
+  const extraRefs = isEdit ? args.extraReferences ?? [] : [];
   for (const ref of extraRefs.slice(0, MAX_EXTRA_REFERENCES)) {
     const found = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
-    if (!found) { notes.push(`参考图 ${ref} 找不到，已跳过`); continue; }
+    if (!found) { notes.push(`额外参考图 ${ref} 找不到，已跳过`); continue; }
     if (!found.asset.mimeType.startsWith("image/")) { notes.push(`${ref} 不是图片，已跳过`); continue; }
-    // 去重要在限额**之前**判：大脑把画布上那张又写进 extraReferences 是常有的事，
-    // 那种情况它已经在组里了，不该报一句「超过 8 张」把用户引到错的地方
+    // 去重要在限额**之前**判：大脑把已经选中的那张又写进 extraReferences 是常有的事
     if (references.some((item) => item.id === found.asset.id)) continue;
     if (references.length >= MAX_REFERENCE_IMAGES) {
       notes.push(`参考图已满 ${MAX_REFERENCE_IMAGES} 张，${ref} 已跳过`);
@@ -448,9 +709,16 @@ async function generateImage(ctx: ToolContext, args: GenerateImageArgs, isEdit: 
     references.push(found.asset);
   }
 
-  for (const reference of references) {
+  for (const [index, reference] of references.entries()) {
     const prepared = await prepareImageBytes(ctx.db, reference, REFERENCE_PROFILE);
-    if (!prepared) { notes.push(`${assetRef(reference.id)} 读取失败，已跳过`); continue; }
+    if (!prepared) {
+      // 选中/画布里的图坏了就硬失败；额外参考图坏了可以跳过，它本来只是补充
+      if (index < requiredCount) {
+        return failResult(`${assetRef(reference.id)} 读取失败，没法按你选的这组图生成；可以换一张或重新上传`, "REFERENCE_IMAGE_MISSING");
+      }
+      notes.push(`额外参考图 ${assetRef(reference.id)} 读取失败，已跳过`);
+      continue;
+    }
     uploads.push({ bytes: prepared.bytes, mimeType: prepared.mimeType, fileName: prepared.fileName });
   }
 
@@ -641,7 +909,11 @@ export async function runAgentTool(
 
   switch (name) {
     case "generate_image": return generateImage(ctx, parsed.data as GenerateImageArgs, false);
-    case "edit_image": return generateImage(ctx, parsed.data as GenerateImageArgs, true);
+    case "edit_image": return generateImage(ctx, parsed.data as GenerateImageArgs & EditImageArgs, true);
+    case "view_images":
+      // 正常路径由 Agent 主循环直接处理（它得把缩略图塞进下一轮大脑上下文）。
+      // 走到这里只可能是大脑把 view_images 放进了 calls 批量。
+      return failResult("view_images 必须单独调用，不能放进 calls 批量里", "VIEW_IMAGES_BATCHED");
     case "set_canvas": return setCanvas(ctx, parsed.data as SetCanvasArgs);
     case "optimize_prompt": return optimizePrompt(ctx, parsed.data as OptimizePromptArgs);
     case "generate_video": return generateVideo(ctx, parsed.data as GenerateVideoArgs);

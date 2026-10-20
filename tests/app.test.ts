@@ -552,6 +552,194 @@ describe("generation API", () => {
   });
 });
 
+describe("local inpainting masks", () => {
+  type TestApp = ReturnType<typeof createApp>["app"];
+
+  async function startMock() {
+    let receivedBody = "";
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/v1/images/edits" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        req.on("end", () => {
+          receivedBody = Buffer.concat(chunks).toString("latin1");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    return { origin: `http://127.0.0.1:${address.port}`, body: () => receivedBody };
+  }
+
+  async function startMaskRejectingMock() {
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/v1/images/edits" && req.method === "POST") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "mask is not supported by upstream; omit it" } }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mockServer.close(() => resolve())));
+    const address = mockServer.address();
+    if (!address || typeof address === "string") throw new Error("Mock server did not start");
+    return `http://127.0.0.1:${address.port}`;
+  }
+
+  async function createChannel(app: TestApp, origin: string, adapterType = "openai-images") {
+    const gemini = adapterType === "gemini-content";
+    const response = await request(app).post("/api/channels").send({
+      name: `Mask ${adapterType}`, baseUrl: origin, adapterType, authType: "none",
+      authHeaderName: "", secretEnv: "",
+      endpoint: gemini ? "/v1beta/models/{model}:generateContent" : "/v1/images/generations",
+      models: [gemini ? "gemini-image" : "mock-image"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    return response.body.data.id as string;
+  }
+
+  async function waitForTask(app: TestApp, task: Task): Promise<Task> {
+    let current = task;
+    for (let index = 0; index < 40 && current.status !== "succeeded" && current.status !== "failed"; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      current = (await request(app).get(`/api/generations/${current.id}`).expect(200)).body.data;
+    }
+    return current;
+  }
+
+  async function setup() {
+    const mock = await startMock();
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-mask-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const channelId = await createChannel(app, mock.origin);
+    return { mock, dataDir, app, context, channelId, pngBytes: Buffer.from(pngBase64, "base64") };
+  }
+
+  it("submits, persists, retries and deletes a mask together with its source image", async () => {
+    const { mock, dataDir, app, context, channelId, pngBytes } = await setup();
+    const createResponse = await request(app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId, model: "mock-image", prompt: "只替换天空" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("mask", pngBytes, "source-mask.png")
+      .expect(202);
+    const taskId = createResponse.body.data.id as string;
+    const task = await waitForTask(app, createResponse.body.data);
+    expect(task.status).toBe("succeeded");
+
+    expect(mock.body()).toContain('name="image"; filename="source.png"');
+    expect(mock.body()).toContain('name="mask"; filename="source-mask.png"');
+    expect(mock.body()).toMatch(/name="mask"; filename="source-mask.png"\r\nContent-Type: image\/png/);
+
+    const storedInput = context.db.getTaskRow(taskId)?.inputJson ?? "";
+    expect(storedInput).not.toContain(pngBase64);
+    const parsed = JSON.parse(storedInput);
+    expect(parsed.maskImage).toMatchObject({ fileName: "source-mask.png", mimeType: "image/png", byteSize: 68 });
+    expect(parsed.maskImage.relativePath).toContain("-mask.png");
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(2);
+
+    const diagnostics = (await request(app).get(`/api/generations/${taskId}/diagnostics`).expect(200)).body.data;
+    expect(diagnostics[0].request.body.mask).toMatchObject({ fileName: "source-mask.png", mimeType: "image/png", byteSize: 68 });
+    // 只看请求：response 里本来就有上游返回的成品图，它和测试用的 1x1 图字节相同
+    expect(JSON.stringify(diagnostics[0].request)).not.toContain(pngBase64);
+
+    const retryResponse = await request(app).post(`/api/generations/${taskId}/retry`).expect(202);
+    const retryTask = await waitForTask(app, retryResponse.body.data);
+    expect(retryTask.status).toBe("succeeded");
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(4);
+
+    await request(app).delete(`/api/generations/${taskId}`).expect(200);
+    await request(app).delete(`/api/generations/${retryTask.id}`).expect(200);
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(0);
+  });
+
+  it("rejects a mask without exactly one reference image and leaves no files behind", async () => {
+    const { dataDir, app, channelId, pngBytes } = await setup();
+    const payload = JSON.stringify({ channelId, model: "mock-image", prompt: "局部重绘" });
+
+    const noReference = await request(app).post("/api/generations")
+      .field("payload", payload)
+      .attach("mask", pngBytes, "source-mask.png")
+      .expect(400);
+    expect(noReference.body.error.code).toBe("MASK_REQUIRES_REFERENCE_IMAGE");
+
+    const twoReferences = await request(app).post("/api/generations")
+      .field("payload", payload)
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("referenceImages", pngBytes, "source-2.png")
+      .attach("mask", pngBytes, "source-mask.png")
+      .expect(400);
+    expect(twoReferences.body.error.code).toBe("MASK_REFERENCE_COUNT");
+
+    // 校验发生在落盘之前：不该留下任何参考图或蒙版文件
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(0);
+  });
+
+  it("rejects masks on non-image-edit adapters and non-PNG uploads", async () => {
+    const { mock, app, channelId, pngBytes } = await setup();
+    const geminiDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-mask-adapter-test-"));
+    const geminiApp = createApp({ dataDir: geminiDir });
+    cleanups.push(() => { geminiApp.context.db.close(); return fs.rm(geminiDir, { recursive: true, force: true }); });
+    const geminiChannelId = await createChannel(geminiApp.app, mock.origin, "gemini-content");
+
+    const unsupported = await request(geminiApp.app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId: geminiChannelId, model: "gemini-image", prompt: "局部重绘" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("mask", pngBytes, "source-mask.png")
+      .expect(400);
+    expect(unsupported.body.error.code).toBe("MASK_UNSUPPORTED_ADAPTER");
+
+    const notPng = await request(app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId, model: "mock-image", prompt: "局部重绘" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("mask", pngBytes, { filename: "source-mask.jpg", contentType: "image/jpeg" })
+      .expect(400);
+    expect(notPng.body.error.code).toBe("MASK_INVALID");
+  });
+
+  it("accepts a mask through the JSON payload as base64", async () => {
+    const { dataDir, app, channelId } = await setup();
+    const response = await request(app).post("/api/generations").send({
+      channelId, model: "mock-image", prompt: "JSON 局部重绘",
+      referenceImages: [{ base64: pngBase64, mimeType: "image/png", fileName: "source.png" }],
+      maskImage: { base64: pngBase64, mimeType: "image/png", fileName: "mask.png" },
+    }).expect(202);
+    const task = await waitForTask(app, response.body.data);
+    expect(task.status).toBe("succeeded");
+    expect(await fs.readdir(path.join(dataDir, "inputs"))).toHaveLength(2);
+  });
+
+  it("translates an upstream mask rejection into an actionable message", async () => {
+    const origin = await startMaskRejectingMock();
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-mask-reject-test-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const channelId = await createChannel(app, origin);
+    const pngBytes = Buffer.from(pngBase64, "base64");
+
+    const created = await request(app).post("/api/generations")
+      .field("payload", JSON.stringify({ channelId, model: "mock-image", prompt: "局部重绘" }))
+      .attach("referenceImages", pngBytes, "source.png")
+      .attach("mask", pngBytes, "source-mask.png")
+      .expect(202);
+    const failed = await waitForTask(app, created.body.data);
+    expect(failed.status).toBe("failed");
+    // 不做模型能力缓存：换渠道/换模型仍可继续尝试，只把错误翻成用户看得懂的话
+    expect(failed.errorCode).toBe("REMOTE_REQUEST_FAILED");
+    expect(failed.errorMessage).toContain("不支持局部重绘");
+    expect(failed.errorMessage).toContain("换用其他模型或去掉蒙版");
+  });
+});
+
 describe("history cleanup, custom asset directory and restart recovery", () => {
   async function startMock(handler: http.RequestListener) {
     const server = http.createServer(handler);

@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { DEFAULT_IMAGE_SIZE, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isVideoAdapter as isVideoAdapterType, normalizeImageSize } from "../shared/types.js";
-import type { GenerationInput, ReferenceImageInput, Task } from "../shared/types.js";
+import { DEFAULT_IMAGE_SIZE, MAX_MASK_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isVideoAdapter as isVideoAdapterType, normalizeImageSize } from "../shared/types.js";
+import type { GenerationInput, MaskImageInput, ReferenceImageInput, Task } from "../shared/types.js";
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
   RemoteApiError,
@@ -82,14 +82,29 @@ interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
   byteSize: number;
 }
 
-interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage" | "referenceImages"> {
+interface StoredMaskImage {
+  fileName: string;
+  mimeType: "image/png";
+  relativePath: string;
+  byteSize: number;
+}
+
+interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage" | "referenceImages" | "maskImage"> {
   referenceImage?: StoredReferenceImage;
   referenceImages?: StoredReferenceImage[];
+  maskImage?: StoredMaskImage;
 }
 
 export interface ReferenceImageUpload {
   bytes: Buffer;
   mimeType: ReferenceImageInput["mimeType"];
+  fileName: string;
+}
+
+/** 局部重绘蒙版的上传形态：和参考图一样按字节进、按相对路径落盘 */
+export interface MaskImageUpload {
+  bytes: Buffer;
+  mimeType: "image/png";
   fileName: string;
 }
 
@@ -185,7 +200,7 @@ export class TaskRunner {
     });
   }
 
-  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = []): Promise<Task> {
+  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
@@ -207,7 +222,30 @@ export class TaskRunner {
     const sources = uploads.length ? uploads : referenceInputs(input).map((image) => ({
       bytes: Buffer.from(image.base64, "base64"), mimeType: image.mimeType, fileName: image.fileName,
     }));
-    const storedInput = await this.persistInputImages(id, input, sources);
+    /**
+     * 蒙版可以来自 multipart 上传，也可以来自重试时 hydrate 回 base64 的 `input.maskImage`。
+     * 校验放在落盘之前：非法蒙版不该留下已经写好的参考图文件。
+     */
+    const maskSource: MaskImageUpload | undefined = maskUpload ?? (input.maskImage ? {
+      bytes: Buffer.from(input.maskImage.base64, "base64"),
+      mimeType: "image/png",
+      fileName: input.maskImage.fileName,
+    } : undefined);
+    if (maskSource) {
+      if (channel.adapterType !== "openai-images") {
+        throw new AppError("MASK_UNSUPPORTED_ADAPTER", "局部重绘只支持 OpenAI Images 协议的渠道（gpt / gpt-c 生图）", 400);
+      }
+      if (!sources.length) {
+        throw new AppError("MASK_REQUIRES_REFERENCE_IMAGE", "局部重绘需要先添加 1 张参考图作为底图", 400);
+      }
+      if (sources.length !== 1) {
+        throw new AppError("MASK_REFERENCE_COUNT", `局部重绘只支持 1 张参考图（当前 ${sources.length} 张）`, 400);
+      }
+      if (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png")) {
+        throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 4 MB（透明区域表示要重绘的部分）", 400);
+      }
+    }
+    const storedInput = await this.persistInputImages(id, input, sources, maskSource);
     this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput });
     queueMicrotask(() => void this.run(id));
     return this.db.getTaskView(id)!;
@@ -248,10 +286,18 @@ export class TaskRunner {
 
       throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片或视频", 502);
     } catch (error) {
-      const current = this.db.getTaskRow(taskId);
-      if (current?.status !== "cancelled") {
-        const normalized = normalizeError(error);
-        this.updateTask(taskId, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
+      /**
+       * 收尾写库本身也可能失败：应用退出或测试清理会先关数据库，而任务还在飞。
+       * 这时没有可写的任务记录，静默结束即可，不能让一个已经失败的任务再抛一次未捕获异常。
+       */
+      try {
+        const current = this.db.getTaskRow(taskId);
+        if (current && current.status !== "cancelled") {
+          const normalized = normalizeError(error);
+          this.updateTask(taskId, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
+        }
+      } catch {
+        // 数据库已关闭，任务记录不再可写
       }
     } finally {
       this.running.delete(taskId);
@@ -584,8 +630,15 @@ export class TaskRunner {
     if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的图片", 502);
   }
 
-  private async persistInputImages(taskId: string, input: GenerationInput, sources: ReferenceImageUpload[]): Promise<StoredGenerationInput> {
-    if (!sources.length) return { ...input, referenceImage: undefined, referenceImages: undefined };
+  private async persistInputImages(
+    taskId: string,
+    input: GenerationInput,
+    sources: ReferenceImageUpload[],
+    maskSource?: MaskImageUpload,
+  ): Promise<StoredGenerationInput> {
+    if (!sources.length && !maskSource) {
+      return { ...input, referenceImage: undefined, referenceImages: undefined, maskImage: undefined };
+    }
     // 上限取常量而不是写死 8：画布（最多 MAX_CANVAS_IMAGES 张）整组都会走到这里，
     // 两处写死两个 8 的话，改一处就会出现「前端让选 12 张、这里按 8 张拒收」
     if (sources.length > MAX_REFERENCE_IMAGES) {
@@ -599,6 +652,10 @@ export class TaskRunner {
         throw new AppError("REFERENCE_IMAGE_INVALID", "参考图格式与文件内容不匹配", 400);
       }
     }
+    // 蒙版也要在写第一张参考图之前验完，否则一张坏蒙版会留下孤儿参考图文件
+    if (maskSource && (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png"))) {
+      throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 4 MB（透明区域表示要重绘的部分）", 400);
+    }
     const storedImages: StoredReferenceImage[] = [];
     for (const [index, source] of sources.entries()) {
       const extension = extensionForMime(source.mimeType);
@@ -608,12 +665,29 @@ export class TaskRunner {
       await fs.writeFile(path.join(this.db.inputsDir, relativePath), source.bytes);
       storedImages.push({ fileName: `${stem}.${extension}`, mimeType: source.mimeType, relativePath, byteSize: source.bytes.length });
     }
-    return { ...input, referenceImage: undefined, referenceImages: storedImages };
+    let storedMask: StoredMaskImage | undefined;
+    if (maskSource) {
+      // 固定用 taskId-mask.png，和参考图的 taskId-1.png 不会撞名
+      const relativePath = safeFileName(`${taskId}-mask.png`);
+      await fs.writeFile(path.join(this.db.inputsDir, relativePath), maskSource.bytes);
+      const originalName = safeFileName(maskSource.fileName) || "mask.png";
+      storedMask = {
+        fileName: originalName.toLowerCase().endsWith(".png") ? originalName : `${originalName}.png`,
+        mimeType: "image/png",
+        relativePath,
+        byteSize: maskSource.bytes.length,
+      };
+    }
+    return {
+      ...input,
+      referenceImage: undefined,
+      referenceImages: storedImages.length ? storedImages : undefined,
+      maskImage: storedMask,
+    };
   }
 
   private async hydrateInputImages(input: StoredGenerationInput): Promise<GenerationInput> {
     const storedImages = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
-    if (!storedImages.length) return { ...input, referenceImage: undefined, referenceImages: undefined };
     const hydratedImages: ReferenceImageInput[] = [];
     for (const image of storedImages) {
       const absolutePath = path.resolve(this.db.inputsDir, image.relativePath);
@@ -631,7 +705,29 @@ export class TaskRunner {
       }
       hydratedImages.push({ base64: bytes.toString("base64"), mimeType: image.mimeType, fileName: image.fileName });
     }
-    return { ...input, referenceImage: undefined, referenceImages: hydratedImages };
+    let hydratedMask: MaskImageInput | undefined;
+    if (input.maskImage) {
+      const absolutePath = path.resolve(this.db.inputsDir, input.maskImage.relativePath);
+      if (!absolutePath.startsWith(path.resolve(this.db.inputsDir) + path.sep)) {
+        throw new AppError("MASK_INVALID", "蒙版路径无效", 400);
+      }
+      let bytes: Buffer;
+      try {
+        bytes = await fs.readFile(absolutePath);
+      } catch {
+        throw new AppError("MASK_IMAGE_MISSING", "蒙版文件不存在，请重新绘制", 400);
+      }
+      if (!bytes.length || bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(bytes, "image/png")) {
+        throw new AppError("MASK_INVALID", "蒙版文件无效或超过 4 MB，请重新绘制", 400);
+      }
+      hydratedMask = { base64: bytes.toString("base64"), mimeType: "image/png", fileName: input.maskImage.fileName };
+    }
+    return {
+      ...input,
+      referenceImage: undefined,
+      referenceImages: hydratedImages.length ? hydratedImages : undefined,
+      maskImage: hydratedMask,
+    };
   }
 
   /**

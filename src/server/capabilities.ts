@@ -307,5 +307,11 @@ export function markVisionUnsupported(
 /** 判断一次大脑报错是不是「这个模型不吃图」，据此决定要不要拉黑视觉 */
 export function looksLikeVisionRejection(status: number | undefined, message: string) {
   if (status !== 400 && status !== 404 && status !== 422) return false;
+  // 数量/体积/请求体超限不是「模型不吃图」，只是这次发多了。
+  // 把它当成 vision-unsupported 会永久拉黑一个明明能看图的模型——
+  // view_images 一次可以附 8 张，这类报错会变得常见。
+  if (/too\s*many|maximum|at\s*most|limit|too\s*large|payload|request\s+entity|size|最多|张数|数量|过大|超出|尺寸/i.test(message)) {
+    return false;
+  }
   return /image|vision|multimodal|content.*type|图片|视觉|不支持/i.test(message);
 }

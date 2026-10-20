@@ -73,12 +73,17 @@ export const api = {
   }),
   deleteChannel: (id: string) => request<{ deleted: true }>(`/api/channels/${id}`, { method: "DELETE" }),
   testChannel: (id: string) => request<{ reachable: boolean; httpStatus: number; durationMs?: number; message?: string }>(`/api/channels/${id}/test`, { method: "POST" }),
-  generate: (input: GenerationInput, referenceFiles: File[] = []) => {
-    if (!referenceFiles.length) return request<Task>("/api/generations", { method: "POST", body: JSON.stringify(input) });
+  /**
+   * `maskFile` 是局部重绘蒙版（PNG）。有蒙版时必须走 multipart，哪怕参考图数组为空——
+   * 服务端会明确拒绝「只有蒙版没有底图」，但不该在这之前把蒙版悄悄丢掉。
+   */
+  generate: (input: GenerationInput, referenceFiles: File[] = [], maskFile?: File | null) => {
+    if (!referenceFiles.length && !maskFile) return request<Task>("/api/generations", { method: "POST", body: JSON.stringify(input) });
     const formData = new FormData();
-    const payload = { ...input, referenceImages: undefined, referenceImage: undefined };
+    const payload = { ...input, referenceImages: undefined, referenceImage: undefined, maskImage: undefined };
     formData.append("payload", JSON.stringify(payload));
     referenceFiles.forEach((file) => formData.append("referenceImages", file, file.name));
+    if (maskFile) formData.append("mask", maskFile, maskFile.name);
     return request<Task>("/api/generations", { method: "POST", body: formData });
   },
   task: (id: string) => request<Task>(`/api/generations/${id}`),
@@ -132,6 +137,15 @@ export const api = {
     manifest: string;
     aliases: Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string; channelId: string }>;
   }>("/api/agent/capabilities"),
+  /** 工作台的提示词润色：调用对话模型，只返回改写后的文本 */
+  optimizePrompt: (prompt: string, target: "image" | "video") => request<{
+    prompt: string;
+    channelName: string;
+    model: string;
+  }>("/api/prompt/optimize", {
+    method: "POST",
+    body: JSON.stringify({ prompt, target }),
+  }),
   conversations: () => request<Array<ConversationSummary & { running: boolean }>>("/api/conversations"),
   conversation: (id: string) => request<ConversationView & { running: boolean }>(`/api/conversations/${id}`),
   createConversation: (input: ConversationInput = {}) => request<ConversationView>("/api/conversations", {

@@ -35,6 +35,7 @@ export type MessageStatus = "ok" | "pending" | "error";
 export const AGENT_TOOL_NAMES = [
   "generate_image",
   "edit_image",
+  "view_images",
   "set_canvas",
   "optimize_prompt",
   "generate_video",
@@ -51,6 +52,7 @@ export const GENERATION_TOOLS: AgentToolName[] = ["generate_image", "edit_image"
 export const agentToolLabels: Record<AgentToolName, string> = {
   generate_image: "生成图片",
   edit_image: "修改图片",
+  view_images: "查看图片",
   set_canvas: "切换画布",
   optimize_prompt: "优化提示词",
   generate_video: "生成视频",
@@ -137,16 +139,37 @@ export interface GenerateImageArgs {
   count?: number;
   /** true 表示不带参考图，纯粹重画 */
   fromScratch?: boolean;
+  /**
+   * 这次要用的参考图（画布/会话里的产物引用）。
+   *
+   * 不给时按「本条消息附带的图 → 画布只有一张就用它」兜底；
+   * 画布多于一张又没指定时会直接失败，让大脑先 `view_images` 或 `ask`，
+   * 而不是再默默把主图/整组画布塞进去。
+   */
+  imageRefs?: string[];
 }
 
 export interface EditImageArgs {
   prompt: string;
   modelHint?: string;
+  /**
+   * 要改的那几张图（`#abcd` 形式的产物引用，按顺序）。
+   *
+   * **只改这里指定的图**；不填时用本条消息附带的图，再退到「画布只有一张」。
+   * 画布多于一张又没指定时会失败并提示先 `view_images` / `ask`。
+   */
+  imageRefs?: string[];
   /** 额外的参考图，用 #abcd 形式的产物引用；上限 8，和 MAX_REFERENCE_IMAGES 对齐 */
   extraReferences?: string[];
   /** 改图同样能指定输出尺寸与宽高比——改完的画面未必沿用原图的形状 */
   aspectRatio?: string;
   imageSize?: string;
+}
+
+/** 看画布/会话里图片的缩略图。不生成、不花钱，由 Agent 主循环直接处理 */
+export interface ViewImagesArgs {
+  /** 看哪几张；不填 = 整组当前画布 */
+  assetRefs?: string[];
 }
 
 export interface SetCanvasArgs {
@@ -173,7 +196,16 @@ export interface GenerateVideoArgs {
   resolution?: string;
   audio?: boolean;
   promptExtend?: boolean;
-  /** 首帧来源，默认 current（当前画布） */
+  /**
+   * 这次进视频的图（`#abcd` 形式，按顺序）：
+   * first-frame 只要 1 张；first-last-frame 正好 2 张（首帧、尾帧）；
+   * reference 1~N 张。不填时用本条消息附带的图，再退到「画布只有一张」。
+   */
+  imageRefs?: string[];
+  /**
+   * 老参数：`none` = 纯文生视频；`current` = 用当前画布。
+   * 新计划应当直接用 `imageRefs` 说清用哪张，别把「当前画布」当成默认目标。
+   */
   imageFrom?: "current" | "none";
 }
 
@@ -254,6 +286,15 @@ export function readCanvasAssetIds(data: Record<string, unknown> | undefined): s
   return raw.filter((id): id is string => typeof id === "string");
 }
 
+/** 视频里一张图扮演的角色。和万相 `VideoMediaType` / Seedance `role` 对齐 */
+export type ConversationVideoRole = "first_frame" | "last_frame" | "reference_image";
+
+/** 确认卡上要展示的「哪几张图、各自什么角色」 */
+export interface ConfirmVideoInput {
+  assetId: string;
+  role: ConversationVideoRole;
+}
+
 /**
  * 待确认计划的信息（§13.5 确认卡片）。
  *
@@ -282,13 +323,20 @@ export interface ConfirmPreview {
   resolution?: string;
   audio?: boolean;
   promptExtend?: boolean;
-  /** 首帧引用的产物 id —— 画布**主图**那一张，前端据此显示缩略图 */
+  /**
+   * 这次真正进视频的图，按顺序、带角色。
+   *
+   * 新卡片优先渲染这份：用户要一眼看出「哪几张图、谁是首帧、谁是尾帧、谁是参考图」。
+   * 不写这个字段时，前端回退到下面那份老的单图字段。
+   */
+  videoInputs?: ConfirmVideoInput[];
+  /**
+   * @deprecated 老卡片的首帧引用。新卡片请用 `videoInputs`。
+   * 保留它是为了让升级前已经待确认的卡片照常显示、照常能确认。
+   */
   referenceAssetId?: string;
   /**
-   * 画布上一共几张（>1 时才写）。
-   *
-   * 视频只会用到主图一张，但用户看到「用当前画布当首帧」时会以为整组都进去了——
-   * 写出总数，卡片才能把「其余几张不发给视频模型」说清楚。
+   * @deprecated 老卡片里「画布上一共几张」。新卡片请用 `videoInputs`。
    */
   referenceCount?: number;
   /**

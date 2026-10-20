@@ -23,6 +23,34 @@ export interface VideoCapability {
 
 export type VideoAdapter = "grok-video" | "wan-video" | "seedance-video";
 
+/**
+ * 对话里能真正执行的视频模式。
+ *
+ * `video-edit` / `video-extend` / `file-to-video` 需要视频或文件素材，
+ * 对话工具目前拿不到这些，所以不列进来——列了只会让大脑规划出跑不通的一轮。
+ */
+export type ConversationVideoMode = "text-to-video" | "first-frame" | "first-last-frame" | "reference";
+
+export const VIDEO_MODE_LABELS: Record<ConversationVideoMode, string> = {
+  "text-to-video": "文生视频",
+  "first-frame": "首帧生视频",
+  "first-last-frame": "首尾帧生视频",
+  reference: "参考生视频",
+};
+
+/** 每个适配器真正支持的模式。Grok 只有文生/图生（参考图） */
+export const VIDEO_MODES_BY_ADAPTER: Record<VideoAdapter, ConversationVideoMode[]> = {
+  "grok-video": ["text-to-video", "reference"],
+  "wan-video": ["text-to-video", "first-frame", "first-last-frame", "reference"],
+  "seedance-video": ["text-to-video", "first-frame", "first-last-frame", "reference"],
+};
+
+/** Grok 那边的「图生视频」不叫参考生视频，卡片上说人话 */
+export function videoModeLabel(mode: ConversationVideoMode, adapterType?: string) {
+  if (adapterType === "grok-video" && mode === "reference") return "图生视频";
+  return VIDEO_MODE_LABELS[mode];
+}
+
 /** 各家视频接口的能力差异集中在这里，UI 按此渲染 */
 export const VIDEO_CAPABILITIES: Record<VideoAdapter, VideoCapability> = {
   "grok-video": {

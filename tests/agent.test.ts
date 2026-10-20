@@ -17,6 +17,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   canvasAfterProducing, mergeConfirmArgs, parsePlan, repairPlan, salvagePlan, shouldConfirm,
+  withConfirmedVideoSelection,
 } from "../src/server/agent";
 import { DEFAULT_CONVERSATION_TITLE } from "../src/shared/agent-types";
 import { TOOL_SCHEMAS } from "../src/server/agent-tools";
@@ -209,7 +210,7 @@ describe("alias layer", () => {
 
 describe("shouldConfirm", () => {
   it("only ever gates video", () => {
-    for (const tool of ["generate_image", "edit_image", "optimize_prompt", "set_canvas", "ask", "reply"] as const) {
+    for (const tool of ["generate_image", "edit_image", "view_images", "optimize_prompt", "set_canvas", "ask", "reply"] as const) {
       for (const policy of ["always", "auto_only", "never"] as const) {
         expect(shouldConfirm(tool, true, policy)).toBe(false);
       }
@@ -257,6 +258,38 @@ describe("mergeConfirmArgs", () => {
     expect(mergeConfirmArgs("generate_image", { prompt: "a" }, { duration: 9 })).toEqual({ prompt: "a" });
     expect(mergeConfirmArgs(null, stored, { duration: 9 })).toEqual(stored);
     expect(mergeConfirmArgs("generate_video", stored, undefined)).toEqual(stored);
+  });
+});
+
+describe("withConfirmedVideoSelection", () => {
+  it("新卡片按 videoInputs 把选中的图和模式写回参数", () => {
+    const args = withConfirmedVideoSelection({ prompt: "x" }, {
+      reason: "video_policy", prompt: "x", model: "m", channelName: "", mode: "first-last-frame",
+      videoInputs: [
+        { assetId: "a", role: "first_frame" },
+        { assetId: "b", role: "last_frame" },
+      ],
+      message: "",
+    });
+    expect(args.imageRefs).toEqual(["a", "b"]);
+    expect(args.mode).toBe("first-last-frame");
+  });
+
+  it("升级前的老卡片按当时显示的 referenceAssetId 补成首帧；Grok 改成 reference", () => {
+    const legacy = {
+      reason: "video_policy" as const, prompt: "x", model: "m", channelName: "",
+      referenceAssetId: "old", message: "",
+    };
+    expect(withConfirmedVideoSelection({ prompt: "x" }, legacy).imageRefs).toEqual(["old"]);
+    expect(withConfirmedVideoSelection({ prompt: "x" }, { ...legacy, adapterType: "grok-video" }).mode).toBe("reference");
+  });
+
+  it("已经写了 imageRefs 的不再覆盖", () => {
+    const args = { prompt: "x", imageRefs: ["explicit"] };
+    expect(withConfirmedVideoSelection(args, {
+      reason: "video_policy", prompt: "x", model: "m", channelName: "",
+      referenceAssetId: "old", message: "",
+    })).toEqual(args);
   });
 });
 

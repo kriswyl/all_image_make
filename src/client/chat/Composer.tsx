@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
 import { api } from "../api";
 import { useFileDrop } from "../useFileDrop";
+import { useImagePaste } from "../useImagePaste";
 
 /**
  * 待发附件。两种来源：
@@ -102,6 +103,8 @@ export function Composer({
   }
 
   const { active, dropProps } = useFileDrop(!blocked, addFiles);
+  // Ctrl+V 和拖拽/选文件走同一条路：先挂成待发附件，点发送才真的上传
+  useImagePaste((files) => addFiles(files), !blocked);
 
   function submit() {
     const value = text.trim();
@@ -169,7 +172,7 @@ export function Composer({
           <button
             type="button"
             className={`composer-attach ${pending.length ? "is-on" : ""}`}
-            title="传一张图进来（也可以直接把图拖到这个框里）"
+            title="传一张图进来（也可以直接把图拖进来或 Ctrl+V 粘贴）"
             disabled={blocked}
             onClick={() => fileRef.current?.click()}
           >

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle, CheckCircle2, ChevronRight, Clapperboard, Download, Eye, Film, ImagePlus, KeyRound,
   Link as LinkIcon, LoaderCircle, Plus, RotateCcw, Settings2, SlidersHorizontal, Square, Upload, X,
@@ -7,7 +7,9 @@ import { api } from "./api";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
+import { PromptPolishButton } from "./PromptPolishButton";
 import { useFileDrop } from "./useFileDrop";
+import { useImagePaste } from "./useImagePaste";
 import type {
   Asset, Channel, SeedanceMediaInput, SeedanceMediaRole, SeedanceVideoMode,
   Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
@@ -220,6 +222,14 @@ export function VideoGenerateView(props: {
     ? (modeSpec?.imageRepeatable ? caps?.maxReferenceImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
     : caps?.maxReferenceImages ?? 0;
   const drop = useFileDrop(maxReferenceImages > 0 && !submitting && referenceImages.length < maxReferenceImages, references.dropFiles);
+  const pasteImages = useCallback((files: File[]) => {
+    if (submitting || readingImage || maxReferenceImages <= 0) return;
+    const room = maxReferenceImages - referenceImages.length;
+    if (room <= 0) { props.onToast("error", `最多 ${maxReferenceImages} 张图片`); return; }
+    if (files.length > room) { props.onToast("error", `最多 ${maxReferenceImages} 张图片，还可添加 ${room} 张`); return; }
+    references.dropFiles(files);
+  }, [submitting, readingImage, maxReferenceImages, referenceImages.length, references, props.onToast]);
+  useImagePaste(pasteImages, !submitting && !readingImage && maxReferenceImages > 0);
 
   // 切换渠道时把参数收敛到该适配器支持的取值
   useEffect(() => {
@@ -449,7 +459,10 @@ export function VideoGenerateView(props: {
 
               <div className="section-title">
                 <div><Film size={17} /><h2>提示词</h2></div>
-                <span>{prompt.length} / 20000</span>
+                <div className="prompt-heading-tools">
+                  <PromptPolishButton prompt={prompt} target="video" onPolished={setPrompt} onToast={props.onToast} disabled={submitting} />
+                  <span>{prompt.length} / 20000</span>
+                </div>
               </div>
               <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="描述画面主体、动作、镜头运动与风格…" />
 
@@ -464,7 +477,7 @@ export function VideoGenerateView(props: {
                     <label className="reference-add-tile" title="添加图片">
                       <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple={maxReferenceImages > 1} onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= maxReferenceImages} />
                       <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                      <span className="reference-file"><strong>{drop.active ? "松开即可添加" : readingImage ? "读取中" : "添加图片"}</strong><small>点击选择，或把图片拖到这里 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                      <span className="reference-file"><strong>{drop.active ? "松开即可添加" : readingImage ? "读取中" : "添加图片"}</strong><small>点击选择、拖入或 Ctrl+V 粘贴 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
                       <Upload size={17} />
                     </label>
                     {referenceImages.map((item, index) => {

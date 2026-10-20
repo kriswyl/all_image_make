@@ -151,6 +151,19 @@ export interface ReferenceImageInput {
 }
 
 /**
+ * 局部重绘蒙版。只接受 PNG：透明像素 = 需要重新生成的区域，不透明像素 = 保留原图。
+ *
+ * 不复用 `ReferenceImageInput`：那个类型允许 JPEG / WebP，会把「蒙版必须是 PNG」
+ * 这条上游硬约束悄悄放宽，等到中转站报错时用户已经花了一次请求。
+ */
+export interface MaskImageInput {
+  base64: string;
+  mimeType: "image/png";
+  fileName: string;
+}
+
+
+/**
  * gemini-content 这类站点的 `imageConfig.imageSize` 取值（大小写敏感）。
  *
  * 放在 shared 里是因为三处要用同一份：设置页的校验、`TaskRunner.create()` 补默认值、
@@ -170,6 +183,11 @@ export const DEFAULT_IMAGE_SIZE: ImageSizeValue = "2K";
  */
 export const MAX_REFERENCE_IMAGES = 8;
 export const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+/**
+ * 局部重绘蒙版的上限，来自 OpenAI Images edit 的官方约束：
+ * 必须是 PNG、小于 4 MB、并且和底图同尺寸。
+ */
+export const MAX_MASK_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**
  * 画布最多放几张图。**和 `MAX_REFERENCE_IMAGES` 相等不是巧合，是同一笔账**：
@@ -198,6 +216,8 @@ export interface GenerationInput {
   referenceImages?: ReferenceImageInput[];
   /** @deprecated Kept for retrying tasks created before multi-image support. */
   referenceImage?: ReferenceImageInput;
+  /** 局部重绘蒙版；必须搭配恰好 1 张参考图，且仅 openai-images 适配器支持 */
+  maskImage?: MaskImageInput;
   negativePrompt?: string;
   size?: string;
   aspectRatio?: string;

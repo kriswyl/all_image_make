@@ -1,6 +1,6 @@
 # ChatCanvas（语布）
 
-当前发布版本为 `2.2.1`。完整打包步骤、版本更新、自动更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)，各版本改动见 [`CHANGELOG.md`](CHANGELOG.md)。
+当前发布版本为 `2.2.2`。完整打包步骤、版本更新、自动更新和发布文件说明见 [`PACKAGING.md`](PACKAGING.md)，各版本改动见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 一个面向**图片 / 视频生成中转 API** 的本地客户端，附带 Tauri 桌面版。前端负责渠道配置、参数输入、结果与历史查看；后端统一处理鉴权、协议适配、异步轮询、素材落盘与脱敏诊断。
 
@@ -151,7 +151,7 @@ npm run tauri:build:exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/chatcanvas-v2.2.1-portable-win-x64.zip`。
+输出位于 `artifacts/chatcanvas-v2.2.2-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成产物默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。生成产物（图片和视频）的目录可以在历史页改成任意位置，改完只影响之后生成的文件。
 

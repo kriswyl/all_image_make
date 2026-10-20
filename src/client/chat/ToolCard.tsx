@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Film, Image as ImageIcon, Layers, LoaderCircle, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -20,6 +20,7 @@ import type { Asset } from "../../shared/types";
 const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_image: ImageIcon,
   edit_image: Sparkles,
+  view_images: Eye,
   set_canvas: Layers,
   optimize_prompt: Wand2,
   generate_video: Film,
@@ -61,6 +62,7 @@ export function ToolCard({
   stale = false,
   assets = [],
   onPreview,
+  onDiagnostics,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
@@ -70,6 +72,8 @@ export function ToolCard({
   /** 本会话的全部素材（图 + 视频），用来把 assetId 还原成 mimeType 和缩略图 */
   assets?: CanvasAsset[];
   onPreview?: (assetId: string) => void;
+  /** 打开应用内诊断弹窗；Tauri webview 会拦掉 window.open，所以不能再走新窗口 */
+  onDiagnostics?: (taskId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const tool = message.toolName ?? "reply";
@@ -162,7 +166,10 @@ export function ToolCard({
                 <button
                   type="button"
                   className="link-btn"
-                  onClick={() => { window.open(api.assetUrl(`/api/generations/${result.taskId}/diagnostics`), "_blank"); }}
+                  onClick={() => {
+                    if (onDiagnostics) onDiagnostics(result.taskId!);
+                    else window.open(api.assetUrl(`/api/generations/${result.taskId}/diagnostics`), "_blank");
+                  }}
                 >
                   诊断
                 </button>

@@ -50,6 +50,28 @@ export const REFERENCE_PROFILE: EncodeProfile = { maxEdge: 2048, maxBytes: MAX_R
 /** 视频首帧：必须挤进内容长度限制，1280 对绝大多数视频模型已经够用 */
 export const VIDEO_FRAME_PROFILE: EncodeProfile = { maxEdge: 1280, maxBytes: MAX_INLINE_FRAME_BYTES, quality: 90 };
 
+/**
+ * 多张图一起进视频请求体时的预算。
+ *
+ * `MAX_INLINE_MEDIA_CHARS` 是**所有** data URI 合计的上限（tasks.ts，约 1.4M 字符），
+ * 而每张图 base64 后还会膨胀约 4/3。首尾帧 / 参考生视频一次要发 2~8 张，
+ * 沿用单帧的 900KB 预算会在第二张就撞线，上游只回一个含糊的 502。
+ *
+ * 这里按张数把总预算均分，并在图多时主动缩画幅；宁可每张糊一点，
+ * 也不能让整个任务在提交前就失败。
+ */
+export function videoInlineProfile(count: number): EncodeProfile {
+  const n = Math.max(1, count);
+  if (n === 1) return VIDEO_FRAME_PROFILE;
+  // 留 20% 余量给 JSON 结构、prompt 和其它字段；1.34 是 base64 的膨胀系数
+  const perImage = Math.floor((1_400_000 * 0.8) / n / 1.34);
+  return {
+    maxEdge: n >= 5 ? 768 : n >= 3 ? 960 : 1100,
+    maxBytes: Math.max(48 * 1024, perImage),
+    quality: 88,
+  };
+}
+
 function extensionFor(mimeType: string) {
   if (mimeType.includes("jpeg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";

@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LoaderCircle, Minus, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
+  ImagePlus, KeyRound, LoaderCircle, Minus, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
   Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, isTauriRuntime } from "./api";
 import { BrandMark } from "./BrandMark";
+import { copyImageToClipboard } from "./clipboard";
 import { APP_VERSION } from "../shared/app-config";
 import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
@@ -15,11 +16,14 @@ import { ChatView } from "./ChatView";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
+import { MaskEditorDialog } from "./MaskEditorDialog";
 import { ParamChips } from "./ParamChips";
+import { PromptPolishButton } from "./PromptPolishButton";
 import { useFileDrop } from "./useFileDrop";
+import { useImagePaste } from "./useImagePaste";
 import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
-import { WelcomeView } from "./WelcomeView";
+import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, isVideoTask } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 
@@ -173,6 +177,66 @@ function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => v
   return { images, reading, select, dropFiles, remove, clear, addFromAsset };
 }
 
+export interface InpaintMaskState {
+  file: File;
+  /** 「原图 + 红色涂抹」缩略图，由本 hook 负责 revoke */
+  previewUrl: string;
+  /** 蒙版绑定的参考图预览地址；底图一换，蒙版就作废 */
+  sourcePreviewUrl: string;
+}
+
+export interface InpaintMaskController {
+  mask: InpaintMaskState | null;
+  apply: (file: File, previewUrl: string) => void;
+  clear: () => void;
+}
+
+/**
+ * 局部重绘蒙版的状态。
+ *
+ * 和参考图一样放在 App 层，切换视图不会丢；但它的生命周期比参考图更短：
+ * 只认「当前这张底图」。删除 / 替换参考图、加第二张、或者换成不支持的渠道，
+ * `sourcePreviewUrl` 都会变，这里自动把蒙版清掉，避免把旧蒙版发给新底图。
+ */
+function useInpaintMask(sourcePreviewUrl: string | null): InpaintMaskController {
+  const [mask, setMask] = useState<InpaintMaskState | null>(null);
+  const latestMask = useRef<InpaintMaskState | null>(null);
+  latestMask.current = mask;
+
+  const clear = useCallback(() => {
+    setMask((current) => {
+      if (current) URL.revokeObjectURL(current.previewUrl);
+      return null;
+    });
+  }, []);
+
+  const apply = useCallback((file: File, previewUrl: string) => {
+    if (!sourcePreviewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      return;
+    }
+    setMask((current) => {
+      if (current) URL.revokeObjectURL(current.previewUrl);
+      return { file, previewUrl, sourcePreviewUrl };
+    });
+  }, [sourcePreviewUrl]);
+
+  useEffect(() => {
+    setMask((current) => {
+      if (!current) return null;
+      if (sourcePreviewUrl && current.sourcePreviewUrl === sourcePreviewUrl) return current;
+      URL.revokeObjectURL(current.previewUrl);
+      return null;
+    });
+  }, [sourcePreviewUrl]);
+
+  useEffect(() => () => {
+    if (latestMask.current) URL.revokeObjectURL(latestMask.current.previewUrl);
+  }, []);
+
+  return { mask, apply, clear };
+}
+
 export function App() {
   const [view, setView] = useState<View>("generate");
   /**
@@ -196,7 +260,28 @@ export function App() {
   const [historySeenAt, setHistorySeenAt] = usePersistentState("historySeenAt", "");
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
   const [wizardOpen, setWizardOpen] = useState(false);
+  /**
+   * 沉浸式引导的开关。
+   *
+   * 不在渲染时直接用 `!channels.length` 推导：用户配完最后一个渠道时，channels 会
+   * 立刻变成非空；如果 overlay 跟着卸载，「欢迎来到 AI 宇宙」的收尾动画就看不到了。
+   * 首次启动由下面的 effect 打开一次，之后只由用户/引导自己关闭。
+   */
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
+  /**
+   * 对话里的「诊断」也走应用内弹窗。
+   *
+   * 以前 ToolCard 用 `window.open` 直接打 API 的 JSON 地址；Tauri webview 默认
+   * 不允许新窗口，点下去什么都不会发生——用户看到的就是「诊断点不开」。
+   * 任务不在当前历史列表里时再补一次 GET，弹窗仍能正常显示。
+   */
+  async function openDiagnostics(taskId: string) {
+    const known = tasks.find((task) => task.id === taskId);
+    if (known) { setDiagnosticTask(known); return; }
+    try { setDiagnosticTask(await api.task(taskId)); }
+    catch (error) { showToast("error", error instanceof Error ? error.message : "读取诊断失败"); }
+  }
   // 三个入口共用同一个确认弹窗，靠 mode 区分真正要删的范围：
   // task=单条、selection=历史页勾选的若干条、scope=按图片/视频/全部清空
   const [clearRequest, setClearRequest] = useState<
@@ -292,6 +377,7 @@ export function App() {
 
   function dismissWelcome() {
     setWelcomeDismissed(true);
+    setOnboardingOpen(false);
     try { window.localStorage.setItem("yida.welcome-dismissed", "1"); } catch { /* 存不下也只是下次再显示一遍 */ }
   }
 
@@ -306,8 +392,22 @@ export function App() {
   }
 
 
-  /** 一个渠道都没有、用户也还没说「先自己看看」——这时候主区留给新用户向导 */
-  const showWelcome = !channels.length && !welcomeDismissed;
+  /**
+   * 首次启动：一个渠道都没有、用户也还没跳过——自动拉开沉浸式引导。
+   *
+   * 只在「首次加载完成」或用户从渠道页主动打开时触发。配完渠道后 channels 变非空，
+   * 不会重新打开；overlay 自己负责收尾动画。
+   */
+  useEffect(() => {
+    if (loading) return;
+    if (!channels.length && !welcomeDismissed) setOnboardingOpen(true);
+  }, [loading, channels.length, welcomeDismissed]);
+
+  /** 关闭引导：如果这次是首次启动且最终没配任何渠道，顺手记下「先自己看看」 */
+  function closeOnboarding() {
+    setOnboardingOpen(false);
+    if (!channels.length) dismissWelcome();
+  }
 
   // 对话渠道只是 Agent 的大脑，不出图也不出视频，所以生图 / 视频工作台都要排除它
   const imageChannels = channels.filter((channel) => isImageAdapter(channel.adapterType));
@@ -320,6 +420,15 @@ export function App() {
   const historyUnread = latestTaskActivity > historySeenAt;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
   const references = useReferenceImages(showToast);
+  /**
+   * 局部重绘只对 openai-images（gpt / gpt-c）且恰好一张参考图生效。
+   * 底图一变（删除、替换、加第二张、换渠道），`maskSourceUrl` 就变，旧蒙版自动作废。
+   */
+  const generateChannel = imageChannels.find((channel) => channel.id === selectedChannelId);
+  const maskSourceUrl = generateChannel?.adapterType === "openai-images" && references.images.length === 1
+    ? references.images[0].previewUrl
+    : null;
+  const inpaint = useInpaintMask(maskSourceUrl);
 
   useEffect(() => {
     void api.bootstrap()
@@ -409,6 +518,8 @@ export function App() {
       }
       return;
     }
+    // 对话渠道只是大脑，不能塞进生图工作台的渠道选择框
+    if (!isImageAdapter(channel.adapterType)) return;
     if (!selectedChannelId || selectedChannelId === channel.id) {
       setSelectedChannelId(channel.id);
       setSelectedModel(channel.models[0] ?? "");
@@ -666,8 +777,7 @@ export function App() {
           </button>
         ) : null}
         {loading ? <LoadingScreen /> : null}
-        {!loading && showWelcome ? <WelcomeView onStart={() => setWizardOpen(true)} onSkip={dismissWelcome} /> : null}
-        {!loading && !showWelcome && view === "generate" ? (
+        {!loading && view === "generate" ? (
           <GenerateView
             channels={imageChannels}
             selectedChannelId={selectedChannelId}
@@ -675,6 +785,7 @@ export function App() {
             activeTask={activeTask}
             tasks={imageTasks}
             references={references}
+            inpaint={inpaint}
             onChannelChange={selectChannel}
             onModelChange={setSelectedModel}
             onAddChannel={() => setWizardOpen(true)}
@@ -688,7 +799,7 @@ export function App() {
             onDiagnostics={setDiagnosticTask}
           />
         ) : null}
-        {!loading && !showWelcome && view === "chat" ? (
+        {!loading && view === "chat" ? (
           <ChatView
             channels={channels}
             sidebarHost={sidebarRecentEl}
@@ -696,13 +807,21 @@ export function App() {
             newChatSignal={newChatSignal}
             onNewChatHandled={() => setNewChatSignal(0)}
             onConfigureChannel={setEditorChannel}
+            onDiagnostics={openDiagnostics}
             onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)}
           />
         ) : null}
-        {!loading && !showWelcome && view === "channels" ? (
-          <ChannelsView channels={channels} onAdd={() => setWizardOpen(true)} onEdit={setEditorChannel} onDelete={deleteChannel} onToast={showToast} />
+        {!loading && view === "channels" ? (
+          <ChannelsView
+            channels={channels}
+            onAdd={() => setWizardOpen(true)}
+            onQuickSetup={() => setOnboardingOpen(true)}
+            onEdit={setEditorChannel}
+            onDelete={deleteChannel}
+            onToast={showToast}
+          />
         ) : null}
-        {!loading && !showWelcome && view === "video" ? (
+        {!loading && view === "video" ? (
           <VideoGenerateView
             channels={videoChannels}
             selectedChannelId={videoChannelId}
@@ -723,7 +842,7 @@ export function App() {
             onDiagnostics={setDiagnosticTask}
           />
         ) : null}
-        {!loading && !showWelcome && view === "history" ? (
+        {!loading && view === "history" ? (
           <HistoryView
             channels={channels}
             tasks={tasks}
@@ -747,6 +866,16 @@ export function App() {
           onRemoved={handleWizardRemoved}
           onCustom={() => { setWizardOpen(false); setEditorChannel(null); }}
           onToast={showToast}
+        />
+      ) : null}
+      {onboardingOpen ? (
+        <ImmersiveOnboarding
+          channels={channels}
+          onSaved={handleWizardSaved}
+          onToast={showToast}
+          onClose={closeOnboarding}
+          onOpenTemplates={() => { setOnboardingOpen(false); setWizardOpen(true); }}
+          onOpenCustom={() => { setOnboardingOpen(false); setEditorChannel(null); }}
         />
       ) : null}
       {editorChannel !== undefined ? (
@@ -794,6 +923,7 @@ function NavButton({ active, icon, label, unread = false, onClick }: {
 
 function GenerateView(props: {
   channels: Channel[]; selectedChannelId: string; selectedModel: string; activeTask: Task | null; tasks: Task[]; references: ReferenceController;
+  inpaint: InpaintMaskController;
   onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void; onConfigureChannel: (channel: Channel) => void;
   onTask: (task: Task) => void; onSelectTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
 }) {
@@ -820,6 +950,7 @@ function GenerateView(props: {
   const [count, setCount] = usePersistentState("count", 1);
   const [raw, setRaw] = usePersistentState("raw", "{}");
   const [submitting, setSubmitting] = useState(false);
+  const [maskEditorOpen, setMaskEditorOpen] = useState(false);
   const references = props.references;
   const referenceImages = references.images;
   const readingImage = references.reading;
@@ -827,9 +958,21 @@ function GenerateView(props: {
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const showAspectRatio = adapterType === "gemini-content";
+  /**
+   * 局部重绘：OpenAI Images 渠道 + 恰好一张底图。
+   * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
+   * 所以这里不按模型名预先禁用它。
+   */
+  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1;
+  useEffect(() => { if (!maskAvailable) setMaskEditorOpen(false); }, [maskAvailable]);
   const drop = useFileDrop(!submitting && referenceImages.length < MAX_REFERENCE_IMAGES, references.dropFiles);
   const dropActive = drop.active;
   const dropProps = drop.dropProps;
+  const pasteImages = useCallback((files: File[]) => {
+    if (submitting || readingImage) return;
+    references.dropFiles(files);
+  }, [submitting, readingImage, references]);
+  useImagePaste(pasteImages, !submitting && !readingImage && !maskEditorOpen);
 
   async function generate() {
     if (!channel) return props.onToast("error", "请先添加渠道");
@@ -873,7 +1016,7 @@ function GenerateView(props: {
         seed: adapterType === "gemini-content" ? optionalNumber(seed) : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, referenceImages.map((item) => item.file));
+      }, referenceImages.map((item) => item.file), maskAvailable ? props.inpaint.mask?.file : undefined);
       props.onTask(task);
       props.onToast("success", "任务已提交");
     } catch (error) { props.onToast("error", error instanceof Error ? error.message : "提交失败"); }
@@ -921,7 +1064,13 @@ function GenerateView(props: {
           <section className="control-panel">
             <div className="control-scroll">
               {/* 基础参数：常驻可见 */}
-              <div className="section-title"><div><Sparkles size={17} /><h2>提示词</h2></div><span>{prompt.length} / 20000</span></div>
+              <div className="section-title">
+                <div><Sparkles size={17} /><h2>提示词</h2></div>
+                <div className="prompt-heading-tools">
+                  <PromptPolishButton prompt={prompt} target="image" onPolished={setPrompt} onToast={props.onToast} disabled={submitting} />
+                  <span>{prompt.length} / 20000</span>
+                </div>
+              </div>
               <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="输入画面内容、构图、风格与光线…" />
               <div className="reference-block">
                 <div className="reference-heading">
@@ -933,7 +1082,7 @@ function GenerateView(props: {
                   <label className="reference-add-tile" title="添加参考图">
                     <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= MAX_REFERENCE_IMAGES} />
                     <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                    <span className="reference-file"><strong>{dropActive ? "松开即可添加" : readingImage ? "读取中" : "添加参考图"}</strong><small>点击选择，或把图片拖到这里 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                    <span className="reference-file"><strong>{dropActive ? "松开即可添加" : readingImage ? "读取中" : "添加参考图"}</strong><small>点击选择、拖入或 Ctrl+V 粘贴 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
                     <Upload size={17} />
                   </label>
                   {referenceImages.map((item, index) => <div className="reference-thumb" key={item.previewUrl}>
@@ -942,6 +1091,42 @@ function GenerateView(props: {
                     <span>{item.file.name}</span>
                   </div>)}
                 </div>
+                {adapterType === "openai-images" ? (
+                  <div className="inpaint-row">
+                    {maskAvailable && props.inpaint.mask ? (
+                      <>
+                        <img className="inpaint-mask-thumb" src={props.inpaint.mask.previewUrl} alt="局部重绘蒙版预览" />
+                        <div className="inpaint-copy">
+                          <strong>局部重绘已启用</strong>
+                          <small>红色区域会重新生成；引导式编辑，蒙版外可能仍有变化</small>
+                        </div>
+                        <button type="button" className="secondary-button" onClick={() => setMaskEditorOpen(true)} disabled={submitting || readingImage}>
+                          <Paintbrush size={15} />编辑蒙版
+                        </button>
+                        <button type="button" className="icon-button compact" title="移除蒙版" onClick={props.inpaint.clear} disabled={submitting}>
+                          <X size={15} />
+                        </button>
+                      </>
+                    ) : maskAvailable ? (
+                      <>
+                        <div className="inpaint-copy">
+                          <strong>局部重绘</strong>
+                          <small>在参考图上涂抹需要重新生成的区域</small>
+                        </div>
+                        <button type="button" className="secondary-button" onClick={() => setMaskEditorOpen(true)} disabled={submitting || readingImage}>
+                          <Paintbrush size={15} />绘制蒙版
+                        </button>
+                      </>
+                    ) : (
+                      <div className="inpaint-hint">
+                        <Paintbrush size={15} />
+                        <span>{referenceImages.length === 0
+                          ? "添加 1 张参考图后可使用局部重绘"
+                          : "局部重绘只支持 1 张参考图，请先移除多余的参考图"}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
               <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>基础参数</h2></div></div>
               <div className="parameter-grid">
@@ -1030,6 +1215,18 @@ function GenerateView(props: {
           <ResultPanel task={props.activeTask} tasks={props.tasks} references={references} onDiagnostics={props.onDiagnostics} onTask={props.onTask} onSelectTask={props.onSelectTask} onToast={props.onToast} />
         </div>
       )}
+      {maskEditorOpen && maskAvailable && referenceImages[0] ? (
+        <MaskEditorDialog
+          sourceUrl={referenceImages[0].previewUrl}
+          sourceName={referenceImages[0].file.name}
+          initialMask={props.inpaint.mask?.file ?? null}
+          onClose={() => setMaskEditorOpen(false)}
+          onApply={({ file, previewUrl }) => {
+            props.inpaint.apply(file, previewUrl);
+            setMaskEditorOpen(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1042,6 +1239,12 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [copying, setCopying] = useState(false);
+  /**
+   * 预取当前结果图的字节。Ctrl+C 是用户手势，剪贴板写入要尽量在激活期内完成；
+   * 等一次 fetch 再 write 有被浏览器判定「不是用户操作」的风险，所以先缓存。
+   */
+  const activeAssetBlob = useRef<{ id: string; blob: Blob } | null>(null);
   // 最近生成：取有图片的成功任务，供缩略图快速切换
   const recentTasks = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
@@ -1052,6 +1255,58 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [previewAsset]);
+
+  useEffect(() => {
+    if (!activeAsset || !activeAsset.mimeType.startsWith("image/")) {
+      activeAssetBlob.current = null;
+      return;
+    }
+    let cancelled = false;
+    const assetId = activeAsset.id;
+    void fetch(api.assetUrl(activeAsset.url))
+      .then((response) => response.ok ? response.blob() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((blob) => { if (!cancelled) activeAssetBlob.current = { id: assetId, blob }; })
+      .catch(() => { /* 复制时再兜底取一次 */ });
+    return () => { cancelled = true; };
+  }, [activeAsset?.id, activeAsset?.url]);
+
+  /**
+   * 把当前结果图复制进系统剪贴板。
+   * Ctrl/Cmd+C 只在没有输入框焦点、也没有选中文字时接管，避免和正常复制冲突。
+   */
+  const copyActiveImage = useCallback(async () => {
+    if (!activeAsset || !activeAsset.mimeType.startsWith("image/") || copying) return;
+    setCopying(true);
+    try {
+      const cached = activeAssetBlob.current?.id === activeAsset.id ? activeAssetBlob.current.blob : null;
+      const blob = cached ?? await (async () => {
+        const response = await fetch(api.assetUrl(activeAsset.url));
+        if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`);
+        return response.blob();
+      })();
+      await copyImageToClipboard(blob);
+      onToast("success", "图片已复制到剪贴板");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "复制图片失败");
+    } finally {
+      setCopying(false);
+    }
+  }, [activeAsset, copying, onToast]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "c" || event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (window.getSelection()?.toString()) return;
+      if (!activeAsset || !activeAsset.mimeType.startsWith("image/")) return;
+      event.preventDefault();
+      void copyActiveImage();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeAsset, copyActiveImage]);
+
   async function cancel() {
     if (!task) return;
     try { onTask(await api.cancel(task.id)); } catch (error) { onToast("error", error instanceof Error ? error.message : "取消失败"); }
@@ -1102,6 +1357,9 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
         <div className="result-actions">
           <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
             {downloadingAssetId === activeAsset.id ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载
+          </button>
+          <button type="button" className="secondary-button" disabled={copying} onClick={() => void copyActiveImage()} title="复制图片（Ctrl+C）">
+            {copying ? <LoaderCircle className="spin" size={16} /> : <Copy size={16} />}复制
           </button>
           <button type="button" className="secondary-button" onClick={retry}><RotateCcw size={16} />重生成</button>
           <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(activeAsset)}><Wand2 size={16} />用作参考图</button>

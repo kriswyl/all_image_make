@@ -10,11 +10,12 @@ import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import { AppDatabase, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
-import { AppError, TaskRunner, extensionForMime, matchesImageSignature, normalizeError, type ReferenceImageUpload } from "./tasks.js";
+import { AppError, TaskRunner, extensionForMime, matchesImageSignature, normalizeError, type MaskImageUpload, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, displayFileName, redact, safeFileName } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
 import { AgentService } from "./agent.js";
 import { buildCapabilityAliases, buildCapabilityManifest } from "./capabilities.js";
+import { optimizePromptForWorkbench } from "./prompt-optimizer.js";
 import { readThumbBytes, writeThumbnail } from "./vision.js";
 import {
   VIDEO_CONFIRM_POLICIES, assetRef, DEFAULT_CONVERSATION_TITLE,
@@ -30,10 +31,18 @@ const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
 const MAX_MEDIA_URL_CHARS = 28_000_000;
 const referenceUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES, files: MAX_REFERENCE_IMAGES, fields: 1 },
-  fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
-    ? callback(null, true)
-    : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 参考图", 400)),
+  // 8 张参考图 + 1 张局部重绘蒙版；payload 仍是唯一一个文本字段
+  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES, files: MAX_REFERENCE_IMAGES + 1, fields: 1 },
+  fileFilter: (_req, file, callback) => {
+    if (file.fieldname === "mask") {
+      return file.mimetype === "image/png"
+        ? callback(null, true)
+        : callback(new AppError("MASK_INVALID", "蒙版必须是 PNG 图片（透明区域表示要重绘的部分）", 400));
+    }
+    return referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
+      ? callback(null, true)
+      : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 参考图", 400));
+  },
 });
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -117,6 +126,11 @@ const messageCreateSchema = z.object({
   assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
 });
 
+const promptOptimizeSchema = z.object({
+  prompt: z.string().trim().min(1).max(20000),
+  target: z.enum(["image", "video"]),
+});
+
 const confirmSchema = z.object({
   messageId: z.string().uuid(),
   decision: z.enum(["approve", "reject"]),
@@ -138,6 +152,15 @@ const generationSchema = z.object({
     mimeType: z.enum(referenceImageMimeTypes),
     fileName: z.string().trim().min(1).max(200),
   })).max(MAX_REFERENCE_IMAGES).optional(),
+  /**
+   * 局部重绘蒙版（JSON 入口）。文件上传走 multipart 的 `mask` 字段；
+   * 这里留着是为了 zod 不把 JSON 调用方的蒙版静默剥掉。mimeType 只认 PNG。
+   */
+  maskImage: z.object({
+    base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    mimeType: z.literal("image/png"),
+    fileName: z.string().trim().min(1).max(200),
+  }).optional(),
   negativePrompt: z.string().max(10000).optional(),
   size: z.string().max(60).optional(),
   aspectRatio: z.string().max(20).optional(),
@@ -334,8 +357,13 @@ export function createApp(options: { dataDir?: string } = {}) {
     }
   }));
 
-  app.post("/api/generations", referenceUpload.array("referenceImages", MAX_REFERENCE_IMAGES), asyncHandler(async (req, res) => {
-      const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+  app.post("/api/generations", referenceUpload.fields([
+    { name: "referenceImages", maxCount: MAX_REFERENCE_IMAGES },
+    { name: "mask", maxCount: 1 },
+  ]), asyncHandler(async (req, res) => {
+      const files = Array.isArray(req.files) || !req.files ? {} : req.files as Record<string, Express.Multer.File[]>;
+      const uploadedFiles = files.referenceImages ?? [];
+      const maskFiles = files.mask ?? [];
       let body = req.body;
       if (typeof req.body.payload === "string") {
         try { body = JSON.parse(req.body.payload); }
@@ -346,11 +374,17 @@ export function createApp(options: { dataDir?: string } = {}) {
         mimeType: file.mimetype as ReferenceImageUpload["mimeType"],
         fileName: file.originalname,
       }));
+      const maskUpload: MaskImageUpload | undefined = maskFiles[0] ? {
+        bytes: maskFiles[0].buffer,
+        mimeType: "image/png",
+        fileName: maskFiles[0].originalname,
+      } : undefined;
       const input = generationSchema.parse({
         ...body,
         ...(uploadedImages.length ? { referenceImages: undefined, referenceImage: undefined } : {}),
+        ...(maskUpload ? { maskImage: undefined } : {}),
       }) as GenerationInput;
-      const task = await runner.create(input, uploadedImages);
+      const task = await runner.create(input, uploadedImages, maskUpload);
       res.status(202).json(ok(task));
   }));
 
@@ -436,6 +470,12 @@ export function createApp(options: { dataDir?: string } = {}) {
       })),
     }));
   });
+
+  /** 生图 / 生视频工作台的「润色」：挑一个可用对话渠道改写提示词，不生成图片 */
+  app.post("/api/prompt/optimize", asyncHandler(async (req, res) => {
+    const input = promptOptimizeSchema.parse(req.body ?? {});
+    res.json(ok(await optimizePromptForWorkbench(db, sessionKeys, input)));
+  }));
 
   app.get("/api/conversations", (_req, res) => {
     res.json(ok(db.listConversations().map((conversation) => {
@@ -677,8 +717,18 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const requestId = crypto.randomUUID();
     if (error instanceof multer.MulterError) {
-      const message = error.code === "LIMIT_FILE_SIZE" ? "单张参考图不能超过 10 MB" : "参考图最多上传 8 张";
-      return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
+      // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
+      if (error.code === "LIMIT_FILE_SIZE") {
+        const message = error.field === "mask" ? "蒙版不能超过 4 MB" : "单张参考图不能超过 10 MB";
+        return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
+      }
+      if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {
+        return res.status(400).json(fail("INVALID_MASK", "蒙版最多上传 1 张", requestId));
+      }
+      if (error.code === "LIMIT_FILE_COUNT") {
+        return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", "上传的图片数量超出限制", requestId));
+      }
+      return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`, requestId));
     }
     if (error instanceof z.ZodError) {
       return res.status(400).json(fail("INVALID_INPUT", "输入数据无效", requestId, error.issues));

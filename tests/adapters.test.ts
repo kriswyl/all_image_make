@@ -28,6 +28,11 @@ const referenceImage = {
   fileName: "source.png",
 };
 const referenceImage2 = { ...referenceImage, fileName: "source-2.png" };
+const maskImage = {
+  base64: referenceImage.base64,
+  mimeType: "image/png" as const,
+  fileName: "source-mask.png",
+};
 
 describe("adapter request building", () => {
   it("maps common image parameters and preserves raw parameters", () => {
@@ -60,6 +65,67 @@ describe("adapter request building", () => {
     const diagnostic = requestForDiagnostic(request);
     expect(diagnostic.body).toMatchObject({ "image[]": [{ fileName: "source.png" }, { fileName: "source-2.png" }] });
     expect(JSON.stringify(diagnostic)).not.toContain(referenceImage.base64);
+  });
+
+  it("appends a PNG mask part for OpenAI image edits and summarizes it", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "replace the sky",
+      referenceImages: [referenceImage], maskImage,
+    }, "secret");
+    expect(request.url).toBe("https://relay.example.com/v1/images/edits");
+    expect(request.formData?.getAll("image")).toHaveLength(1);
+    const masks = request.formData?.getAll("mask") ?? [];
+    expect(masks).toHaveLength(1);
+    const mask = masks[0] as File;
+    expect(mask.type).toBe("image/png");
+    expect(mask.name).toBe("source-mask.png");
+
+    const diagnostic = requestForDiagnostic(request);
+    expect(diagnostic.body).toMatchObject({
+      mask: { fileName: "source-mask.png", mimeType: "image/png", byteSize: 68 },
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(maskImage.base64);
+  });
+
+  it("appends a keep-outside-unchanged instruction when a mask is present", () => {
+    // mask 是引导式编辑，明确写一次「只改蒙版区域」能减少整图重画
+    const masked = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "replace the sky",
+      referenceImages: [referenceImage], maskImage,
+    }, "secret");
+    expect(masked.formData?.get("prompt")).toBe("replace the sky\n\n只修改蒙版标记的区域；蒙版以外的画面保持完全不变。用户对颜色、材质或物体的描述只作用于蒙版区域内的对象，不要应用到蒙版外的相似物体上；不要重新绘制整张图。");
+
+    const plain = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "replace the sky",
+      referenceImages: [referenceImage],
+    }, "secret");
+    expect(plain.formData?.get("prompt")).toBe("replace the sky");
+  });
+
+  it("lets an explicit mask win over rawParameters.mask without dropping other raw fields", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "replace the sky",
+      referenceImages: [referenceImage], maskImage,
+      rawParameters: { mask: "legacy-string-mask", quality: "high" },
+    }, "secret");
+    const masks = request.formData?.getAll("mask") ?? [];
+    expect(masks).toHaveLength(1);
+    expect(masks[0]).not.toBe("legacy-string-mask");
+    expect((masks[0] as File).type).toBe("image/png");
+    expect(request.formData?.get("quality")).toBe("high");
+  });
+
+  it("keeps legacy raw mask fields working and redacts them in diagnostics", () => {
+    const request = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "replace the sky",
+      referenceImages: [referenceImage],
+      rawParameters: { mask: referenceImage.base64 },
+    }, "secret");
+    const masks = request.formData?.getAll("mask") ?? [];
+    expect(masks).toHaveLength(1);
+    expect(masks[0]).toBe(referenceImage.base64);
+    expect((requestForDiagnostic(request).body as Record<string, unknown>).mask).toBe("[IMAGE_DATA 68 bytes]");
+    expect(JSON.stringify(requestForDiagnostic(request))).not.toContain(referenceImage.base64);
   });
 
   it("redacts raw image fields in multipart diagnostics", () => {

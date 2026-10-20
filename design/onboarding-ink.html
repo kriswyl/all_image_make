@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ChatCanvas 水墨引导预览</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    color: #242724;
+    background: #ffffff;
+    font-family: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  .serif { font-family: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif; }
+
+  .scene {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #ffffff;
+  }
+
+  /* 纸纹与墨晕 */
+  .grain {
+    display: none;
+    position: absolute; inset: 0; pointer-events: none; opacity: .5;
+    background-image:
+      radial-gradient(rgba(55, 52, 44, .16) .55px, transparent .6px),
+      repeating-linear-gradient(0deg, rgba(90, 80, 60, .035) 0 1px, transparent 1px 4px);
+    background-size: 5px 5px, auto;
+    mix-blend-mode: multiply;
+    mask-image: linear-gradient(180deg, transparent, #000 12%, #000 88%, transparent);
+  }
+  .wash { display: none; position: absolute; border-radius: 48% 52% 60% 40% / 55% 45% 55% 45%; filter: blur(46px); pointer-events: none; }
+  .wash.a { top: -12%; left: -8%; width: 52vw; height: 48vw; background: rgba(96, 112, 104, .16); animation: wash 26s ease-in-out infinite alternate; }
+  .wash.b { right: -12%; bottom: -18%; width: 54vw; height: 50vw; background: rgba(118, 130, 134, .12); animation: wash 32s ease-in-out infinite alternate-reverse; }
+  .wash.c { top: 24%; right: 18%; width: 34vw; height: 32vw; background: rgba(86, 100, 108, .1); animation: wash 21s ease-in-out infinite alternate; animation-delay: -8s; }
+  @keyframes wash {
+    0% { transform: translate3d(-2%, -1%, 0) scale(1) rotate(-2deg); }
+    50% { transform: translate3d(3%, 2%, 0) scale(1.06) rotate(2deg); }
+    100% { transform: translate3d(-1%, 3%, 0) scale(.97) rotate(-1deg); }
+  }
+  .mountains { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; height: 38vh; pointer-events: none; opacity: .55; }
+  .brush-line { position: absolute; pointer-events: none; opacity: .18; }
+  .brush-line.one { top: 18%; left: 4%; width: 300px; transform: rotate(-7deg); }
+  .brush-line.two { right: 6%; bottom: 20%; width: 260px; transform: rotate(5deg); opacity: .12; }
+  .ink-dot { position: absolute; border-radius: 50%; background: #2b2f2b; pointer-events: none; opacity: .22; animation: ink-float 8s ease-in-out infinite; }
+  .ink-dot.d1 { top: 22%; left: 12%; width: 4px; height: 4px; animation-delay: -1s; }
+  .ink-dot.d2 { top: 68%; left: 8%; width: 2px; height: 2px; animation-delay: -4s; }
+  .ink-dot.d3 { top: 32%; right: 10%; width: 3px; height: 3px; animation-delay: -2.5s; }
+  .ink-dot.d4 { bottom: 22%; right: 22%; width: 2px; height: 2px; animation-delay: -6s; }
+  @keyframes ink-float { 0%, 100% { transform: translateY(0); opacity: .14; } 50% { transform: translateY(-12px); opacity: .3; } }
+
+  /* 页面容器 */
+  .page { position: absolute; inset: 0; display: none !important; }
+  .page.on { display: block !important; animation: pageIn .7s cubic-bezier(.2, .8, .2, 1) both; }
+  .page.on.welcome { display: flex !important; }
+  .page.on.intro { display: grid !important; }
+  @keyframes pageIn { from { opacity: 0; filter: blur(8px); transform: scale(.985); } to { opacity: 1; filter: none; transform: none; } }
+
+  /* 顶部品牌与进度 */
+  .top {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 8;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 24px 38px; pointer-events: none;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; color: #7c837e; font-size: 12px; }
+  .mark {
+    display: grid; width: 27px; height: 27px; place-items: center;
+    color: #f4f6f4; background: #242724; border-radius: 8px;
+    font-family: "Noto Serif SC", serif; font-size: 14px; font-weight: 700;
+  }
+  .brand em { color: #9aa09b; font-style: normal; font-size: 10px; letter-spacing: .16em; }
+  .progress { display: flex; align-items: center; gap: 6px; }
+  .progress i { width: 16px; height: 2px; background: rgba(36, 39, 36, .18); border-radius: 99px; }
+  .progress i.on { width: 28px; background: #242724; }
+
+  /* 欢迎页 */
+  .welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
+  .welcome .enso-bg { position: absolute; width: min(56vw, 640px); height: min(56vw, 640px); opacity: .55; pointer-events: none; }
+  .welcome .enso-bg svg { width: 100%; height: 100%; }
+  .welcome .kicker { color: #7c837e; font-size: 10px; font-weight: 700; letter-spacing: .32em; }
+  .welcome h1 { margin: 2px 0 0; font-family: "Noto Serif SC", "Songti SC", "STSong", serif; font-size: clamp(44px, 5.6vw, 76px); font-weight: 600; letter-spacing: -.02em; }
+  .welcome .slogan { margin: 0; color: #7c837e; font-family: "Noto Serif SC", serif; font-size: 14px; letter-spacing: .36em; }
+  .welcome .lede { margin: 4px 0 16px; color: #858b86; font-size: 12.5px; }
+  .welcome .vertical { position: absolute; right: 8%; top: 32%; writing-mode: vertical-rl; color: #858b86; font-family: "Noto Serif SC", serif; font-size: 13px; letter-spacing: .34em; }
+  .welcome .seal { position: absolute; right: 8.2%; top: 56%; }
+
+  /* 章节介绍页 */
+  .intro { display: grid; grid-template-columns: 1.02fr .98fr; }
+  .intro-art { position: relative; display: flex; align-items: center; justify-content: center; }
+  .enso { position: relative; width: min(42vw, 500px); height: min(42vw, 500px); }
+  .enso svg { width: 100%; height: 100%; overflow: visible; }
+  .enso .char {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: rgba(36, 39, 36, .14); font-family: "Noto Serif SC", serif;
+    font-size: clamp(90px, 10vw, 150px); font-weight: 600; pointer-events: none;
+  }
+  .enso .splash { position: absolute; border-radius: 50%; background: rgba(36, 39, 36, .1); filter: blur(2px); }
+  .enso .splash.s1 { width: 30px; height: 30px; left: 6%; bottom: 18%; }
+  .enso .splash.s2 { width: 14px; height: 14px; right: 8%; top: 12%; }
+  .enso .splash.s3 { width: 7px; height: 7px; right: 16%; bottom: 4%; }
+  .art-caption { position: absolute; left: 9%; bottom: 14%; color: #9aa09b; font-family: "Noto Serif SC", serif; font-size: 11px; letter-spacing: .3em; writing-mode: vertical-rl; }
+  .intro-copy { display: flex; flex-direction: column; justify-content: center; padding-right: 14%; }
+  .chapter { display: flex; align-items: center; gap: 12px; color: #7c837e; font-size: 10px; letter-spacing: .2em; }
+  .chapter span { font-family: "Noto Serif SC", serif; font-size: 12px; letter-spacing: .16em; }
+  .chapter i { width: 46px; height: 1px; background: rgba(36, 39, 36, .28); }
+  .chapter em { color: #9aa09b; font-style: normal; letter-spacing: .24em; font-size: 9px; }
+  .intro-copy h1 { margin: 18px 0 12px; font-family: "Noto Serif SC", "Songti SC", "STSong", serif; font-size: clamp(38px, 4.2vw, 56px); font-weight: 600; letter-spacing: -.02em; line-height: 1.15; }
+  .intro-copy .lede { margin: 0; color: #5f665f; font-family: "Noto Serif SC", serif; font-size: 16px; line-height: 2; letter-spacing: .04em; }
+  .intro-copy .meta { margin: 26px 0 30px; color: #858b86; font-size: 11.5px; line-height: 1.8; }
+  .intro-copy .meta b { color: #2b2f2b; font-weight: 600; }
+  .intro-copy .actions { display: flex; align-items: center; gap: 18px; }
+  .cta {
+    display: inline-flex; align-items: center; gap: 10px;
+    min-height: 44px; padding: 0 23px;
+    color: #f4f6f4; background: #242724;
+    border: 1px solid #242724; border-radius: 999px;
+    font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: .04em;
+    cursor: pointer;
+    transition: transform .2s ease, background .2s ease;
+  }
+  .cta:hover { transform: translateY(-1px); background: #2b2f2b; }
+  .cta span { font-size: 14px; }
+  .skip-inline { color: #858b86; background: transparent; border: 0; font: inherit; font-size: 11px; cursor: pointer; border-bottom: 1px solid rgba(36, 39, 36, .18); padding-bottom: 2px; }
+  .skip-inline:hover { color: #242724; }
+  .vertical-poem { position: absolute; right: 5.5%; top: 30%; writing-mode: vertical-rl; color: #6f756e; font-family: "Noto Serif SC", serif; font-size: 14px; letter-spacing: .36em; }
+  .seal {
+    display: inline-grid; width: 34px; height: 34px; place-items: center;
+    color: #f4f6f4; background: #3c423e; border-radius: 4px;
+    font-family: "Noto Serif SC", serif; font-size: 16px; font-weight: 700;
+    box-shadow: 0 3px 10px rgba(60, 66, 62, .22);
+    transform: rotate(-2deg);
+  }
+  .vertical-poem .seal { margin-top: 18px; }
+  .chapter-nav { position: absolute; left: 38px; bottom: 30px; display: flex; align-items: center; gap: 10px; color: #858b86; font-size: 10px; letter-spacing: .18em; }
+  .chapter-nav i { width: 70px; height: 1px; background: rgba(36, 39, 36, .22); }
+  .chapter-nav em { color: #a8aea9; font-style: normal; }
+
+  /* 选模型页 */
+  .select-head { position: absolute; top: 122px; left: 38px; z-index: 4; }
+  .select-head .kicker { color: #7c837e; font-size: 10px; letter-spacing: .22em; }
+  .select-head h1 { margin: 8px 0 6px; font-family: "Noto Serif SC", "Songti SC", serif; font-size: clamp(28px, 3vw, 38px); font-weight: 600; letter-spacing: -.01em; }
+  .select-head p { margin: 0; color: #858b86; font-size: 11.5px; }
+  .vertical-label { position: absolute; left: 4%; top: 42%; writing-mode: vertical-rl; color: rgba(36, 39, 36, .16); font-family: "Noto Serif SC", serif; font-size: 40px; letter-spacing: .28em; pointer-events: none; }
+
+  .bubble-field { position: absolute; inset: 0; z-index: 3; }
+  .bubble {
+    position: absolute;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    padding: 12px; text-align: center;
+    color: #242724;
+    background: rgba(250, 252, 250, .58);
+    border: 1px solid rgba(36, 39, 36, .22);
+    border-radius: 50%;
+    box-shadow: 0 16px 38px rgba(52, 58, 54, .1), inset 0 1px 0 rgba(255, 255, 255, .8);
+    backdrop-filter: blur(12px) saturate(120%);
+    -webkit-backdrop-filter: blur(12px) saturate(120%);
+    transform: translate(-50%, -50%);
+    cursor: pointer;
+    animation: drift 9s ease-in-out infinite;
+    transition: transform .3s cubic-bezier(.2, 1.6, .4, 1), box-shadow .3s ease, border-color .3s ease;
+  }
+  .bubble:hover { animation-play-state: paused; transform: translate(-50%, -50%) scale(1.06); border-color: #242724; }
+  .bubble .ico {
+    display: grid; width: 32px; height: 32px; place-items: center;
+    color: #f4f6f4; background: #242724; border-radius: 50%;
+    font-family: "Noto Serif SC", serif; font-size: 13px; font-weight: 700;
+  }
+  .bubble .name { max-width: 88%; font-size: 11.5px; font-weight: 600; line-height: 1.25; word-break: break-all; }
+  .bubble .sub { color: #858b86; font-family: "Noto Serif SC", serif; font-size: 9.5px; }
+  .bubble.recommended { border-color: rgba(36, 39, 36, .5); box-shadow: 0 0 0 1px rgba(250, 252, 250, .9), 0 0 0 2px rgba(36, 39, 36, .2), 0 16px 38px rgba(52, 58, 54, .12); }
+  .bubble.recommended::before {
+    content: "推荐"; position: absolute; top: -10px; left: 50%; transform: translateX(-50%);
+    padding: 2px 7px; color: #f4f6f4; background: #7c837e; border-radius: 999px;
+    font-size: 8.5px; letter-spacing: .08em; white-space: nowrap;
+  }
+  .bubble.selected { border-color: #242724; box-shadow: 0 0 0 2px #f4f6f4, 0 0 0 3px #242724, 0 16px 38px rgba(52, 58, 54, .12); }
+  .bubble.selected::after {
+    content: "选"; position: absolute; right: 7%; bottom: 9%;
+    display: grid; width: 24px; height: 24px; place-items: center;
+    color: #f4f6f4; background: #3c423e; border-radius: 4px;
+    font-family: "Noto Serif SC", serif; font-size: 11px; font-weight: 700;
+    transform: rotate(-3deg); box-shadow: 0 3px 8px rgba(60, 66, 62, .22);
+  }
+  @keyframes drift {
+    0%, 100% { margin-top: 0; margin-left: 0; }
+    50% { margin-top: -13px; margin-left: 5px; }
+  }
+  .b1 { left: 18%; top: 38%; width: 158px; height: 158px; animation-duration: 10s; }
+  .b2 { left: 42%; top: 30%; width: 134px; height: 134px; animation-duration: 8.5s; animation-delay: -2s; }
+  .b3 { left: 66%; top: 31%; width: 150px; height: 150px; animation-duration: 11s; animation-delay: -4s; }
+  .b4 { left: 15%; top: 67%; width: 168px; height: 168px; animation-duration: 9.5s; animation-delay: -1s; }
+  .b5 { left: 36%; top: 75%; width: 120px; height: 120px; animation-duration: 7.5s; animation-delay: -3s; }
+  .b6 { left: 56%; top: 75%; width: 132px; height: 132px; animation-duration: 10.5s; animation-delay: -5s; }
+  .b7 { left: 80%; top: 57%; width: 184px; height: 184px; animation-duration: 12s; animation-delay: -6s; }
+
+  .select-foot { position: absolute; left: 38px; right: 38px; bottom: 30px; z-index: 8; display: flex; align-items: center; justify-content: space-between; }
+  .ghost { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; color: #6f756e; background: transparent; border: 1px solid rgba(36, 39, 36, .16); border-radius: 999px; font: inherit; font-size: 11.5px; cursor: pointer; }
+  .ghost:hover { color: #242724; border-color: #242724; }
+  .select-foot .right { display: flex; align-items: center; gap: 18px; margin-left: auto; }
+  .count { color: #858b86; font-size: 11px; }
+  .link { color: #858b86; background: transparent; border: 0; font: inherit; font-size: 11px; cursor: pointer; }
+  .link:hover { color: #242724; }
+  .skip { color: #9aa09b; background: transparent; border: 0; font: inherit; font-size: 11px; cursor: pointer; }
+  .skip:hover { color: #242724; }
+
+  /* 配置页 */
+  .config-wrap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 100px 8vw 90px; overflow-y: auto; }
+  .config-card {
+    width: min(760px, 100%); padding: 26px;
+    background: rgba(250, 252, 250, .74);
+    border: 1px solid rgba(36, 39, 36, .18);
+    border-radius: 6px;
+    box-shadow: 0 26px 70px rgba(52, 58, 54, .13);
+    backdrop-filter: blur(16px);
+  }
+  .config-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(36, 39, 36, .12); }
+  .config-head .kicker { color: #7c837e; font-size: 10px; letter-spacing: .22em; }
+  .config-head h1 { margin: 7px 0 5px; font-family: "Noto Serif SC", serif; font-size: 28px; font-weight: 600; }
+  .config-head p { margin: 0; color: #858b86; font-size: 11.5px; }
+  .rows { display: flex; flex-direction: column; gap: 0; }
+  .row { display: grid; grid-template-columns: 1.2fr 1.1fr .75fr 1fr; gap: 14px; align-items: center; padding: 17px 4px; border-bottom: 1px solid rgba(36, 39, 36, .1); }
+  .row .title { display: flex; align-items: center; gap: 10px; }
+  .row .ink-mark { display: grid; width: 30px; height: 30px; place-items: center; color: #f4f6f4; background: #2b2f2b; border-radius: 50%; font-family: "Noto Serif SC", serif; font-size: 12px; }
+  .row strong { display: block; font-size: 12.5px; font-weight: 600; }
+  .row small { display: block; margin-top: 2px; color: #858b86; font-size: 10px; }
+  .row .models { color: #6f756e; font-size: 10.5px; line-height: 1.6; }
+  .row .badge { color: #858b86; font-size: 10px; }
+  .row input { width: 100%; height: 36px; padding: 0 10px; color: #242724; background: rgba(255, 255, 255, .55); border: 1px solid rgba(36, 39, 36, .16); border-radius: 6px; font: inherit; font-size: 11px; }
+  .row input:focus { outline: none; border-color: #242724; }
+  .config-foot { display: flex; align-items: center; justify-content: space-between; padding-top: 18px; }
+  .config-foot .right { display: flex; align-items: center; gap: 16px; }
+
+  /* 页面切换（截图时隐藏） */
+  .switch {
+    position: absolute; left: 50%; bottom: 18px; z-index: 30; transform: translateX(-50%);
+    display: flex; gap: 3px; padding: 4px;
+    background: rgba(250, 252, 250, .82); border: 1px solid rgba(36, 39, 36, .14); border-radius: 999px;
+    box-shadow: 0 10px 30px rgba(52, 58, 54, .12); font-size: 10px; backdrop-filter: blur(10px);
+  }
+  .switch button { padding: 6px 10px; color: #7c837e; background: transparent; border: 0; border-radius: 999px; font: inherit; cursor: pointer; white-space: nowrap; }
+  .switch button.on { color: #f4f6f4; background: #242724; }
+
+  @media (max-width: 900px) {
+    .intro { grid-template-columns: 1fr; }
+    .intro-art { display: none; }
+    .intro-copy { padding: 110px 10vw 40px; }
+    .vertical-poem { display: none; }
+    .select-head { top: 100px; left: 24px; }
+    .select-head h1 { font-size: 26px; }
+    .b7 { left: 72%; top: 58%; }
+    .select-foot { left: 24px; right: 24px; }
+    .config-wrap { padding: 90px 16px 80px; }
+    .row { grid-template-columns: 1fr 1fr; }
+    .row .models { grid-column: 1 / -1; }
+    .row input { grid-column: 1 / -1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .page.on, .bubble, .wash, .ink-dot { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="scene">
+  <div class="grain"></div>
+  <div class="wash a"></div>
+  <div class="wash b"></div>
+  <div class="wash c"></div>
+  <svg class="mountains" viewBox="0 0 1440 500" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0,420 C180,300 300,360 430,300 C600,220 700,330 860,280 C1040,220 1160,330 1440,250 L1440,500 L0,500 Z" fill="#697570" opacity=".1"/>
+    <path d="M0,470 C220,380 360,430 560,360 C760,290 920,400 1120,340 C1260,300 1360,340 1440,320 L1440,500 L0,500 Z" fill="#4f5b56" opacity=".08"/>
+  </svg>
+  <svg class="brush-line one" viewBox="0 0 300 20" aria-hidden="true">
+    <path d="M4 12 C60 3 120 18 170 8 C215 0 260 14 296 9" fill="none" stroke="#2b2f2b" stroke-width="3" stroke-linecap="round"/>
+  </svg>
+  <svg class="brush-line two" viewBox="0 0 260 18" aria-hidden="true">
+    <path d="M3 10 C50 2 100 16 150 8 C195 1 230 12 257 7" fill="none" stroke="#2b2f2b" stroke-width="2.5" stroke-linecap="round"/>
+  </svg>
+  <span class="ink-dot d1"></span><span class="ink-dot d2"></span><span class="ink-dot d3"></span><span class="ink-dot d4"></span>
+
+  <!-- 欢迎 -->
+  <section class="page welcome" data-page="welcome">
+    <div class="enso-bg">
+      <svg viewBox="0 0 520 520">
+        <path d="M 262 54 C 376 40 466 132 456 250 C 447 360 344 452 226 440 C 118 429 52 338 74 230 C 93 136 178 58 284 68" fill="none" stroke="#242724" stroke-width="1.6" stroke-linecap="round" opacity=".22"/>
+      </svg>
+    </div>
+    <span class="kicker">CHAT CANVAS</span>
+    <h1>欢迎使用 ChatCanvas</h1>
+    <p class="slogan">马中赤兔，创中语布</p>
+    <p class="lede">先选几颗你喜欢的模型，剩下的交给纸与墨。</p>
+    <button class="cta">开启探索 <span>→</span></button>
+    <div class="vertical">一念起 · 万物生</div>
+    <span class="seal" style="position:absolute;right:8.2%;top:56%">始</span>
+    <button class="skip" style="position:absolute;right:38px;bottom:30px">跳过引导 →</button>
+  </section>
+
+  <!-- 对话：章节页 -->
+  <section class="page intro" data-page="chat-intro">
+    <div class="top">
+      <div class="brand"><span class="mark">C</span> ChatCanvas <em>引导预览</em></div>
+      <div class="progress"><i class="on"></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="intro-art">
+      <div class="enso">
+        <svg viewBox="0 0 520 520">
+          <path d="M 268 62 C 382 48 470 142 456 256 C 443 366 340 458 224 442 C 114 427 54 332 80 222 C 104 122 196 54 310 76" fill="none" stroke="#2b2f2b" stroke-width="2" stroke-linecap="round" opacity=".52"/>
+          <path d="M 310 76 C 330 80 348 88 364 98" fill="none" stroke="#2b2f2b" stroke-width="5" stroke-linecap="round" opacity=".28"/>
+        </svg>
+        <span class="char">对</span>
+        <span class="splash s1"></span><span class="splash s2"></span><span class="splash s3"></span>
+      </div>
+      <div class="art-caption">对话 · 第一章</div>
+    </div>
+    <div class="intro-copy">
+      <div class="chapter"><span>第一章</span><i></i><em>CHAPTER 01</em></div>
+      <h1>选择对话模型</h1>
+      <p class="lede">让一个大脑理解你的话，<br/>再决定画什么。</p>
+      <div class="meta">推荐 <b>deepseek-v4-1-flash</b><br/>之后也能随时更换</div>
+      <div class="actions">
+        <button class="cta">开始选择 <span>→</span></button>
+        <button class="skip-inline">跳过这一步</button>
+      </div>
+    </div>
+    <div class="vertical-poem">一念起 · 万物生<span class="seal">对</span></div>
+    <div class="chapter-nav"><span>01</span><i></i><em>08</em></div>
+  </section>
+
+  <!-- 对话：选模型 -->
+  <section class="page select" data-page="chat-select">
+    <div class="top">
+      <div class="brand"><span class="mark">C</span> ChatCanvas <em>引导预览</em></div>
+      <div class="progress"><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="select-head">
+      <span class="kicker">第一章 · 对话模型</span>
+      <h1>点亮一颗作为你的对话大脑</h1>
+      <p>选中的模型会生成一个渠道配置，之后也能换。</p>
+    </div>
+    <div class="vertical-label">对话</div>
+    <div class="bubble-field">
+      <div class="bubble b1"><span class="ico">G</span><span class="name">grok-4.7</span><span class="sub">对话模型</span></div>
+      <div class="bubble b2"><span class="ico">O</span><span class="name">gpt-5.6-sol</span><span class="sub">对话模型</span></div>
+      <div class="bubble b3"><span class="ico">C</span><span class="name">claude-sonnet-5-5</span><span class="sub">对话模型</span></div>
+      <div class="bubble b4"><span class="ico">Q</span><span class="name">qwen3.8-max</span><span class="sub">对话模型</span></div>
+      <div class="bubble b5"><span class="ico">G</span><span class="name">glm-5.3</span><span class="sub">对话模型</span></div>
+      <div class="bubble b6"><span class="ico">D</span><span class="name">deepseek-v4-pro</span><span class="sub">对话模型</span></div>
+      <div class="bubble b7 recommended selected"><span class="ico">D</span><span class="name">deepseek-v4-1-flash</span><span class="sub">对话模型</span></div>
+    </div>
+    <footer class="select-foot">
+      <button class="ghost">← 上一步</button>
+      <div class="right"><span class="count">已选 1 颗</span><button class="link">跳过这一类</button><button class="cta">下一步 <span>→</span></button></div>
+    </footer>
+    <button class="skip" style="position:absolute;right:38px;bottom:80px">跳过引导 →</button>
+  </section>
+
+  <!-- 生图：章节页 -->
+  <section class="page intro" data-page="image-intro">
+    <div class="top">
+      <div class="brand"><span class="mark">C</span> ChatCanvas <em>引导预览</em></div>
+      <div class="progress"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="intro-art">
+      <div class="enso">
+        <svg viewBox="0 0 520 520">
+          <path d="M 268 62 C 382 48 470 142 456 256 C 443 366 340 458 224 442 C 114 427 54 332 80 222 C 104 122 196 54 310 76" fill="none" stroke="#5f6a63" stroke-width="2" stroke-linecap="round" opacity=".5"/>
+          <path d="M 310 76 C 330 80 348 88 364 98" fill="none" stroke="#5f6a63" stroke-width="5" stroke-linecap="round" opacity=".26"/>
+        </svg>
+        <span class="char" style="color:rgba(95,106,99,.16)">绘</span>
+        <span class="splash s1" style="background:rgba(95,106,99,.14)"></span>
+        <span class="splash s2" style="background:rgba(95,106,99,.12)"></span>
+        <span class="splash s3" style="background:rgba(95,106,99,.12)"></span>
+      </div>
+      <div class="art-caption">生图 · 第二章</div>
+    </div>
+    <div class="intro-copy">
+      <div class="chapter"><span>第二章</span><i></i><em>CHAPTER 02</em></div>
+      <h1>选择生图模型</h1>
+      <p class="lede">落笔成山，<br/>点墨成海。</p>
+      <div class="meta">推荐 <b>gpt-image-2.5-sunburst-c</b><br/>可以多选，不同系列各自成组</div>
+      <div class="actions">
+        <button class="cta">开始选择 <span>→</span></button>
+        <button class="skip-inline">跳过这一步</button>
+      </div>
+    </div>
+    <div class="vertical-poem">落笔成山 · 点墨成海<span class="seal">绘</span></div>
+    <div class="chapter-nav"><span>03</span><i></i><em>08</em></div>
+  </section>
+
+  <!-- 配置页 -->
+  <section class="page config" data-page="config">
+    <div class="top">
+      <div class="brand"><span class="mark">C</span> ChatCanvas <em>引导预览</em></div>
+      <div class="progress"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div>
+    </div>
+    <div class="config-wrap">
+      <div class="config-card">
+        <div class="config-head">
+          <div>
+            <span class="kicker">LAST CHAPTER · CONFIGURE</span>
+            <h1>把钥匙交给语布</h1>
+            <p>变量名已经替你填好；已有环境变量的可以留空，其余补上 Key 就能开始。</p>
+          </div>
+          <span class="seal">钥</span>
+        </div>
+        <div class="rows">
+          <div class="row">
+            <div class="title"><span class="ink-mark">对</span><div><strong>词元流墟-对话模型</strong><small>OpenAI Chat · 1 个模型</small></div></div>
+            <div class="models">deepseek-v4-1-flash</div>
+            <div class="badge">环境变量已配置</div>
+            <input type="password" value="已配置，可留空" readonly />
+          </div>
+          <div class="row">
+            <div class="title"><span class="ink-mark">绘</span><div><strong>词元流墟-gpt生图</strong><small>OpenAI Images · 1 个模型</small></div></div>
+            <div class="models">gpt-image-2</div>
+            <div class="badge">更新已有渠道</div>
+            <input type="password" value="在此填入密钥" readonly />
+          </div>
+          <div class="row">
+            <div class="title"><span class="ink-mark">动</span><div><strong>词元流墟-万相视频</strong><small>万相视频 · 1 个模型</small></div></div>
+            <div class="models">wan3.0-video</div>
+            <div class="badge">新建渠道</div>
+            <input type="password" value="在此填入密钥" readonly />
+          </div>
+        </div>
+        <div class="config-foot">
+          <button class="ghost">← 上一步</button>
+          <div class="right"><button class="link">跳过引导</button><button class="cta">开始配置 <span>→</span></button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="switch" id="switch">
+    <button data-page="welcome" class="on">欢迎</button>
+    <button data-page="chat-intro">对话 · 章节</button>
+    <button data-page="chat-select">对话 · 选模型</button>
+    <button data-page="image-intro">生图 · 章节</button>
+    <button data-page="config">配置</button>
+  </div>
+</div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const initial = params.get("page") || "chat-intro";
+  function show(page) {
+    const exists = [...document.querySelectorAll(".page")].some((item) => item.dataset.page === page);
+    const target = exists ? page : "chat-intro";
+    for (const item of document.querySelectorAll(".page")) item.classList.toggle("on", item.dataset.page === target);
+    for (const button of document.querySelectorAll("#switch button")) button.classList.toggle("on", button.dataset.page === target);
+  }
+  for (const button of document.querySelectorAll("#switch button")) {
+    button.addEventListener("click", () => show(button.dataset.page));
+  }
+  if (params.get("shot") === "1") document.getElementById("switch").style.display = "none";
+  show(initial);
+</script>
+</body>
+</html>

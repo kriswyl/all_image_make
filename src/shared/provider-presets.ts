@@ -1,5 +1,4 @@
 import type { AdapterType, AuthType, Channel, ChannelInput } from "./types.js";
-import { VECTORENGINE_KEY_ENV, VECTORENGINE_KEY_PLACEHOLDER } from "./app-config.js";
 
 /**
  * 服务商预设：一个站点下若干「渠道单元」。
@@ -52,6 +51,8 @@ const GEMINI_MODELS = [
   "gemini-3.1-flash-lite-image",
   "gemini-3-pro-image-preview",
   "gemini-3-pro-image",
+  "gemini-nano-banana-2.1",
+  "gemini-nano-banana-2.1-preview",
 ];
 const GROK_VIDEO_MODELS = ["grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-imagine-video-1.5"];
 const WAN_VIDEO_MODELS = ["wan3.0-video"];
@@ -74,63 +75,6 @@ const CHAT_MODELS = [
 ];
 
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
-  {
-    id: "vectorengine-gpt",
-    label: "向量引擎-gpt生图",
-    baseUrl: "https://api.vectorengine.cn",
-    logo: "/logo-vectorengine.png",
-    keyHint: VECTORENGINE_KEY_PLACEHOLDER,
-    units: [
-      {
-        id: "gpt",
-        label: "gpt 生图",
-        description: "OpenAI Images 协议，标准 gpt-image 系列",
-        adapterType: "openai-images",
-        authType: "bearer",
-        channelName: "{provider}",
-        secretEnv: VECTORENGINE_KEY_ENV,
-        models: GPT_MODELS,
-      },
-    ],
-  },
-  {
-    id: "vectorengine-gpt-c",
-    label: "向量引擎-gpt-c生图",
-    baseUrl: "https://api.vectorengine.cn",
-    logo: "/logo-vectorengine.png",
-    keyHint: VECTORENGINE_KEY_PLACEHOLDER,
-    units: [
-      {
-        id: "gpt-c",
-        label: "gpt-c 生图",
-        description: "OpenAI Images 协议，-c 系列独立计费与密钥",
-        adapterType: "openai-images",
-        authType: "bearer",
-        channelName: "{provider}",
-        secretEnv: "VECTORENGINE_GPT_C_API_KEY",
-        models: GPT_C_MODELS,
-      },
-    ],
-  },
-  {
-    id: "vectorengine-gemini",
-    label: "向量引擎-gemini生图",
-    baseUrl: "https://api.vectorengine.cn",
-    logo: "/logo-vectorengine.png",
-    keyHint: VECTORENGINE_KEY_PLACEHOLDER,
-    units: [
-      {
-        id: "gemini",
-        label: "gemini 生图",
-        description: "Gemini Content 协议，宽高比与出图尺寸控制",
-        adapterType: "gemini-content",
-        authType: "bearer",
-        channelName: "{provider}",
-        secretEnv: "VECTORENGINE_GEMINI_API_KEY",
-        models: GEMINI_MODELS,
-      },
-    ],
-  },
   {
     id: "tiantoken-gpt",
     label: "词元流墟-gpt生图",

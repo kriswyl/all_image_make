@@ -41,6 +41,20 @@ function compact<T extends Record<string, unknown>>(value: T) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== ""));
 }
 
+/**
+ * 带蒙版时自动补一句约束。
+ *
+ * mask 是**引导式**编辑，不是 DALL·E 2 那种像素级硬约束：中转站背后的模型
+ * 可能只把它当区域提示，仍会按提示词改动蒙版外。明确写一次「只改蒙版区域」，
+ * 能把这类整图重画压下去；真正的像素级保证不做，避免让用户误以为蒙版外绝不会变。
+ */
+const MASK_PROMPT_SUFFIX = "\n\n只修改蒙版标记的区域；蒙版以外的画面保持完全不变。用户对颜色、材质或物体的描述只作用于蒙版区域内的对象，不要应用到蒙版外的相似物体上；不要重新绘制整张图。";
+
+function withMaskInstruction(prompt: string) {
+  return `${prompt}${MASK_PROMPT_SUFFIX}`;
+}
+
+
 function openAiImageParameters(input: GenerationInput) {
   return compact({
     negative_prompt: input.negativePrompt,
@@ -68,7 +82,7 @@ function referenceImages(input: GenerationInput) {
   return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
 }
 
-function imageSummary(input: NonNullable<GenerationInput["referenceImage"]>) {
+function imageSummary(input: { base64: string; mimeType: string; fileName: string }) {
   return { fileName: input.fileName, mimeType: input.mimeType, byteSize: Buffer.byteLength(input.base64, "base64") };
 }
 
@@ -250,15 +264,27 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       ...raw,
     });
   } else if (channel.adapterType === "openai-images" && references.length) {
+    /**
+     * 显式蒙版优先于 `rawParameters.mask`。
+     *
+     * 两个都发会让上游收到两个同名 part，行为取决于中转站怎么解析；而「高级 JSON 里写了个
+     * 字符串 mask」是给旧用法留的逃生口，不应该盖住用户在画布上亲手涂抹的那张图。
+     * 同时只接受 1 张参考图：OpenAI 的 mask 只作用于第一张图，多图配一张蒙版会让用户
+     * 以为其余几张也被局部编辑了。
+     */
+    const mask = input.maskImage && references.length === 1 ? input.maskImage : undefined;
+    const rawFields = mask && Object.hasOwn(raw, "mask")
+      ? Object.fromEntries(Object.entries(raw).filter(([field]) => field !== "mask"))
+      : raw;
     const fields = compact({
       model: input.model,
-      prompt: input.prompt,
+      prompt: mask ? withMaskInstruction(input.prompt) : input.prompt,
       ...openAiImageParameters(input),
-      ...raw,
+      ...rawFields,
     });
     formData = new FormData();
     for (const [field, value] of Object.entries(fields)) {
-      if (field !== "image" && field !== "image[]") appendFormValue(formData, field, value);
+      if (field !== "image" && field !== "image[]" && field !== "mask") appendFormValue(formData, field, value);
     }
     if (Object.hasOwn(fields, "image") || Object.hasOwn(fields, "image[]")) {
       if (Object.hasOwn(fields, "image")) appendFormValue(formData, "image", fields.image);
@@ -270,11 +296,24 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
         formData.append(fieldName, new Blob([Uint8Array.from(bytes)], { type: reference.mimeType }), reference.fileName);
       }
     }
+    if (mask) {
+      const bytes = Buffer.from(mask.base64, "base64");
+      const maskFileName = mask.fileName.toLowerCase().endsWith(".png") ? mask.fileName : "mask.png";
+      formData.append("mask", new Blob([Uint8Array.from(bytes)], { type: "image/png" }), maskFileName);
+    } else if (Object.hasOwn(fields, "mask")) {
+      // 老用法：rawParameters 里的 mask 当文本字段发出去，行为保持不变
+      appendFormValue(formData, "mask", fields.mask);
+    }
     const rawImageField = Object.hasOwn(fields, "image") ? "image" : Object.hasOwn(fields, "image[]") ? "image[]" : undefined;
     const rawImage = rawImageField ? summarizeImageData(fields[rawImageField]) : undefined;
-    const diagnosticFields = Object.fromEntries(Object.entries(fields).filter(([field]) => field !== "image" && field !== "image[]"));
+    const diagnosticFields = Object.fromEntries(Object.entries(fields).filter(([field]) => field !== "image" && field !== "image[]" && field !== "mask"));
     diagnosticBody = {
       ...diagnosticFields,
+      ...(mask
+        ? { mask: imageSummary(mask) }
+        : Object.hasOwn(fields, "mask")
+          ? { mask: summarizeImageData(fields.mask) }
+          : {}),
       ...(rawImageField ? { [rawImageField]: rawImage } : references.length > 1 ? { "image[]": references.map(imageSummary) } : { image: imageSummary(references[0]) }),
     };
   } else if (channel.adapterType === "openai-chat-image") {
@@ -370,6 +409,14 @@ export async function sendPreparedRequest(request: PreparedRequest) {
   return { payload, status: response.status, durationMs };
 }
 
+/** 上游的英文错误里，mask 不支持这一类翻成人话；其余原样保留 */
+function translateMaskError(message: string) {
+  if (/mask/i.test(message) && /not\s*supported|unsupported|not\s*support/i.test(message)) {
+    return "当前渠道的这个模型不支持局部重绘（mask），请换用其他模型或去掉蒙版";
+  }
+  return message;
+}
+
 /**
  * 从中转站的错误响应里抠出一句人话。
  *
@@ -380,22 +427,22 @@ export async function sendPreparedRequest(request: PreparedRequest) {
 function extractErrorMessage(payload: unknown) {
   if (!payload || typeof payload !== "object") return "中转接口返回错误";
   const record = payload as Record<string, unknown>;
-  if (typeof record.message === "string" && record.message) return record.message;
+  if (typeof record.message === "string" && record.message) return translateMaskError(record.message);
   const nested = record.error;
   if (nested && typeof nested === "object") {
     const inner = nested as Record<string, unknown>;
-    if (typeof inner.message === "string" && inner.message) return inner.message;
+    if (typeof inner.message === "string" && inner.message) return translateMaskError(inner.message);
     // 有的站点只回 code / status，把这半句也留下，好过换成一句常量
     if (typeof inner.code === "string" || typeof inner.code === "number") return `上游错误 ${inner.code}`;
     if (typeof inner.status === "string") return `上游错误 ${inner.status}`;
   }
-  if (typeof nested === "string" && nested) return nested;
+  if (typeof nested === "string" && nested) return translateMaskError(nested);
   // 非 JSON 的响应体被上游包成 { text }，原文比常量有用得多
-  if (typeof record.text === "string" && record.text.trim()) return record.text.trim().slice(0, 300);
+  if (typeof record.text === "string" && record.text.trim()) return translateMaskError(record.text.trim().slice(0, 300));
   if (typeof record.code === "string" || typeof record.code === "number") return `上游错误 ${record.code}`;
   try {
     const text = JSON.stringify(record);
-    if (text && text !== "{}") return `上游返回了无法识别的错误：${text.slice(0, 300)}`;
+    if (text && text !== "{}") return translateMaskError(`上游返回了无法识别的错误：${text.slice(0, 300)}`);
   } catch {
     // 循环引用之类，退回常量
   }
