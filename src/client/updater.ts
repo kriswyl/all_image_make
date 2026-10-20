@@ -6,8 +6,6 @@ import { isTauriRuntime } from "./api";
  * 和 api.ts 里其它 Tauri 能力一样，非桌面运行时要优雅降级：网页版既没有
  * updater 插件，也不该出现「检查更新」这种点不动的入口。
  */
-export const UPDATE_DOWNLOAD_PAGE = "https://github.com/kriswyl/all_image_make/releases/latest";
-
 export type UpdateInfo = { version: string; notes: string; date?: string };
 export type UpdateProgress = { downloaded: number; total: number | null };
 
@@ -87,11 +85,3 @@ export async function isPortableBuild(): Promise<boolean> {
   return invoke<boolean>("is_portable_build");
 }
 
-export async function openDownloadPage(): Promise<void> {
-  if (isTauriRuntime()) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(UPDATE_DOWNLOAD_PAGE);
-    return;
-  }
-  window.open(UPDATE_DOWNLOAD_PAGE, "_blank", "noopener,noreferrer");
-}

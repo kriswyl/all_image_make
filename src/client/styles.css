@@ -324,6 +324,8 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .update-close { display: grid; width: 22px; height: 22px; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 6px; place-items: center; }
 .update-close:hover { color: var(--ink); background: var(--surface-soft); }
 .update-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.update-contact { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 8px 10px; background: var(--surface-soft); border-radius: 8px; }
+.update-contact code { color: var(--ink); font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; user-select: text; }
 .update-inline { display: flex; align-items: center; gap: 7px; }
 .update-version-line { display: flex; align-items: baseline; gap: 7px; margin: 0; font-size: 15px; font-weight: 600; }
 .update-version-line span { color: var(--muted); font-size: 11.5px; font-weight: 400; }
@@ -505,7 +507,30 @@ input::placeholder, textarea::placeholder { color: #a1aaa3; }
 .onboarding-success-row > span:nth-child(2) { color: var(--muted); }
 @keyframes onboarding-pop { from { opacity: 0; transform: scale(.6); } to { opacity: 1; transform: scale(1); } }
 
-.page-header-actions { display: flex; align-items: center; gap: 9px; }
+.page-header-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+.provider-contact { position: relative; }
+.provider-contact-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: 272px;
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+.provider-contact-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.provider-contact-head strong { font-size: 12.5px; font-weight: 650; }
+.provider-contact-popover img { display: block; width: 100%; height: auto; border-radius: 8px; background: #1677ff; }
+.provider-contact-popover p { margin: 9px 2px 1px; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
+.provider-contact-popover p span { display: block; color: var(--muted); font-size: 10px; }
+@media (max-width: 720px) {
+  .provider-contact-popover { position: fixed; right: 16px; bottom: 16px; left: 16px; top: auto; width: auto; max-width: 340px; margin-left: auto; }
+}
 
 @media (max-width: 760px) {
   .onboarding-groups { grid-template-columns: 1fr; }
@@ -1535,6 +1560,49 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .sidebar-conv.is-active .sidebar-conv-title { color: var(--ink); font-weight: 600; }
 .sidebar-conv-del { flex: 0 0 24px; width: 24px; height: 24px; margin-right: 4px; opacity: 0; }
 .sidebar-conv:hover .sidebar-conv-del, .sidebar-conv-del:focus-visible { opacity: 1; }
+.sidebar-conv.is-renaming { background: var(--accent-soft); }
+.sidebar-conv-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  margin-left: 4px;
+  padding: 0 8px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.sidebar-conv-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 150px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow-card);
+}
+.sidebar-conv-menu button {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-conv-menu button:hover { color: var(--ink); background: var(--accent-soft); }
+.sidebar-conv-menu button.danger { color: var(--coral); }
+.sidebar-conv-menu button.danger:hover { color: var(--coral); background: var(--coral-soft); }
 .sidebar-conv-empty { margin: 0; padding: 2px 8px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .sidebar-group-add { display: grid; width: 20px; height: 20px; margin-left: auto; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 6px; }
 .sidebar-group-add:hover { color: var(--ink); background: var(--accent-soft); }

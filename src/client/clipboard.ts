@@ -1,3 +1,20 @@
+/** 复制一段文字；老 WebView 没有 clipboard.writeText 时退回 textarea + execCommand */
+export async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  const copied = document.execCommand("copy");
+  area.remove();
+  if (!copied) throw new Error("当前环境不支持复制文本");
+}
+
 /**
  * 把图片写进系统剪贴板。
  *

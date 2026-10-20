@@ -1,13 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { Check, Copy, Download, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { APP_VERSION } from "../shared/app-config";
 import { isTauriRuntime } from "./api";
+import { copyTextToClipboard } from "./clipboard";
 import {
-  checkForUpdate, downloadUpdate, installUpdate, isPortableBuild, openDownloadPage, prepareForUpdate, relaunchApp,
+  checkForUpdate, downloadUpdate, installUpdate, isPortableBuild, prepareForUpdate, relaunchApp,
 } from "./updater";
 import type { UpdateInfo } from "./updater";
 
 type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error";
+type CopyState = "idle" | "copied" | "error";
+
+/** 作者联系方式；发布页入口已移除，用户需要新版本或反馈问题时走这里 */
+const AUTHOR_EMAIL = "1413803765@qq.com";
+
+function ContactButton({ copied, onClick }: { copied: boolean; onClick: () => void }) {
+  return (
+    <button type="button" className="update-secondary" onClick={onClick}>
+      {copied ? <Check size={14} /> : <Copy size={14} />}
+      {copied ? "已复制" : "联系作者"}
+    </button>
+  );
+}
+
+function AuthorEmail({ state }: { state: CopyState }) {
+  return (
+    <p className={`update-note update-contact ${state === "error" ? "update-error" : ""}`}>
+      {state === "error" ? "复制失败，请手动记录： " : "作者邮箱： "}
+      <code>{AUTHOR_EMAIL}</code>
+    </p>
+  );
+}
 
 /**
  * 侧栏底部的版本号 + 更新面板。
@@ -22,6 +45,7 @@ export function UpdateStatus() {
   const [progress, setProgress] = useState<{ downloaded: number; total: number | null }>({ downloaded: 0, total: null });
   const [portable, setPortable] = useState(false);
   const [open, setOpen] = useState(false);
+  const [copyState, setCopyState] = useState<CopyState>("idle");
   const rootRef = useRef<HTMLDivElement>(null);
   const desktop = isTauriRuntime();
 
@@ -66,14 +90,17 @@ export function UpdateStatus() {
     if (next && (phase === "idle" || phase === "error")) void check(true);
   };
 
-  const startUpdate = async () => {
-    if (portable) {
-      await openDownloadPage().catch((cause) => {
-        setPhase("error");
-        setError(cause instanceof Error ? cause.message : String(cause));
-      });
-      return;
+  const copyAuthorEmail = async () => {
+    try {
+      await copyTextToClipboard(AUTHOR_EMAIL);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 2000);
+    } catch {
+      setCopyState("error");
     }
+  };
+
+  const startUpdate = async () => {
     setError("");
     setProgress({ downloaded: 0, total: null });
     try {
@@ -131,13 +158,23 @@ export function UpdateStatus() {
                 {info.version} <span>当前 v{APP_VERSION}</span>
               </p>
               {info.notes ? <div className="update-notes">{info.notes}</div> : null}
-              <div className="update-actions">
-                <button type="button" className="update-primary" onClick={() => void startUpdate()}>
-                  <Download size={14} />{portable ? "去下载新版本" : "下载并安装"}
-                </button>
-                <button type="button" className="update-secondary" onClick={() => setOpen(false)}>稍后</button>
-              </div>
-              {portable ? <p className="update-note">便携版不会自动覆盖安装，下载新包后替换原目录即可。</p> : null}
+              {portable ? (
+                <>
+                  <p className="update-note">便携版不会自动覆盖安装。需要新版本请联系作者。</p>
+                  <div className="update-actions">
+                    <ContactButton copied={copyState === "copied"} onClick={() => void copyAuthorEmail()} />
+                    <button type="button" className="update-secondary" onClick={() => setOpen(false)}>稍后</button>
+                  </div>
+                  <AuthorEmail state={copyState} />
+                </>
+              ) : (
+                <div className="update-actions">
+                  <button type="button" className="update-primary" onClick={() => void startUpdate()}>
+                    <Download size={14} />下载并安装
+                  </button>
+                  <button type="button" className="update-secondary" onClick={() => setOpen(false)}>稍后</button>
+                </div>
+              )}
             </>
           ) : phase === "current" ? (
             <>
@@ -146,8 +183,9 @@ export function UpdateStatus() {
                 <button type="button" className="update-secondary" onClick={() => void check(true)}>
                   <RefreshCw size={14} />重新检查
                 </button>
-                <button type="button" className="update-secondary" onClick={() => void openDownloadPage()}>打开发布页</button>
+                <ContactButton copied={copyState === "copied"} onClick={() => void copyAuthorEmail()} />
               </div>
+              <AuthorEmail state={copyState} />
             </>
           ) : phase === "error" ? (
             <>
@@ -156,10 +194,11 @@ export function UpdateStatus() {
                 <button type="button" className="update-secondary" onClick={() => void check(true)}>
                   <RefreshCw size={14} />重试
                 </button>
-                <button type="button" className="update-secondary" onClick={() => void openDownloadPage()}>手动下载</button>
+                <ContactButton copied={copyState === "copied"} onClick={() => void copyAuthorEmail()} />
               </div>
+              <AuthorEmail state={copyState} />
               {error.includes("内置后端") || error.includes("端口") ? (
-                <p className="update-note">本地服务已停止，请关闭应用后重新打开，或手动安装新版本。</p>
+                <p className="update-note">本地服务已停止，请关闭应用后重新打开，或联系作者。</p>
               ) : null}
             </>
           ) : (

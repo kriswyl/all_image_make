@@ -12,6 +12,7 @@ import {
   ArrowLeft, ArrowRight, Check, ChevronRight, KeyRound, LoaderCircle, Sparkles,
 } from "lucide-react";
 import { api } from "../api";
+import { openExternal } from "../external";
 import { adapterLabels } from "../labels";
 import { ModelLogo } from "../chat/ModelLogo";
 import type { Channel } from "../../shared/types";
@@ -28,6 +29,8 @@ type Stage =
   | "video-intro" | "video-select"
   | "config" | "finish";
 type Transition = "forward" | "back" | null;
+
+const TIANTOKEN_LOGIN_URL = "https://api.tiantoken.com/login";
 
 interface KeyState { secretEnv: string; apiKey: string; }
 interface RowResult { status: "saving" | "done" | "error"; message?: string; }
@@ -556,6 +559,14 @@ export function ImmersiveOnboarding({
                         ? `变量名已经替你填好。补上高亮这一行的 Key，其余照做即可。`
                         : "全部就绪。点「开始配置」就能进入工作台。"
                       : "还没有选择任何模型。可以先回去选一颗，或者跳过引导去渠道页手动配置。"}
+                  </p>
+                  <p className="ink-provider-link">
+                    <button type="button" className="ink-key-link" onClick={() => void openExternal(TIANTOKEN_LOGIN_URL)}>
+                      <KeyRound size={15} />
+                      <span>还没有 Key？</span>
+                      <strong>去词元流墟登录获取</strong>
+                      <ArrowRight size={14} />
+                    </button>
                   </p>
                 </div>
                 <span className="ink-seal">钥</span>

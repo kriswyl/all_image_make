@@ -118,6 +118,29 @@
 }
 .ink-link:hover { color: var(--ink); border-color: var(--line-strong); }
 .ink-link:disabled { opacity: .35; cursor: not-allowed; }
+.ink-provider-link { margin: 14px 0 0; }
+/* 获取 Key 是这条流程里最实际的下一步，用描边胶囊把它从灰字里拎出来 */
+.ink-key-link {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease, border-color .2s ease, transform .2s ease;
+}
+.ink-key-link span { color: var(--muted); }
+.ink-key-link strong { font-weight: 650; }
+.ink-key-link svg { flex: 0 0 auto; }
+.ink-key-link:hover { color: #fff; background: var(--ink); border-color: var(--ink); transform: translateY(-1px); }
+.ink-key-link:hover span { color: rgba(255, 255, 255, .72); }
 .ink-skip {
   position: absolute;
   right: 38px;

@@ -113,6 +113,12 @@ export function ChatView({
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
+  /** 会话列表的右键菜单：位置固定在视口里，避免被侧栏滚动裁掉 */
+  const [convMenu, setConvMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const convMenuRef = useRef<HTMLDivElement>(null);
+  const renameCancelRef = useRef(false);
   const threadRef = useRef<HTMLDivElement>(null);
   /** 消息流的实际内容高度：图片异步加载时消息条数不变，只能靠它感知「版面又长高了」 */
   const threadInnerRef = useRef<HTMLDivElement>(null);
@@ -277,6 +283,26 @@ export function ChatView({
     })();
     return () => { cancelled = true; };
   }, [reloadList]);
+
+  // 右键菜单：点外面、按 Esc、滚动或窗口尺寸变化都收起
+  useEffect(() => {
+    if (!convMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!convMenuRef.current?.contains(event.target as Node)) setConvMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setConvMenu(null); };
+    const close = () => setConvMenu(null);
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [convMenu]);
 
   // 切换会话：拉全量 + 开 SSE
   useEffect(() => {
@@ -564,6 +590,53 @@ export function ChatView({
     }
   }
 
+  /** 右键会话行：显示应用内菜单，而不是 WebView 自带的「返回 / 刷新 / 检查」 */
+  function openConversationMenu(event: React.MouseEvent, id: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const width = 160;
+    const height = 82;
+    setConvMenu({
+      id,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+    });
+  }
+
+  function beginRenameConversation(id: string) {
+    const item = list.find((conversation) => conversation.id === id);
+    if (!item) return;
+    renameCancelRef.current = false;
+    setRenameDraft(item.title || "");
+    setRenamingId(id);
+    setConvMenu(null);
+  }
+
+  /**
+   * 改完立即写本地状态，再发 PATCH。
+   * 不等服务端返回再刷列表——用户点完回车就该看到新名字，而不是等一次往返。
+   */
+  async function commitRenameConversation(id: string) {
+    const title = renameDraft.trim() || DEFAULT_CONVERSATION_TITLE;
+    setRenamingId(null);
+    const current = list.find((conversation) => conversation.id === id);
+    if (!current || current.title === title) return;
+    setList((items) => items.map((item) => item.id === id ? { ...item, title } : item));
+    setView((value) => value && value.id === id ? { ...value, title } : value);
+    try {
+      const next = await api.updateConversation(id, { title });
+      // 服务端可能做了 trim/兜底，用它的最终值校正一次；不整份回灌 view
+      if (next.title && next.title !== title) {
+        setList((items) => items.map((item) => item.id === id ? { ...item, title: next.title } : item));
+        setView((value) => value && value.id === id ? { ...value, title: next.title } : value);
+      }
+    } catch (error) {
+      toastError(error);
+      void reloadList();
+      if (id === activeId) void reloadView(id);
+    }
+  }
+
   /** 确认卡片：改过的参数跟着这次确认一起提交，服务端才会用上新值 */
   async function resolveConfirm(messageId: string, decision: "approve" | "reject", args?: Partial<GenerateVideoArgs>) {
     if (!activeId) return;
@@ -656,11 +729,44 @@ export function ChatView({
           </div>
           <div className="sidebar-conv-list">
             {filteredList.length ? filteredList.map((item) => (
-              <div key={item.id} className={`sidebar-conv ${item.id === activeId ? "is-active" : ""}`}>
-                <button type="button" className="sidebar-conv-main" title={item.lastMessage || item.title} onClick={() => setActiveId(item.id)}>
-                  <span className="sidebar-conv-title">{item.title || DEFAULT_CONVERSATION_TITLE}</span>
-                  {item.running ? <LoaderCircle size={11} className="spin" /> : null}
-                </button>
+              <div
+                key={item.id}
+                className={`sidebar-conv ${item.id === activeId ? "is-active" : ""} ${renamingId === item.id ? "is-renaming" : ""}`}
+                onContextMenu={(event) => openConversationMenu(event, item.id)}
+              >
+                {renamingId === item.id ? (
+                  <input
+                    className="sidebar-conv-rename"
+                    value={renameDraft}
+                    autoFocus
+                    maxLength={120}
+                    aria-label="会话名称"
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onFocus={(event) => event.currentTarget.select()}
+                    onClick={(event) => event.stopPropagation()}
+                    onContextMenu={(event) => event.stopPropagation()}
+                    onBlur={() => {
+                      if (renameCancelRef.current) { renameCancelRef.current = false; return; }
+                      void commitRenameConversation(item.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        renameCancelRef.current = true;
+                        setRenamingId(null);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                  />
+                ) : (
+                  <button type="button" className="sidebar-conv-main" title={item.lastMessage || item.title} onClick={() => setActiveId(item.id)}>
+                    <span className="sidebar-conv-title">{item.title || DEFAULT_CONVERSATION_TITLE}</span>
+                    {item.running ? <LoaderCircle size={11} className="spin" /> : null}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="icon-button compact danger sidebar-conv-del"
@@ -677,6 +783,32 @@ export function ChatView({
             )}
           </div>
         </div>, sidebarHost) : null}
+
+      {convMenu ? createPortal(
+        <div
+          ref={convMenuRef}
+          className="sidebar-conv-menu"
+          role="menu"
+          aria-label="会话操作"
+          style={{ left: convMenu.x, top: convMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button type="button" role="menuitem" onClick={() => beginRenameConversation(convMenu.id)}>重命名</button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            onClick={() => {
+              const id = convMenu.id;
+              setConvMenu(null);
+              void removeConversation(id);
+            }}
+          >
+            删除会话
+          </button>
+        </div>,
+        document.body,
+      ) : null}
 
       <section className="chat-main">
         {!view ? (
