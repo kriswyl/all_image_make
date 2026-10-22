@@ -1,4 +1,4 @@
-import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageSizeValue, Settings, Task } from "../shared/types";
+import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
 import type {
   AgentStreamEvent, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
@@ -20,7 +20,7 @@ export function isTauriRuntime() {
       || window.location.hostname === "tauri.localhost");
 }
 
-function imageExtension(asset: Asset) {
+function assetExtension(asset: Asset) {
   const fileExtension = asset.fileName.split(".").pop()?.toLowerCase();
   if (fileExtension && /^[a-z0-9]+$/.test(fileExtension)) return fileExtension;
   if (asset.mimeType === "image/jpeg") return "jpg";
@@ -30,6 +30,13 @@ function imageExtension(asset: Asset) {
     if (asset.mimeType === "video/webm") return "webm";
     if (asset.mimeType === "video/quicktime") return "mov";
     return "mp4";
+  }
+  if (asset.mimeType.startsWith("audio/")) {
+    if (asset.mimeType.includes("mpeg")) return "mp3";
+    if (asset.mimeType.includes("wav")) return "wav";
+    if (asset.mimeType.includes("ogg")) return "ogg";
+    if (asset.mimeType.includes("flac")) return "flac";
+    return "m4a";
   }
   return "png";
 }
@@ -110,6 +117,7 @@ export const api = {
     geminiImageSize?: ImageSizeValue;
     agentDefaultImageAlias?: string;
     agentDefaultVideoAlias?: string;
+    agentDefaultAudioAlias?: string;
   }) => request<Settings>("/api/settings", {
     method: "PATCH",
     body: JSON.stringify(input),
@@ -135,7 +143,7 @@ export const api = {
   /** §6 能力清单原文：和喂给大脑的是同一份，展示给用户看不会「说的和做的不一样」 */
   capabilities: () => request<{
     manifest: string;
-    aliases: Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string; channelId: string }>;
+    aliases: Array<{ alias: string; kind: TaskKind; model: string; channelName: string; channelId: string }>;
   }>("/api/agent/capabilities"),
   /** 工作台的提示词润色：调用对话模型，只返回改写后的文本 */
   optimizePrompt: (prompt: string, target: "image" | "video") => request<{
@@ -230,14 +238,15 @@ export const api = {
   downloadAsset: async (asset: Asset) => {
     const separator = asset.url.includes("?") ? "&" : "?";
     const isVideo = asset.mimeType.startsWith("video/");
-    const fileType = isVideo ? "视频" : "图片";
+    const isAudio = asset.mimeType.startsWith("audio/");
+    const fileType = isVideo ? "视频" : isAudio ? "音乐" : "图片";
 
     if (isTauriRuntime()) {
       const [{ save }, { writeFile }] = await Promise.all([
         import("@tauri-apps/plugin-dialog"),
         import("@tauri-apps/plugin-fs"),
       ]);
-      const extension = imageExtension(asset);
+      const extension = assetExtension(asset);
       const destination = await save({
         title: `保存${fileType}`,
         defaultPath: asset.fileName,

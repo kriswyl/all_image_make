@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-这是一个 Windows 桌面图片 / 视频生成客户端（当前版本 `2.2.3`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
+这是一个 Windows 桌面图片 / 视频生成客户端（当前版本 `2.2.4`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
 
 ## 当前架构
 
@@ -36,9 +36,18 @@
 - 图标母版在 `design/chatcanvas-icon-1024.png`，用 `npx tauri icon` 生成 `src-tauri/icons/*`；界面里的裸 mark 是 `src/client/public/brand-mark.png`（由 `src/client/BrandMark.tsx` 使用），站点图标是 `src/client/public/app-icon.png`。
 - **自绘标题栏的窗口动作必须显式授权**：`decorations: false` 后，拖拽、最小化、最大化、关闭分别走 `core:window:allow-start-dragging` / `allow-minimize` / `allow-toggle-maximize` / `allow-close`。`core:default` **不包含**这四个权限，漏掉时前端拿到的是静默失败的 Promise，表现为“拖不动、按钮没反应”（v2.2.1 修过一次）。
 
+### 音乐生成
+
+- 一种音乐渠道：词元流墟 Suno（`suno-music`，模型 `suno_damobi_music`），协议细节见 [`SUNO_HANDOFF.md`](SUNO_HANDOFF.md)。
+- 一次固定返回 2 首；支持灵感描述 / 自定义歌词 / 纯音乐，音频与封面一起落盘。
+- 独立「音乐」工作台、历史筛选、播放器；对话工具 `generate_music` 同样一次返回两首。
+- 异步任务统一走 `src/server/async-providers.ts` 的 `AsyncProviderSpec`；
+  视频和音乐共用 `TaskRunner.pollAsyncTask()`，新增异步渠道只填描述表。
+- 品类判断统一走 `src/shared/kinds.ts` 的 `ChannelKind / TaskKind`，不再用「不是视频就是图片」的排除法。
+
 ### 视频生成
 
-- 三种视频渠道（通义万相 `wan-video`、Grok `grok-video`、豆包 Seedance `seedance-video`），协议细节见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)。
+- 四种视频渠道（通义万相 `wan-video`、Grok `grok-video`、豆包 Seedance `seedance-video`、可灵 `kling-video`），协议细节见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)。
 - 异步任务提交 → 持久化上游 task id → 轮询 → 下载落盘。**服务重启后，已拿到上游 task id 的视频任务会接着轮询**，不再一律判失败。
 - 视频任务的诊断记录采用「首尾完整 + 中间精简」：提交请求和最后一次轮询保留完整响应，中间的轮询只存一行状态摘要。
 
@@ -68,8 +77,18 @@ RELAY_API_KEY=替换为中转站密钥
 
 ## 重要目录和文件
 
-- `src/client/App.tsx`：主界面和表单、生图工作台、生成历史、清空确认与目录设置弹窗。
+- `src/client/App.tsx`：应用外壳、侧栏、渠道/任务状态和页面切换。
+- `src/client/views/GenerateView.tsx`：生图工作台和结果面板。
+- `src/client/views/HistoryView.tsx`：历史列表、预览和清空确认。
+- `src/client/dialogs/`：设置与诊断弹窗。
+- `src/client/hooks/useReferenceImages.ts`、`hooks/usePolling.ts`：参考图/蒙版与任务轮询。
 - `src/client/VideoGenerateView.tsx`：视频工作台和模式选择器。
+- `src/client/MusicGenerateView.tsx`：音乐工作台、全部模式、源歌曲选择、播放器与歌词。
+- `src/client/chat/ModelPanel.tsx`、`chat/ConversationSidebar.tsx`、`chat/AssetLightbox.tsx`：对话页拆出的组件。
+- `src/client/task-ui.tsx`：图片 / 视频 / 音乐共用的状态徽标、格式化与表单持久化。
+- `src/shared/kinds.ts`：渠道 / 任务品类的唯一真相（图片 / 视频 / 音乐 / 对话）。
+- `src/server/async-providers.ts`：异步厂商（视频 / 音乐）的轮询、状态与结果提取。
+- `src/server/agent-plan.ts` / `agent-confirm.ts` / `agent-batch.ts` / `agent-vision.ts` / `agent-task-events.ts` / `agent-brain.ts` / `agent-prompt.ts`：从 `agent.ts` 拆出的职责模块。
 - `src/client/useFileDrop.ts`：参考图上传区的拖放交互（图片页与视频页共用）。
 - `src/client/api.ts`：前端 API 客户端和桌面 API 地址切换。
 - `src/client/updater.ts`、`src/client/UpdateStatus.tsx`：自动更新的前端封装和侧栏底部面板。
@@ -84,7 +103,8 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/channels/`：渠道列表、编辑弹窗和添加渠道向导。
 - `src/server/index.ts`：本地 API 入口。
 - `src/shared/types.ts`：前后端共享类型。
-- `src-tauri/tauri.conf.json`：Tauri 窗口、资源、sidecar 和 CSP 配置。
+- `src-tauri/tauri.conf.json`：Tauri 窗口、资源、sidecar 和 CSP 配置。窗口是 `decorations:false` + `transparent:true` + `shadow:false`，前端在 `html.tauri-window` 下画 18px 圆角外壳；最大化时自动去掉透明边。
+- `src/client/notifications.ts`：对话完成时的任务栏提示与 overlay 角标；需要 `requestUserAttention` / `setOverlayIcon` 权限。
 - `src-tauri/src/lib.rs`：启动和关闭 Node sidecar 的 Rust 代码。
 - `scripts/prepare-tauri.mjs`：复制服务端资源、生产依赖和 Node sidecar。
 - `README.md`：日常运行和构建说明。
@@ -129,7 +149,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/chatcanvas-v2.2.3-portable-win-x64/` 和 `artifacts/chatcanvas-v2.2.3-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
+输出位于 `artifacts/chatcanvas-v2.2.4-portable-win-x64/` 和 `artifacts/chatcanvas-v2.2.4-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
 
 生成用于换电脑继续开发的源码包：
 
@@ -137,7 +157,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/chatcanvas-v2.2.3-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/chatcanvas-v2.2.4-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 

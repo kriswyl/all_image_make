@@ -19,6 +19,7 @@ import geminiLogo from "@lobehub/icons-static-svg/icons/gemini-color.svg?url";
 import grokLogo from "@lobehub/icons-static-svg/icons/grok.svg?url";
 import hunyuanLogo from "@lobehub/icons-static-svg/icons/hunyuan-color.svg?url";
 import kimiLogo from "@lobehub/icons-static-svg/icons/kimi-color.svg?url";
+import klingLogo from "@lobehub/icons-static-svg/icons/kling-color.svg?url";
 import midjourneyLogo from "@lobehub/icons-static-svg/icons/midjourney.svg?url";
 import minimaxLogo from "@lobehub/icons-static-svg/icons/minimax-color.svg?url";
 import openaiLogo from "@lobehub/icons-static-svg/icons/openai.svg?url";
@@ -26,8 +27,8 @@ import qwenLogo from "@lobehub/icons-static-svg/icons/qwen-color.svg?url";
 import stabilityLogo from "@lobehub/icons-static-svg/icons/stability-color.svg?url";
 import stepfunLogo from "@lobehub/icons-static-svg/icons/stepfun-color.svg?url";
 
-/** 图片 / 视频 / 对话——同一个模型名在不同类目下可能不是一家（`sd-*` 视频里是 Seedance） */
-export type ModelKind = "image" | "video" | "chat";
+/** 图片 / 视频 / 音乐 / 对话——同一个模型名在不同类目下可能不是一家（`sd-*` 视频里是 Seedance） */
+export type ModelKind = import("../../shared/types").ChannelKind;
 
 interface Brand {
   test: RegExp;
@@ -59,6 +60,7 @@ const BRANDS: Brand[] = [
   { test: /grok/i, logo: grokLogo, name: "xAI Grok" },
   { test: /wan|qwen|通义|万相/i, logo: qwenLogo, name: "通义万相" },
   { test: /seedance|doubao|豆包/i, logo: bytedanceLogo, name: "字节 Seedance" },
+  { test: /kling|可灵/i, logo: klingLogo, name: "快手可灵" },
   { test: /(^|[^a-z])sd[-_.\d]/i, kind: "video", logo: bytedanceLogo, name: "字节 Seedance" },
   { test: /flux/i, logo: fluxLogo, name: "Black Forest Labs FLUX" },
   { test: /midjourney|(^|[^a-z])mj([^a-z]|$)/i, logo: midjourneyLogo, name: "Midjourney" },

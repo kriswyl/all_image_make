@@ -1,6 +1,29 @@
 // 参数核对结果（需求.md 问题 1）的类型住在 agent-types 里，因为 Agent 卡片先用到它。
 // 这里只要类型、不要运行时的东西，所以用 `import type`——编译后整行消失，不会绕成一个环。
 import type { ParamNote } from "./agent-types.js";
+import { taskKindOf as taskKindOfFromKinds } from "./kinds.js";
+
+export {
+  AUDIO_ADAPTER_TYPES,
+  CHAT_ADAPTER_TYPES,
+  VIDEO_ADAPTER_TYPES,
+  channelKindOf,
+  isAudioAdapter,
+  isAudioAsset,
+  isChannelKind,
+  isChatAdapter,
+  isImageAdapter,
+  isImageAsset,
+  isVideoAdapter,
+  isVideoAsset,
+  taskKindFor,
+  taskKindOf,
+  type AudioAdapterType,
+  type ChannelKind,
+  type ChatAdapterType,
+  type TaskKind,
+  type VideoAdapterType,
+} from "./kinds.js";
 
 export type AdapterType =
   | "openai-images"
@@ -10,41 +33,12 @@ export type AdapterType =
   | "wan-video"
   | "grok-video"
   | "seedance-video"
+  | "kling-video"
+  | "suno-music"
   | "openai-chat";
 
 export type AuthType = "bearer" | "x-api-key" | "query" | "custom-header" | "none";
 
-/** 视频适配器集合：渠道筛选、历史分类都以此为准 */
-export const VIDEO_ADAPTER_TYPES = ["wan-video", "grok-video", "seedance-video"] as const;
-export type VideoAdapterType = (typeof VIDEO_ADAPTER_TYPES)[number];
-
-export function isVideoAdapter(adapterType: AdapterType): adapterType is VideoAdapterType {
-  return (VIDEO_ADAPTER_TYPES as readonly string[]).includes(adapterType);
-}
-
-/**
- * 对话适配器集合：只用于 Agent 的大脑调用，本身不出图也不出视频。
- * 它不经过 TaskRunner，因此不会产生任务记录，也不该出现在生图 / 视频工作台的渠道下拉里。
- */
-export const CHAT_ADAPTER_TYPES = ["openai-chat"] as const;
-export type ChatAdapterType = (typeof CHAT_ADAPTER_TYPES)[number];
-
-export function isChatAdapter(adapterType: AdapterType): adapterType is ChatAdapterType {
-  return (CHAT_ADAPTER_TYPES as readonly string[]).includes(adapterType);
-}
-
-/** 图片适配器：既不是视频也不是对话，生图工作台的渠道筛选以此为准 */
-export function isImageAdapter(adapterType: AdapterType) {
-  return !isVideoAdapter(adapterType) && !isChatAdapter(adapterType);
-}
-
-/**
- * 产物是不是图片。缩略图、参考图、视频首帧三处都要先过这一关：
- * 视频产物喂给 jimp 只会白花一次解码。
- */
-export function isImageAsset(asset: { mimeType: string }) {
-  return asset.mimeType.startsWith("image/");
-}
 
 /**
  * 万相的七种请求形态，对应官方文档的「请求示例」分类。
@@ -76,6 +70,22 @@ export interface VideoMediaInput {
 }
 
 /**
+ * 可灵的生成方式。
+ *
+ * 文档按模型拆能力：kling-3.0 有运动控制，turbo 只有文生/首帧，
+ * omni 才有首尾帧和参考图（`refer_image`）。普通图生视频目前只开放首帧。
+ */
+export type KlingVideoMode =
+  | "text-to-video"
+  | "first-frame"
+  | "first-last-frame"
+  | "reference"
+  | "motion-control";
+
+/** 运动控制里角色朝向：跟图片一致（参考视频 ≤10 秒）或跟视频一致（≤30 秒） */
+export type KlingCharacterOrientation = "image" | "video";
+
+/**
  * Seedance 的生成方式。请求体里不带模式字段，火山方舟按 content 里的
  * 素材类型和 role 自行推断，所以这里只用于前端渲染对应的输入槽。
  */
@@ -103,6 +113,20 @@ export interface SeedanceMediaInput {
   role?: SeedanceMediaRole;
 }
 
+/**
+ * 可灵视频素材。
+ *
+ * `image` / `video` 只用于运动控制（角色图和参考动作视频），其余是生成素材。
+ * 参考视频只接受公网地址：中转的请求体内联上限约 1.4MB，本地视频转 base64 必定超限。
+ */
+export type KlingMediaType = "first_frame" | "last_frame" | "reference_image" | "image" | "video";
+
+export interface KlingMediaInput {
+  type: KlingMediaType;
+  /** 公网 URL 或 data:{mime};base64,{data}（video 仅支持公网 URL） */
+  url: string;
+}
+
 /** 万相视频生成的 7 种模式 */
 export type WanVideoMode =
   | "text-to-video"           // 文生视频：仅 prompt
@@ -112,6 +136,16 @@ export type WanVideoMode =
   | "video-edit"              // 视频编辑：1 段 reference_video
   | "video-extend"            // 视频延长：1 段 reference_video + duration
   | "file-to-video";          // 参考文件生视频：1 个 file/link + 必须 prompt_extend=true
+
+/** Suno 的音乐生成方式；歌词生成不在本轮范围 */
+export type MusicMode =
+  | "inspiration"
+  | "custom"
+  | "cover"
+  | "mashup"
+  | "sound"
+  | "playlist"
+  | "sample";
 
 export type TaskStatus =
   | "queued"
@@ -253,6 +287,32 @@ export interface GenerationInput {
   seedanceVideoMode?: SeedanceVideoMode;
   /** Seedance 视频媒体素材（仅 Seedance 需要，替代 referenceImages） */
   seedanceVideoMedia?: SeedanceMediaInput[];
+  /** 可灵视频媒体素材（仅 Kling 需要，替代 referenceImages） */
+  klingVideoMedia?: KlingMediaInput[];
+  /** 可灵生成方式（仅 Kling 需要） */
+  klingVideoMode?: KlingVideoMode;
+  /** 运动控制：角色朝向跟随图片还是参考视频 */
+  klingCharacterOrientation?: KlingCharacterOrientation;
+  /** 可灵多镜头；不填按文档默认 true */
+  klingMultiShot?: boolean;
+  /** 音乐生成方式：灵感 / 自定义歌词 / 翻唱 / 混音 / 音效 / 歌单风格 / 取样 */
+  musicMode?: MusicMode;
+  /** 歌名，最多 80 字 */
+  musicTitle?: string;
+  /** 曲风标签，最多 1000 字 */
+  musicTags?: string;
+  /** 要排除的曲风 */
+  musicNegativeTags?: string;
+  /** 纯音乐（无人声） */
+  musicInstrumental?: boolean;
+  /** Suno 模型版本，例如 chirp-v3-5；不填由适配器补默认值 */
+  musicVersion?: string;
+  /** 翻唱源曲的 Suno custom_id */
+  musicCoverClipId?: string;
+  /** 混音源曲的两个 Suno custom_id */
+  musicMashupClipIds?: string[];
+  /** 音效模式的 BPM / 调性 / 是否循环 */
+  musicSoundConfigs?: { tempo?: number; key?: string; loop?: boolean };
   /** 本次请求的超时等待时长（毫秒） */
   timeoutMs?: number;
   rawParameters?: Record<string, unknown>;
@@ -270,8 +330,13 @@ export interface Asset {
    * 服务端按需生成，生成失败会 404，前端要 `onError` 回落到 `url`。
    */
   thumbUrl?: string | null;
-  /** Video duration in seconds (null for images) */
+  /** Video/audio duration in seconds (null for images) */
   duration?: number | null;
+  /** 音乐产物的歌名 / 歌词 / 曲风 / Suno custom_id（图片/视频为 null） */
+  title?: string | null;
+  lyrics?: string | null;
+  tags?: string | null;
+  remoteClipId?: string | null;
   createdAt: string;
 }
 
@@ -303,9 +368,12 @@ export interface Task {
 
 /** 任务是否属于视频：优先看渠道适配器，失败任务没有产物时也能判断 */
 export function isVideoTask(task: Task, channels: Channel[]): boolean {
-  const channel = channels.find((item) => item.id === task.channelId);
-  if (channel) return isVideoAdapter(channel.adapterType);
-  return task.assets.some((asset) => asset.mimeType.startsWith("video/"));
+  return taskKindOfFromKinds(task, channels) === "video";
+}
+
+/** 任务品类：图片 / 视频 / 音频。所有分类都走这一份真相 */
+export function taskKind(task: Task, channels: Channel[]) {
+  return taskKindOfFromKinds(task, channels);
 }
 
 export interface Diagnostic {
@@ -339,10 +407,11 @@ export interface Settings {
   /** 默认生图 / 生视频模型（需求.md 问题 5），存 alias，空串表示没设 */
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  defaultAudioAlias: string;
 }
 
 /** 清空历史的作用范围 */
-export type ClearScope = "image" | "video" | "all";
+export type ClearScope = "image" | "video" | "audio" | "all";
 
 export interface ApiResponse<T> {
   ok: boolean;

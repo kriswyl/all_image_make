@@ -1,5 +1,6 @@
 import type { DbChannel } from "./db.js";
-import type { GenerationInput } from "../shared/types.js";
+import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
+import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
 
 export interface PreparedRequest {
@@ -155,15 +156,18 @@ function geminiGenerationConfig(input: GenerationInput, raw: Record<string, unkn
 }
 
 export function defaultEndpoint(adapterType: DbChannel["adapterType"]) {
-  switch (adapterType) {
-    case "openai-images": return "/v1/images/generations";
-    case "openai-chat-image": return "/v1/chat/completions";
-    case "openai-chat": return "/v1/chat/completions";
-    case "gemini-content": return "/v1beta/models/{model}:generateContent";
-    case "wan-video": return "/api/v1/services/aigc/video-generation/video-synthesis";
-    case "grok-video": return "/v1/videos/generations";
-    case "seedance-video": return "/api/v3/contents/generations/tasks";
-    default: return "/v1/images/generations";
+  return defaultEndpointFor(adapterType);
+}
+
+/** Suno 各模式支持的 mv 不同，缺省值也跟着模式走 */
+function sunoDefaultVersion(mode: string) {
+  switch (mode) {
+    case "cover":
+    case "playlist": return "chirp-v3-5-tau";
+    case "mashup":
+    case "sound":
+    case "sample": return "chirp-crow";
+    default: return "chirp-v3-5";
   }
 }
 
@@ -182,12 +186,42 @@ export function applyAuth(url: string, headers: Record<string, string>, channel:
   return url;
 }
 
+/** 没显式给模式时，按素材反推一个最合理的模式 */
+function resolveKlingMode(input: GenerationInput): KlingVideoMode {
+  return input.klingVideoMode
+    ?? (input.klingVideoMedia?.some((item) => item.type === "reference_image")
+      ? "reference"
+      : input.klingVideoMedia?.length ? "first-frame" : "text-to-video");
+}
+
+/**
+ * 可灵原生端点。模型固定在路径里，body 不带 model。
+ * 文档按模型开放能力：运动控制只有 kling-3.0，首尾帧/参考图只有 omni。
+ */
+function klingEndpoint(model: string, mode: KlingVideoMode) {
+  const encoded = encodeURIComponent(model);
+  if (mode === "motion-control") {
+    if (/omni|turbo/i.test(model)) throw new Error("运动控制只支持 kling-3.0，不能用于 Omni / Turbo 模型");
+    return `/motion-control/${encoded}`;
+  }
+  if (/omni/i.test(model)) return `/omni-video/${encoded}`;
+  if (mode === "reference") {
+    throw new Error("参考图生成只支持 kling-3.0-omni 模型");
+  }
+  // 文档说尾帧暂未开放，实测 /image-to-video 能接 first_frame + last_frame
+  if (mode === "first-frame" || mode === "first-last-frame") return `/image-to-video/${encoded}`;
+  return `/text-to-video/${encoded}`;
+}
+
 export function buildGenerationRequest(channel: DbChannel, input: GenerationInput, key: string): PreparedRequest {
   const references = referenceImages(input);
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
   if (references.length && channel.adapterType === "openai-images"
     && (!channel.endpoint || channel.endpoint === defaultEndpoint(channel.adapterType))) {
     endpoint = "/v1/images/edits";
+  }
+  if (channel.adapterType === "kling-video") {
+    endpoint = klingEndpoint(input.model, resolveKlingMode(input));
   }
   endpoint = endpoint.replaceAll("{model}", encodeURIComponent(input.model));
   assertEndpoint(endpoint);
@@ -263,6 +297,175 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       watermark: input.watermark,
       ...raw,
     });
+  } else if (channel.adapterType === "kling-video") {
+    const media = input.klingVideoMedia ?? [];
+    const omni = /omni/i.test(input.model);
+    const mode = resolveKlingMode(input);
+    if (mode === "motion-control" && input.resolution === "4k") {
+      throw new Error("运动控制最高支持 1080p，没有 4K 档");
+    }
+
+    const settings = compact({
+      resolution: input.resolution || "720p",
+      // 运动控制的时长由参考视频决定，文档里没有 duration
+      duration: mode === "motion-control" ? undefined : input.duration ?? 5,
+      // 图生视频与运动控制的文档没有 aspect_ratio
+      aspect_ratio: mode === "motion-control" || (!omni && mode !== "text-to-video")
+        ? undefined
+        : input.aspectRatio || "16:9",
+      // 运动控制只认 original / off，其余模式是 native / off
+      audio: mode === "motion-control"
+        ? (input.audio === false ? "off" : "original")
+        : (input.audio ? "native" : "off"),
+      multi_shot: mode === "motion-control" ? undefined : input.klingMultiShot ?? true,
+      character_orientation: mode === "motion-control"
+        ? input.klingCharacterOrientation ?? "video"
+        : undefined,
+    });
+    const options = compact({
+      watermark_info: { enabled: input.watermark ?? false },
+    });
+
+    let contents: Array<Record<string, unknown>> | undefined;
+    if (mode === "motion-control") {
+      const image = media.find((item) => item.type === "image");
+      const video = media.find((item) => item.type === "video");
+      if (!image) throw new Error("运动控制需要一张角色图片");
+      if (!video) throw new Error("运动控制需要参考视频的公网地址");
+      contents = [
+        ...(input.prompt ? [{ type: "prompt", text: input.prompt }] : []),
+        { type: "image", url: image.url },
+        { type: "video", url: video.url },
+      ];
+    } else if (omni || mode === "first-frame" || mode === "first-last-frame") {
+      if (!omni) {
+        if (mode === "first-frame" && (media.length !== 1 || media[0]?.type !== "first_frame")) {
+          throw new Error("首帧生视频需要且只需要 1 张首帧图");
+        }
+        if (mode === "first-last-frame" && (
+          media.length !== 2
+          || media[0]?.type !== "first_frame"
+          || media[1]?.type !== "last_frame"
+        )) {
+          throw new Error("首尾帧生视频需要按顺序提供 1 张首帧和 1 张尾帧");
+        }
+        if (media.some((item) => item.type !== "first_frame" && item.type !== "last_frame")) {
+          throw new Error("普通图生视频不支持参考图；请改用 kling-3.0-omni");
+        }
+      }
+      contents = [
+        ...(input.prompt ? [{ type: "prompt", text: input.prompt }] : []),
+        ...media.map((item) => ({
+          type: item.type === "reference_image" ? "refer_image" : item.type,
+          url: item.url,
+        })),
+      ];
+    }
+
+    body = contents
+      ? compact({ contents, settings, options, ...raw })
+      : compact({ prompt: input.prompt, settings, options, ...raw });
+  } else if (channel.adapterType === "suno-music") {
+    // 文档的部分音乐接口要求 New-Api-User；补上不影响已验证的灵感/自定义模式
+    headers["New-Api-User"] = "1";
+    const mode = input.musicMode ?? "inspiration";
+    const mv = input.musicVersion?.trim() || sunoDefaultVersion(mode);
+    const instrumental = input.musicInstrumental ?? false;
+    const customMetadata = { create_mode: "custom" as const };
+
+    if (mode === "custom" && !input.musicTags?.trim()) {
+      throw new Error("自定义模式需要填写曲风（tags）");
+    }
+    if (mode === "cover" && !input.musicCoverClipId?.trim()) {
+      throw new Error("翻唱模式需要选择一首源歌曲");
+    }
+    if (mode === "mashup") {
+      const ids = input.musicMashupClipIds ?? [];
+      if (ids.length !== 2 || !ids[0]?.trim() || !ids[1]?.trim() || ids[0] === ids[1]) {
+        throw new Error("混音模式需要选择两首不同的歌曲");
+      }
+    }
+
+    if (mode === "custom") {
+      body = compact({
+        prompt: input.prompt,
+        tags: input.musicTags,
+        negative_tags: input.musicNegativeTags,
+        mv,
+        title: input.musicTitle,
+        make_instrumental: instrumental,
+        ...raw,
+      });
+    } else if (mode === "cover") {
+      body = compact({
+        task: "cover",
+        prompt: input.prompt,
+        mv,
+        cover_clip_id: input.musicCoverClipId,
+        metadata: customMetadata,
+        ...raw,
+      });
+    } else if (mode === "mashup") {
+      body = compact({
+        task: "mashup_condition",
+        generation_type: "TEXT",
+        title: input.musicTitle,
+        mv,
+        prompt: input.prompt,
+        make_instrumental: instrumental,
+        metadata: customMetadata,
+        mashup_clip_ids: input.musicMashupClipIds,
+        ...raw,
+      });
+    } else if (mode === "sound") {
+      body = compact({
+        task: "sound",
+        generation_type: "TEXT",
+        title: input.musicTitle,
+        tags: input.musicTags,
+        negative_tags: input.musicNegativeTags,
+        mv,
+        prompt: "",
+        // 音效一定是纯音乐，和文档示例保持一致
+        make_instrumental: true,
+        metadata: {
+          ...customMetadata,
+          sound_configs: {
+            user_tempo: input.musicSoundConfigs?.tempo ?? 99,
+            user_key: input.musicSoundConfigs?.key?.trim() || "C",
+            user_loop: input.musicSoundConfigs?.loop ?? false,
+          },
+        },
+        ...raw,
+      });
+    } else if (mode === "playlist") {
+      body = compact({
+        task: "playlist_condition",
+        generation_type: "TEXT",
+        mv,
+        prompt: input.prompt,
+        make_instrumental: instrumental,
+        metadata: customMetadata,
+        ...raw,
+      });
+    } else if (mode === "sample") {
+      body = compact({
+        task: "chop_sample_condition",
+        generation_type: "TEXT",
+        mv,
+        prompt: input.prompt,
+        make_instrumental: instrumental,
+        metadata: customMetadata,
+        ...raw,
+      });
+    } else {
+      body = compact({
+        gpt_description_prompt: input.prompt,
+        mv,
+        make_instrumental: instrumental,
+        ...raw,
+      });
+    }
   } else if (channel.adapterType === "openai-images" && references.length) {
     /**
      * 显式蒙版优先于 `rawParameters.mask`。

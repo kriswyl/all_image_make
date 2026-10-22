@@ -21,19 +21,30 @@ import {
   type ModelGroup, type ModelGroupKind,
 } from "../../shared/model-catalog";
 
-type ChapterKind = "chat" | "image" | "video";
+type ChapterKind = "chat" | "image" | "video" | "audio";
 type Stage =
-  | "welcome"
+  | "welcome" | "needs"
   | "chat-intro" | "chat-select"
   | "image-intro" | "image-select"
   | "video-intro" | "video-select"
+  | "audio-intro" | "audio-select"
   | "config" | "finish";
 type Transition = "forward" | "back" | null;
+
+/** 章节顺序和「你需要？」里的选项顺序一致：先用的排前面，对话大脑放最后 */
+const CHAPTER_ORDER: ChapterKind[] = ["image", "video", "audio", "chat"];
+
+const NEED_OPTIONS: Array<{ kind: ChapterKind; label: string; hint: string; char: string }> = [
+  { kind: "image", label: "生图", hint: "画图、改图、图生图", char: "绘" },
+  { kind: "video", label: "生视频", hint: "文生视频、首尾帧、参考图", char: "动" },
+  { kind: "audio", label: "生音乐", hint: "灵感、自定义歌词、纯音乐", char: "乐" },
+  { kind: "chat", label: "对话创作", hint: "和 AI 一起规划与生成", char: "对" },
+];
 
 const TIANTOKEN_LOGIN_URL = "https://api.tiantoken.com/login";
 
 interface KeyState { secretEnv: string; apiKey: string; }
-interface RowResult { status: "saving" | "done" | "error"; message?: string; }
+interface RowResult { status: "saving" | "done" | "error" | "skipped"; message?: string; }
 
 const CHAPTERS: Record<ChapterKind, {
   index: string;
@@ -74,23 +85,29 @@ const CHAPTERS: Record<ChapterKind, {
     char: "动",
     poem: "风起于青萍之末",
     lede: "让画面有风，\n也有呼吸。",
-    selectHint: "可以多选；万相、Seedance、Grok 各自成组。",
+    selectHint: "可以多选；万相、Seedance、可灵各自成组。",
     note: "可以多选，也可以先跳过",
+  },
+  audio: {
+    index: "第四章", num: "04", en: "CHAPTER 04",
+    title: "选择音乐模型",
+    selectTitle: "选一颗做歌的种子",
+    char: "乐",
+    poem: "丝竹入耳 · 心声成曲",
+    lede: "让旋律落地，\n让歌词有声音。",
+    selectHint: "目前是 Suno；灵感、自定义歌词、翻唱与混音都用它。",
+    note: "音乐独立于图片和视频",
   },
 };
 
-const STEP_OF: Record<Stage, number> = {
-  welcome: 0,
-  "chat-intro": 1, "chat-select": 2,
-  "image-intro": 3, "image-select": 4,
-  "video-intro": 5, "video-select": 6,
-  config: 7, finish: 8,
-};
+const MODES: Record<ChapterKind, string> = { image: "生图", video: "视频", audio: "音乐", chat: "对话" };
+const KIND_MARKS: Record<ChapterKind, string> = { image: "绘", video: "动", audio: "乐", chat: "对" };
 
 function kindOfStage(stage: Stage): ChapterKind | null {
   if (stage.startsWith("chat-")) return "chat";
   if (stage.startsWith("image-")) return "image";
   if (stage.startsWith("video-")) return "video";
+  if (stage.startsWith("audio-")) return "audio";
   return null;
 }
 
@@ -157,6 +174,7 @@ export function ImmersiveOnboarding({
 
   const [stage, setStage] = useState<Stage>("welcome");
   const [transition, setTransition] = useState<Transition>(null);
+  const [needs, setNeeds] = useState<ChapterKind[]>([]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [keys, setKeys] = useState<Record<string, KeyState>>({});
   const [saving, setSaving] = useState(false);
@@ -165,8 +183,25 @@ export function ImmersiveOnboarding({
   const [inkBurst, setInkBurst] = useState<Array<{ id: number; x: number; y: number; dx: number; dy: number }>>([]);
 
   savedRef.current = saved;
+  const activeKinds = useMemo(
+    () => CHAPTER_ORDER.filter((item) => needs.includes(item)),
+    [needs],
+  );
+  const flowStages = useMemo<Stage[]>(() => [
+    "welcome", "needs",
+    ...activeKinds.flatMap((item) => [`${item}-intro`, `${item}-select`] as Stage[]),
+    "config", "finish",
+  ], [activeKinds]);
   const kind = kindOfStage(stage);
-  const chapter = kind ? CHAPTERS[kind] : null;
+  const chapterIndex = kind ? activeKinds.indexOf(kind) : -1;
+  const chapter = kind
+    ? {
+        ...CHAPTERS[kind],
+        index: `第${["一", "二", "三", "四"][chapterIndex] ?? chapterIndex + 1}章`,
+        num: String(chapterIndex + 1).padStart(2, "0"),
+        en: `CHAPTER ${String(chapterIndex + 1).padStart(2, "0")}`,
+      }
+    : null;
   const isIntro = stage.endsWith("-intro");
   const isSelect = stage.endsWith("-select");
   const stageGroups = kind ? groupsForKind(kind) : [];
@@ -191,8 +226,9 @@ export function ImmersiveOnboarding({
   }, [kind, recommendedKey]);
 
   const selectedGroups = useMemo(
-    () => MODEL_GROUPS.filter((group) => (selected[group.key]?.length ?? 0) > 0),
-    [selected],
+    () => MODEL_GROUPS.filter((group) =>
+      needs.includes(group.kind) && (selected[group.key]?.length ?? 0) > 0),
+    [selected, needs],
   );
   const knownChannels = useMemo(
     () => [...saved, ...channels.filter((channel) => !saved.some((item) => item.id === channel.id))],
@@ -219,21 +255,40 @@ export function ImmersiveOnboarding({
   }
 
   function nextChapter(current: ChapterKind): Stage {
-    if (current === "chat") return "image-intro";
-    if (current === "image") return "video-intro";
-    return "config";
+    const index = activeKinds.indexOf(current);
+    const next = activeKinds[index + 1];
+    return next ? `${next}-intro` : "config";
   }
 
   function previousStage(current: Stage): Stage | null {
     if (current === "welcome") return null;
-    if (current === "chat-intro") return "welcome";
-    if (current === "chat-select") return "chat-intro";
-    if (current === "image-intro") return "chat-select";
-    if (current === "image-select") return "image-intro";
-    if (current === "video-intro") return "image-select";
-    if (current === "video-select") return "video-intro";
-    if (current === "config") return "video-select";
+    if (current === "needs") return "welcome";
+    const currentKind = kindOfStage(current);
+    if (currentKind) {
+      const index = activeKinds.indexOf(currentKind);
+      if (current.endsWith("-select")) return `${currentKind}-intro`;
+      if (index > 0) return `${activeKinds[index - 1]}-select`;
+      return "needs";
+    }
+    if (current === "config") {
+      const last = activeKinds[activeKinds.length - 1];
+      return last ? `${last}-select` : "needs";
+    }
     return null;
+  }
+
+  function toggleNeed(target: ChapterKind) {
+    const removing = needs.includes(target);
+    setNeeds((current) => removing
+      ? current.filter((item) => item !== target)
+      : [...current, target]);
+    if (!removing) return;
+    // 取消某一类时顺手清掉它已选的模型，避免配置页出现「没勾的类别」
+    setSelected((models) => {
+      const next = { ...models };
+      for (const group of groupsForKind(target)) delete next[group.key];
+      return next;
+    });
   }
 
   function toggleModel(group: ModelGroup, model: string) {
@@ -306,18 +361,31 @@ export function ImmersiveOnboarding({
   async function save() {
     if (!rows.length) {
       onToast("error", "还没有选择模型，先回去选一颗");
-      go("video-select", "back");
+      go(previousStage("config") ?? "needs", "back");
       return;
     }
-    if (missingKeyRows.length) {
-      onToast("error", `${missingKeyRows.length} 个配置还缺 API Key`);
+    const readyRows = rows.filter(keyReady);
+    const skippedRows = rows.filter((row) => !keyReady(row));
+    if (!readyRows.length) {
+      onToast("error", "还没有填任何 API Key，至少填一组再开始配置");
       return;
     }
+    if (skippedRows.length) {
+      const confirmed = window.confirm(
+        `还有 ${skippedRows.length} 个模型没填 API Key，将只保存已填好的 ${readyRows.length} 个。`
+        + "之后可以在「模型设置」里继续补。现在开始配置吗？",
+      );
+      if (!confirmed) return;
+    }
+
     setSaving(true);
-    setResults(Object.fromEntries(rows.map((row) => [row.group.key, { status: "saving" as const }])));
+    setResults(Object.fromEntries([
+      ...readyRows.map((row) => [row.group.key, { status: "saving" as const }]),
+      ...skippedRows.map((row) => [row.group.key, { status: "skipped" as const, message: "缺 Key，已跳过" }]),
+    ]));
     const savedNow: Channel[] = [];
     try {
-      for (const row of rows) {
+      for (const row of readyRows) {
         if (!row.draft) continue;
         try {
           const channel = row.duplicate
@@ -339,11 +407,13 @@ export function ImmersiveOnboarding({
         ...savedNow,
         ...current.filter((channel) => !savedNow.some((item) => item.id === channel.id)),
       ]);
-      if (savedNow.length === rows.length) {
-        onToast("success", `已配置 ${savedNow.length} 个渠道`);
+      if (savedNow.length === readyRows.length) {
+        onToast("success", skippedRows.length
+          ? `已配置 ${savedNow.length} 个渠道，${skippedRows.length} 个缺 Key 已跳过`
+          : `已配置 ${savedNow.length} 个渠道`);
         go("finish", "forward");
       } else {
-        onToast("error", `${rows.length - savedNow.length} 个配置保存失败，可以直接重试`);
+        onToast("error", `${readyRows.length - savedNow.length} 个配置保存失败，可以直接重试`);
       }
     } finally {
       setSaving(false);
@@ -357,8 +427,12 @@ export function ImmersiveOnboarding({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage]);
 
-  const step = STEP_OF[stage];
-  const progressChapter = kind ? (kind === "chat" ? 1 : kind === "image" ? 2 : 3) : stage === "config" ? 4 : 0;
+  const step = Math.max(1, flowStages.indexOf(stage));
+  const stepTotal = Math.max(1, flowStages.length - 1);
+  const progressChapter = kind
+    ? activeKinds.indexOf(kind) + 1
+    : stage === "config" ? activeKinds.length + 1 : 0;
+  const progressTotal = activeKinds.length + 1;
 
   return (
     <div
@@ -386,7 +460,7 @@ export function ImmersiveOnboarding({
         />
       ))}
 
-      {stage !== "welcome" && stage !== "finish" ? (
+      {stage !== "welcome" && stage !== "needs" && stage !== "finish" ? (
         <header className="ink-chrome">
           <div className="ink-brand">
             <span className="ink-mark">C</span>
@@ -394,7 +468,7 @@ export function ImmersiveOnboarding({
             <em>初次探索</em>
           </div>
           <div className="ink-progress" aria-label="引导进度">
-            {[1, 2, 3, 4].map((index) => (
+            {Array.from({ length: progressTotal }, (_, index) => index + 1).map((index) => (
               <i key={index} className={progressChapter >= index ? "is-on" : ""} />
             ))}
           </div>
@@ -414,7 +488,7 @@ export function ImmersiveOnboarding({
             <button
               type="button"
               className="ink-primary ink-welcome-cta"
-              onClick={(event) => { burstInk(event); go("chat-intro"); }}
+              onClick={(event) => { burstInk(event); go("needs"); }}
             >
               开启探索 <ArrowRight size={15} />
             </button>
@@ -424,6 +498,52 @@ export function ImmersiveOnboarding({
               {onOpenTemplates ? <button type="button" className="ink-link" onClick={() => leaveTo(onOpenTemplates)}>按站点模板配置</button> : null}
               {onOpenCustom ? <button type="button" className="ink-link" onClick={() => leaveTo(onOpenCustom)}>自定义站点</button> : null}
             </div>
+            <button type="button" className="ink-skip is-plain" onClick={skip}>跳过引导 →</button>
+          </section>
+        ) : null}
+
+        {stage === "needs" ? (
+          <section className="ink-needs">
+            <span className="ink-kicker">FIRST STEP</span>
+            <h1>你需要？</h1>
+            <p className="ink-needs-lede">可多选，只配置你真正会用的模型。</p>
+            <div className="ink-needs-grid" role="group" aria-label="选择需要的功能">
+              {NEED_OPTIONS.map((option) => {
+                const on = needs.includes(option.kind);
+                return (
+                  <button
+                    key={option.kind}
+                    type="button"
+                    className={`ink-need ${on ? "is-on" : ""}`}
+                    aria-pressed={on}
+                    onClick={() => toggleNeed(option.kind)}
+                  >
+                    <span className="ink-need-char">{option.char}</span>
+                    <strong>{option.label}</strong>
+                    <small>{option.hint}</small>
+                    {on ? <span className="ink-need-check"><Check size={12} /></span> : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="ink-needs-actions">
+              <button type="button" className="ink-ghost" onClick={() => go("welcome", "back")}>
+                <ArrowLeft size={13} />上一步
+              </button>
+              <div>
+                <button type="button" className="ink-link" onClick={() => setNeeds([...CHAPTER_ORDER])}>全都要</button>
+                <button
+                  type="button"
+                  className="ink-primary"
+                  disabled={!needs.length}
+                  onClick={() => go(activeKinds[0] ? `${activeKinds[0]}-intro` : "config")}
+                >
+                  继续 <ArrowRight size={14} />
+                </button>
+              </div>
+            </div>
+            <div className="ink-vertical">先问所需 · 再配其器</div>
+            <span className="ink-seal ink-needs-seal">需</span>
             <button type="button" className="ink-skip is-plain" onClick={skip}>跳过引导 →</button>
           </section>
         ) : null}
@@ -439,7 +559,7 @@ export function ImmersiveOnboarding({
                 <span className="ink-enso-char">{chapter.char}</span>
                 <span className="ink-splash s1" /><span className="ink-splash s2" /><span className="ink-splash s3" />
               </div>
-              <div className="ink-art-caption">{kind === "chat" ? "对话" : kind === "image" ? "生图" : "视频"} · {chapter.index}</div>
+              <div className="ink-art-caption">{MODES[kind]} · {chapter.index}</div>
             </div>
 
             <div className="ink-intro-copy">
@@ -476,7 +596,7 @@ export function ImmersiveOnboarding({
               {chapter.poem}
               <span className="ink-seal">{chapter.char}</span>
             </div>
-            <div className="ink-step-nav"><span>{String(step).padStart(2, "0")}</span><i /><em>08</em></div>
+            <div className="ink-step-nav"><span>{String(step).padStart(2, "0")}</span><i /><em>{String(stepTotal).padStart(2, "0")}</em></div>
             <button type="button" className="ink-skip" onClick={skip}>跳过引导 →</button>
           </section>
         ) : null}
@@ -488,7 +608,7 @@ export function ImmersiveOnboarding({
               <h1>{chapter.selectTitle}</h1>
               <p>{chapter.selectHint}</p>
             </div>
-            <div className="ink-vertical-label">{kind === "chat" ? "对话" : kind === "image" ? "生图" : "视频"}</div>
+            <div className="ink-vertical-label">{MODES[kind]}</div>
 
             <div className="ink-bubble-field">
               {bubbles.map((bubble) => {
@@ -556,7 +676,7 @@ export function ImmersiveOnboarding({
                   <p>
                     {rows.length
                       ? missingKeyRows.length
-                        ? `变量名已经替你填好。补上高亮这一行的 Key，其余照做即可。`
+                        ? `还有 ${missingKeyRows.length} 组没填 Key。可以直接开始配置，只保存已填好的；缺的之后在「模型设置」里补。`
                         : "全部就绪。点「开始配置」就能进入工作台。"
                       : "还没有选择任何模型。可以先回去选一颗，或者跳过引导去渠道页手动配置。"}
                   </p>
@@ -587,9 +707,7 @@ export function ImmersiveOnboarding({
                         className={`ink-config-row ${highlighted ? "is-highlight" : ""} ${ready ? "" : "is-missing"}`}
                       >
                         <div className="ink-config-title">
-                          <span className="ink-config-mark">
-                            {row.group.kind === "chat" ? "对" : row.group.kind === "image" ? "绘" : "动"}
-                          </span>
+                          <span className="ink-config-mark">{KIND_MARKS[row.group.kind]}</span>
                           <div>
                             <strong>{row.draft?.name ?? row.group.unit.label}</strong>
                             <small>{adapterLabels[row.group.unit.adapterType]} · {count} 个模型</small>
@@ -624,6 +742,7 @@ export function ImmersiveOnboarding({
                           <span className={`ink-config-state ${result?.status ?? ""}`}>
                             {result?.status === "saving" ? <><LoaderCircle size={12} className="spin" />保存中</>
                               : result?.status === "done" ? <><Check size={12} />{result.message}</>
+                              : result?.status === "skipped" ? <>{result.message}</>
                               : result?.status === "error" ? <>{result.message}</>
                               : ready ? "就绪" : "缺 Key"}
                           </span>
@@ -637,12 +756,12 @@ export function ImmersiveOnboarding({
                   <Sparkles size={24} />
                   <h3>还没有点亮任何模型</h3>
                   <p>先回去选一颗，或者跳过引导去渠道页手动配置。</p>
-                  <button type="button" className="ink-primary" onClick={() => go("video-select", "back")}>回到选模型</button>
+                  <button type="button" className="ink-primary" onClick={() => go(previousStage("config") ?? "needs", "back")}>回到选模型</button>
                 </div>
               )}
 
               <footer className="ink-config-foot">
-                <button type="button" className="ink-ghost" onClick={() => go("video-select", "back")} disabled={saving}>
+                <button type="button" className="ink-ghost" onClick={() => go(previousStage("config") ?? "needs", "back")} disabled={saving}>
                   <ArrowLeft size={13} />上一步
                 </button>
                 <div>
@@ -652,7 +771,7 @@ export function ImmersiveOnboarding({
                   <button
                     type="button"
                     className="ink-primary"
-                    disabled={saving || !rows.length || missingKeyRows.length > 0}
+                    disabled={saving || !rows.length}
                     onClick={() => void save()}
                   >
                     {saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}

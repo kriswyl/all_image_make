@@ -16,19 +16,22 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ConversationSidebar } from "./chat/ConversationSidebar";
+import { clearCompletionBadge, notifyCompletion } from "./notifications";
+import { AssetLightbox } from "./chat/AssetLightbox";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
-import type { Asset, Channel } from "../shared/types";
+import type { Asset, Channel, TaskKind } from "../shared/types";
 import {
   assetRef, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent,
   type ChatMessage, type ConversationStatus, type ConversationSummary,
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
-import { api, ApiError } from "./api";
+import { api, ApiError, isTauriRuntime } from "./api";
 import { AssetStrip } from "./chat/AssetStrip";
 import { Composer } from "./chat/Composer";
 import { ConfirmCard } from "./chat/ConfirmCard";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
-import { ModelLogo } from "./chat/ModelLogo";
+import { ModelPanel } from "./chat/ModelPanel";
 import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
@@ -104,9 +107,9 @@ export function ChatView({
   const [reasoning, setReasoning] = useState("");
   const [draft, setDraft] = useState("");
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
-  const [capabilities, setCapabilities] = useState<Array<{ alias: string; kind: "image" | "video"; model: string; channelName: string; channelId: string }>>([]);
+  const [capabilities, setCapabilities] = useState<Array<{ alias: string; kind: TaskKind; model: string; channelName: string; channelId: string }>>([]);
   /** 默认生图 / 生视频模型（需求.md 问题 5），空串表示不指定、用类目里第一个 */
-  const [defaults, setDefaults] = useState({ image: "", video: "" });
+  const [defaults, setDefaults] = useState({ image: "", video: "", audio: "" });
   const [preview, setPreview] = useState<string | null>(null);
   /** 画布条默认收起：平时只靠对话，需要挑图时从会话头那个开关展开 */
   const [canvasOpen, setCanvasOpen] = useState(false);
@@ -138,6 +141,26 @@ export function ChatView({
     if (options.some((item) => item.value === currentValue)) return options;
     return [...options, { value: currentValue, model: `${view.brainModel}（不可用）`, channelName: "当前设置" }];
   }, [brains, view?.brainChannelId, view?.brainModel]);
+
+  // 对话完成但窗口在后台时，闪任务栏并挂一个「1」角标；用户回到窗口后清掉
+  const previousStatusRef = useRef(status);
+  useEffect(() => {
+    const previous = previousStatusRef.current;
+    previousStatusRef.current = status;
+    if ((previous === "running" || previous === "waiting_task") && status === "idle") {
+      void notifyCompletion();
+    }
+  }, [status]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
+      unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (payload) void clearCompletionBadge();
+      });
+    }).catch(() => undefined);
+    return () => unlisten?.();
+  }, []);
 
   const running = status === "running";
   const activeIdRef = useRef<string | null>(null);
@@ -273,7 +296,11 @@ export function ChatView({
       ]);
       if (cancelled) return;
       setCapabilities(caps.aliases);
-      if (settings) setDefaults({ image: settings.defaultImageAlias, video: settings.defaultVideoAlias });
+      if (settings) setDefaults({
+        image: settings.defaultImageAlias,
+        video: settings.defaultVideoAlias,
+        audio: settings.defaultAudioAlias,
+      });
       const remembered = localStorage.getItem(STORAGE_KEY);
       const pick = conversations.find((item) => item.id === remembered) ?? conversations[0];
       // 记着的那个已经没了（多半是在别处删的），顺手把指针抹掉；
@@ -420,7 +447,7 @@ export function ChatView({
   // ── 操作 ───────────────────────────────────────────────────────────────────
 
   async function createConversation() {
-    if (!brains.length) { onToast("error", "先在「渠道配置」里加一个对话渠道，助手才有大脑"); return; }
+    if (!brains.length) { onToast("error", "先在「模型配置」里加一个对话模型，助手才有大脑"); return; }
     try {
       const created = await api.createConversation({});
       await reloadList();
@@ -687,9 +714,11 @@ export function ChatView({
       ?? null
     : null;
   const previewIsVideo = previewAsset?.mimeType.startsWith("video/") ?? false;
+  const previewIsAudio = previewAsset?.mimeType.startsWith("audio/") ?? false;
 
   const imageAliases = capabilities.filter((cap) => cap.kind === "image");
   const videoAliases = capabilities.filter((cap) => cap.kind === "video");
+  const audioAliases = capabilities.filter((cap) => cap.kind === "audio");
   /**
    * 「现在实际会用哪个」——优先级和 `resolveAlias` 保持一致：
    * 你设的默认值还在能力表里就用它，否则就是类目里第一个。
@@ -699,13 +728,19 @@ export function ChatView({
     return aliases.some((cap) => cap.alias === configured) ? configured : aliases[0]?.alias ?? "";
   }
 
-  async function setDefaultAlias(kind: "image" | "video", alias: string) {
-    const label = kind === "image" ? "生图" : "生视频";
+  async function setDefaultAlias(kind: TaskKind, alias: string) {
+    const label = kind === "image" ? "生图" : kind === "video" ? "生视频" : "音乐";
     try {
       const result = await api.updateSettings(
-        kind === "image" ? { agentDefaultImageAlias: alias } : { agentDefaultVideoAlias: alias },
+        kind === "image" ? { agentDefaultImageAlias: alias }
+          : kind === "video" ? { agentDefaultVideoAlias: alias }
+            : { agentDefaultAudioAlias: alias },
       );
-      setDefaults({ image: result.defaultImageAlias, video: result.defaultVideoAlias });
+      setDefaults({
+        image: result.defaultImageAlias,
+        video: result.defaultVideoAlias,
+        audio: result.defaultAudioAlias,
+      });
       toast("ok", alias ? `默认${label}模型已设为 ${alias}` : `默认${label}模型已交回自动选择`);
     } catch (error) {
       toastError(error);
@@ -719,70 +754,21 @@ export function ChatView({
         列表数据和 SSE 都长在这个组件里，把状态整个往上提的代价远大于挂一个 portal 节点；
         换来的是导航只剩侧栏一层——原来是「顶栏 + 页内侧栏」叠两层，Codex 只有一层。
       */}
-      {sidebarHost ? createPortal(
-        <div className="sidebar-group">
-          <div className="sidebar-group-title">
-            <span>最近</span>
-            <button type="button" className="sidebar-group-add" title="新建会话" aria-label="新建会话" onClick={() => void createConversation()}>
-              <Plus size={13} />
-            </button>
-          </div>
-          <div className="sidebar-conv-list">
-            {filteredList.length ? filteredList.map((item) => (
-              <div
-                key={item.id}
-                className={`sidebar-conv ${item.id === activeId ? "is-active" : ""} ${renamingId === item.id ? "is-renaming" : ""}`}
-                onContextMenu={(event) => openConversationMenu(event, item.id)}
-              >
-                {renamingId === item.id ? (
-                  <input
-                    className="sidebar-conv-rename"
-                    value={renameDraft}
-                    autoFocus
-                    maxLength={120}
-                    aria-label="会话名称"
-                    onChange={(event) => setRenameDraft(event.target.value)}
-                    onFocus={(event) => event.currentTarget.select()}
-                    onClick={(event) => event.stopPropagation()}
-                    onContextMenu={(event) => event.stopPropagation()}
-                    onBlur={() => {
-                      if (renameCancelRef.current) { renameCancelRef.current = false; return; }
-                      void commitRenameConversation(item.id);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        event.currentTarget.blur();
-                      } else if (event.key === "Escape") {
-                        event.preventDefault();
-                        renameCancelRef.current = true;
-                        setRenamingId(null);
-                        event.currentTarget.blur();
-                      }
-                    }}
-                  />
-                ) : (
-                  <button type="button" className="sidebar-conv-main" title={item.lastMessage || item.title} onClick={() => setActiveId(item.id)}>
-                    <span className="sidebar-conv-title">{item.title || DEFAULT_CONVERSATION_TITLE}</span>
-                    {item.running ? <LoaderCircle size={11} className="spin" /> : null}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="icon-button compact danger sidebar-conv-del"
-                  title="删除会话"
-                  onClick={() => void removeConversation(item.id)}
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            )) : (
-              <p className="sidebar-conv-empty">
-                {sidebarFilter.trim() ? "没有匹配的会话。" : "还没有会话。点上面的「新对话」开始，然后用一句话让它画图或改图。"}
-              </p>
-            )}
-          </div>
-        </div>, sidebarHost) : null}
+      <ConversationSidebar
+        host={sidebarHost}
+        conversations={filteredList}
+        activeId={activeId}
+        renamingId={renamingId}
+        renameDraft={renameDraft}
+        filter={sidebarFilter}
+        onSelect={setActiveId}
+        onCreate={() => void createConversation()}
+        onDelete={(id) => void removeConversation(id)}
+        onContextMenu={openConversationMenu}
+        onRenameChange={setRenameDraft}
+        onRenameCommit={(id) => void commitRenameConversation(id)}
+        onRenameCancel={() => { renameCancelRef.current = true; setRenamingId(null); }}
+      />
 
       {convMenu ? createPortal(
         <div
@@ -830,8 +816,8 @@ export function ChatView({
             ) : (
               <>
                 <Brain size={22} />
-                <h2>还没有可以用来当大脑的渠道</h2>
-                <p>助手需要走 chat completions 协议的对话模型。到「渠道配置」加一个对话渠道，填好 Base URL、模型 ID 和 Key，再回来这里。</p>
+                <h2>还没有可以用来当大脑的模型配置</h2>
+                <p>助手需要走 chat completions 协议的对话模型。到「模型配置」加一个对话模型，填好 Base URL、模型 ID 和 Key，再回来这里。</p>
               </>
             )}
           </div>
@@ -868,110 +854,14 @@ export function ChatView({
                 </button>
 
                 {capabilities.length ? (
-                  <details className="chat-caps" ref={capsRef}>
-                    <summary title="助手现在能调哪些模型"><ListTree size={13} />图片 · 视频模型</summary>
-                    <div className="chat-caps-body">
-                      <div className="chat-caps-defaults">
-                        <div className="chat-caps-defaults-grid">
-                        <label>
-                          <span>默认生图模型</span>
-                          <select
-                            value={defaults.image}
-                            disabled={!imageAliases.length}
-                            onChange={(event) => void setDefaultAlias("image", event.target.value)}
-                          >
-                            <option value="">自动（用第一个）</option>
-                            {imageAliases.map((cap) => (
-                              <option key={cap.alias} value={cap.alias}>{cap.alias} · {cap.model}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          <span>默认生视频模型</span>
-                          <select
-                            value={defaults.video}
-                            disabled={!videoAliases.length}
-                            onChange={(event) => void setDefaultAlias("video", event.target.value)}
-                          >
-                            <option value="">自动（用第一个）</option>
-                            {videoAliases.map((cap) => (
-                              <option key={cap.alias} value={cap.alias}>{cap.alias} · {cap.model}</option>
-                            ))}
-                          </select>
-                        </label>
-                        </div>
-                        <p className="chat-caps-hint">
-                          助手没说用哪个模型时，就用这里的——也可以直接点下面列表里的那一行。
-                        </p>
-                      </div>
-                      {/* 生图和视频分两列：混在一列里，找一个视频模型要滑过一屏图片模型 */}
-                      <div className="chat-caps-columns">
-                        {(["image", "video"] as const).map((kind) => {
-                          const items = capabilities.filter((cap) => cap.kind === kind);
-                          const label = kind === "video" ? "生视频" : "生图";
-                          return (
-                            <section key={kind} className="chat-caps-column">
-                              <h4>{label}模型{items.length ? `（${items.length}）` : ""}</h4>
-                              {items.length ? items.map((cap) => {
-                                const effective = cap.alias === effectiveAlias(
-                                  kind === "video" ? defaults.video : defaults.image,
-                                  kind === "video" ? videoAliases : imageAliases,
-                                );
-                                return (
-                                  /*
-                                    整行可点 = 把这个模型设成该类目的默认。
-                                    用 div 而不是 button：里面还嵌着「调整」那个 button，
-                                    按钮套按钮是非法 HTML，点哪一个都不可靠。
-                                  */
-                                  <div
-                                    key={`${cap.kind}-${cap.alias}`}
-                                    className={`chat-caps-item ${effective ? "is-default" : ""}`}
-                                    role="button"
-                                    tabIndex={0}
-                                    title={effective ? "当前默认" : `点一下把 ${cap.model} 设为默认`}
-                                    onClick={() => { if (!effective) void setDefaultAlias(cap.kind, cap.alias); }}
-                                    onKeyDown={(event) => {
-                                      if (event.key !== "Enter" && event.key !== " ") return;
-                                      event.preventDefault();
-                                      if (!effective) void setDefaultAlias(cap.kind, cap.alias);
-                                    }}
-                                  >
-                                    {/* 认不出厂商时这一格就是空的，但版式靠它对齐，所以留同宽的空位 */}
-                                    <span className="chat-caps-logo">
-                                      <ModelLogo model={cap.model} kind={cap.kind} />
-                                    </span>
-                                    <span className="chat-caps-model">
-                                      <strong title={cap.model}>{cap.model}</strong>
-                                      {effective ? <i className="chat-caps-flag">默认</i> : null}
-                                    </span>
-                                    <span className="chat-caps-meta">{cap.channelName} · 叫「{cap.alias}」</span>
-                                    {/* 就在这儿改：看到模型不对，下一步就是想动它所属的渠道 */}
-                                    {onConfigureChannel && cap.channelId ? (
-                                      <button
-                                        type="button"
-                                        className="chat-caps-adjust"
-                                        title="调整这个渠道的配置"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          const channel = channels.find((item) => item.id === cap.channelId);
-                                          if (channel) onConfigureChannel(channel);
-                                        }}
-                                      >
-                                        调整
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                );
-                              }) : (
-                                <p className="chat-caps-empty">还没有可用的{label}模型——到「渠道」里接一个。</p>
-                              )}
-                            </section>
-                          );
-                        })}
-                      </div>
-                      <p className="chat-caps-note">上面是真名，下面那个是对话里用的简称——你在对话里说「用 Gemini 画」就够了，不必记真实模型 ID。</p>
-                    </div>
-                  </details>
+                  <ModelPanel
+                    capabilities={capabilities}
+                    defaults={defaults}
+                    channels={channels}
+                    capsRef={capsRef}
+                    onSetDefaultAlias={setDefaultAlias}
+                    onConfigureChannel={onConfigureChannel}
+                  />
                 ) : null}
               </div>
             </header>
@@ -1137,26 +1027,7 @@ export function ChatView({
       </section>
 
       {preview ? (
-        <div className="chat-lightbox" onClick={() => setPreview(null)} role="presentation">
-          <div className="chat-lightbox-body" onClick={(event) => event.stopPropagation()}>
-            {previewIsVideo ? (
-              // 视频只能交给浏览器解码：服务端缩略图走 jimp，喂给它视频会直接 404
-              // （ASSET_NOT_IMAGE），所以这里不做 poster，直接播
-              <video
-                src={api.assetUrl(`/api/assets/${preview}/file`)}
-                controls autoPlay loop playsInline disablePictureInPicture disableRemotePlayback
-              />
-            ) : (
-              <img src={api.assetUrl(`/api/assets/${preview}/file`)} alt="" />
-            )}
-            <div className="chat-lightbox-bar">
-              <span>{assetRef(preview)}{previewAsset ? ` · ${previewAsset.fileName}` : ""}</span>
-              <button type="button" className="icon-button compact" onClick={() => setPreview(null)} title="关闭">
-                <X size={14} />
-              </button>
-            </div>
-          </div>
-        </div>
+        <AssetLightbox assetId={preview} asset={previewAsset} onClose={() => setPreview(null)} />
       ) : null}
     </div>
   );

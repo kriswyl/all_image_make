@@ -8,11 +8,11 @@
  * 这份清单会进系统提示词，所以它**绝不能**包含 baseUrl、密钥、channelId。
  * `tests/agent.test.ts` 里有一条会失败的断言守着这件事。
  */
-import type { AdapterType } from "../shared/types.js";
-import { isChatAdapter, isVideoAdapter } from "../shared/types.js";
+import type { AdapterType, TaskKind } from "../shared/types.js";
+import { channelKindOf } from "../shared/kinds.js";
 import type { DbChannel } from "./db.js";
 
-export type CapabilityKind = "image" | "video";
+export type CapabilityKind = TaskKind;
 
 export interface CapabilityAlias {
   /** 大脑看到的唯一标识，例如 `gemini`、`wan`、`gpt-image-2` */
@@ -42,11 +42,14 @@ const ALIAS_PREFIXES: Array<{ pattern: RegExp; alias: string; kind?: CapabilityK
   { pattern: /gemini|imagen|nano-?banana/i, alias: "gemini" },
   { pattern: /grok/i, alias: "grok" },
   { pattern: /wan|万相|通义/i, alias: "wan" },
+  { pattern: /kling|可灵/i, alias: "kling" },
   { pattern: /gpt-image|dall-?e|gpt-4o-image/i, alias: "gpt-image" },
   { pattern: /flux/i, alias: "flux" },
   { pattern: /midjourney|(^|[^a-z])mj([^a-z]|$)/i, alias: "mj" },
   { pattern: /stable-?diffusion|(^|[^a-z])sd[-_.\d]/i, alias: "sd", kind: "image" },
   { pattern: /qwen/i, alias: "qwen" },
+  // 音乐渠道：模型名可能是 suno_damobi_music / suno_music，别名统一成 suno
+  { pattern: /suno|music/i, alias: "suno", kind: "audio" },
 ];
 
 /**
@@ -101,6 +104,11 @@ const VIDEO_TRAITS: Record<string, string> = {
   "wan-video": "2-30s  480P|720P|1080P  模式=文生|首帧|首尾帧|参考|编辑|延长  音频=✔  提示词扩展=✔",
   "seedance-video": "4-30s  480p|720p|1080p  模式=文生|首帧|首尾帧|参考  音频=✔",
   "grok-video": "1-15s  480p|720p|1080p  模式=文生|图生  参考图≤7",
+  "kling-video": "3-15s  720p|1080p  模式=文生|首帧  音频=✔",
+};
+
+const AUDIO_TRAITS: Record<string, string> = {
+  "suno-music": "一次生成 2 首  灵感|自定义歌词|纯音乐  时长自动（约 2-5 分钟）",
 };
 
 /**
@@ -115,8 +123,8 @@ export function likelySupportsVision(adapterType: AdapterType) {
 }
 
 function traitsFor(adapterType: AdapterType, kind: CapabilityKind) {
-  const table = kind === "video" ? VIDEO_TRAITS : IMAGE_TRAITS;
-  return table[adapterType] ?? (kind === "video" ? "视频生成" : "图片生成");
+  const table = kind === "video" ? VIDEO_TRAITS : kind === "audio" ? AUDIO_TRAITS : IMAGE_TRAITS;
+  return table[adapterType] ?? (kind === "video" ? "视频生成" : kind === "audio" ? "音乐生成" : "图片生成");
 }
 
 /**
@@ -130,8 +138,9 @@ export function buildCapabilityAliases(channels: DbChannel[]): CapabilityAlias[]
   for (const channel of channels) {
     if (!channel.enabled) continue;
     // 对话渠道是大脑自己，不是可选的能力
-    if (isChatAdapter(channel.adapterType)) continue;
-    const kind: CapabilityKind = isVideoAdapter(channel.adapterType) ? "video" : "image";
+    const channelKind = channelKindOf(channel.adapterType);
+    if (channelKind === "chat") continue;
+    const kind: CapabilityKind = channelKind;
     for (const model of channel.models) {
       entries.push({
         kind, channelId: channel.id, channelName: channel.name, model,
@@ -167,12 +176,15 @@ export function buildCapabilityManifest(aliases: CapabilityAlias[]): string {
   if (!aliases.length) return "（当前没有可用的生成渠道，请先到「渠道配置」添加）";
   const image = aliasesFor(aliases, "image");
   const video = aliasesFor(aliases, "video");
+  const audio = aliasesFor(aliases, "audio");
   const lines: string[] = [];
-  for (const item of [...image, ...video]) {
+  for (const item of [...image, ...video, ...audio]) {
     const vision = item.kind === "image" ? `  视觉=${likelySupportsVision(item.adapterType) ? "✔" : "✘"}` : "";
-    lines.push(`alias=${item.alias}  ${item.kind === "video" ? "视频" : "图片"}  ${item.traits}${vision}`);
+    const label = item.kind === "video" ? "视频" : item.kind === "audio" ? "音乐" : "图片";
+    lines.push(`alias=${item.alias}  ${label}  ${item.traits}${vision}`);
   }
   if (!video.length) lines.push("（还没有配置视频渠道，用户要视频时如实说明）");
+  if (!audio.length) lines.push("（还没有配置音乐渠道，用户要音乐时如实说明）");
   return lines.join("\n");
 }
 

@@ -2,15 +2,13 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, ChevronDown, LoaderCircle, Plus, QrCode, Server, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { adapterLabels } from "../labels";
-import { isChatAdapter, isVideoAdapter, type Channel } from "../../shared/types";
+import { channelKindOf, type Channel } from "../../shared/types";
 import type { ToastKind } from "../labels";
 import { ModelLogo, type ModelKind } from "../chat/ModelLogo";
 
 /** 模型图标按渠道类目匹配：`sd-*` 在视频里是 Seedance，在图片里是 Stable Diffusion */
 function channelModelKind(channel: Channel): ModelKind {
-  if (isChatAdapter(channel.adapterType)) return "chat";
-  if (isVideoAdapter(channel.adapterType)) return "video";
-  return "image";
+  return channelKindOf(channel.adapterType);
 }
 
 export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, onToast }: {
@@ -61,7 +59,7 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
   return (
     <div className="page">
       <div className="page-header">
-        <div><h1>渠道</h1><span className="page-kicker">CONNECTIONS</span></div>
+        <div><h1>模型设置</h1><span className="page-kicker">MODEL CONFIGURATION</span></div>
         <div className="page-header-actions">
           <div className="provider-contact" ref={contactRef}>
             <button
@@ -70,7 +68,7 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
               aria-expanded={contactOpen}
               onClick={() => setContactOpen((value) => !value)}
             >
-              <QrCode size={16} />联系词元流墟
+              <QrCode size={16} />词元流墟技术支持
             </button>
             {contactOpen ? (
               <div className="provider-contact-popover" role="dialog" aria-label="词元流墟官方联系方式">

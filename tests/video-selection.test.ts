@@ -144,6 +144,28 @@ describe("resolveVideoSelection", () => {
     expect(explicitText.selection?.mode).toBe("text-to-video");
   });
 
+  it("可灵按模型判断：turbo 不认参考图，omni 才认首尾帧/参考图", async () => {
+    const { context, conversationId, ids } = await setup(2);
+    const conversation = context.db.getConversation(conversationId)!;
+
+    const turbo = resolveVideoSelection(context.db, conversation,
+      args({ mode: "reference", imageRefs: [ids[0]!] }), "kling-video", [], "kling-3.0-turbo");
+    expect(turbo.selection).toBeUndefined();
+    expect(turbo.error).toContain("不支持");
+    // 首尾帧实测可用，所以 turbo 的错误提示里应该列出它，便于大脑换模式
+    expect(turbo.error).toContain("first-last-frame");
+
+    const omni = resolveVideoSelection(context.db, conversation,
+      args({ mode: "reference", imageRefs: ids }), "kling-video", [], "kling-3.0-omni");
+    expect(omni.selection?.roles).toEqual(["reference_image", "reference_image"]);
+
+    for (const model of ["kling-3.0-omni", "kling-3.0-turbo", "kling-3.0"]) {
+      const frames = resolveVideoSelection(context.db, conversation,
+        args({ mode: "first-last-frame", imageRefs: [ids[0]!, ids[1]!] }), "kling-video", [], model);
+      expect(frames.selection?.roles).toEqual(["first_frame", "last_frame"]);
+    }
+  });
+
   it("引用不存在 / 不是图片时硬失败，不静默少发一张", async () => {
     const { context, conversationId } = await setup(1);
     const conversation = context.db.getConversation(conversationId)!;

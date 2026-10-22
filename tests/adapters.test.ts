@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildGenerationRequest, extractImageCandidates, extractVideoCandidates, normalizeTimeout, requestForDiagnostic } from "../src/server/adapters";
 import type { DbChannel } from "../src/server/db";
+import type { GenerationInput } from "../src/shared/types";
 
 const channel: DbChannel = {
   id: "channel-1", name: "Test", baseUrl: "https://relay.example.com", adapterType: "openai-images",
@@ -395,5 +396,236 @@ describe("response normalization", () => {
   it("finds no video while the relay still returns an empty video field", () => {
     const videos = extractVideoCandidates({ id: "task-1", video: "", status: "unknown", progress: 0 });
     expect(videos).toHaveLength(0);
+  });
+});
+
+const sunoChannel: DbChannel = {
+  ...channel, adapterType: "suno-music", endpoint: "/api/queue/makeAiMusic", models: ["suno_damobi_music"],
+};
+
+function sunoBody(input: Omit<GenerationInput, "channelId" | "model">) {
+  return buildGenerationRequest(sunoChannel, {
+    channelId: sunoChannel.id, model: "suno_damobi_music", ...input,
+  }, "secret").body;
+}
+
+describe("Suno 各模式请求体", () => {
+  it("灵感模式发 gpt_description_prompt", () => {
+    expect(sunoBody({ prompt: "雨后的城市", musicMode: "inspiration", musicVersion: "chirp-v3-5" })).toMatchObject({
+      gpt_description_prompt: "雨后的城市",
+      mv: "chirp-v3-5",
+      make_instrumental: false,
+    });
+  });
+
+  it("自定义模式发歌词、曲风和标题", () => {
+    expect(sunoBody({
+      prompt: "歌词……", musicMode: "custom", musicTags: "民谣, 温暖",
+      musicTitle: "雨后的城", musicVersion: "chirp-v4",
+    })).toMatchObject({
+      prompt: "歌词……", tags: "民谣, 温暖", title: "雨后的城", mv: "chirp-v4", make_instrumental: false,
+    });
+  });
+
+  it("翻唱带 cover_clip_id 和 task=cover", () => {
+    expect(sunoBody({
+      prompt: "改成爵士", musicMode: "cover", musicCoverClipId: "clip-1", musicVersion: "chirp-v3-5-tau",
+    })).toMatchObject({
+      task: "cover", prompt: "改成爵士", cover_clip_id: "clip-1", mv: "chirp-v3-5-tau",
+      metadata: { create_mode: "custom" },
+    });
+  });
+
+  it("混音带两个 clip id 和固定字段", () => {
+    expect(sunoBody({
+      prompt: "", musicMode: "mashup", musicMashupClipIds: ["clip-1", "clip-2"], musicVersion: "chirp-crow",
+    })).toMatchObject({
+      task: "mashup_condition", generation_type: "TEXT", mv: "chirp-crow",
+      mashup_clip_ids: ["clip-1", "clip-2"], metadata: { create_mode: "custom" },
+    });
+  });
+
+  it("音效带 sound_configs，prompt 留空、纯音乐固定 true", () => {
+    expect(sunoBody({
+      prompt: "", musicMode: "sound", musicTitle: "Rain", musicTags: "rain",
+      musicSoundConfigs: { tempo: 99, key: "D", loop: true }, musicVersion: "chirp-crow",
+    })).toMatchObject({
+      task: "sound", generation_type: "TEXT", title: "Rain", tags: "rain",
+      mv: "chirp-crow", make_instrumental: true,
+      metadata: {
+        create_mode: "custom",
+        sound_configs: { user_tempo: 99, user_key: "D", user_loop: true },
+      },
+    });
+  });
+
+  it("歌单风格和取样各自带 task，mv 缺省跟随模式", () => {
+    expect(sunoBody({ prompt: "city pop", musicMode: "playlist" })).toMatchObject({
+      task: "playlist_condition", generation_type: "TEXT", mv: "chirp-v3-5-tau",
+      make_instrumental: false,
+    });
+    expect(sunoBody({ prompt: "lofi", musicMode: "sample" })).toMatchObject({
+      task: "chop_sample_condition", generation_type: "TEXT", mv: "chirp-crow",
+    });
+  });
+
+  it("缺源歌曲 / 缺曲风 / 混音不是两首时直接报错", () => {
+    expect(() => sunoBody({ prompt: "x", musicMode: "cover" })).toThrow("翻唱模式需要选择一首源歌曲");
+    expect(() => sunoBody({ prompt: "x", musicMode: "custom" })).toThrow("自定义模式需要填写曲风");
+    expect(() => sunoBody({ prompt: "x", musicMode: "mashup", musicMashupClipIds: ["a"] })).toThrow("混音模式需要选择两首不同的歌曲");
+    expect(() => sunoBody({ prompt: "x", musicMode: "mashup", musicMashupClipIds: ["a", "a"] })).toThrow("混音模式需要选择两首不同的歌曲");
+  });
+});
+
+const klingChannel: DbChannel = {
+  ...channel, adapterType: "kling-video", endpoint: "/text-to-video/{model}", models: ["kling-3.0"],
+};
+
+function klingRequest(input: Omit<GenerationInput, "channelId" | "model"> & { model?: string }) {
+  const { model, ...rest } = input;
+  return buildGenerationRequest(klingChannel, {
+    channelId: klingChannel.id, model: model ?? "kling-3.0", ...rest,
+  }, "secret");
+}
+
+describe("Kling 原生格式请求", () => {
+  it("文生视频走 /text-to-video/{model}，body 不带 model", () => {
+    const request = klingRequest({ prompt: "cat", duration: 5, resolution: "720p", aspectRatio: "16:9" });
+    expect(request.url).toBe("https://relay.example.com/text-to-video/kling-3.0");
+    expect(request.body).toMatchObject({
+      prompt: "cat",
+      settings: { resolution: "720p", duration: 5, aspect_ratio: "16:9", audio: "off", multi_shot: true },
+    });
+    expect(request.body).not.toHaveProperty("model");
+    expect(request.body).not.toHaveProperty("size");
+  });
+
+  it("首帧走 /image-to-video/{model}，素材放 contents", () => {
+    const request = klingRequest({
+      prompt: "cat", duration: 5, resolution: "1080p", klingVideoMode: "first-frame",
+      klingVideoMedia: [{ type: "first_frame", url: "data:image/jpeg;base64,AAA" }],
+    });
+    expect(request.url).toBe("https://relay.example.com/image-to-video/kling-3.0");
+    expect(request.body).toMatchObject({
+      contents: [
+        { type: "prompt", text: "cat" },
+        { type: "first_frame", url: "data:image/jpeg;base64,AAA" },
+      ],
+    });
+  });
+
+  it("Omni 走 /omni-video/{model}，参考图用 refer_image", () => {
+    const request = klingRequest({
+      model: "kling-3.0-omni", prompt: "cat", duration: 5, resolution: "720p", klingVideoMode: "reference",
+      klingVideoMedia: [
+        { type: "reference_image", url: "data:image/jpeg;base64,AAA" },
+        { type: "reference_image", url: "data:image/jpeg;base64,BBB" },
+      ],
+    });
+    expect(request.url).toBe("https://relay.example.com/omni-video/kling-3.0-omni");
+    expect(request.body).toMatchObject({
+      contents: [
+        { type: "prompt", text: "cat" },
+        { type: "refer_image", url: "data:image/jpeg;base64,AAA" },
+        { type: "refer_image", url: "data:image/jpeg;base64,BBB" },
+      ],
+    });
+  });
+
+  it("图生视频不发 aspect_ratio，但支持 4K 与原生音频", () => {
+    const request = klingRequest({
+      prompt: "cat", duration: 8, resolution: "4k", audio: true, klingVideoMode: "first-frame",
+      klingVideoMedia: [{ type: "first_frame", url: "data:image/jpeg;base64,AAA" }],
+    });
+    expect(request.body).toMatchObject({
+      settings: { resolution: "4k", duration: 8, audio: "native", multi_shot: true },
+    });
+    expect((request.body as { settings: Record<string, unknown> }).settings).not.toHaveProperty("aspect_ratio");
+  });
+
+  it("Omni 首尾帧用 first_frame + last_frame", () => {
+    const request = klingRequest({
+      model: "kling-3.0-omni", prompt: "cat", klingVideoMode: "first-last-frame",
+      klingVideoMedia: [
+        { type: "first_frame", url: "https://cdn/first.png" },
+        { type: "last_frame", url: "https://cdn/last.png" },
+      ],
+    });
+    expect(request.url).toBe("https://relay.example.com/omni-video/kling-3.0-omni");
+    expect(request.body).toMatchObject({
+      contents: [
+        { type: "prompt", text: "cat" },
+        { type: "first_frame", url: "https://cdn/first.png" },
+        { type: "last_frame", url: "https://cdn/last.png" },
+      ],
+    });
+  });
+
+  it("运动控制走 /motion-control/{model}，带角色图、参考视频和朝向", () => {
+    const request = klingRequest({
+      prompt: "dance", resolution: "1080p", duration: 15, audio: true,
+      klingVideoMode: "motion-control", klingCharacterOrientation: "image",
+      klingVideoMedia: [
+        { type: "image", url: "https://cdn/character.png" },
+        { type: "video", url: "https://cdn/motion.mp4" },
+      ],
+    });
+    expect(request.url).toBe("https://relay.example.com/motion-control/kling-3.0");
+    expect(request.body).toEqual({
+      contents: [
+        { type: "prompt", text: "dance" },
+        { type: "image", url: "https://cdn/character.png" },
+        { type: "video", url: "https://cdn/motion.mp4" },
+      ],
+      settings: { resolution: "1080p", audio: "original", character_orientation: "image" },
+      options: { watermark_info: { enabled: false } },
+    });
+  });
+
+  it("运动控制不接受 4K，也不允许用在 Omni 上", () => {
+    expect(() => klingRequest({
+      prompt: "dance", resolution: "4k", klingVideoMode: "motion-control",
+      klingVideoMedia: [
+        { type: "image", url: "https://cdn/character.png" },
+        { type: "video", url: "https://cdn/motion.mp4" },
+      ],
+    })).toThrow(/1080p/);
+    expect(() => klingRequest({
+      model: "kling-3.0-omni", prompt: "dance", klingVideoMode: "motion-control",
+      klingVideoMedia: [
+        { type: "image", url: "https://cdn/character.png" },
+        { type: "video", url: "https://cdn/motion.mp4" },
+      ],
+    })).toThrow(/kling-3\.0/);
+  });
+
+  it("普通模型实测支持首尾帧，但参考图仍必须换 Omni", () => {
+    const frames = klingRequest({
+      prompt: "cat", klingVideoMode: "first-last-frame",
+      klingVideoMedia: [
+        { type: "first_frame", url: "https://cdn/first.png" },
+        { type: "last_frame", url: "https://cdn/last.png" },
+      ],
+    });
+    expect(frames.url).toBe("https://relay.example.com/image-to-video/kling-3.0");
+    expect(frames.body).toMatchObject({
+      contents: [
+        { type: "prompt", text: "cat" },
+        { type: "first_frame", url: "https://cdn/first.png" },
+        { type: "last_frame", url: "https://cdn/last.png" },
+      ],
+    });
+
+    expect(() => klingRequest({
+      prompt: "cat", klingVideoMode: "reference",
+      klingVideoMedia: [{ type: "reference_image", url: "https://cdn/ref.png" }],
+    })).toThrow(/omni/);
+  });
+
+  it("首尾帧数量或顺序不对直接拒绝，不把脏请求发给上游", () => {
+    expect(() => klingRequest({
+      prompt: "cat", klingVideoMode: "first-last-frame",
+      klingVideoMedia: [{ type: "last_frame", url: "https://cdn/last.png" }],
+    })).toThrow(/按顺序/);
   });
 });

@@ -39,6 +39,7 @@ export const AGENT_TOOL_NAMES = [
   "set_canvas",
   "optimize_prompt",
   "generate_video",
+  "generate_music",
   "ask",
   "reply",
 ] as const;
@@ -47,7 +48,7 @@ export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 /** 产出图片的工具：成功后自动把画布指针挪到新产物上（§10.1 规则 1） */
 export const IMAGE_PRODUCING_TOOLS: AgentToolName[] = ["generate_image", "edit_image"];
 /** 会花钱、会占任务额度的工具：会话任务软上限（§16）和确认流程都看这一份 */
-export const GENERATION_TOOLS: AgentToolName[] = ["generate_image", "edit_image", "generate_video"];
+export const GENERATION_TOOLS: AgentToolName[] = ["generate_image", "edit_image", "generate_video", "generate_music"];
 
 export const agentToolLabels: Record<AgentToolName, string> = {
   generate_image: "生成图片",
@@ -56,6 +57,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   set_canvas: "切换画布",
   optimize_prompt: "优化提示词",
   generate_video: "生成视频",
+  generate_music: "生成音乐",
   ask: "提问",
   reply: "回复",
 };
@@ -209,6 +211,29 @@ export interface GenerateVideoArgs {
   imageFrom?: "current" | "none";
 }
 
+export interface GenerateMusicArgs {
+  /** 灵感模式是描述；自定义模式是歌词；翻唱/混音/音效等模式按各自语义 */
+  prompt?: string;
+  mode?: "inspiration" | "custom" | "cover" | "mashup" | "sound" | "playlist" | "sample";
+  /** 歌名，最多 80 字 */
+  title?: string;
+  /** 曲风 / 音效标签 */
+  tags?: string;
+  /** 要排除的曲风 */
+  negativeTags?: string;
+  /** 纯音乐（无人声） */
+  instrumental?: boolean;
+  /** 翻唱 1 首、混音 2 首的产物引用（#abcd） */
+  sourceAssetRefs?: string[];
+  /** 音效模式的 BPM / 调性 / 是否循环 */
+  tempo?: number;
+  key?: string;
+  loop?: boolean;
+  modelHint?: string;
+  /** Suno 模型版本，例如 chirp-v3-5 */
+  version?: string;
+}
+
 export interface AskArgs {
   question: string;
   options?: string[];
@@ -224,6 +249,8 @@ export interface ToolResult {
   summary: string;
   taskId?: string;
   assetId?: string;
+  /** 一次产出多个产物时用（音乐通常 2 首）；`assetId` 仍指向第一个，兼容旧卡片 */
+  assetIds?: string[];
   /**
    * 产物的 MIME。卡片靠它决定缩略图怎么渲染（图片 `<img>` / 视频 `<video>`）——
    * 只给 assetId 的话前端还得反过来查一次素材表，而对话卡片并不持有那份数据。
@@ -323,6 +350,15 @@ export interface ConfirmPreview {
   resolution?: string;
   audio?: boolean;
   promptExtend?: boolean;
+  /** 音乐确认卡片展示用 */
+  musicMode?: "inspiration" | "custom" | "cover" | "mashup" | "sound" | "playlist" | "sample";
+  musicTitle?: string;
+  musicTags?: string;
+  musicInstrumental?: boolean;
+  musicSourceAssetRefs?: string[];
+  musicTempo?: number;
+  musicKey?: string;
+  musicLoop?: boolean;
   /**
    * 这次真正进视频的图，按顺序、带角色。
    *
@@ -553,4 +589,5 @@ export interface AgentSettings {
    */
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  defaultAudioAlias: string;
 }

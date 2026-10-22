@@ -23,7 +23,7 @@ import {
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "openai-chat"] as const;
+const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
@@ -88,6 +88,7 @@ const settingsSchema = z.object({
    */
   agentDefaultImageAlias: z.string().trim().max(80).optional(),
   agentDefaultVideoAlias: z.string().trim().max(80).optional(),
+  agentDefaultAudioAlias: z.string().trim().max(80).optional(),
 });
 
 const conversationCreateSchema = z.object({
@@ -141,7 +142,8 @@ const confirmSchema = z.object({
 const generationSchema = z.object({
   channelId: z.string().uuid(),
   model: z.string().trim().min(1).max(200),
-  prompt: z.string().trim().min(1).max(20000),
+  // 音效 / 混音允许空 prompt；其余生成在路由里再补一次非空校验
+  prompt: z.string().trim().max(20000),
   referenceImage: z.object({
     base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
     mimeType: z.enum(referenceImageMimeTypes),
@@ -214,6 +216,27 @@ const generationSchema = z.object({
     "first-last-frame",
     "reference",
   ]).optional(),
+  // Music generation parameters (Suno)
+  musicMode: z.enum(["inspiration", "custom", "cover", "mashup", "sound", "playlist", "sample"]).optional(),
+  musicTitle: z.string().trim().max(80).optional(),
+  musicTags: z.string().trim().max(1000).optional(),
+  musicNegativeTags: z.string().trim().max(1000).optional(),
+  musicInstrumental: z.boolean().optional(),
+  musicVersion: z.string().trim().max(40).optional(),
+  musicCoverClipId: z.string().trim().max(100).optional(),
+  musicMashupClipIds: z.array(z.string().trim().min(1).max(100)).max(2).optional(),
+  musicSoundConfigs: z.object({
+    tempo: z.number().int().min(20).max(300).optional(),
+    key: z.string().trim().max(10).optional(),
+    loop: z.boolean().optional(),
+  }).optional(),
+  klingVideoMedia: z.array(z.object({
+    type: z.enum(["first_frame", "last_frame", "reference_image", "image", "video"]),
+    url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
+  })).max(10).optional(),
+  klingVideoMode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference", "motion-control"]).optional(),
+  klingCharacterOrientation: z.enum(["image", "video"]).optional(),
+  klingMultiShot: z.boolean().optional(),
   seedanceVideoMedia: z.array(z.object({
     type: z.enum(["image_url", "video_url", "audio_url"]),
     url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
@@ -302,6 +325,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (input.geminiImageSize !== undefined) db.setSetting("geminiImageSize", input.geminiImageSize);
     if (input.agentDefaultImageAlias !== undefined) db.setSetting("agentDefaultImageAlias", input.agentDefaultImageAlias);
     if (input.agentDefaultVideoAlias !== undefined) db.setSetting("agentDefaultVideoAlias", input.agentDefaultVideoAlias);
+    if (input.agentDefaultAudioAlias !== undefined) db.setSetting("agentDefaultAudioAlias", input.agentDefaultAudioAlias);
     res.json(ok({
       assetsDir,
       defaultAssetsDir: db.defaultAssetsDir,
@@ -384,6 +408,9 @@ export function createApp(options: { dataDir?: string } = {}) {
         ...(uploadedImages.length ? { referenceImages: undefined, referenceImage: undefined } : {}),
         ...(maskUpload ? { maskImage: undefined } : {}),
       }) as GenerationInput;
+      if (!input.prompt.trim() && input.musicMode !== "sound" && input.musicMode !== "mashup") {
+        throw new AppError("INVALID_INPUT", "提示词不能为空", 400);
+      }
       const task = await runner.create(input, uploadedImages, maskUpload);
       res.status(202).json(ok(task));
   }));
@@ -430,7 +457,9 @@ export function createApp(options: { dataDir?: string } = {}) {
    * ids 优先：勾选删除只该动用户勾中的那些，范围清空是另一个入口。
    */
   app.delete("/api/generations", asyncHandler(async (req, res) => {
-    const scope = req.query.scope === "image" || req.query.scope === "video" ? req.query.scope : "all";
+    const scope = req.query.scope === "image" || req.query.scope === "video" || req.query.scope === "audio"
+      ? req.query.scope
+      : "all";
     const keepFiles = req.query.keepFiles === "1";
     const ids = String(req.query.ids ?? "").split(",").map((id) => id.trim()).filter(Boolean);
     let targets: string[];
@@ -439,11 +468,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     } else {
       const adapterByChannel = new Map(db.listChannels().map((channel) => [channel.id, String(channel.adapterType)]));
       targets = db.listAllTaskRows()
-        .filter((row) => {
-          if (scope === "all") return true;
-          const isVideo = db.isVideoTaskRow(row, adapterByChannel);
-          return scope === "video" ? isVideo : !isVideo;
-        })
+        .filter((row) => scope === "all" || db.taskKindRow(row, adapterByChannel) === scope)
         .map((row) => row.id);
     }
     const removed = db.deleteTasks(targets, { keepFiles });
@@ -678,8 +703,11 @@ export function createApp(options: { dataDir?: string } = {}) {
   /** 缩略图（§11.4）。没有就现缩现存；缩不出来就 404，前端回落到原图 */
   app.get("/api/assets/:id/thumb", asyncHandler(async (req, res) => {
     const asset = db.getAsset(routeParam(req.params.id));
-    if (!asset) throw new AppError("ASSET_NOT_FOUND", "图片不存在", 404);
-    if (!asset.mimeType.startsWith("image/")) throw new AppError("ASSET_NOT_IMAGE", "视频没有缩略图", 404);
+    if (!asset) throw new AppError("ASSET_NOT_FOUND", "产物不存在", 404);
+    // 音频的缩略图是封面；视频没有缩略图
+    if (!asset.mimeType.startsWith("image/") && !asset.mimeType.startsWith("audio/")) {
+      throw new AppError("ASSET_NOT_IMAGE", "该产物没有缩略图", 404);
+    }
     const bytes = await readThumbBytes(db, asset);
     if (!bytes) throw new AppError("THUMB_UNAVAILABLE", "缩略图不可用", 404);
     res.setHeader("Content-Type", "image/jpeg");
@@ -786,6 +814,7 @@ function readAgentDefaults(db: AppDatabase): {
   visionEnabled: boolean;
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  defaultAudioAlias: string;
 } {
   const policy = db.getSetting("agentVideoConfirmPolicy");
   return {
@@ -796,6 +825,7 @@ function readAgentDefaults(db: AppDatabase): {
     // 空串 = 没设，大脑不点名时退回类目第一个（问题 5）。alias 是否还有效不在这里判断
     defaultImageAlias: db.getSetting("agentDefaultImageAlias") ?? "",
     defaultVideoAlias: db.getSetting("agentDefaultVideoAlias") ?? "",
+    defaultAudioAlias: db.getSetting("agentDefaultAudioAlias") ?? "",
   };
 }
 

@@ -11,19 +11,19 @@ import { PromptPolishButton } from "./PromptPolishButton";
 import { useFileDrop } from "./useFileDrop";
 import { useImagePaste } from "./useImagePaste";
 import type {
-  Asset, Channel, SeedanceMediaInput, SeedanceMediaRole, SeedanceVideoMode,
-  Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
+  Asset, Channel, KlingCharacterOrientation, KlingMediaInput, KlingVideoMode, SeedanceMediaInput,
+  SeedanceMediaRole, SeedanceVideoMode, Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
 } from "../shared/types";
-import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
-import type { ReferenceController } from "./App";
+import {
+  KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type VideoAdapter,
+} from "../shared/video-capabilities";
+import type { ReferenceController } from "./app-shared";
+import {
+  StatusBadge, formatDuration, formatTime, optionalNumber, statusLabels, terminalStatuses,
+  usePersistentState as useSharedPersistentState,
+} from "./task-ui";
 
 type Toast = { kind: "success" | "error"; message: string };
-
-const terminalStatuses: TaskStatus[] = ["succeeded", "failed", "cancelled", "expired"];
-const statusLabels: Record<TaskStatus, string> = {
-  queued: "排队中", validating: "校验中", submitting: "提交中", running: "生成中", succeeded: "已完成",
-  failed: "失败", cancelled: "已取消", expired: "已超时",
-};
 
 
 
@@ -159,20 +159,7 @@ const SEEDANCE_MODE_ORDER: SeedanceVideoMode[] = [
 ];
 
 function usePersistentState<T>(key: string, initialValue: T) {
-  const storageKey = `vector-image:video-draft:${key}`;
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      return stored === null ? initialValue : JSON.parse(stored) as T;
-    } catch {
-      return initialValue;
-    }
-  });
-  useEffect(() => {
-    try { window.localStorage.setItem(storageKey, JSON.stringify(value)); }
-    catch { /* 存储不可用时表单依然可用 */ }
-  }, [storageKey, value]);
-  return [value, setValue] as const;
+  return useSharedPersistentState(key, initialValue, "vector-image:video-draft:");
 }
 
 export function VideoGenerateView(props: {
@@ -205,6 +192,10 @@ export function VideoGenerateView(props: {
   const [raw, setRaw] = usePersistentState("raw", "{}");
   const [wanMode, setWanMode] = usePersistentState<WanVideoMode>("wanMode", "text-to-video");
   const [seedanceMode, setSeedanceMode] = usePersistentState<SeedanceVideoMode>("seedanceMode", "text-to-video");
+  const [klingMode, setKlingMode] = usePersistentState<KlingVideoMode>("klingMode", "text-to-video");
+  const [klingReferenceVideoUrl, setKlingReferenceVideoUrl] = usePersistentState("klingReferenceVideoUrl", "");
+  const [klingCharacterOrientation, setKlingCharacterOrientation] = usePersistentState<KlingCharacterOrientation>("klingOrientation", "video");
+  const [klingMultiShot, setKlingMultiShot] = usePersistentState("klingMultiShot", true);
   const [urlInputs, setUrlInputs] = usePersistentState<Record<VideoMediaType, string>>("urlInputs", {} as Record<VideoMediaType, string>);
   const [submitting, setSubmitting] = useState(false);
 
@@ -216,11 +207,24 @@ export function VideoGenerateView(props: {
   const caps = adapterType ? VIDEO_CAPABILITIES[adapterType] : null;
   const isWan = adapterType === "wan-video";
   const isSeedance = adapterType === "seedance-video";
-  const modeSpec = isWan ? WAN_MODES[wanMode] : isSeedance ? SEEDANCE_MODE_SPECS[seedanceMode] : null;
-  // 万相/Seedance 按当前模式的槽位算上限，Grok 没有模式概念，直接用适配器上限
-  const maxReferenceImages = (isWan || isSeedance)
+  const isKling = adapterType === "kling-video";
+  // 可灵的能力按模型分：turbo 只有文生/首帧/首尾帧，omni 才有多图，运动控制只有 kling-3.0
+  const isKlingOmni = isKling && /omni/i.test(props.selectedModel);
+  const klingModeOrder = isKling ? klingModesForModel(props.selectedModel) : [];
+  const klingCap = isKling ? KLING_MODE_CAPABILITIES[klingMode] : null;
+  const modeSpec = isWan ? WAN_MODES[wanMode]
+    : isSeedance ? SEEDANCE_MODE_SPECS[seedanceMode]
+      : isKling ? klingCap
+        : null;
+  // 万相/Seedance/可灵按当前模式的槽位算上限，Grok 没有模式概念，直接用适配器上限
+  const maxReferenceImages = (isWan || isSeedance || isKling)
     ? (modeSpec?.imageRepeatable ? caps?.maxReferenceImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
     : caps?.maxReferenceImages ?? 0;
+  // 分辨率档位跟着模式走：运动控制没有 4K
+  const resolutionOptions = klingCap?.resolutions ?? caps?.resolutions ?? [];
+  // 可灵普通图生视频（含首尾帧）不认 aspect_ratio，Omni 才认
+  const klingAspectRatio = !isKling || klingMode === "text-to-video" || isKlingOmni;
+  const urlModeSpec = !isKling ? modeSpec as WanModeSpec | null : null;
   const drop = useFileDrop(maxReferenceImages > 0 && !submitting && referenceImages.length < maxReferenceImages, references.dropFiles);
   const pasteImages = useCallback((files: File[]) => {
     if (submitting || readingImage || maxReferenceImages <= 0) return;
@@ -250,6 +254,20 @@ export function VideoGenerateView(props: {
     if (isSeedance && referenceImages.length) references.clear();
   }, [seedanceMode]);
 
+  useEffect(() => {
+    if (isKling && referenceImages.length) references.clear();
+  }, [klingMode]);
+
+  useEffect(() => {
+    if (isKling && !klingModeOrder.includes(klingMode)) setKlingMode(klingModeOrder[0] ?? "text-to-video");
+  }, [isKling, props.selectedModel, klingMode]);
+
+  // 4K 只对文生/图生/Omni 开放，切到运动控制时要退回 1080p
+  useEffect(() => {
+    if (!resolutionOptions.length) return;
+    if (!resolutionOptions.includes(resolution)) setResolution(resolutionOptions[1] ?? resolutionOptions[0]);
+  }, [adapterType, klingMode, resolutionOptions.join(",")]);
+
   // Seedance 首帧/首尾帧只接受自适应比例，界面直接锁定，避免提交后被接口拒绝
   const ratioLocked = isSeedance && (seedanceMode === "first-frame" || seedanceMode === "first-last-frame");
   useEffect(() => {
@@ -258,19 +276,19 @@ export function VideoGenerateView(props: {
 
   /** 把上传的图片和 URL 输入按模式拼成万相要求的 media 数组 */
   async function buildWanMedia(): Promise<VideoMediaInput[] | string> {
-    if (!modeSpec) return [];
+    const spec = WAN_MODES[wanMode];
     const media: VideoMediaInput[] = [];
 
     // 图片按槽位顺序分配 type：首尾帧模式下第 1 张是 first_frame，第 2 张是 last_frame
     for (const [index, item] of referenceImages.entries()) {
-      const type = modeSpec.imageRepeatable
-        ? modeSpec.imageSlots[0]
-        : modeSpec.imageSlots[index];
-      if (!type) return `${modeSpec.label}最多接受 ${modeSpec.imageSlots.length} 张图片`;
+      const type = spec.imageRepeatable
+        ? spec.imageSlots[0]
+        : spec.imageSlots[index];
+      if (!type) return `${spec.label}最多接受 ${spec.imageSlots.length} 张图片`;
       media.push({ type, url: await fileToVideoDataUrl(item.file) });
     }
 
-    for (const slot of modeSpec.urlSlots) {
+    for (const slot of spec.urlSlots) {
       const url = (urlInputs[slot.type] ?? "").trim();
       if (!url) {
         if (slot.required) return `请填写${slot.label}`;
@@ -287,8 +305,8 @@ export function VideoGenerateView(props: {
     if (wanMode === "file-to-video" && !media.some((item) => item.type === "file" || item.type === "link")) {
       return "请填写文档地址或网页链接";
     }
-    if (modeSpec.imageSlots.length && !modeSpec.imageRepeatable && referenceImages.length < modeSpec.imageSlots.length) {
-      return `${modeSpec.label}需要 ${modeSpec.imageSlots.length} 张图片`;
+    if (spec.imageSlots.length && !spec.imageRepeatable && referenceImages.length < spec.imageSlots.length) {
+      return `${spec.label}需要 ${spec.imageSlots.length} 张图片`;
     }
     return media;
   }
@@ -314,6 +332,32 @@ export function VideoGenerateView(props: {
     return media;
   }
 
+  /** 可灵的 media：首帧/尾帧/参考图/角色图，运动控制再补参考视频 */
+  async function buildKlingMedia(): Promise<KlingMediaInput[] | string> {
+    const spec = KLING_MODE_CAPABILITIES[klingMode];
+    const slots = spec.imageSlots;
+    if (!slots.length && !spec.needsReferenceVideo) return [];
+    if (!spec.imageRepeatable && slots.length && referenceImages.length < slots.length) {
+      return `${spec.label}需要 ${slots.length} 张图片`;
+    }
+    if (!spec.imageRepeatable && referenceImages.length > slots.length) {
+      return `${spec.label}最多 ${slots.length} 张图片`;
+    }
+    const media: KlingMediaInput[] = [];
+    for (const [index, item] of referenceImages.entries()) {
+      const type = spec.imageRepeatable ? slots[0] : slots[index];
+      if (!type) return `${spec.label}最多 ${slots.length} 张图片`;
+      media.push({ type, url: await fileToVideoDataUrl(item.file) });
+    }
+    if (spec.needsReferenceVideo) {
+      const url = klingReferenceVideoUrl.trim();
+      if (!url) return "运动控制需要填写参考视频的公网地址";
+      if (!/^https?:\/\//i.test(url)) return "参考视频需要 http(s):// 公网地址";
+      media.push({ type: "video", url });
+    }
+    return media;
+  }
+
   async function generate() {
     if (!channel || !caps) return props.onToast("error", "请先选择视频渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
@@ -335,6 +379,7 @@ export function VideoGenerateView(props: {
       // 万相走 media 数组（素材带 type），Grok 仍走 multipart 上传
       let wanVideoMedia: VideoMediaInput[] | undefined;
       let seedanceVideoMedia: SeedanceMediaInput[] | undefined;
+      let klingVideoMedia: KlingMediaInput[] | undefined;
       if (isWan) {
         const built = await buildWanMedia();
         if (typeof built === "string") { props.onToast("error", built); return; }
@@ -343,6 +388,10 @@ export function VideoGenerateView(props: {
         const built = await buildSeedanceMedia();
         if (typeof built === "string") { props.onToast("error", built); return; }
         seedanceVideoMedia = built.length ? built : undefined;
+      } else if (isKling) {
+        const built = await buildKlingMedia();
+        if (typeof built === "string") { props.onToast("error", built); return; }
+        klingVideoMedia = built.length ? built : undefined;
       }
 
       const task = await api.generate({
@@ -352,8 +401,8 @@ export function VideoGenerateView(props: {
         negativePrompt: negativePrompt.trim() || undefined,
         duration: modeSpec && !modeSpec.durationEditable ? undefined : caps.durations.fixed ?? duration,
         resolution,
-        // Grok 用 aspect_ratio，万相用 ratio，两者不混用
-        aspectRatio: caps.ratioField === "aspectRatio" ? aspectRatio : undefined,
+        // Grok 用 aspect_ratio，万相用 ratio；可灵的图生/运动控制不认宽高比
+        aspectRatio: caps.ratioField === "aspectRatio" && klingAspectRatio ? aspectRatio : undefined,
         ratio: caps.ratioField === "ratio" ? ratio : undefined,
         audio: caps.supportsAudio ? audio : undefined,
         promptExtend: caps.supportsPromptExtend ? promptExtend : undefined,
@@ -363,9 +412,13 @@ export function VideoGenerateView(props: {
         wanVideoMedia,
         seedanceVideoMode: isSeedance ? seedanceMode : undefined,
         seedanceVideoMedia,
+        klingVideoMedia,
+        klingVideoMode: isKling ? klingMode : undefined,
+        klingCharacterOrientation: isKling && klingMode === "motion-control" ? klingCharacterOrientation : undefined,
+        klingMultiShot: isKling ? klingMultiShot : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, (isWan || isSeedance) ? [] : referenceImages.map((item) => item.file));
+      }, (isWan || isSeedance || isKling) ? [] : referenceImages.map((item) => item.file));
       props.onTask(task);
       props.onToast("success", "视频任务已提交");
     } catch (error) {
@@ -379,7 +432,7 @@ export function VideoGenerateView(props: {
     <div className="page generate-page">
       <div className="page-header">
         <div>
-          <h1>生视频</h1>
+          <h1>视频生成</h1>
           <span className="page-kicker">{modeSpec ? modeSpec.label : "VIDEO GENERATION"}</span>
         </div>
         <div className="header-selects">
@@ -423,7 +476,7 @@ export function VideoGenerateView(props: {
         <div className="generation-grid">
           <section className="control-panel">
             <div className="control-scroll">
-              {isWan || isSeedance ? (
+              {isWan || isSeedance || isKling ? (
                 <>
                   <div className="section-title"><div><Clapperboard size={17} /><h2>生成方式</h2></div></div>
                   <div className="mode-picker" role="radiogroup" aria-label={`${caps?.label ?? ""}生成方式`}>
@@ -440,18 +493,31 @@ export function VideoGenerateView(props: {
                             {WAN_MODES[item].label}
                           </button>
                         ))
-                      : SEEDANCE_MODE_ORDER.map((item) => (
-                          <button
-                            key={item}
-                            type="button"
-                            role="radio"
-                            aria-checked={seedanceMode === item}
-                            className={`mode-chip ${seedanceMode === item ? "active" : ""}`}
-                            onClick={() => setSeedanceMode(item)}
-                          >
-                            {SEEDANCE_MODE_SPECS[item].label}
-                          </button>
-                        ))}
+                      : isSeedance
+                        ? SEEDANCE_MODE_ORDER.map((item) => (
+                            <button
+                              key={item}
+                              type="button"
+                              role="radio"
+                              aria-checked={seedanceMode === item}
+                              className={`mode-chip ${seedanceMode === item ? "active" : ""}`}
+                              onClick={() => setSeedanceMode(item)}
+                            >
+                              {SEEDANCE_MODE_SPECS[item].label}
+                            </button>
+                          ))
+                        : klingModeOrder.map((item) => (
+                            <button
+                              key={item}
+                              type="button"
+                              role="radio"
+                              aria-checked={klingMode === item}
+                              className={`mode-chip ${klingMode === item ? "active" : ""}`}
+                              onClick={() => setKlingMode(item)}
+                            >
+                              {KLING_MODE_CAPABILITIES[item].label}
+                            </button>
+                          ))}
                   </div>
                   {modeSpec ? <p className="mode-hint">{modeSpec.hint}</p> : null}
                 </>
@@ -495,10 +561,29 @@ export function VideoGenerateView(props: {
                 </div>
               ) : null}
 
-              {modeSpec?.urlSlots.length ? (
+              {isKling && klingCap?.needsReferenceVideo ? (
+                <div className="media-url-block">
+                  <div className="section-title compact"><div><LinkIcon size={16} /><h2>参考视频</h2></div></div>
+                  <label className="field-block">
+                    <span>视频地址<em className="required-mark">必填</em></span>
+                    <input
+                      value={klingReferenceVideoUrl}
+                      onChange={(event) => setKlingReferenceVideoUrl(event.target.value)}
+                      placeholder="https://…/motion.mp4"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <p className="mode-hint">
+                    只接受公网 http(s) 地址；本地视频转 base64 会超过中转约 1.4MB 的请求体上限。
+                    角色朝向选「图片」时视频需 ≤10 秒，选「视频」时 ≤30 秒。
+                  </p>
+                </div>
+              ) : null}
+
+              {urlModeSpec?.urlSlots.length ? (
                 <div className="media-url-block">
                   <div className="section-title compact"><div><LinkIcon size={16} /><h2>素材地址</h2></div></div>
-                  {modeSpec.urlSlots.map((slot) => (
+                  {urlModeSpec.urlSlots.map((slot) => (
                     <label className="field-block" key={slot.type}>
                       <span>{slot.label}{slot.required ? <em className="required-mark">必填</em> : null}</span>
                       <input
@@ -533,10 +618,19 @@ export function VideoGenerateView(props: {
                   <label>
                     <span>分辨率</span>
                     <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
-                      {caps.resolutions.map((item) => <option key={item} value={item}>{item}</option>)}
+                      {resolutionOptions.map((item) => <option key={item} value={item}>{item}</option>)}
                     </select>
                   </label>
-                  {caps.ratioField === "aspectRatio" && caps.aspectRatios.length ? (
+                  {isKling && klingMode === "motion-control" ? (
+                    <label>
+                      <span>角色朝向</span>
+                      <select value={klingCharacterOrientation} onChange={(event) => setKlingCharacterOrientation(event.target.value as KlingCharacterOrientation)}>
+                        <option value="video">跟随参考视频（≤30 秒）</option>
+                        <option value="image">跟随角色图片（≤10 秒）</option>
+                      </select>
+                    </label>
+                  ) : null}
+                  {caps.ratioField === "aspectRatio" && caps.aspectRatios.length && klingAspectRatio ? (
                     <label>
                       <span>宽高比</span>
                       <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>
@@ -553,9 +647,9 @@ export function VideoGenerateView(props: {
                     </label>
                   ) : null}
                   {caps.supportsAudio ? (
-                    <label className="checkbox-label">
+                    <label className="switch-field">
+                      <span>{isKling && klingMode === "motion-control" ? "保留参考视频原声" : "包含音频"}</span>
                       <input type="checkbox" checked={audio} onChange={(event) => setAudio(event.target.checked)} />
-                      <span>包含音频</span>
                     </label>
                   ) : null}
                 </> : null}
@@ -578,6 +672,12 @@ export function VideoGenerateView(props: {
                         <label className="switch-field">
                           <span>AI 生成水印</span>
                           <input type="checkbox" checked={watermark} onChange={(event) => setWatermark(event.target.checked)} />
+                        </label>
+                      ) : null}
+                      {isKling && klingMode !== "motion-control" ? (
+                        <label className="switch-field">
+                          <span>多镜头</span>
+                          <input type="checkbox" checked={klingMultiShot} onChange={(event) => setKlingMultiShot(event.target.checked)} />
                         </label>
                       ) : null}
                       {caps.supportsSeed ? (
@@ -799,17 +899,6 @@ function EmptyVideoResult() {
   return <div className="empty-result"><div className="empty-result-icon"><Film size={32} /></div><strong>等待生成</strong></div>;
 }
 
-function StatusBadge({ status }: { status: TaskStatus }) {
-  return (
-    <span className={`status-badge ${status}`}>
-      {!terminalStatuses.includes(status) ? <LoaderCircle className="spin" size={13} />
-        : status === "succeeded" ? <CheckCircle2 size={13} />
-        : <AlertCircle size={13} />}
-      {statusLabels[status]}
-    </span>
-  );
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
@@ -860,35 +949,24 @@ async function downscaleToJpeg(file: File): Promise<string> {
   }
 }
 
-function imageSlotLabel(modeSpec: WanModeSpec | null): string {
+function imageSlotLabel(modeSpec: { imageSlots: readonly string[]; imageRepeatable: boolean } | null): string {
   if (!modeSpec) return "参考图";
   if (modeSpec.imageSlots.length === 0) return "参考素材";
   if (modeSpec.imageSlots[0] === "first_frame") return modeSpec.imageSlots.length === 1 ? "首帧图像" : "首帧与尾帧";
+  if (modeSpec.imageSlots[0] === "image") return "角色图片";
   return "参考图像";
 }
 
-function slotRoleLabel(modeSpec: WanModeSpec | null, index: number): string | null {
+function slotRoleLabel(
+  modeSpec: { imageSlots: readonly string[]; imageRepeatable: boolean } | null,
+  index: number,
+): string | null {
   if (!modeSpec || modeSpec.imageRepeatable) return null;
   const type = modeSpec.imageSlots[index];
   if (type === "first_frame") return "首帧";
   if (type === "last_frame") return "尾帧";
+  if (type === "image") return "角色";
   return null;
-}
-
-function optionalNumber(value: string) {
-  if (!value.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function formatTime(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
-}
-
-function formatDuration(seconds: number) {
-  if (seconds < 60) return `${seconds.toFixed(1)} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 }
 
 function formatBytes(bytes: number) {

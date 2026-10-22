@@ -6,7 +6,7 @@ import {
   buildChannelDrafts, findConflictChannels, findProviderPreset,
   PROVIDER_PRESETS, type ChannelDraft, type UnitSelection,
 } from "../../shared/provider-presets";
-import { isChatAdapter, isVideoAdapter, type Channel } from "../../shared/types";
+import { channelKindOf, type Channel, type ChannelKind } from "../../shared/types";
 
 type SaveMode = "create" | "skip";
 
@@ -16,16 +16,15 @@ type SaveMode = "create" | "skip";
  * 一个中转站常常同时卖三类密钥（生图、视频、对话），平铺十来张卡片时
  * 「我要找的那个视频模型组在哪」全靠肉眼扫。分组之后一眼定位。
  */
-const UNIT_GROUPS = [
+const UNIT_GROUPS: ReadonlyArray<{ kind: ChannelKind; label: string }> = [
   { kind: "image", label: "生图" },
   { kind: "video", label: "视频" },
+  { kind: "audio", label: "音乐" },
   { kind: "chat", label: "对话（当大脑用）" },
-] as const;
+];
 
-function unitGroupOf(adapterType: string) {
-  if (isChatAdapter(adapterType as never)) return "chat";
-  if (isVideoAdapter(adapterType as never)) return "video";
-  return "image";
+function unitGroupOf(adapterType: string): ChannelKind {
+  return channelKindOf(adapterType);
 }
 type RowResult = { status: "saving" | "done" | "error"; message?: string };
 type TestResult = { status: "testing" | "ok" | "error"; message?: string };

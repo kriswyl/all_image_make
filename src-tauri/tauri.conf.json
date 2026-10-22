@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "ChatCanvas",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -19,6 +19,8 @@
         "minHeight": 680,
         "resizable": true,
         "decorations": false,
+        "transparent": true,
+        "shadow": false,
         "fullscreen": false,
         "center": true,
         "dragDropEnabled": false

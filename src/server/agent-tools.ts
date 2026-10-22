@@ -12,14 +12,14 @@
  */
 import { z } from "zod";
 import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../shared/types.js";
-import type { GenerationInput, WanVideoMode, SeedanceVideoMode, VideoMediaType } from "../shared/types.js";
+import type { GenerationInput, WanVideoMode, SeedanceVideoMode, KlingMediaType, VideoMediaType } from "../shared/types.js";
 import type {
   AgentStreamEvent, AskArgs, Conversation, ConversationVideoRole, GenerateImageArgs,
-  GenerateVideoArgs, EditImageArgs, OptimizePromptArgs, ReplyArgs, SetCanvasArgs, ToolResult,
+  GenerateMusicArgs, GenerateVideoArgs, EditImageArgs, OptimizePromptArgs, ReplyArgs, SetCanvasArgs, ToolResult,
 } from "../shared/agent-types.js";
 import { assetRef } from "../shared/agent-types.js";
 import {
-  VIDEO_CAPABILITIES, VIDEO_MODES_BY_ADAPTER, videoModeLabel,
+  supportedVideoModes, VIDEO_CAPABILITIES, videoModeLabel,
   type ConversationVideoMode, type VideoAdapter,
 } from "../shared/video-capabilities.js";
 import type { AppDatabase, AssetRow } from "./db.js";
@@ -100,6 +100,21 @@ export const generateVideoSchema = z.object({
   imageFrom: z.enum(["current", "none"]).optional(),
 });
 
+export const generateMusicSchema = z.object({
+  prompt: z.string().trim().max(5000).optional(),
+  mode: z.enum(["inspiration", "custom", "cover", "mashup", "sound", "playlist", "sample"]).optional().catch(undefined),
+  title: z.string().trim().max(80).optional(),
+  tags: z.string().trim().max(1000).optional(),
+  negativeTags: z.string().trim().max(1000).optional(),
+  instrumental: z.coerce.boolean().optional(),
+  sourceAssetRefs: z.array(z.string().trim().min(1).max(80)).max(2).optional(),
+  tempo: z.coerce.number().int().min(20).max(300).optional(),
+  key: z.string().trim().max(10).optional(),
+  loop: z.coerce.boolean().optional(),
+  modelHint: z.string().trim().max(80).optional(),
+  version: z.string().trim().max(40).optional(),
+});
+
 export const askSchema = z.object({
   question: nonEmpty(2000),
   options: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
@@ -116,6 +131,7 @@ export const TOOL_SCHEMAS = {
   set_canvas: setCanvasSchema,
   optimize_prompt: optimizePromptSchema,
   generate_video: generateVideoSchema,
+  generate_music: generateMusicSchema,
   ask: askSchema,
   reply: replySchema,
 } as const;
@@ -130,7 +146,7 @@ export interface ToolContext {
    * 用户在设置里挑的默认生图 / 生视频模型（需求.md 问题 5），存的是 alias。
    * 大脑没点名（或点了个不存在的名字）时用它们，而不是碰运气取类目里第一个。
    */
-  defaultAliases: { image?: string; video?: string };
+  defaultAliases: { image?: string; video?: string; audio?: string };
   /**
    * 「原话直发」时用户那句话的**原文**，没开就是 null。
    *
@@ -288,12 +304,12 @@ export interface VideoSelection {
 
 const VIDEO_MODE_ORDER: ConversationVideoMode[] = ["text-to-video", "first-frame", "first-last-frame", "reference"];
 
-function supportedModes(adapterType: string): ConversationVideoMode[] {
-  return VIDEO_MODES_BY_ADAPTER[adapterType as VideoAdapter] ?? ["text-to-video"];
+function supportedModes(adapterType: string, model?: string): ConversationVideoMode[] {
+  return supportedVideoModes(adapterType, model);
 }
 
-function modeListLabel(adapterType: string) {
-  return supportedModes(adapterType).map((mode) => `${mode}（${videoModeLabel(mode, adapterType)}）`).join("、");
+function modeListLabel(adapterType: string, model?: string) {
+  return supportedModes(adapterType, model).map((mode) => `${mode}（${videoModeLabel(mode, adapterType)}）`).join("、");
 }
 
 /**
@@ -308,15 +324,16 @@ export function resolveVideoSelection(
   args: GenerateVideoArgs,
   adapterType: string,
   turnAttachmentIds: string[],
+  model?: string,
 ): { selection?: VideoSelection; error?: string } {
-  const supported = supportedModes(adapterType);
+  const supported = supportedModes(adapterType, model);
   const requested = typeof args.mode === "string" ? args.mode.trim() : "";
   const requestedMode = requested ? requested as ConversationVideoMode : undefined;
   if (requestedMode && !VIDEO_MODE_ORDER.includes(requestedMode)) {
-    return { error: `视频模式 ${requested} 对话里不支持。可用的是：${modeListLabel(adapterType)}` };
+    return { error: `视频模式 ${requested} 对话里不支持。可用的是：${modeListLabel(adapterType, model)}` };
   }
   if (requestedMode && !supported.includes(requestedMode)) {
-    return { error: `这个视频渠道不支持 ${videoModeLabel(requestedMode, adapterType)}。它支持：${modeListLabel(adapterType)}` };
+    return { error: `这个视频模型不支持 ${videoModeLabel(requestedMode, adapterType)}。它支持：${modeListLabel(adapterType, model)}` };
   }
   // 明确说「文生视频」时不需要图：画布上有几张都不该拦住一句纯文字的视频
   if (requestedMode === "text-to-video" || args.imageFrom === "none") {
@@ -550,6 +567,7 @@ const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; aud
   "wan-video": { duration: 5, resolution: "720P", audio: true },
   "seedance-video": { duration: 5, resolution: "720p", audio: false },
   "grok-video": { duration: 8, resolution: "720p", audio: false },
+  "kling-video": { duration: 5, resolution: "720p", audio: false },
 };
 
 async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise<ToolOutcome> {
@@ -559,7 +577,7 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   if (!channel) return failResult("解析到的视频渠道不存在", "CHANNEL_NOT_FOUND");
 
   const resolved = resolveVideoSelection(
-    ctx.db, ctx.conversation, args, channel.adapterType, ctx.turnAttachmentIds,
+    ctx.db, ctx.conversation, args, channel.adapterType, ctx.turnAttachmentIds, resolution.model,
   );
   if (!resolved.selection) return failResult(resolved.error ?? "这次视频用哪几张图没定下来", "VIDEO_SELECTION_INVALID");
   const selection = resolved.selection;
@@ -606,6 +624,10 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
         input.seedanceVideoMode = selection.mode as SeedanceVideoMode;
         // Seedance 的首帧/首尾帧只接受自适应比例（见 VIDEO_HANDOFF.md）
         if (selection.mode === "first-frame" || selection.mode === "first-last-frame") input.ratio = "adaptive";
+      } else if (channel.adapterType === "kling-video") {
+        input.klingVideoMedia = media.map((item) => ({ type: item.role as KlingMediaType, url: item.url }));
+        input.klingVideoMode = selection.mode;
+        input.aspectRatio = input.aspectRatio ?? "16:9";
       } else {
         input.wanVideoMedia = media.map((item) => ({ type: item.role as VideoMediaType, url: item.url }));
         input.wanVideoMode = selection.mode as WanVideoMode;
@@ -615,6 +637,9 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
     input.wanVideoMode = "text-to-video";
   } else if (channel.adapterType === "seedance-video") {
     input.seedanceVideoMode = "text-to-video";
+  } else if (channel.adapterType === "kling-video") {
+    input.klingVideoMode = "text-to-video";
+    input.aspectRatio = input.aspectRatio ?? "16:9";
   }
 
   input.timeoutMs = IMAGE_TASK_TIMEOUT_MS;
@@ -646,6 +671,119 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
     });
   } catch (error) {
     return failResult(`提交视频失败：${describeError(error)}`, "VIDEO_SUBMIT_FAILED");
+  }
+}
+
+async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise<ToolOutcome> {
+  const resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.audio);
+  if (!resolution) return failResult("还没有可用的音乐渠道，请先到「渠道配置」添加", "NO_MUSIC_CHANNEL");
+  const channel = ctx.db.getChannel(resolution.channelId);
+  if (!channel) return failResult("解析到的音乐渠道不存在", "CHANNEL_NOT_FOUND");
+
+  const mode = args.mode
+    ?? (args.sourceAssetRefs?.length
+      ? (args.sourceAssetRefs.length >= 2 ? "mashup" : "cover")
+      : args.tags?.trim() || args.title?.trim() ? "custom" : "inspiration");
+  const prompt = (ctx.verbatimPrompt ?? args.prompt ?? "").trim();
+  const instrumental = mode === "sound" ? true : args.instrumental ?? false;
+
+  if (mode !== "sound" && mode !== "mashup" && !prompt) {
+    return failResult("这个音乐模式需要 prompt。请让用户描述风格、歌词或翻唱方向", "MUSIC_PROMPT_REQUIRED");
+  }
+  if (mode === "inspiration" && prompt.length > 500) {
+    return failResult("灵感描述最多 500 字，请压缩后再提交", "MUSIC_PROMPT_TOO_LONG");
+  }
+  if (mode === "custom" && !args.tags?.trim()) {
+    return failResult("自定义歌词模式需要曲风（tags）。请先用 ask 问用户想要什么曲风，或改成灵感模式", "MUSIC_TAGS_REQUIRED");
+  }
+  if (mode === "sound" && !args.tags?.trim()) {
+    return failResult("音效模式需要标题或标签来描述音效内容", "MUSIC_SOUND_TAGS_REQUIRED");
+  }
+
+  // 翻唱 / 混音要引用本会话里带 Suno custom_id 的歌
+  const sourceAssets: AssetRow[] = [];
+  for (const ref of args.sourceAssetRefs ?? []) {
+    const resolved = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
+    if (!resolved) return failResult(`找不到歌曲 ${ref}，请用本会话里出现过的产物编号`, "MUSIC_SOURCE_NOT_FOUND");
+    if (!resolved.asset.mimeType.startsWith("audio/") || !resolved.asset.remoteClipId) {
+      return failResult(`${ref} 不是带 Suno ID 的音乐产物，不能用它翻唱或混音`, "MUSIC_SOURCE_INVALID");
+    }
+    sourceAssets.push(resolved.asset);
+  }
+  if (mode === "cover" && sourceAssets.length !== 1) {
+    return failResult("翻唱需要正好 1 首源歌曲（sourceAssetRefs 给 1 个）", "MUSIC_COVER_SOURCE_REQUIRED");
+  }
+  if (mode === "mashup") {
+    if (sourceAssets.length !== 2) {
+      return failResult("混音需要正好 2 首源歌曲（sourceAssetRefs 给 2 个）", "MUSIC_MASHUP_SOURCE_REQUIRED");
+    }
+    if (sourceAssets[0]!.remoteClipId === sourceAssets[1]!.remoteClipId) {
+      return failResult("混音的两首歌不能是同一首", "MUSIC_MASHUP_SAME_SOURCE");
+    }
+  }
+
+  const input: GenerationInput = {
+    channelId: channel.id,
+    model: resolution.model,
+    prompt,
+    musicMode: mode,
+    musicInstrumental: instrumental,
+    musicVersion: args.version,
+    ...(["custom", "mashup", "sound"].includes(mode) ? {
+      musicTitle: args.title?.trim() || undefined,
+    } : {}),
+    ...(["custom", "sound"].includes(mode) ? {
+      musicTags: args.tags?.trim(),
+      musicNegativeTags: args.negativeTags?.trim() || undefined,
+    } : {}),
+    ...(mode === "cover" ? { musicCoverClipId: sourceAssets[0]!.remoteClipId! } : {}),
+    ...(mode === "mashup" ? { musicMashupClipIds: sourceAssets.map((asset) => asset.remoteClipId!) } : {}),
+    ...(mode === "sound" ? {
+      musicSoundConfigs: {
+        tempo: args.tempo ?? 99,
+        key: args.key?.trim() || "C",
+        loop: args.loop ?? false,
+      },
+    } : {}),
+    timeoutMs: 900_000,
+  };
+
+  try {
+    const created = await ctx.runner.create(input);
+    ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
+    const choice = describeAliasChoice(resolution);
+    const modeLabel: Record<string, string> = {
+      inspiration: instrumental ? "纯音乐" : "灵感描述",
+      custom: "自定义歌词",
+      cover: "翻唱",
+      mashup: "混音",
+      sound: "音效",
+      playlist: "歌单风格",
+      sample: "取样",
+    };
+    const sourcePart = sourceAssets.length
+      ? `，源歌曲 ${sourceAssets.map((asset) => assetRef(asset.id)).join(" + ")}`
+      : "";
+    const summary = [
+      `已提交音乐任务 ${created.id.slice(0, 8)}，模型 ${resolution.model}（${resolution.alias}）${choice ? `，${choice}` : ""}，`,
+      `${modeLabel[mode] ?? mode}${args.title?.trim() ? `《${args.title.trim()}》` : ""}${sourcePart}。`,
+      "一次会生成 2 首，完成后我会接着处理。",
+    ].join("");
+    return okResult(summary, {
+      async: true,
+      taskId: created.id,
+      data: {
+        model: resolution.model, alias: resolution.alias,
+        usedFallback: resolution.usedFallback, ...(choice ? { aliasNote: choice } : {}),
+        musicMode: mode,
+        ...(args.title?.trim() ? { musicTitle: args.title.trim() } : {}),
+        ...(args.tags?.trim() ? { musicTags: args.tags.trim() } : {}),
+        musicInstrumental: instrumental,
+        ...(sourceAssets.length ? { musicSourceAssetIds: sourceAssets.map((asset) => asset.id) } : {}),
+      },
+    });
+  } catch (error) {
+    return failResult(`提交音乐失败：${describeError(error)}`, "MUSIC_SUBMIT_FAILED");
   }
 }
 
@@ -917,6 +1055,7 @@ export async function runAgentTool(
     case "set_canvas": return setCanvas(ctx, parsed.data as SetCanvasArgs);
     case "optimize_prompt": return optimizePrompt(ctx, parsed.data as OptimizePromptArgs);
     case "generate_video": return generateVideo(ctx, parsed.data as GenerateVideoArgs);
+    case "generate_music": return generateMusic(ctx, parsed.data as GenerateMusicArgs);
     // ask / reply 由 Agent 循环直接处理（它们只需要生成一段文本，没有副作用）
     case "ask": return okResult((parsed.data as AskArgs).question);
     case "reply": return okResult((parsed.data as ReplyArgs).text);

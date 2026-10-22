@@ -28,13 +28,16 @@ describe("model catalog", () => {
       "tiantoken-wan-video:wan-video",
       "tiantoken-grok-video:grok-video",
       "tiantoken-seedance:seedance-video",
+      "tiantoken-kling-video:kling-video",
+      "tiantoken-suno:suno-music",
       "tiantoken-chat:chat",
     ]);
     expect(MODEL_GROUPS.every((group) => !group.key.startsWith("vectorengine"))).toBe(true);
     expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(3);
-    expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(3);
+    expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(4);
+    expect(MODEL_GROUPS.filter((group) => group.kind === "audio")).toHaveLength(1);
     expect(MODEL_GROUPS.filter((group) => group.kind === "chat")).toHaveLength(1);
-    expect(MODEL_GROUP_SECTIONS.map((section) => section.kind)).toEqual(["image", "video", "chat"]);
+    expect(MODEL_GROUP_SECTIONS.map((section) => section.kind)).toEqual(["image", "video", "audio", "chat"]);
   });
 
   it("推荐组合里的模型都真的属于对应模型组", () => {
@@ -53,7 +56,7 @@ describe("model catalog", () => {
   });
 
   it("每类都能拿到用于聚光灯的推荐模型，且不会指向别的类", () => {
-    for (const kind of ["chat", "image", "video"] as const) {
+    for (const kind of ["chat", "image", "video", "audio"] as const) {
       const recommended = recommendedModelFor(kind);
       expect(recommended).toBeTruthy();
       expect(recommended!.group.kind).toBe(kind);

@@ -685,19 +685,20 @@ describe("本会话的图不重复", () => {
       title: "去重", brainChannelId: "c1", brainModel: "m1",
       videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false,
     });
-    const addAsset = (id: string) => context.db.insertAsset({
-      id, taskId: "task-1", fileName: `${id}.png`, mimeType: "image/png", byteSize: 1,
+    const addAsset = (id: string, taskId: string) => context.db.insertAsset({
+      id, taskId, fileName: `${id}.png`, mimeType: "image/png", byteSize: 1,
       relativePath: `${id}.png`, baseDir: context.db.assetsDir, sha256: id, thumbPath: "",
     });
     const reference = (id: string, content: string) => context.db.appendMessage({
       conversationId: conversation.id, role: "tool", content, assetId: id, taskId: "task-1",
     });
 
-    addAsset("img00001");
+    addAsset("img00001", "task-1");
     reference("img00001", "生图完成");
     // 第二次引用同一个产物：set_canvas 那一类消息也会带上 assetId
     reference("img00001", "已设为当前画布");
-    addAsset("img00002");
+    // 第二张来自另一个任务；同一个 task 的多个产物（比如音乐两首）才共享轮次
+    addAsset("img00002", "task-2");
     reference("img00002", "生图完成");
 
     const view = context.agent.buildView(conversation.id)!;

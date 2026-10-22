@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { DEFAULT_IMAGE_SIZE, MAX_MASK_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isVideoAdapter as isVideoAdapterType, normalizeImageSize } from "../shared/types.js";
+import { DEFAULT_IMAGE_SIZE, MAX_MASK_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import type { GenerationInput, MaskImageInput, ReferenceImageInput, Task } from "../shared/types.js";
 import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
 import {
@@ -9,12 +9,16 @@ import {
   applyAuth,
   buildGenerationRequest,
   extractImageCandidates,
-  extractVideoCandidates,
   requestForDiagnostic,
   sendPreparedRequest,
   type ImageCandidate,
-  type VideoCandidate,
 } from "./adapters.js";
+import {
+  asyncProviderSpec,
+  extractAsyncTaskId,
+  type AsyncProviderSpec,
+  type AsyncResult,
+} from "./async-providers.js";
 import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
 import { writeThumbnail } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
@@ -22,20 +26,9 @@ import type { KeyStore } from "./key-store.js";
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 // 参考图的张数和体积都住在 shared/types.ts（前端校验、上传出口、这里三处共用一份）
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 8000;
 const VIDEO_MAX_POLLS = 100;
-
-/** 上游与中转对“生成完成”的叫法不统一，逐个列出 */
-const VIDEO_SUCCESS_STATUSES = ["succeeded", "success", "done", "completed", "complete", "finished", "ok"];
-/**
- * 真正代表失败的终态。
- *
- * 这里刻意不含 `unknown`：中转在任务刚提交、上游还没回报时就会先回一个
- * `{ status: "unknown", progress: 0 }`，把它当成失败会误杀仍在生成的视频
- * （用户实际遇到：上游生成成功，应用却立刻报 REMOTE_TASK_FAILED）。
- * pending / queued / processing / running 同理，都属于“还没好”，继续轮询即可。
- */
-const VIDEO_FAILURE_STATUSES = ["failed", "failure", "error", "canceled", "cancelled", "expired", "rejected", "timeout"];
 
 /** 中转站对请求体的实际上限在 1~2MB 之间（实测 1MB 通过、2MB 被网关掐断），
  *  且超限时只回含糊的 502 / fetch failed。内联 base64 素材超过这个字符数就提前拦下。 */
@@ -70,12 +63,6 @@ export function resolveImageSize(
   return normalizeImageSize(defaultSize) ?? DEFAULT_IMAGE_SIZE;
 }
 
-/** 视频任务的状态查询路径。提交路径在 adapters.ts，两处都要跟着官方文档改 */
-export function videoPollEndpoint(adapterType: string, remoteTaskId: string) {
-  if (adapterType === "wan-video") return `/api/v1/tasks/${remoteTaskId}`;
-  if (adapterType === "seedance-video") return `/api/v3/contents/generations/tasks/${remoteTaskId}`;
-  return `/v1/videos/${remoteTaskId}`;
-}
 
 interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
   relativePath: string;
@@ -265,14 +252,14 @@ export class TaskRunner {
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared);
 
-      // Check if this is an async video generation (返回task_id需要轮询)
-      const isVideoAdapter = isVideoAdapterType(channel.adapterType);
-      const asyncTaskId = this.extractAsyncTaskId(result.payload);
+      // 异步厂商（视频 / 音乐）：提交响应里拿远端 id，交给统一的轮询器
+      const spec = asyncProviderSpec(channel.adapterType);
+      const asyncTaskId = spec ? (spec.extractTaskId?.(result.payload) ?? extractAsyncTaskId(result.payload)) : null;
 
-      if (isVideoAdapter && asyncTaskId) {
+      if (spec && asyncTaskId) {
         // 先记下上游 task id：进程重启后靠它接着轮询，而不是把任务判死
         this.updateTask(taskId, { remoteTaskId: asyncTaskId });
-        await this.pollVideoTask(taskId, asyncTaskId, channel, key);
+        await this.pollAsyncTask(taskId, asyncTaskId, channel, key, spec);
         return;
       }
 
@@ -284,7 +271,7 @@ export class TaskRunner {
         return;
       }
 
-      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到图片或视频", 502);
+      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到可保存的产物", 502);
     } catch (error) {
       /**
        * 收尾写库本身也可能失败：应用退出或测试清理会先关数据库，而任务还在飞。
@@ -327,20 +314,21 @@ export class TaskRunner {
   async resume() {
     for (const task of this.db.listPendingTasks()) {
       const channel = task.remoteTaskId ? this.db.getChannel(task.channelId) : null;
-      if (!channel || !isVideoAdapterType(channel.adapterType)) {
+      const spec = channel ? asyncProviderSpec(channel.adapterType) : null;
+      if (!channel || !spec) {
         this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
         continue;
       }
       // 不 await：多个任务并行恢复，任一失败都不能拖住启动
-      void this.resumePolling(task.id, task.remoteTaskId!, channel);
+      void this.resumePolling(task.id, task.remoteTaskId!, channel, spec);
     }
   }
 
-  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel) {
+  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel, spec: AsyncProviderSpec) {
     if (this.running.has(taskId)) return;
     this.running.add(taskId);
     try {
-      await this.pollVideoTask(taskId, remoteTaskId, channel, this.resolveKey(channel), { immediate: true });
+      await this.pollAsyncTask(taskId, remoteTaskId, channel, this.resolveKey(channel), spec, { immediate: true });
     } catch (error) {
       const current = this.db.getTaskRow(taskId);
       if (current && !["succeeded", "failed", "cancelled", "expired"].includes(current.status)) {
@@ -386,17 +374,18 @@ export class TaskRunner {
     return null;
   }
 
-  private async pollVideoTask(
+  private async pollAsyncTask(
     localTaskId: string,
     remoteTaskId: string,
     channel: DbChannel,
     key: string,
+    spec: AsyncProviderSpec,
     options: { immediate?: boolean } = {},
   ) {
     this.updateTask(localTaskId, { status: "running", remoteTaskId });
     // 提交路径走 joinEndpoint（会吃掉 Base URL 的尾斜杠），轮询这里必须一致，
     // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
-    const url = joinEndpoint(channel.baseUrl, videoPollEndpoint(channel.adapterType, remoteTaskId));
+    const url = joinEndpoint(channel.baseUrl, spec.pollPath(remoteTaskId));
 
     const headers: Record<string, string> = { Accept: "application/json" };
     if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
@@ -417,14 +406,17 @@ export class TaskRunner {
       pending = null;
     };
 
+    const maxPolls = spec.maxPolls ?? VIDEO_MAX_POLLS;
+    const delayMs = spec.pollIntervalMs ?? VIDEO_POLL_DELAY_MS;
+
     try {
-      for (let poll = 0; poll < VIDEO_MAX_POLLS; poll += 1) {
+      for (let poll = 0; poll < maxPolls; poll += 1) {
         const current = this.db.getTaskRow(localTaskId);
         if (current?.status === "cancelled") return;
 
         // 重启恢复时第一轮不再等：上游要是早没了，没必要再耗一个间隔
         if (poll > 0 || !options.immediate) {
-          await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_DELAY_MS));
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
 
         let response: Response;
@@ -437,18 +429,19 @@ export class TaskRunner {
           // 网关出错时多半回的是 HTML，强行 json() 会抛 SyntaxError 掩盖真实状态码
           payload = await response.json().catch(() => null);
         } catch (error) {
-          throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询视频状态失败", 502);
+          throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询任务状态失败", 502);
         }
 
         // 上一次轮询既然不是终点，就降级成一条状态摘要
         if (pending) {
+          const summary = spec.extractStatus(pending.payload);
           this.db.insertDiagnostic({
             taskId: localTaskId,
             request: null,
             response: {
               poll: pending.index,
-              status: this.extractVideoStatus(pending.payload),
-              progress: this.extractVideoProgress(pending.payload),
+              status: summary.status,
+              progress: summary.progress,
             },
             httpStatus: pending.httpStatus,
             durationMs: pending.durationMs,
@@ -461,36 +454,34 @@ export class TaskRunner {
           throw new AppError("REMOTE_TASK_NOT_FOUND", "上游已找不到该任务，可能已过期或被清理", 502);
         }
 
-        const status = this.extractVideoStatus(payload);
-        const progress = this.extractVideoProgress(payload);
-        if (progress !== null) this.updateTask(localTaskId, { progress });
+        const status = spec.extractStatus(payload);
+        if (status.progress !== null) this.updateTask(localTaskId, { progress: status.progress });
 
         // 先判失败：只有明确的失败状态才算失败，unknown / pending / running 都继续轮询
-        if (status && VIDEO_FAILURE_STATUSES.includes(status)) {
-          const errorMsg = this.extractVideoError(payload);
+        if (status.status && spec.failureStatuses.includes(status.status)) {
           throw new AppError(
             "REMOTE_TASK_FAILED",
-            errorMsg || `视频生成失败（状态 ${status}）：${JSON.stringify(payload).slice(0, 300)}`,
+            status.error || `生成失败（状态 ${status.status}）：${JSON.stringify(payload).slice(0, 300)}`,
             502,
           );
         }
 
-        const succeeded = Boolean(status && VIDEO_SUCCESS_STATUSES.includes(status));
-        const videos = extractVideoCandidates(payload);
-        // 状态说完成时收下全部候选；状态还停在 unknown / running 时，只认字段名带 video
-        // 或地址本身是视频扩展名的候选——中转生成完经常不更新 status，只把 video 填上
-        const readyVideos = succeeded ? videos : videos.filter((video) => video.strong);
-        if (succeeded || readyVideos.length) {
-          const chosen = readyVideos.length ? readyVideos : videos;
+        const succeeded = Boolean(status.status && spec.successStatuses.includes(status.status));
+        const results = spec.extractResults(payload);
+        // 状态说完成时收下全部候选；状态还停在 unknown / running 时，只认强候选
+        // ——中转生成完经常不更新 status，只把结果字段填上
+        const ready = succeeded ? results : results.filter((item) => item.strong);
+        if (succeeded || ready.length) {
+          const chosen = ready.length ? ready : results;
           if (chosen.length === 0) {
             throw new AppError(
               "RESPONSE_PARSE_FAILED",
-              `视频生成完成但响应中没有找到视频 URL。原始响应：${JSON.stringify(payload).slice(0, 500)}`,
+              `生成完成但响应中没有找到可保存的产物。原始响应：${JSON.stringify(payload).slice(0, 500)}`,
               502,
             );
           }
-          // 下载失败时 saveVideos 会把视频链接带进报错，方便手动打开核对
-          await this.saveVideos(localTaskId, chosen, channel);
+          // 下载失败时会把产物链接带进报错，方便手动打开核对
+          await this.saveResults(localTaskId, chosen, channel);
           this.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
         }
@@ -498,7 +489,7 @@ export class TaskRunner {
         // Still running, continue polling
       }
 
-      throw new AppError("VIDEO_TIMEOUT", `视频生成超时（已轮询 ${VIDEO_MAX_POLLS} 次）`, 504);
+      throw new AppError("VIDEO_TIMEOUT", `生成超时（已轮询 ${maxPolls} 次）`, 504);
     } finally {
       // 最后一条轮询（成功、失败、超时都一样）保留完整响应：排查时最有用的是它
       flushPending();
@@ -506,64 +497,33 @@ export class TaskRunner {
   }
 
   /**
-   * 各家字段名不同：Grok 用 status，万相用 output.task_status，
-   * 部分中转还会把任务包在 data / result 里。顶层优先，找不到再看下一层。
+   * 按产物类型落盘。
+   *
+   * 目前视频走 `saveVideos`；音频在下一个阶段接进来。把分派放在这里，
+   * 轮询器不用知道「视频怎么下载、音乐怎么下载」。
    */
-  private extractVideoStatus(payload: unknown): string | null {
-    if (!payload || typeof payload !== "object") return null;
-    const record = payload as Record<string, unknown>;
-    if (typeof record.status === "string") return record.status.toLowerCase();
-    if (typeof record.task_status === "string") return record.task_status.toLowerCase();
-    for (const key of ["output", "data", "result"]) {
-      const nested = record[key];
-      if (!nested || typeof nested !== "object") continue;
-      const inner = nested as Record<string, unknown>;
-      if (typeof inner.task_status === "string") return inner.task_status.toLowerCase();
-      if (typeof inner.status === "string") return inner.status.toLowerCase();
+  private async saveResults(taskId: string, results: AsyncResult[], channel: DbChannel) {
+    const videos = results.filter((item) => item.kind === "video");
+    const audios = results.filter((item) => item.kind === "audio");
+    if (videos.length) await this.saveVideos(taskId, videos, channel);
+    if (audios.length) await this.saveAudios(taskId, audios, channel);
+    if (!videos.length && !audios.length) {
+      throw new AppError("RESPONSE_PARSE_FAILED", "暂不支持保存这种产物", 502);
     }
-    return null;
   }
 
-  private extractVideoProgress(payload: unknown): number | null {
-    if (!payload || typeof payload !== "object") return null;
-    const record = payload as Record<string, unknown>;
-    if (typeof record.progress === "number") return Math.min(99, Math.max(0, record.progress));
-    for (const key of ["output", "data", "result"]) {
-      const nested = record[key];
-      if (!nested || typeof nested !== "object") continue;
-      const progress = (nested as Record<string, unknown>).progress;
-      if (typeof progress === "number") return Math.min(99, Math.max(0, progress));
-    }
-    return null;
-  }
-
-  private extractVideoError(payload: unknown): string | null {
-    if (!payload || typeof payload !== "object") return null;
-    const record = payload as Record<string, unknown>;
-    if (record.error && typeof record.error === "object") {
-      const error = record.error as Record<string, unknown>;
-      if (typeof error.message === "string") return error.message;
-    }
-    if (typeof record.error === "string") return record.error;
-    // 万相把失败原因放在 output.message / output.code
-    if (record.output && typeof record.output === "object") {
-      const output = record.output as Record<string, unknown>;
-      const parts = [output.code, output.message].filter((item) => typeof item === "string");
-      if (parts.length) return parts.join(": ");
-    }
-    if (typeof record.message === "string") return record.message;
-    return null;
-  }
-
-  private async saveVideos(taskId: string, videos: VideoCandidate[], channel: DbChannel) {
+  private async saveVideos(taskId: string, videos: AsyncResult[], channel: DbChannel) {
     // 目录在写盘和入库之间必须保持一致，取一次而不是每次读 getter
     const baseDir = this.db.assetsDir;
     let saved = 0;
-    for (const video of videos.slice(0, 1)) {
-      const bytes = await this.fetchVideoBytes(video.url, channel);
+    // 一次可能返回多个结果（n>1，或上游把同一段视频放在多个字段里）；全部保存，
+    // 由展示层决定主产物，别再像以前那样只看第一个。
+    for (const video of videos.slice(0, 8)) {
+      const { bytes, contentType } = await this.fetchAssetBytes(video.url, channel, "视频");
       if (bytes.length > MAX_VIDEO_BYTES) throw new AppError("ASSET_TOO_LARGE", "视频超过 200 MB 限制", 502);
-      const extension = video.url.endsWith(".webm") ? "webm" : "mp4";
-      const mimeType = extension === "webm" ? "video/webm" : "video/mp4";
+      const mimeType = video.mimeType ?? (contentType.startsWith("video/") ? contentType : undefined)
+        ?? (video.url.toLowerCase().includes(".webm") ? "video/webm" : "video/mp4");
+      const extension = videoExtensionForMime(mimeType);
       const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
       const id = crypto.randomUUID();
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
@@ -578,23 +538,79 @@ export class TaskRunner {
     if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的视频", 502);
   }
 
-  private async fetchVideoBytes(url: string, channel: DbChannel): Promise<Buffer> {
+  /**
+   * 音乐一次返回多首（Suno 通常是 2 首），每首带一张封面。
+   * 封面写进现有的 `thumb_path`，不再单独建一条图片 asset——否则历史里会多出
+   * 一张「不是用户要的图」，删除/清空时也不好解释。
+   */
+  private async saveAudios(taskId: string, audios: AsyncResult[], channel: DbChannel) {
+    const baseDir = this.db.assetsDir;
+    let saved = 0;
+    for (const audio of audios.slice(0, 8)) {
+      const { bytes, contentType } = await this.fetchAssetBytes(audio.url, channel, "音频");
+      if (bytes.length > MAX_AUDIO_BYTES) throw new AppError("ASSET_TOO_LARGE", "音频超过 100 MB 限制", 502);
+      const mimeType = audio.mimeType ?? (contentType.startsWith("audio/") ? contentType : undefined)
+        ?? (audio.url.toLowerCase().includes(".wav") ? "audio/wav"
+          : audio.url.toLowerCase().includes(".mp3") ? "audio/mpeg"
+            : "audio/mp4");
+      const extension = audioExtensionForMime(mimeType);
+      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+      const id = crypto.randomUUID();
+      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
+      const absolutePath = path.join(baseDir, fileName);
+      await fs.writeFile(absolutePath, bytes);
+
+      // 封面失败不影响音频本身：缩略图接口会 404，前端回落到通用音乐图标
+      let thumbPath: string | null = null;
+      if (audio.coverUrl) {
+        try {
+          const cover = await this.fetchAssetBytes(audio.coverUrl, channel, "音频封面", "image/*");
+          if (cover.contentType.startsWith("image/") || !cover.contentType) {
+            thumbPath = await writeThumbnail(this.db, id, cover.bytes);
+          }
+        } catch {
+          // 封面是装饰，丢了不影响听歌
+        }
+      }
+
+      this.db.insertAsset({
+        id, taskId, fileName, mimeType, byteSize: bytes.length,
+        relativePath: fileName, baseDir, sha256, duration: audio.duration, thumbPath,
+        title: audio.title,
+        lyrics: audio.lyrics,
+        tags: audio.tags,
+        remoteClipId: audio.remoteClipId,
+      });
+      saved += 1;
+    }
+    if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的音频", 502);
+  }
+
+  private async fetchAssetBytes(
+    url: string,
+    channel: DbChannel,
+    label: string,
+    accept = "*/*",
+  ): Promise<{ bytes: Buffer; contentType: string }> {
     try {
-      const headers = this.assetDownloadHeaders(url, channel, "*/*");
+      const headers = this.assetDownloadHeaders(url, channel, accept);
       const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
       if (!response.ok) {
         throw new AppError(
-          "VIDEO_DOWNLOAD_FAILED",
-          `下载视频失败：HTTP ${response.status}。视频链接：${url}`,
+          "ASSET_DOWNLOAD_FAILED",
+          `下载${label}失败：HTTP ${response.status}。地址：${url}`,
           502,
         );
       }
-      return Buffer.from(await response.arrayBuffer());
+      return {
+        bytes: Buffer.from(await response.arrayBuffer()),
+        contentType: response.headers.get("content-type") ?? "",
+      };
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError(
-        "VIDEO_DOWNLOAD_FAILED",
-        `下载视频失败：${error instanceof Error ? error.message : "未知错误"}。视频链接：${url}`,
+        "ASSET_DOWNLOAD_FAILED",
+        `下载${label}失败：${error instanceof Error ? error.message : "未知错误"}。地址：${url}`,
         502,
       );
     }
@@ -742,7 +758,8 @@ export class TaskRunner {
    * 拼错了反而会把地址弄坏。这类网关的资产地址一般本来就是公开的。
    */
   private assetDownloadHeaders(url: string, channel: DbChannel, accept: string): Record<string, string> {
-    const headers: Record<string, string> = { Accept: accept };
+    // 部分 CDN（Suno 的封面就是）对无 UA 的请求回 403，浏览器却能打开
+    const headers: Record<string, string> = { Accept: accept, "User-Agent": "Mozilla/5.0" };
     if (channel.authType === "none" || channel.authType === "query") return headers;
     let host = "";
     let channelHost = "";
@@ -808,13 +825,30 @@ export function extensionForMime(mimeType: string) {
   return "png";
 }
 
+export function videoExtensionForMime(mimeType: string) {
+  if (mimeType.includes("webm")) return "webm";
+  if (mimeType.includes("quicktime")) return "mov";
+  if (mimeType.includes("x-matroska")) return "mkv";
+  return "mp4";
+}
+
+export function audioExtensionForMime(mimeType: string) {
+  if (mimeType.includes("mpeg")) return "mp3";
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("flac")) return "flac";
+  if (mimeType.includes("aac")) return "aac";
+  // audio/mp4、audio/x-m4a、audio/m4a 都落到这里
+  return "m4a";
+}
+
 function referenceInputs(input: GenerationInput) {
   return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
 }
 
 /** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */
 function inlineMediaSize(input: GenerationInput) {
-  const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? [])];
+  const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? []), ...(input.klingVideoMedia ?? [])];
   return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
 }
 

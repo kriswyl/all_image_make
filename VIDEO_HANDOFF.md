@@ -9,7 +9,7 @@
 | 项目 | 状态 |
 |---|---|
 | TypeScript | `npx tsc --noEmit` 零错误 |
-| 单元测试 | `npm test` → 58 passed（3 个文件） |
+| 单元测试 | `npm test` → 260 passed（20 个文件） |
 | 开发服务 | 前端 `127.0.0.1:5173`，API `127.0.0.1:17891` |
 | 真实 API 联调 | Seedance **已跑通**（见下）；万相 / Grok 仍只测到 mock 上游 |
 
@@ -17,17 +17,54 @@
 
 ## 已完成的功能
 
-### 三种视频渠道
+### 四种视频渠道
 
 | 适配器 | 渠道预设 | 模型 |
 |---|---|---|
 | `wan-video` | 词元流墟-万相视频 | wan3.0-video |
 | `grok-video` | 词元流墟-grok视频 | grok-imagine-video / -1.5-preview / -1.5 |
 | `seedance-video` | 词元流墟-seedance视频 | sd-2.5 / sd-2.0 / sd-2.0-fast / sd-2.0-mini |
+| `kling-video` | 词元流墟-可灵视频 | kling-3.0 / kling-3.0-turbo / kling-3.0-omni |
 
-`provider-presets.ts` 里一共 9 个预设，全部按「模型系列」平铺成独立模板，不按站点合并：向量引擎 3 个（gpt / gpt-c / gemini），词元流墟 6 个（gpt / gpt-c / gemini / 万相 / grok / seedance）。
+`provider-presets.ts` 里一共 11 个预设，全部按「模型系列」平铺成独立模板，不按站点合并：向量引擎 3 个（gpt / gpt-c / gemini），词元流墟 8 个（gpt / gpt-c / gemini / 万相 / grok / seedance / 可灵 / suno）。
 
-### 请求体格式（三家都不同，改代码时注意）
+### 可灵（Kling）
+
+可灵走的是**原生格式**，不是 `/v1/video/generations`：
+
+| 模式 | 提交路径 | 请求体 |
+|---|---|---|
+| 文生视频 | `POST /text-to-video/{model}` | `{ prompt, settings, options }` |
+| 图生视频（首帧） | `POST /image-to-video/{model}` | `{ contents: [{type:"prompt",text},{type:"first_frame",url}], settings, options }` |
+| Omni | `POST /omni-video/kling-3.0-omni` | `contents` 可含 `prompt/first_frame/last_frame/refer_image/...` |
+| 运动控制 | `POST /motion-control/kling-3.0` | `contents` 含 `prompt/image/video`，`settings.character_orientation` 必填 |
+| 查询 | `GET /tasks?task_ids={id}` | 返回 `data[].status` 和 `data[].outputs[].url` |
+
+- **body 不带 `model`**，模型固定在路径里
+- **模式按模型开放**：`kling-3.0` 有文生/首帧/首尾帧/运动控制；`turbo` 有文生/首帧/首尾帧；`omni` 有文生/首帧/首尾帧/参考图
+- 文生/图生/Omni 的 `resolution` 支持 `720p` / `1080p` / `4k`；运动控制只到 `1080p`
+- 音频档位：文生/图生/Omni 是 `off` / `native`；运动控制是 `off` / `original`
+- 文生/Omni 有 `aspect_ratio`（16:9 / 9:16 / 1:1）；图生视频和运动控制**没有**这个字段
+- `duration` 3–15 秒；运动控制没有 `duration`，时长由参考视频决定（朝向选图片 ≤10 秒、选视频 ≤30 秒）
+- `multi_shot` 默认 true；运动控制没有这个字段
+- 查询状态是 `submitted / processing / succeeded / failed`，不是统一接口的 status 形状；已在 `async-providers.ts` 单独适配
+- **不要完全相信文档的「尾帧暂未开放」**：2026-10-22 实测 `kling-3.0` 与 `kling-3.0-turbo` 的 `/image-to-video` 都接受 `first_frame + last_frame`，3 秒 720p 任务成功；抽最后一帧与输入尾帧一致。所以非 Omni 也开放首尾帧
+- 参考图实测仍只属于 Omni：普通 `/image-to-video` 只传 `refer_image` 时返回 400 `content item of type 'first_frame' is required`
+- Omni 的参考图走 `refer_image`
+- 运动控制的参考视频只接受公网 http(s) 地址：本地视频转 base64 会超过中转约 1.4MB 的请求体上限
+- Omni 文档里的 `element` / `voice` / `feature_video` / `base_video` 需要可灵素材库或额外视频输入，工作台暂未开放；参考图走 `refer_image`
+- `kling-3.0-turbo` 走同样的原生路径；默认打开音频，避免只配置了 `audio` 计费档时被拒
+- **Key 必须属于 `kling专属` 分组**。模型列表里能看到 Kling 不代表当前 Key 能调用；不在该分组时会报 `get_channel_failed ... 可用渠道不存在`
+- **提交响应里的 `request_id` 不是任务 id**：任务 id 在 `data.id`（形如 `task_...`）。通用 `extractAsyncTaskId` 会先抓到 `request_id`，所以 Kling 必须用 spec 里的 `extractTaskId` 覆盖
+- 用错 id 去查 `/tasks?task_ids=` 会持续返回 HTTP 400，任务会一直显示 running 直到超时
+- 真实联调已完成：`kling-3.0`、5 秒、720p、无声，约 2.5 分钟完成；app 内落盘为 `video/mp4`、5.041 秒、约 5.6MB
+- 首尾帧联调：`kling-3.0` 与 `kling-3.0-turbo` 各提交一条 3 秒 720p 首尾帧任务，均 `succeeded`；首条约 30 秒出片
+- Omni 参考图联调：`kling-3.0-omni` + 2 张 `refer_image`，3 秒 720p、无声、16:9，约 4 分 23 秒完成
+- 运动控制联调：`kling-3.0` + 角色图 + 10 秒舞蹈视频，720p、无声，约 10 分 49 秒完成；输出 10.0 秒、约 11.8MB，人物来自角色图、动作跟随参考视频
+- 运动控制提交后前 8 分钟一直是 `submitted`，之后才转 `processing`；轮询上限（10 秒 × 120 次）足够，但不要再缩短
+- 真实 cover/任务 id 关系见 `SUNO_HANDOFF.md`；这里只记 Kling
+
+### 请求体格式（几家都不同，改代码时注意）
 
 **Grok** — 参数平铺，图片走 `reference_images`：
 ```json
@@ -59,8 +96,9 @@ media 里出现 `file` 或 `link` 时，`prompt_extend` 被强制改成 `true`�
 | wan-video | `/api/v1/services/aigc/video-generation/video-synthesis` | `/api/v1/tasks/{id}` |
 | grok-video | `/v1/videos/generations` | `/v1/videos/{id}` |
 | seedance-video | `/api/v3/contents/generations/tasks` | `/api/v3/contents/generations/tasks/{id}` |
+| kling-video | `/text-to-video/{model}` / `/image-to-video/{model}` / `/omni-video/{model}` | `/tasks?task_ids={id}` |
 
-这三处路径在两个文件里各写了一遍，改动时要同步：`src/server/adapters.ts` 的 `defaultEndpoint()` 和 `src/shared/provider-presets.ts` 的 `adapterDefaultEndpoint()`。轮询路径集中在 `src/server/tasks.ts` 的 `videoPollEndpoint()`。
+提交路径统一在 `src/shared/adapter-endpoints.ts`；轮询路径集中在 `src/server/async-providers.ts` 的 `AsyncProviderSpec`。新增渠道不要再往 `tasks.ts` 里写 switch。
 
 提交与轮询都必须走 `security.ts` 的 `joinEndpoint()` 拼 URL。曾经轮询是直接 `channel.baseUrl + path` 拼的，Base URL 填成 `https://api.x.com/`（带尾斜杠）时会「提交成功、轮询 404」，而 404 的响应体既可能被当成「还在跑」而一路轮询到超时，也可能是 HTML 解析失败报成内部错误——两种情况都不指向真正的原因。现在 404 直接判 `REMOTE_TASK_NOT_FOUND`。测试用带尾斜杠的 Base URL 专门盯这条。
 

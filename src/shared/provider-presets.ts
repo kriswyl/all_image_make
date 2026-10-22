@@ -1,4 +1,5 @@
 import type { AdapterType, AuthType, Channel, ChannelInput } from "./types.js";
+import { defaultEndpointFor } from "./adapter-endpoints.js";
 
 /**
  * 服务商预设：一个站点下若干「渠道单元」。
@@ -57,6 +58,8 @@ const GEMINI_MODELS = [
 const GROK_VIDEO_MODELS = ["grok-imagine-video", "grok-imagine-video-1.5-preview", "grok-imagine-video-1.5"];
 const WAN_VIDEO_MODELS = ["wan3.0-video"];
 const SEEDANCE_VIDEO_MODELS = ["sd-2.5", "sd-2.0", "sd-2.0-fast", "sd-2.0-mini"];
+const KLING_VIDEO_MODELS = ["kling-3.0", "kling-3.0-turbo", "kling-3.0-omni"];
+const SUNO_MUSIC_MODELS = ["suno_damobi_music"];
 
 /**
  * 对话（大脑）模型候选。
@@ -141,7 +144,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         description: "万相 3.0，七种生成方式，首尾帧与参考素材",
         adapterType: "wan-video",
         authType: "bearer",
-        endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
         channelName: "{provider}",
         secretEnv: "TIANTOKEN_WAN_VIDEO_API_KEY",
         models: WAN_VIDEO_MODELS,
@@ -160,7 +162,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         description: "Grok Imagine，1 到 15 秒，支持参考图",
         adapterType: "grok-video",
         authType: "bearer",
-        endpoint: "/v1/videos/generations",
         channelName: "{provider}",
         secretEnv: "TIANTOKEN_GROK_VIDEO_API_KEY",
         models: GROK_VIDEO_MODELS,
@@ -179,10 +180,45 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         description: "豆包 Seedance，文生/首帧/首尾帧/参考图",
         adapterType: "seedance-video",
         authType: "bearer",
-        endpoint: "/api/v3/contents/generations/tasks",
         channelName: "{provider}",
         secretEnv: "TIANTOKEN_SEEDANCE_VIDEO_API_KEY",
         models: SEEDANCE_VIDEO_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-kling-video",
+    label: "词元流墟-可灵视频",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "kling-video",
+        label: "可灵视频",
+        description: "Kling 3.0 / Turbo / Omni，文生、首帧、首尾帧、参考图、运动控制",
+        adapterType: "kling-video",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_KLING_VIDEO_API_KEY",
+        models: KLING_VIDEO_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-suno",
+    label: "词元流墟-音乐",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "suno-music",
+        label: "Suno 音乐",
+        description: "一次生成 2 首：灵感描述、自定义歌词、纯音乐",
+        adapterType: "suno-music",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_SUNO_API_KEY",
+        models: SUNO_MUSIC_MODELS,
       },
     ],
   },
@@ -210,18 +246,9 @@ export function findProviderPreset(id: string): ProviderPreset | undefined {
   return PROVIDER_PRESETS.find((preset) => preset.id === id);
 }
 
-/** 适配器默认路径，与服务端 adapters.ts 的 defaultEndpoint 保持一致 */
+/** 适配器默认路径：和服务端共用 `adapter-endpoints.ts`，不再各写一份 */
 export function adapterDefaultEndpoint(adapterType: AdapterType) {
-  switch (adapterType) {
-    case "openai-images": return { endpoint: "/v1/images/generations" };
-    case "openai-chat-image": return { endpoint: "/v1/chat/completions" };
-    case "openai-chat": return { endpoint: "/v1/chat/completions" };
-    case "gemini-content": return { endpoint: "/v1beta/models/{model}:generateContent" };
-    case "grok-video": return { endpoint: "/v1/videos/generations" };
-    case "wan-video": return { endpoint: "/api/v1/services/aigc/video-generation/video-synthesis" };
-    case "seedance-video": return { endpoint: "/api/v3/contents/generations/tasks" };
-    default: return { endpoint: "/v1/images/generations" };
-  }
+  return { endpoint: defaultEndpointFor(adapterType) };
 }
 
 export function channelNameFor(preset: ProviderPreset, unit: ChannelUnitPreset) {

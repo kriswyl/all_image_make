@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { LoaderCircle, Wand2 } from "lucide-react";
 import { api } from "./api";
-import type { Toast } from "./App";
+import type { Toast } from "./app-shared";
 
 /**
  * 提示词润色按钮。只改提示词、不触发生成，调用的是对话模型；

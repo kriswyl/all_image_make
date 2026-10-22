@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Music, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -24,6 +24,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   set_canvas: Layers,
   optimize_prompt: Wand2,
   generate_video: Film,
+  generate_music: Music,
   ask: Sparkles,
   reply: Sparkles,
 };
@@ -42,6 +43,12 @@ function resultDetail(tool: AgentToolName, result: ToolResult | null) {
   if (tool === "optimize_prompt" && typeof data.prompt === "string") rows.push(["优化后", data.prompt]);
   if (tool === "generate_image" || tool === "edit_image") {
     if (typeof data.count === "number" && data.count > 1) rows.push(["张数", String(data.count)]);
+  }
+  if (tool === "generate_music") {
+    rows.push(["方式", data.musicMode === "custom" ? "自定义歌词" : "灵感描述"]);
+    if (typeof data.musicTitle === "string") rows.push(["标题", data.musicTitle]);
+    if (typeof data.musicTags === "string") rows.push(["曲风", data.musicTags]);
+    if (data.musicInstrumental === true) rows.push(["纯音乐", "是"]);
   }
   if (typeof data.round === "number") rows.push(["轮次", `第 ${data.round} 轮`]);
   // set_canvas 一次设了多张时把整组列出来：ToolResult.assetId 只装得下主图，
@@ -105,6 +112,10 @@ export function ToolCard({
     ? produced.mimeType.startsWith("video/")
     // 这一轮刚落的库、还没走过那次全量刷新：退回 ToolResult 里带的那份
     : payload?.mimeType?.startsWith("video/") ?? false;
+  const isAudioResult = produced
+    ? produced.mimeType.startsWith("audio/")
+    : payload?.mimeType?.startsWith("audio/") ?? false;
+  const resultAssetIds = payload?.assetIds?.length ? payload.assetIds : assetId ? [assetId] : [];
 
   /**
    * 胶囊上那一小串参数：优先写提示词，没有提示词就写这次动了哪张画布。
@@ -182,7 +193,33 @@ export function ToolCard({
           结果图放在卡片最底部：先读完「做了什么、参数是什么」，最后才看图。
           缩略图仍然属于这张卡片，所以拖进输入框当参考图的行为不变。
         */}
-        {assetId && onPreview ? (
+        {isAudioResult && resultAssetIds.length ? (
+          <div className="tool-card-audio-list">
+            {resultAssetIds.slice(0, 4).map((id) => {
+              const item = assets.find((entry) => entry.asset.id === id)?.asset;
+              return (
+                <div className="tool-card-audio" key={id}>
+                  <div className="tool-card-audio-head">
+                    <span className="tool-card-audio-cover">
+                      {item?.thumbUrl ? <img src={api.assetUrl(item.thumbUrl)} alt="" loading="lazy" /> : <Music size={18} />}
+                    </span>
+                    <span className="tool-card-audio-title">
+                      <strong>{item?.title || "歌曲"}</strong>
+                      {item?.duration ? <small>{Math.floor(item.duration / 60)}:{Math.floor(item.duration % 60).toString().padStart(2, "0")}</small> : null}
+                    </span>
+                  </div>
+                  <audio controls preload="metadata" src={api.assetUrl(item?.url ?? `/api/assets/${id}/file`)} />
+                  {item?.lyrics ? (
+                    <details className="music-lyrics">
+                      <summary>歌词</summary>
+                      <pre>{item.lyrics}</pre>
+                    </details>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : assetId && onPreview ? (
           <button
             type="button"
             className="tool-card-thumb"

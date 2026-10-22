@@ -1,8 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset } from "../shared/types.js";
-import { isImageAsset } from "../shared/types.js";
+import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset, TaskKind } from "../shared/types.js";
+import { isAudioAsset, isImageAsset } from "../shared/types.js";
+import { taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
 import type {
@@ -132,6 +133,11 @@ export class AppDatabase {
         base_dir TEXT NOT NULL DEFAULT '',
         sha256 TEXT NOT NULL,
         duration REAL,
+        -- 音乐产物的歌名 / 歌词 / 曲风 / Suno custom_id；图片/视频为空
+        title TEXT NOT NULL DEFAULT '',
+        lyrics TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '',
+        remote_clip_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       -- 列表里每个任务都要按 task_id 取产物，没有索引会退化成全表扫描
@@ -220,6 +226,20 @@ export class AppDatabase {
     const hasThumbPath = columnsResult.some((col) => col.name === "thumb_path");
     if (!hasThumbPath) {
       this.db.exec("ALTER TABLE assets ADD COLUMN thumb_path TEXT NOT NULL DEFAULT ''");
+    }
+    // 音乐产物的歌名；老行默认空串，不影响图片/视频
+    if (!columnsResult.some((col) => col.name === "title")) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+    }
+    if (!columnsResult.some((col) => col.name === "lyrics")) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN lyrics TEXT NOT NULL DEFAULT ''");
+    }
+    if (!columnsResult.some((col) => col.name === "tags")) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
+    }
+    // Suno 的 custom_id：翻唱 / 混音要引用已有歌曲，必须存下来
+    if (!columnsResult.some((col) => col.name === "remote_clip_id")) {
+      this.db.exec("ALTER TABLE assets ADD COLUMN remote_clip_id TEXT NOT NULL DEFAULT ''");
     }
     // messages 建表早于「视频确认卡片」，补上待确认计划的列（§13.6 ①）
     const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
@@ -400,11 +420,17 @@ export class AppDatabase {
     return { deleted, assets, inputs };
   }
 
-  /** 供清空历史按「图片 / 视频 / 全部」筛选：渠道适配器优先，渠道已删则看产物类型 */
+  /** 任务品类：和前后端共用同一份规则，避免「历史页和清空接口各判各的」 */
+  taskKindRow(row: TaskRow, adapterByChannel: Map<string, string>): TaskKind {
+    return taskKindFor(
+      adapterByChannel.get(row.channelId),
+      this.listAssets(row.id).map((asset) => asset.mimeType),
+    );
+  }
+
+  /** 兼容旧调用点；新代码用 `taskKindRow` */
   isVideoTaskRow(row: TaskRow, adapterByChannel: Map<string, string>): boolean {
-    const adapterType = adapterByChannel.get(row.channelId);
-    if (adapterType) return adapterType.endsWith("-video");
-    return this.listAssets(row.id).some((asset) => asset.mimeType.startsWith("video/"));
+    return this.taskKindRow(row, adapterByChannel) === "video";
   }
 
   private collectInputImagePaths(id: string): string[] {
@@ -499,13 +525,19 @@ export class AppDatabase {
     relativePath: string; baseDir: string; sha256: string; duration?: number | null;
     /** 相对 thumbs/ 的文件名。缩略图生成失败时留空，Agent 那边会现缩现存 */
     thumbPath?: string | null;
+    /** 音乐产物的歌名 / 歌词 / 曲风 / Suno custom_id；图片/视频留空 */
+    title?: string | null;
+    lyrics?: string | null;
+    tags?: string | null;
+    remoteClipId?: string | null;
   }) {
     this.db.prepare(`
-      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, base_dir, sha256, duration, thumb_path, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO assets (id, task_id, file_name, mime_type, byte_size, relative_path, base_dir, sha256, duration, thumb_path, title, lyrics, tags, remote_clip_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       asset.id, asset.taskId, asset.fileName, asset.mimeType, asset.byteSize, asset.relativePath,
-      asset.baseDir, asset.sha256, asset.duration ?? null, asset.thumbPath ?? "", now(),
+      asset.baseDir, asset.sha256, asset.duration ?? null, asset.thumbPath ?? "", asset.title ?? "",
+      asset.lyrics ?? "", asset.tags ?? "", asset.remoteClipId ?? "", now(),
     );
   }
 
@@ -551,6 +583,10 @@ export class AppDatabase {
       sha256: String(row.sha256),
       duration: row.duration == null ? null : Number(row.duration),
       thumbPath: row.thumb_path == null ? "" : String(row.thumb_path),
+      title: row.title == null ? "" : String(row.title),
+      lyrics: row.lyrics == null ? "" : String(row.lyrics),
+      tags: row.tags == null ? "" : String(row.tags),
+      remoteClipId: row.remote_clip_id == null ? "" : String(row.remote_clip_id),
       createdAt: String(row.created_at),
     };
   }
@@ -855,10 +891,12 @@ export class AppDatabase {
       SELECT assets.*, messages.seq AS message_seq, messages.content AS message_content,
              COALESCE(tasks.origin, 'generate') AS asset_origin
       FROM messages
-      JOIN assets ON assets.id = messages.asset_id
+      JOIN assets anchor ON anchor.id = messages.asset_id
+      -- 一条消息只挂了主产物；音乐一次两首，必须把同一个 task 的其余产物也带进来
+      JOIN assets ON assets.task_id = anchor.task_id
       LEFT JOIN tasks ON tasks.id = assets.task_id
       WHERE messages.conversation_id = ? AND messages.asset_id IS NOT NULL
-      ORDER BY messages.seq ASC
+      ORDER BY messages.seq ASC, assets.created_at ASC
     `).all(conversationId) as DbRow[];
     /*
      * 同一个产物可能被不止一条消息引用：产出它那条算一次，之后每次 set_canvas
@@ -966,8 +1004,15 @@ export class AppDatabase {
     return {
       id: asset.id, taskId: asset.taskId, fileName: asset.fileName, mimeType: asset.mimeType, byteSize: asset.byteSize,
       url: `/api/assets/${asset.id}/file`,
-      thumbUrl: isImageAsset(asset) ? `/api/assets/${asset.id}/thumb` : null,
-      duration: asset.duration, createdAt: asset.createdAt,
+      thumbUrl: isImageAsset(asset) || (isAudioAsset(asset) && Boolean(asset.thumbPath))
+        ? `/api/assets/${asset.id}/thumb`
+        : null,
+      duration: asset.duration,
+      title: asset.title || null,
+      lyrics: asset.lyrics || null,
+      tags: asset.tags || null,
+      remoteClipId: asset.remoteClipId || null,
+      createdAt: asset.createdAt,
     };
   }
 
@@ -1021,6 +1066,11 @@ export interface AssetRow {
   sha256: string; duration: number | null;
   /** 相对 thumbs/ 的缩略图文件名，空串表示还没生成 */
   thumbPath: string;
+  /** 音乐产物的歌名 / 歌词 / 曲风 / Suno custom_id；图片/视频为空串 */
+  title: string;
+  lyrics: string;
+  tags: string;
+  remoteClipId: string;
   createdAt: string;
 }
 

@@ -62,6 +62,10 @@ const VIDEO_MAPS: Partial<Record<AdapterType, ParamMapEntry[]>> = {
     { param: "resolution", label: "分辨率", path: ["resolution"] },
     { param: "duration", label: "时长", path: ["duration"] },
   ],
+  "kling-video": [
+    { param: "resolution", label: "清晰度", path: ["size"] },
+    { param: "duration", label: "时长", path: ["duration"] },
+  ],
 };
 
 function paramMap(adapterType: AdapterType): ParamMapEntry[] {

@@ -9,9 +9,10 @@ import {
   buildChannelDrafts, findConflictChannels, type ChannelUnitPreset, type ProviderPreset,
   PROVIDER_PRESETS,
 } from "./provider-presets.js";
+import { channelKindOf } from "./kinds.js";
 import type { Channel } from "./types.js";
 
-export type ModelGroupKind = "image" | "video" | "chat";
+export type ModelGroupKind = "image" | "video" | "audio" | "chat";
 
 export interface ModelGroup {
   /** `${presetId}:${unitId}`，选择状态和 React key 都用它 */
@@ -22,11 +23,7 @@ export interface ModelGroup {
 }
 
 function kindOf(unit: ChannelUnitPreset): ModelGroupKind {
-  if (unit.adapterType === "openai-chat") return "chat";
-  if (unit.adapterType === "wan-video" || unit.adapterType === "grok-video" || unit.adapterType === "seedance-video") {
-    return "video";
-  }
-  return "image";
+  return channelKindOf(unit.adapterType);
 }
 
 export const MODEL_GROUPS: ModelGroup[] = PROVIDER_PRESETS.flatMap((preset) => preset.units.map((unit) => ({
@@ -39,6 +36,7 @@ export const MODEL_GROUPS: ModelGroup[] = PROVIDER_PRESETS.flatMap((preset) => p
 export const MODEL_GROUP_SECTIONS: Array<{ kind: ModelGroupKind; label: string; hint: string }> = [
   { kind: "image", label: "生图", hint: "画图、改图、图生图" },
   { kind: "video", label: "视频", hint: "文生视频、首尾帧、参考生视频" },
+  { kind: "audio", label: "音乐", hint: "灵感描述、自定义歌词、纯音乐" },
   { kind: "chat", label: "对话", hint: "对话工作区的大脑，不出图" },
 ];
 
@@ -47,6 +45,8 @@ export const RECOMMENDED_MODELS: Record<string, string> = {
   // 生图推荐 -c 系列：独立计费与密钥，出图更稳，也不会和标准 gpt 渠道混用
   "tiantoken-gpt-c:gpt-c": "gpt-image-2.5-sunburst-c",
   "tiantoken-wan-video:wan-video": "wan3.0-video",
+  "tiantoken-kling-video:kling-video": "kling-3.0",
+  "tiantoken-suno:suno-music": "suno_damobi_music",
   "tiantoken-chat:chat": "deepseek-v4-1-flash",
 };
 

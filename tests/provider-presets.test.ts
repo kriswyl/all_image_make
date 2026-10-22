@@ -31,6 +31,8 @@ describe("provider presets", () => {
       "tiantoken-wan-video",
       "tiantoken-grok-video",
       "tiantoken-seedance",
+      "tiantoken-kling-video",
+      "tiantoken-suno",
       "tiantoken-chat",
     ]);
     // 向量引擎模板暂时下线；手工自定义渠道仍然可以填它的 Base URL
