@@ -59,6 +59,9 @@ function resultDetail(tool: AgentToolName, result: ToolResult | null) {
     if (typeof data.storyboardVideoCount === "number" && data.storyboardVideoCount > 0) {
       rows.push(["视频镜头", `${data.storyboardVideoCount} 个`]);
     }
+    if (Array.isArray(data.storyboardCharacters) && data.storyboardCharacters.length) {
+      rows.push(["角色", data.storyboardCharacters.filter((item) => typeof item === "string").join("、")]);
+    }
   }
   // set_canvas 一次设了多张时把整组列出来：ToolResult.assetId 只装得下主图，
   // 卡片上不写，用户就只能看见「切到 #a3f1」，看不到另外两张也被设进去了

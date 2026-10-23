@@ -1190,9 +1190,11 @@ async function createStoryboard(
   const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots);
   const incomplete = saved.filter((shot) => storyboardShotMissing(shot));
   const videoCount = saved.filter((shot) => shot.kind === "video").length;
+  const characterNames = [...new Set(shots.map((shot) => shot.character).filter(Boolean))];
   const summary = [
     `已拆成 ${saved.length} 个镜头`,
     videoCount ? `（其中 ${videoCount} 个视频镜头）` : "",
+    characterNames.length ? `，角色：${characterNames.join("、")}` : "",
     "，还没有提交生成。",
     incomplete.length ? `有 ${incomplete.length} 个镜头的画面描述太短（第 ${incomplete.map((shot) => shot.index).join("、")} 镜），请先补全。` : "",
     previous.length ? "旧的镜头表已替换，之前生成的结果仍在生成历史里。" : "",
@@ -1202,6 +1204,7 @@ async function createStoryboard(
     data: {
       storyboardCount: saved.length,
       storyboardVideoCount: videoCount,
+      storyboardCharacters: characterNames,
       storyboardIncomplete: incomplete.map((shot) => shot.index),
     },
   });
