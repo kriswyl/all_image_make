@@ -1011,6 +1011,7 @@ export function ChatView({
                   + view.messages.filter((message) => message.toolName === "create_storyboard" && message.status === "ok").length
                 }
                 canvasIds={canvasImages.map((asset) => asset.id)}
+                images={sessionImages}
                 onClose={() => setStoryboardOpen(false)}
                 onToast={toast}
                 onAddToCanvas={(assetId) => {

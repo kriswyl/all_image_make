@@ -881,6 +881,12 @@ export function extractAudioCandidates(payload: unknown): AudioCandidate[] {
         : typeof (inline as Record<string, unknown>).mime_type === "string"
           ? String((inline as Record<string, unknown>).mime_type)
           : "audio/wav";
+      /*
+       * Gemini 的图片也走 inlineData。以前这里不看 mimeType，只要是 inlineData
+       * 就当成音频交给 saveAudios：图片能被存下来，但文件名叫 `xxx.m4a`、
+       * 没有缩略图，下载下来还打不开。音频候选必须真的以 audio/ 开头。
+       */
+      if (!/^audio\//i.test(mimeType) && !/^data:audio\//i.test(data)) continue;
       // 3.1 preview 即使非流式也返回裸 PCM（audio/l16; rate=...; channels=...）
       if (/audio\/(?:l16|pcm)/i.test(mimeType) && !data.startsWith("data:")) {
         const rate = Number(/rate=(\d+)/i.exec(mimeType)?.[1] ?? 24_000);

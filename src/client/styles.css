@@ -2448,3 +2448,45 @@ html.tauri-window.is-maximized .app-shell {
   .storyboard-thumb { width: 96px; flex: 0 0 auto; }
   .storyboard-head-actions .link-btn { display: none; }
 }
+
+/* 分镜角色参考：头部一个缩略图 + 下拉，不打断「拆镜 → 确认 → 生成」这条主线 */
+.storyboard-reference {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.storyboard-reference > img {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.storyboard-reference > svg { flex: 0 0 auto; }
+.storyboard-reference select {
+  width: auto;
+  max-width: 170px;
+  height: 26px;
+  min-height: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  background: var(--surface-soft);
+  border-color: transparent;
+}
+.storyboard-reference select:hover:not(:focus) { background: #efefef; }
+.storyboard-head-actions { margin-left: 0; }
+.storyboard-reference-note {
+  margin: 0 0 8px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.storyboard-reference-note.is-warning { color: var(--warning); }
+@media (max-width: 900px) {
+  .storyboard-reference select { max-width: 110px; }
+}

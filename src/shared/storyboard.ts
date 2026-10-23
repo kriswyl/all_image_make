@@ -47,12 +47,46 @@ export interface StoryboardShot {
   updatedAt: string;
 }
 
+export type StoryboardReferenceMode = "auto" | "manual" | "off";
+
+/** 角色参考的三种来源；auto 指「第一个已完成的图片镜头」 */
+export interface StoryboardReference {
+  mode: StoryboardReferenceMode;
+  asset: Asset | null;
+  /** 这个参考来自第几镜；手动指定或未设置时为 null */
+  shotIndex: number | null;
+}
+
 export interface StoryboardView {
   shots: StoryboardShot[];
   /** 当前渠道里有没有可用的生图 / 生视频模型，前端据此禁用按钮 */
   canGenerateImage: boolean;
   canGenerateVideo: boolean;
   maxBatch: number;
+  reference: StoryboardReference;
+}
+
+/**
+ * 带参考图时加在画面描述前面的约束。
+ *
+ * 参考图本身只能告诉模型「长什么样」，不会告诉它「哪些地方必须保持不变」——
+ * 不写这句，模型经常只借一点配色，脸和服装还是各画各的。
+ */
+export const STORYBOARD_CHARACTER_PREFIX =
+  "以参考图中的同一位人物为准，严格保持脸型、五官、发型、肤色、体型、服装和整体画风完全一致，只改变场景、姿态与构图：\n";
+
+/**
+ * 这一镜大概会出现人物吗？
+ *
+ * 角色参考只该用在有人物的镜头上：把一张人脸塞进「空无一人的走廊」或
+ * 「片尾黑底字幕」，模型会硬生生多画一个人出来。关键词只是粗筛——
+ * 它决定「要不要带参考图」，不决定用户能不能手动指定。
+ */
+export const STORYBOARD_PERSON_HINT =
+  /人物|男人|女人|男孩|女孩|少年|少女|男子|女子|男性|女性|老人|孩子|主角|角色|助手|(?<!其)他|她|脸|面部|五官|近景|特写|半身|全身|肖像|背影|侧影|剪影/;
+
+export function shotNeedsCharacterReference(shot: Pick<StoryboardShot, "prompt" | "sourceText">): boolean {
+  return STORYBOARD_PERSON_HINT.test(`${shot.prompt}\n${shot.sourceText}`);
 }
 
 export function storyboardKindLabel(kind: StoryboardShotKind): string {

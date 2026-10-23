@@ -5,13 +5,14 @@
  * 也没法在生成前统一改描述。这里把「拆镜」和「生成」分成两步——
  * 大脑只负责拆，真正花钱的动作由用户在这张表上确认后触发。
  */
-import { Check, ChevronDown, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle, RefreshCw, Sparkles, X } from "lucide-react";
+import { Check, ChevronDown, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle, RefreshCw, Sparkles, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
-  isStoryboardShotActive, storyboardKindLabel, storyboardShotMissing,
+  isStoryboardShotActive, shotNeedsCharacterReference, storyboardKindLabel, storyboardShotMissing,
   STORYBOARD_ASPECT_RATIOS, type StoryboardShot, type StoryboardView,
 } from "../../shared/storyboard";
+import type { CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { AssetLightbox } from "./AssetLightbox";
 
@@ -21,6 +22,7 @@ export function StoryboardPanel({
   conversationId,
   refreshKey,
   canvasIds,
+  images,
   onClose,
   onToast,
   onAddToCanvas,
@@ -29,6 +31,8 @@ export function StoryboardPanel({
   /** 消息数变化时重新拉一次：大脑刚拆完镜，面板要立刻出现 */
   refreshKey: number;
   canvasIds: string[];
+  /** 本会话的全部图片产物，角色参考从这里选 */
+  images: CanvasAsset[];
   onClose: () => void;
   onToast: (kind: ToastKind, text: string) => void;
   onAddToCanvas: (assetId: string) => void;
@@ -42,6 +46,7 @@ export function StoryboardPanel({
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<Asset | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [referenceBusy, setReferenceBusy] = useState(false);
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   // 切换会话时旧请求可能后到；只让最后一次发出的请求回写
   const loadSeq = useRef(0);
@@ -61,10 +66,10 @@ export function StoryboardPanel({
         for (const shot of next.shots) merged[shot.id] = current[shot.id] ?? shot.prompt;
         return merged;
       });
-      // 已经出结果 / 已经在跑的镜头不该还留在勾选里——否则下一次「生成选中」会重复提交
+      // 已经在跑的镜头不该还留在勾选里；已完成的可以留——用户可能是勾起来批量重跑
       setSelected((current) => new Set([...current].filter((id) => {
         const shot = next.shots.find((item) => item.id === id);
-        return Boolean(shot) && shot!.status !== "succeeded" && !isStoryboardShotActive(shot!.status);
+        return Boolean(shot) && !isStoryboardShotActive(shot!.status);
       })));
     } catch (error) {
       if (seq === loadSeq.current && !quiet) onToast("error", error instanceof Error ? error.message : "分镜表加载失败");
@@ -105,8 +110,39 @@ export function StoryboardPanel({
     () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status !== "succeeded" && !isStoryboardShotActive(shot.status)),
     [shots],
   );
+  const rerunnable = useMemo(
+    () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status === "succeeded"),
+    [shots],
+  );
   const maxBatch = data?.maxBatch ?? 8;
   const canGenerateAny = data?.canGenerateImage || data?.canGenerateVideo;
+  const reference = data?.reference;
+  const referenceValue = reference?.mode === "manual" && reference.asset
+    ? `asset:${reference.asset.id}`
+    : reference?.mode ?? "auto";
+
+  function imageLabel(entry: CanvasAsset): string {
+    const name = entry.asset.fileName.replace(/\.[^.]+$/, "");
+    if (entry.source === "storyboard") return `第 ${entry.round} 镜 · ${name.slice(0, 12)}`;
+    if (entry.source === "upload") return `上传 · ${name.slice(0, 12)}`;
+    return `第 ${entry.round} 轮 · ${name.slice(0, 12)}`;
+  }
+
+  async function changeReference(value: string) {
+    if (referenceBusy) return;
+    setReferenceBusy(true);
+    try {
+      const next = value.startsWith("asset:")
+        ? await api.updateStoryboardReference(conversationId, { referenceMode: "manual", referenceAssetId: value.slice(6) })
+        : await api.updateStoryboardReference(conversationId, { referenceMode: value as "auto" | "off" });
+      setData(next);
+      onToast("ok", next.reference.asset ? "角色参考已更新" : "已关闭角色参考");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "设置角色参考失败");
+    } finally {
+      setReferenceBusy(false);
+    }
+  }
 
   function toggle(id: string) {
     setSelected((current) => {
@@ -125,6 +161,10 @@ export function StoryboardPanel({
 
   function selectReady() {
     setSelected(new Set(selectable.slice(0, maxBatch).map((shot) => shot.id)));
+  }
+
+  function selectRerun() {
+    setSelected(new Set(rerunnable.slice(0, maxBatch).map((shot) => shot.id)));
   }
 
   function changePrompt(shot: StoryboardShot, value: string) {
@@ -186,6 +226,8 @@ export function StoryboardPanel({
       setConfirming(null);
       if (result.failures.length) {
         onToast("error", result.failures.map((item) => `第 ${item.index} 镜：${item.error}`).join("；"));
+      } else if (result.note) {
+        onToast("error", result.note);
       } else {
         onToast("ok", `已提交 ${result.submitted} 个镜头，完成后会显示在列表里`);
       }
@@ -213,6 +255,11 @@ export function StoryboardPanel({
     : [];
   const confirmImages = confirmShots.filter((shot) => shot.kind === "image").length;
   const confirmVideos = confirmShots.length - confirmImages;
+  const firstImageShot = confirmShots.filter((shot) => shot.kind === "image").sort((left, right) => left.index - right.index)[0];
+  const willAutoBase = reference?.mode === "auto" && !reference.asset && confirmImages >= 2;
+  const rerunCount = confirmShots.filter((shot) => shot.status === "succeeded").length;
+  const referenceShot = reference?.shotIndex ? shots.find((shot) => shot.index === reference.shotIndex) : undefined;
+  const referenceLooksLikeScene = Boolean(referenceShot && !shotNeedsCharacterReference(referenceShot));
 
   return (
     <div className="storyboard-panel">
@@ -223,10 +270,40 @@ export function StoryboardPanel({
           <span>{shots.length} 镜</span>
           {loading ? <LoaderCircle size={13} className="spin" /> : null}
         </div>
+
+        <label
+          className="storyboard-reference"
+          title="多镜之间保持同一个人物。自动 = 用镜号最小、已经有结果的图片镜头；也可以指定任意一张本会话的图。"
+        >
+          {reference?.asset
+            ? <img src={api.assetUrl(reference.asset.thumbUrl ?? reference.asset.url)} alt="" />
+            : <UserRound size={13} />}
+          <select
+            value={referenceValue}
+            disabled={referenceBusy || !shots.length}
+            onChange={(event) => void changeReference(event.target.value)}
+          >
+            <option value="auto">角色参考：自动</option>
+            <option value="off">角色参考：不使用</option>
+            {images.map((entry) => (
+              <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
+            ))}
+            {reference?.mode === "manual" && reference.asset && !images.some((entry) => entry.asset.id === reference.asset!.id) ? (
+              <option value={`asset:${reference.asset.id}`}>当前指定的参考图</option>
+            ) : null}
+          </select>
+          {referenceBusy ? <LoaderCircle size={12} className="spin" /> : null}
+        </label>
+
         <div className="storyboard-head-actions">
           <button type="button" className="link-btn" onClick={selectReady} disabled={!selectable.length}>
             选中可生成
           </button>
+          {rerunnable.length ? (
+            <button type="button" className="link-btn" onClick={selectRerun} title="勾选已完成的前 8 镜，一起重跑">
+              选中已完成
+            </button>
+          ) : null}
           <button
             type="button"
             className="primary-button compact"
@@ -261,8 +338,9 @@ export function StoryboardPanel({
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={Boolean(missing) || activeShot || succeeded}
+                  disabled={Boolean(missing) || activeShot}
                   onChange={() => toggle(shot.id)}
+                  title={succeeded ? "已生成，勾选可以一起重跑" : undefined}
                   aria-label={`选择第 ${shot.index} 镜`}
                 />
                 <span className="storyboard-index">{shot.index}</span>
@@ -377,6 +455,27 @@ export function StoryboardPanel({
                   </div>
                 ))}
               </div>
+              <p className={`storyboard-reference-note ${reference?.mode === "off" ? "is-warning" : ""}`}>
+                {reference?.mode === "off"
+                  ? "已关闭角色参考：多个镜头里的人物可能对不上。"
+                  : reference?.asset
+                    ? `本次会以${reference.shotIndex ? `第 ${reference.shotIndex} 镜` : "指定的图片"}作为角色 / 画风参考。`
+                    : willAutoBase
+                      ? `还没有角色基准：会先生成第 ${firstImageShot?.index ?? 1} 镜，等它完成后自动提交其余镜头（需要多等一次生成，最长约 3 分钟）。`
+                      : confirmImages > 1
+                        ? "还没有可用的角色基准，本批图片会各自生成；先从这一批里验收一张，下一次生成就会自动以它为参考。"
+                        : "本批只有 1 个图片镜头，暂不需要角色参考；它完成后会自动成为后续镜头的参考。"}
+              </p>
+              {referenceLooksLikeScene ? (
+                <p className="storyboard-reference-note is-warning">
+                  当前角色参考是第 {reference!.shotIndex} 镜，看起来是空镜 / 环境，不是人物镜头；用它可能起不到保持人物一致的作用。建议改选一张有人物的图。
+                </p>
+              ) : null}
+              {rerunCount ? (
+                <p className="storyboard-reference-note">
+                  其中 {rerunCount} 镜已经有结果，会重新生成并替换分镜表里的最新结果；旧结果仍保留在生成历史里。
+                </p>
+              ) : null}
               <p className="storyboard-billing">
                 每个镜头都会按渠道单独计费，提交后不能撤回。失败或不满意的镜头可以单独重跑。
               </p>
@@ -385,7 +484,7 @@ export function StoryboardPanel({
               <button type="button" className="secondary-button" onClick={() => setConfirming(null)} disabled={submitting}>取消</button>
               <button type="button" className="primary-button" onClick={() => void submitGenerate(confirming)} disabled={submitting}>
                 {submitting ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
-                确认提交 {confirmShots.length} 镜
+                {submitting ? (willAutoBase ? "先生成角色基准…" : "提交中…") : `确认提交 ${confirmShots.length} 镜`}
               </button>
             </div>
           </div>

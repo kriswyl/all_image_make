@@ -185,6 +185,9 @@ export class AppDatabase {
         video_confirm_policy TEXT NOT NULL DEFAULT 'auto_only',
         vision_enabled       INTEGER NOT NULL DEFAULT 1,
         verbatim_prompt      INTEGER NOT NULL DEFAULT 0,
+        -- 分镜的角色参考：auto = 用第一个已完成的图片镜头；manual = 指定产物；off = 不用
+        storyboard_reference_asset_id TEXT,
+        storyboard_reference_mode     TEXT NOT NULL DEFAULT 'auto',
         auto_continue_count  INTEGER NOT NULL DEFAULT 0,
         created_at           TEXT NOT NULL,
         updated_at           TEXT NOT NULL
@@ -316,6 +319,13 @@ export class AppDatabase {
     // 「原话直发」：有时候用户就是要自己那句话原样发出去，不许大脑润色（需求.md 问题 1）
     if (!conversationColumns.some((col) => col.name === "verbatim_prompt")) {
       this.db.exec("ALTER TABLE conversations ADD COLUMN verbatim_prompt INTEGER NOT NULL DEFAULT 0");
+    }
+    // 分镜角色参考：老会话默认走 auto（第一个已完成的图片镜头）
+    if (!conversationColumns.some((col) => col.name === "storyboard_reference_asset_id")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_asset_id TEXT");
+    }
+    if (!conversationColumns.some((col) => col.name === "storyboard_reference_mode")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_mode TEXT NOT NULL DEFAULT 'auto'");
     }
     /**
      * 回填**键在 `IS NULL` 上，而不是键在「刚加完列」上**，两个原因：
@@ -864,6 +874,21 @@ export class AppDatabase {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM conversation_shots WHERE conversation_id = ?")
       .get(conversationId) as DbRow | undefined;
     return Number(row?.count ?? 0);
+  }
+
+  /** 分镜的角色参考设置。auto = 用第一个已完成的图片镜头，manual = 用指定产物，off = 不用 */
+  getStoryboardReference(conversationId: string): { assetId: string | null; mode: "auto" | "manual" | "off" } {
+    const row = this.db.prepare(
+      "SELECT storyboard_reference_asset_id AS asset_id, storyboard_reference_mode AS mode FROM conversations WHERE id = ?",
+    ).get(conversationId) as DbRow | undefined;
+    const mode = row?.mode === "manual" || row?.mode === "off" ? row.mode : "auto";
+    return { assetId: row?.asset_id == null ? null : String(row.asset_id), mode };
+  }
+
+  setStoryboardReference(conversationId: string, input: { assetId: string | null; mode: "auto" | "manual" | "off" }) {
+    this.db.prepare(
+      "UPDATE conversations SET storyboard_reference_asset_id = ?, storyboard_reference_mode = ?, updated_at = ? WHERE id = ?",
+    ).run(input.mode === "manual" ? input.assetId : null, input.mode, now(), conversationId);
   }
 
   deleteStoryboard(conversationId: string): number {

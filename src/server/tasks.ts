@@ -569,6 +569,8 @@ export class TaskRunner {
         ?? (audio.url.toLowerCase().includes(".wav") ? "audio/wav"
           : audio.url.toLowerCase().includes(".mp3") ? "audio/mpeg"
             : "audio/mp4");
+      // 第二道闸：图片 inlineData 被误判成音频时，宁可跳过也不写一条 .m4a 的图片
+      if (!mimeType.startsWith("audio/")) continue;
       const extension = audioExtensionForMime(mimeType);
       const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
       const id = crypto.randomUUID();

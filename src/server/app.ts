@@ -159,6 +159,11 @@ const conversationDocumentSchema = z.object({
   })).min(1).max(3),
 });
 
+const storyboardSettingsSchema = z.object({
+  referenceMode: z.enum(["auto", "manual", "off"]).optional(),
+  referenceAssetId: z.string().uuid().nullable().optional(),
+});
+
 const storyboardShotPatchSchema = z.object({
   prompt: z.string().trim().max(20000).optional(),
   sourceText: z.string().trim().max(20000).optional(),
@@ -799,6 +804,37 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(buildStoryboardView(db, id)));
   });
 
+  /**
+   * 角色参考设置。
+   *
+   * auto：用镜号最小的已完成图片镜头；manual：用户指定某张产物；off：不用参考。
+   * 指定 manual 时必须真的给一张**本会话里的图片**，否则等生成时才发现找不到，
+   * 用户会以为「选了却没生效」。
+   */
+  app.patch("/api/conversations/:id/storyboard", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const current = db.getStoryboardReference(id);
+    const input = storyboardSettingsSchema.parse(req.body ?? {});
+    const mode = input.referenceMode ?? current.mode;
+    let assetId: string | null = null;
+
+    if (mode === "manual") {
+      const wanted = input.referenceAssetId ?? current.assetId;
+      if (!wanted) return res.status(400).json(fail("STORYBOARD_REFERENCE_REQUIRED", "请选择一张图片作为角色参考"));
+      const asset = db.getAsset(wanted);
+      if (!asset || !asset.mimeType.startsWith("image/")) {
+        return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "角色参考必须是图片"));
+      }
+      const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === wanted);
+      if (!belongs) return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话"));
+      assetId = wanted;
+    }
+
+    db.setStoryboardReference(id, { assetId, mode });
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
   /** 改一镜的画面描述 / 画幅 / 类型。只影响下一次生成，不回滚已经提交的任务 */
   app.patch("/api/conversations/:id/storyboard/shots/:shotId", (req, res) => {
     const id = routeParam(req.params.id);
@@ -911,7 +947,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const baseDir = path.resolve(asset.baseDir);
     const absolutePath = path.resolve(baseDir, asset.relativePath);
     if (!absolutePath.startsWith(baseDir + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
-    if (req.query.download === "1") return res.download(absolutePath, asset.fileName);
+    if (req.query.download === "1") return res.download(absolutePath, assetDownloadName(asset));
     res.type(asset.mimeType).sendFile(absolutePath);
   });
 
@@ -983,6 +1019,33 @@ function publicChannel(channel: DbChannel, sessionKeys: KeyStore): Channel {
  * 设置表是纯 key/value 的字符串，谁都能写脏，所以读的时候必须再校验一次——
  * 把一个非法值补进请求体只会把「参数缺失」换成「参数非法」，还是照样失败。
  */
+/**
+ * 下载时用的文件名。
+ *
+ * 磁盘上的 `file_name` 可能是旧版本写错的扩展名（Gemini 图片曾被当成音频存成 .m4a），
+ * 扩展名和 mimeType 对不上时以 mimeType 为准，否则用户下载到一张打不开的图。
+ */
+function assetDownloadName(asset: { fileName: string; mimeType: string }): string {
+  const current = asset.fileName.split(".").pop()?.toLowerCase() ?? "";
+  const compatible = asset.mimeType.startsWith("image/")
+    ? ["png", "jpg", "jpeg", "webp", "gif"]
+    : asset.mimeType.startsWith("video/")
+      ? ["mp4", "webm", "mov", "m4v", "mkv"]
+      : asset.mimeType.startsWith("audio/")
+        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac"]
+        : [];
+  const extension = compatible.includes(current)
+    ? current
+    : asset.mimeType === "image/jpeg" ? "jpg"
+      : asset.mimeType === "image/webp" ? "webp"
+        : asset.mimeType.includes("mpeg") ? "mp3"
+          : asset.mimeType.includes("wav") ? "wav"
+            : asset.mimeType.startsWith("video/") ? "mp4"
+              : asset.mimeType.startsWith("audio/") ? "m4a" : "png";
+  const stem = asset.fileName.replace(/\.[^.]+$/, "") || "asset";
+  return `${stem}.${extension}`;
+}
+
 function readGeminiImageSize(db: AppDatabase): ImageSizeValue {
   return normalizeImageSize(db.getSetting("geminiImageSize")) ?? DEFAULT_IMAGE_SIZE;
 }

@@ -23,7 +23,19 @@ export function isTauriRuntime() {
 
 function assetExtension(asset: Asset) {
   const fileExtension = asset.fileName.split(".").pop()?.toLowerCase();
-  if (fileExtension && /^[a-z0-9]+$/.test(fileExtension)) return fileExtension;
+  /*
+   * 文件名只有和 mimeType 对得上才能信。
+   * 旧版本把 Gemini 的图片 inlineData 当音频存过，磁盘上真的会出现
+   * `xxx.m4a` + `image/png` 的组合；照着文件名下载会得到一个打不开的图片。
+   */
+  const compatible = asset.mimeType.startsWith("image/")
+    ? ["png", "jpg", "jpeg", "webp", "gif"]
+    : asset.mimeType.startsWith("video/")
+      ? ["mp4", "webm", "mov", "m4v", "mkv"]
+      : asset.mimeType.startsWith("audio/")
+        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac"]
+        : [];
+  if (fileExtension && compatible.includes(fileExtension)) return fileExtension;
   if (asset.mimeType === "image/jpeg") return "jpg";
   if (asset.mimeType === "image/webp") return "webp";
   if (asset.mimeType.startsWith("video/")) {
@@ -199,6 +211,11 @@ export const api = {
       body: JSON.stringify({ documents }),
     }),
   storyboard: (id: string) => request<StoryboardView>(`/api/conversations/${id}/storyboard`),
+  updateStoryboardReference: (id: string, patch: { referenceMode?: "auto" | "manual" | "off"; referenceAssetId?: string | null }) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
   updateStoryboardShot: (
     id: string,
     shotId: string,
@@ -211,6 +228,8 @@ export const api = {
     submitted: number;
     failures: Array<{ shotId: string; index: number; error: string }>;
     shots: StoryboardShot[];
+    referenceAssetId: string | null;
+    note?: string;
   }>(`/api/conversations/${id}/storyboard/generate`, {
     method: "POST",
     body: JSON.stringify({ shotIds }),
@@ -277,9 +296,12 @@ export const api = {
         import("@tauri-apps/plugin-fs"),
       ]);
       const extension = assetExtension(asset);
+      // 用修正后的扩展名拼默认文件名；旧记录里的 .m4a 图片也能存成 .png
+      const stem = asset.fileName.replace(/\.[^.]+$/, "") || "asset";
+      const defaultPath = `${stem}.${extension}`;
       const destination = await save({
         title: `保存${fileType}`,
-        defaultPath: asset.fileName,
+        defaultPath,
         filters: [{ name: fileType, extensions: [extension] }],
       });
       if (!destination) return false;
@@ -295,7 +317,7 @@ export const api = {
     const objectUrl = URL.createObjectURL(await response.blob());
     const anchor = document.createElement("a");
     anchor.href = objectUrl;
-    anchor.download = asset.fileName;
+    anchor.download = `${asset.fileName.replace(/\.[^.]+$/, "") || "asset"}.${assetExtension(asset)}`;
     anchor.style.display = "none";
     document.body.append(anchor);
     anchor.click();

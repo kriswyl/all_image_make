@@ -134,6 +134,17 @@ describe("TTS 响应解析", () => {
     expect(candidates).toEqual([{ url: "data:audio/wav;base64,UklGRg==", mimeType: "audio/wav" }]);
   });
 
+  it("Gemini 的图片 inlineData 不能被当成音频（否则会存成 .m4a、没有缩略图）", () => {
+    const candidates = extractAudioCandidates({
+      candidates: [{
+        content: {
+          parts: [{ inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }],
+        },
+      }],
+    });
+    expect(candidates).toEqual([]);
+  });
+
   it("兼容 inline_data 写法，并忽略不是音频的 part", () => {
     const candidates = extractAudioCandidates({
       candidates: [{

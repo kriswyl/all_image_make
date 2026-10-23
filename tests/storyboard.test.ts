@@ -242,6 +242,133 @@ describe("脚本文档与分镜表", () => {
     expect(tooMany.body.error.code).toBe("STORYBOARD_BATCH_TOO_LARGE");
   });
 
+  it("多镜没有角色参考时：先生成基准镜头，其余镜头带参考图重发", async () => {
+    const hits: Array<{ url: string; body: Buffer }> = [];
+    const mock = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        hits.push({ url: req.url ?? "", body: Buffer.concat(chunks) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const { app, context, conversationId } = await bootConversation("storyboard-consistency-", base);
+    await context.db.saveChannel({
+      name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    });
+    const [first, second] = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "她站在雨里", prompt: "雨夜街道，女孩撑着黑伞回头，中景", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "她走进巷子", prompt: "同一位女孩走进狭窄巷子，背影，霓虹灯", kind: "image", aspectRatio: "" },
+    ]);
+
+    const response = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [second!.id, first!.id] })
+      .expect(202);
+    expect(response.body.data.submitted).toBe(2);
+    expect(response.body.data.referenceAssetId).toBeTruthy();
+    // 接口只等基准镜头；第二镜是提交后异步跑的，先等它落盘再看请求
+    await waitShotDone(app, conversationId, first!.id);
+    await waitShotDone(app, conversationId, second!.id);
+
+    // 基准镜头先发：普通文生图，不带参考图
+    const firstHit = hits.find((hit) => hit.url.includes("/images/generations"));
+    expect(firstHit).toBeTruthy();
+    expect(firstHit!.body.toString("utf8")).toContain("雨夜街道");
+    expect(firstHit!.body.toString("utf8")).not.toContain("以参考图中的同一位人物为准");
+
+    // 其余镜头带参考图：openai-images 会切到 /images/edits，提示词前面加上一致性约束
+    const secondHit = hits.find((hit) => hit.url.includes("/images/edits"));
+    expect(secondHit).toBeTruthy();
+    const secondBody = secondHit!.body;
+    expect(secondBody.includes(Buffer.from("以参考图中的同一位人物为准", "utf8"))).toBe(true);
+    expect(secondBody.includes(Buffer.from("同一位女孩走进狭窄巷子", "utf8"))).toBe(true);
+    // 参考图真的作为文件发出去了（PNG 字节头）
+    expect(secondBody.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true);
+
+    const view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      shots: Array<{ id: string; status: string; asset: { id: string } | null }>;
+      reference: { mode: string; asset: { id: string } | null; shotIndex: number | null };
+    };
+    expect(view.reference.mode).toBe("auto");
+    expect(view.reference.shotIndex).toBe(1);
+    expect(view.shots.every((shot) => shot.status === "succeeded")).toBe(true);
+
+    // 可以手动指定另一张，也可以关掉
+    const manual = (await request(app).patch(`/api/conversations/${conversationId}/storyboard`)
+      .send({ referenceMode: "manual", referenceAssetId: view.shots[1]!.asset!.id })
+      .expect(200)).body.data as { reference: { mode: string; asset: { id: string } } };
+    expect(manual.reference.mode).toBe("manual");
+    expect(manual.reference.asset.id).toBe(view.shots[1]!.asset!.id);
+
+    const off = (await request(app).patch(`/api/conversations/${conversationId}/storyboard`)
+      .send({ referenceMode: "off" })
+      .expect(200)).body.data as { reference: { mode: string; asset: unknown } };
+    expect(off.reference.mode).toBe("off");
+    expect(off.reference.asset).toBeNull();
+  });
+
+  it("空镜不当角色基准，也不带角色参考；人物镜头才带", async () => {
+    const hits: Array<{ url: string; body: Buffer }> = [];
+    const mock = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        hits.push({ url: req.url ?? "", body: Buffer.concat(chunks) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const { app, context, conversationId } = await bootConversation("storyboard-person-", base);
+    await context.db.saveChannel({
+      name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    });
+    const [landscape, person, personAgain] = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "走廊空无一人。", prompt: "空无一人的冷白走廊，长透视，环境光", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "林昭站在尽头。", prompt: "中年男人林昭站在走廊尽头，中景，冷白光", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "他转身离开。", prompt: "同一个男人转身走进黑暗，背影，冷色调", kind: "image", aspectRatio: "16:9" },
+    ]);
+
+    const response = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [landscape!.id, person!.id, personAgain!.id] })
+      .expect(202);
+    expect(response.body.data.submitted).toBe(3);
+    await waitShotDone(app, conversationId, landscape!.id);
+    await waitShotDone(app, conversationId, person!.id);
+    await waitShotDone(app, conversationId, personAgain!.id);
+
+    // 基准选的是「林昭」那一镜，不是更靠前的空镜
+    const view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      reference: { mode: string; shotIndex: number | null; asset: { id: string } | null };
+      shots: Array<{ id: string; asset: { id: string } | null }>;
+    };
+    expect(view.reference.mode).toBe("auto");
+    expect(view.reference.shotIndex).toBe(2);
+    expect(view.reference.asset?.id).toBe(view.shots.find((shot) => shot.id === person!.id)!.asset!.id);
+
+    // 带参考图（edits）的只有第三镜这个人物镜头，空镜仍走普通文生图
+    const editBodies = hits.filter((hit) => hit.url.includes("/images/edits")).map((hit) => hit.body.toString("utf8"));
+    expect(editBodies).toHaveLength(1);
+    expect(editBodies[0]).toContain("同一个男人转身");
+    expect(editBodies[0]).not.toContain("空无一人的冷白走廊");
+  });
+
   it("缺画面描述的镜头不提交：错误里带镜号", async () => {
     const { app, context, conversationId } = await bootConversation("storyboard-missing-");
     const [shot] = context.db.replaceStoryboard(conversationId, [
