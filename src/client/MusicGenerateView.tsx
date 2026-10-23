@@ -505,7 +505,7 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
                     {asset.duration ? <span>{formatDuration(asset.duration)}</span> : null}
                   </div>
                   {asset.tags ? <div className="music-tags" title={asset.tags}>{asset.tags}</div> : null}
-                  <audio controls preload="metadata" src={api.assetUrl(asset.url)} />
+                  <audio controls controlsList="nodownload" preload="metadata" src={api.assetUrl(asset.url)} onContextMenu={(event) => event.preventDefault()} />
                   {asset.lyrics ? (
                     <details className="music-lyrics">
                       <summary>歌词</summary>

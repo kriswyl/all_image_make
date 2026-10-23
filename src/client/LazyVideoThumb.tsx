@@ -32,7 +32,7 @@ export function LazyVideoThumb({ src, alt = "" }: { src: string; alt?: string })
   return (
     <span ref={holder} className="lazy-video">
       {visible
-        ? <video src={src} muted playsInline preload="metadata" aria-label={alt || undefined} />
+        ? <video src={src} muted playsInline preload="metadata" aria-label={alt || undefined} onContextMenu={(event) => event.preventDefault()} />
         : <span className="lazy-video-placeholder" aria-hidden="true"><Film size={14} /></span>}
     </span>
   );

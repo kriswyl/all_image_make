@@ -69,6 +69,8 @@ const VIDEO_MAPS: Partial<Record<AdapterType, ParamMapEntry[]>> = {
 };
 
 function paramMap(adapterType: AdapterType): ParamMapEntry[] {
+  // MJ 的宽高比/负面词是提示词里的原生参数，没有独立字段，别报成“未发出”
+  if (adapterType === "midjourney") return [];
   if (adapterType === "gemini-content") return GEMINI_MAP;
   const video = VIDEO_MAPS[adapterType];
   if (video) return video;

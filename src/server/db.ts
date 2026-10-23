@@ -109,6 +109,7 @@ export class AppDatabase {
         status TEXT NOT NULL,
         progress REAL,
         remote_task_id TEXT,
+        remote_meta TEXT NOT NULL DEFAULT '',
         input_json TEXT NOT NULL,
         effective_json TEXT,
         attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -256,6 +257,10 @@ export class AppDatabase {
     const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
     if (!taskColumns.some((col) => col.name === "origin")) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'generate'");
+    }
+    // 上游任务的附加元数据（Midjourney 的按钮等）；空串表示没有
+    if (!taskColumns.some((col) => col.name === "remote_meta")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN remote_meta TEXT NOT NULL DEFAULT ''");
     }
     // 画布从一根指针改成一组图（有序列表）：加列 + 把老指针搬进来
     const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
@@ -487,13 +492,14 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
+  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
     const fields: string[] = [];
     const values: Array<string | number | bigint | null | Uint8Array> = [];
     const mapping: Record<string, string> = {
       status: "status",
       progress: "progress",
       remoteTaskId: "remote_task_id",
+      remoteMeta: "remote_meta",
       effectiveJson: "effective_json",
       attemptCount: "attempt_count",
       errorCode: "error_code",
@@ -994,6 +1000,7 @@ export class AppDatabase {
       status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
+      ...(task.remoteMeta ? { remoteMeta: parseJson<NonNullable<Task["remoteMeta"]>>(task.remoteMeta, {}) } : {}),
       assets: this.listAssets(task.id).map((asset) => this.assetView(asset)),
       createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,
     };
@@ -1032,6 +1039,7 @@ export class AppDatabase {
       model: String(row.model), prompt: String(row.prompt), status: String(row.status) as TaskStatus,
       progress: row.progress == null ? null : Number(row.progress),
       remoteTaskId: row.remote_task_id == null ? null : String(row.remote_task_id),
+      remoteMeta: row.remote_meta == null ? null : String(row.remote_meta),
       inputJson: String(row.input_json), effectiveJson: row.effective_json == null ? null : String(row.effective_json), attemptCount: Number(row.attempt_count),
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
@@ -1054,6 +1062,8 @@ export interface TaskRow {
   model: string; prompt: string; status: TaskStatus; progress: number | null;
   /** 上游异步任务 id：重启后用它接着轮询，不用从头发起 */
   remoteTaskId: string | null;
+  /** 上游附加元数据 JSON（Midjourney 按钮等） */
+  remoteMeta: string | null;
   inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
   errorMessage: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
   origin: TaskOrigin;

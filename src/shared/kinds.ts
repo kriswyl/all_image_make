@@ -16,8 +16,8 @@ export type TaskKind = "image" | "video" | "audio";
 export const VIDEO_ADAPTER_TYPES = ["wan-video", "grok-video", "seedance-video", "kling-video"] as const;
 export type VideoAdapterType = (typeof VIDEO_ADAPTER_TYPES)[number];
 
-/** 音频适配器集合。技术类型叫 audio，界面文案叫「音乐」 */
-export const AUDIO_ADAPTER_TYPES = ["suno-music"] as const;
+/** 音频适配器集合：音乐生成 + 配音/旁白 */
+export const AUDIO_ADAPTER_TYPES = ["suno-music", "gemini-tts"] as const;
 export type AudioAdapterType = (typeof AUDIO_ADAPTER_TYPES)[number];
 
 /**

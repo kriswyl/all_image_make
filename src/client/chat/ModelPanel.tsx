@@ -38,12 +38,12 @@ export function ModelPanel({
   const kinds: Array<{ kind: TaskKind; label: string }> = [
     { kind: "image", label: "生图" },
     { kind: "video", label: "生视频" },
-    { kind: "audio", label: "音乐" },
+    { kind: "audio", label: "音频" },
   ];
 
   return (
     <details className="chat-caps" ref={capsRef}>
-      <summary title="助手现在能调哪些模型"><ListTree size={13} />图片 · 视频 · 音乐模型</summary>
+      <summary title="助手现在能调哪些模型"><ListTree size={13} />图片 · 视频 · 音频模型</summary>
       <div className="chat-caps-body">
         <div className="chat-caps-defaults">
           <div className="chat-caps-defaults-grid">

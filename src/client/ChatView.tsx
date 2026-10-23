@@ -729,7 +729,7 @@ export function ChatView({
   }
 
   async function setDefaultAlias(kind: TaskKind, alias: string) {
-    const label = kind === "image" ? "生图" : kind === "video" ? "生视频" : "音乐";
+    const label = kind === "image" ? "生图" : kind === "video" ? "生视频" : "音频";
     try {
       const result = await api.updateSettings(
         kind === "image" ? { agentDefaultImageAlias: alias }
@@ -920,6 +920,7 @@ export function ChatView({
                     assets={mediaAssets}
                     onPreview={setPreview}
                     onDiagnostics={onDiagnostics}
+                    onToast={toast}
                   />
                 );
               })}
@@ -1027,7 +1028,7 @@ export function ChatView({
       </section>
 
       {preview ? (
-        <AssetLightbox assetId={preview} asset={previewAsset} onClose={() => setPreview(null)} />
+        <AssetLightbox assetId={preview} asset={previewAsset} onClose={() => setPreview(null)} onToast={toast} />
       ) : null}
     </div>
   );

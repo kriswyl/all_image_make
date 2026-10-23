@@ -8,6 +8,7 @@ import {
   RemoteApiError,
   applyAuth,
   buildGenerationRequest,
+  extractAudioCandidates,
   extractImageCandidates,
   requestForDiagnostic,
   sendPreparedRequest,
@@ -263,6 +264,18 @@ export class TaskRunner {
         return;
       }
 
+      // 同步音频：Gemini TTS 把 WAV 以 base64 内联在 generateContent 响应里
+      const audioCandidates = extractAudioCandidates(result.payload);
+      if (audioCandidates.length) {
+        await this.saveAudios(taskId, audioCandidates.map((audio, index) => ({
+          ...audio,
+          kind: "audio" as const,
+          title: audio.title ?? speechTitle(input.prompt, index),
+        })), channel);
+        this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
+        return;
+      }
+
       // Sync response: extract images immediately
       const images = extractImageCandidates(result.payload);
       if (images.length) {
@@ -456,6 +469,7 @@ export class TaskRunner {
 
         const status = spec.extractStatus(payload);
         if (status.progress !== null) this.updateTask(localTaskId, { progress: status.progress });
+        if (status.meta) this.updateTask(localTaskId, { remoteMeta: JSON.stringify(status.meta) });
 
         // 先判失败：只有明确的失败状态才算失败，unknown / pending / running 都继续轮询
         if (status.status && spec.failureStatuses.includes(status.status)) {
@@ -499,15 +513,17 @@ export class TaskRunner {
   /**
    * 按产物类型落盘。
    *
-   * 目前视频走 `saveVideos`；音频在下一个阶段接进来。把分派放在这里，
-   * 轮询器不用知道「视频怎么下载、音乐怎么下载」。
+   * 视频走 `saveVideos`，音乐/配音走 `saveAudios`。把分派放在这里，
+   * 轮询器不用知道「视频怎么下载、音频怎么下载」。
    */
   private async saveResults(taskId: string, results: AsyncResult[], channel: DbChannel) {
     const videos = results.filter((item) => item.kind === "video");
     const audios = results.filter((item) => item.kind === "audio");
+    const images = results.filter((item) => item.kind === "image");
     if (videos.length) await this.saveVideos(taskId, videos, channel);
     if (audios.length) await this.saveAudios(taskId, audios, channel);
-    if (!videos.length && !audios.length) {
+    if (images.length) await this.saveImages(taskId, images.map((item) => ({ url: item.url, mimeType: item.mimeType })), channel);
+    if (!videos.length && !audios.length && !images.length) {
       throw new AppError("RESPONSE_PARSE_FAILED", "暂不支持保存这种产物", 502);
     }
   }
@@ -573,9 +589,10 @@ export class TaskRunner {
         }
       }
 
+      const duration = audio.duration ?? (mimeType.includes("wav") ? wavDurationSeconds(bytes) : undefined);
       this.db.insertAsset({
         id, taskId, fileName, mimeType, byteSize: bytes.length,
-        relativePath: fileName, baseDir, sha256, duration: audio.duration, thumbPath,
+        relativePath: fileName, baseDir, sha256, duration, thumbPath,
         title: audio.title,
         lyrics: audio.lyrics,
         tags: audio.tags,
@@ -593,6 +610,16 @@ export class TaskRunner {
     accept = "*/*",
   ): Promise<{ bytes: Buffer; contentType: string }> {
     try {
+      // Gemini TTS 把音频内联成 data URI；不把它当网络地址去 fetch
+      if (url.startsWith("data:")) {
+        const match = url.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+        if (!match) throw new AppError("ASSET_DOWNLOAD_FAILED", `${label}的 data URI 格式不合法`, 502);
+        const contentType = match[1] ?? "";
+        const bytes = match[2]
+          ? Buffer.from(match[3] ?? "", "base64")
+          : Buffer.from(decodeURIComponent(match[3] ?? ""), "utf8");
+        return { bytes, contentType };
+      }
       const headers = this.assetDownloadHeaders(url, channel, accept);
       const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
       if (!response.ok) {
@@ -830,6 +857,37 @@ export function videoExtensionForMime(mimeType: string) {
   if (mimeType.includes("quicktime")) return "mov";
   if (mimeType.includes("x-matroska")) return "mkv";
   return "mp4";
+}
+
+/** TTS 没有歌名，用正文第一行的前几十个字当标题，历史里才分得清 */
+function speechTitle(prompt: string, index: number) {
+  const line = prompt.replace(/\s+/g, " ").trim();
+  if (!line) return `语音 ${index + 1}`;
+  return line.length > 40 ? `${line.slice(0, 40)}…` : line;
+}
+
+/**
+ * 从 PCM WAV 头里算时长。
+ * Gemini TTS 固定 24kHz / 16bit / mono，但它不返回值；历史列表需要时长。
+ */
+export function wavDurationSeconds(bytes: Buffer): number | undefined {
+  if (bytes.length < 44 || bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WAVE") return undefined;
+  let offset = 12;
+  let byteRate = 0;
+  while (offset + 8 <= bytes.length) {
+    const id = bytes.toString("ascii", offset, offset + 4);
+    const size = bytes.readUInt32LE(offset + 4);
+    const dataStart = offset + 8;
+    if (id === "fmt " && size >= 16 && dataStart + 16 <= bytes.length) {
+      byteRate = bytes.readUInt32LE(dataStart + 8);
+    }
+    if (id === "data" && byteRate > 0) {
+      const available = Math.min(size, bytes.length - dataStart);
+      return Math.round((available / byteRate) * 100) / 100;
+    }
+    offset = dataStart + size + (size % 2);
+  }
+  return undefined;
 }
 
 export function audioExtensionForMime(mimeType: string) {

@@ -820,6 +820,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
                 tabIndex={-1}
                 disablePictureInPicture
                 disableRemotePlayback
+                onContextMenu={(event) => event.preventDefault()}
               />
             ) : null}
             {/* disablePictureInPicture / disableRemotePlayback 去掉悬停时浮出的「画中画」「投屏」按钮 */}
@@ -828,10 +829,12 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
               className="stage-video-main"
               src={api.assetUrl(activeAsset.url)}
               controls
+              controlsList="nodownload"
               loop
               playsInline
               preload="metadata"
               title="双击放大"
+              onContextMenu={(event) => event.preventDefault()}
               onDoubleClick={() => setTheater(true)}
               onLoadedMetadata={(event) => {
                 const video = event.currentTarget;
@@ -859,7 +862,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
             <div className="stage-thumbs" role="tablist" aria-label="本次生成结果">
               {task.assets.map((asset, index) => (
                 <button key={asset.id} type="button" className={`stage-thumb ${asset.id === activeAsset.id ? "active" : ""}`} title={`结果 ${index + 1}`} onClick={() => setSelectedAssetId(asset.id)}>
-                  <video src={api.assetUrl(asset.url)} muted playsInline preload="metadata" />
+                  <video src={api.assetUrl(asset.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
                 </button>
               ))}
             </div>
@@ -886,7 +889,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
       {theater && activeAsset ? (
         <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="视频预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setTheater(false); }}>
           <div className="image-preview">
-            <video src={api.assetUrl(activeAsset.url)} controls autoPlay loop playsInline disablePictureInPicture disableRemotePlayback />
+            <video src={api.assetUrl(activeAsset.url)} controls controlsList="nodownload" autoPlay loop playsInline disablePictureInPicture disableRemotePlayback onContextMenu={(event) => event.preventDefault()} />
             <button type="button" className="image-preview-close" title="关闭预览" aria-label="关闭预览" onClick={() => setTheater(false)}><X size={21} /></button>
           </div>
         </div>

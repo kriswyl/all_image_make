@@ -19,6 +19,8 @@
 
 - **可灵视频渠道**（`kling-video`，模型 `kling-3.0` / `kling-3.0-turbo` / `kling-3.0-omni`）：文生、首帧、首尾帧；`kling-3.0` 另有运动控制，Omni 另有参考图（`refer_image`）。3–15 秒、720p/1080p/4k（运动控制到 1080p）；走原生 `/text-to-video/{model}`、`/image-to-video/{model}`、`/omni-video/{model}`、`/motion-control/{model}`，用 `/tasks?task_ids=` 轮询。需要 `kling专属` 分组的 Key。
 - **可灵实测校正**：文档写「尾帧暂未开放」，但实测 `kling-3.0` / Turbo 的首尾帧均能成功生成，最后一帧与输入尾帧一致；普通图生接口传 `refer_image` 仍返回 400，参考图只走 Omni。
+- **Midjourney 渠道**（`midjourney`）：`mj_imagine` 文生图、`mj_edits` 图生图；结果四宫格支持 U1-U4 / V1-V4 / 重绘按钮，点击后通过 `/mj/submit/action` 提交并继续轮询。支持 `--ar` / `--v` / `--no` 原生提示词参数。
+- **Gemini 语音渠道**（`gemini-tts`）：`gemini-3.8-flash-tts`、`gemini-3.8-flash-lite-tts`、`gemini-3.1-flash-tts-preview`；30 个预置音色，单人/双人对话，风格与语种可控。新增「语音生成」工作台与对话工具 `generate_speech`；输出 24kHz WAV，3.1 preview 的裸 PCM 自动补 WAV 头。
 - **Suno 音乐渠道**（`suno-music`，模型 `suno_damobi_music`）：灵感描述、自定义歌词、纯音乐、翻唱、混音、音效、歌单风格、取样（歌词生成暂不接）；一次固定生成 2 首，支持按模式选择模型版本。
 - **翻唱 / 混音选歌**：每条音乐产物保存 Suno `custom_id`（`remote_clip_id`），音乐工作台可以从历史歌曲里选 1 首翻唱、选 2 首混音；旧歌从诊断记录回填。
 - **音效参数**：BPM、调性、是否循环；音效固定纯音乐。

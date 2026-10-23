@@ -1,5 +1,6 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
+import { TTS_DEFAULT_VOICE } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
 
@@ -186,6 +187,24 @@ export function applyAuth(url: string, headers: Record<string, string>, channel:
   return url;
 }
 
+/** 把带「A：」「B：」标签的正文切成逐说话人的 part */
+function splitSpeakerParts(text: string): Array<{ speaker: "A" | "B"; text: string }> {
+  const parts: Array<{ speaker: "A" | "B"; text: string }> = [];
+  // 支持换行分段，也支持「A：你好。B：你好。」这种同一行写法
+  const pattern = /(^|\n|(?<=[。！？!?；;]))\s*([AB])\s*[：:]\s*/g;
+  let speaker: "A" | "B" | null = null;
+  let lastIndex = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const chunk = text.slice(lastIndex, match.index).trim();
+    if (speaker && chunk) parts.push({ speaker, text: chunk });
+    speaker = match[2] as "A" | "B";
+    lastIndex = pattern.lastIndex;
+  }
+  const tail = text.slice(lastIndex).trim();
+  if (speaker && tail) parts.push({ speaker, text: tail });
+  return parts;
+}
+
 /** 没显式给模式时，按素材反推一个最合理的模式 */
 function resolveKlingMode(input: GenerationInput): KlingVideoMode {
   return input.klingVideoMode
@@ -213,6 +232,21 @@ function klingEndpoint(model: string, mode: KlingVideoMode) {
   return `/text-to-video/${encoded}`;
 }
 
+/** MJ 的宽高比/负面词都写在提示词里，没有独立字段 */
+function midjourneyPrompt(input: GenerationInput) {
+  let prompt = input.prompt.trim();
+  if (!/--\s*ar\s+\S+/i.test(prompt) && input.aspectRatio && input.aspectRatio !== "auto") {
+    prompt += ` --ar ${input.aspectRatio}`;
+  }
+  if (input.midjourneyVersion?.trim() && !/--\s*v\s+\S+/i.test(prompt)) {
+    prompt += ` --v ${input.midjourneyVersion.trim()}`;
+  }
+  if (input.negativePrompt?.trim() && !/--\s*no\s+/i.test(prompt)) {
+    prompt += ` --no ${input.negativePrompt.trim()}`;
+  }
+  return prompt;
+}
+
 export function buildGenerationRequest(channel: DbChannel, input: GenerationInput, key: string): PreparedRequest {
   const references = referenceImages(input);
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
@@ -222,6 +256,11 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   }
   if (channel.adapterType === "kling-video") {
     endpoint = klingEndpoint(input.model, resolveKlingMode(input));
+  }
+  if (channel.adapterType === "midjourney") {
+    endpoint = input.midjourneyAction
+      ? "/mj/submit/action"
+      : references.length ? "/mj/submit/edits" : "/mj/submit/imagine";
   }
   endpoint = endpoint.replaceAll("{model}", encodeURIComponent(input.model));
   assertEndpoint(endpoint);
@@ -540,6 +579,78 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       generationConfig: geminiGenerationConfig(input, raw),
       ...rawBody,
     };
+  } else if (channel.adapterType === "gemini-tts") {
+    if (references.length) throw new Error("TTS 不支持参考图，请只提交文本");
+    const speakers = (input.ttsSpeakers ?? []).filter((item) => item.speaker.trim() && item.voice.trim());
+    if (input.ttsSpeakers?.length && speakers.length !== 2) {
+      throw new Error("双人对话必须正好提供 2 个说话人音色");
+    }
+    const style = input.ttsStyle?.trim();
+    /**
+     * 单人：一个 text part，风格放 annotations。
+     *
+     * 双人：3.8 实测要求每个 text part 都带 `speech_metadata.speaker`；
+     * 把整段「A：… B：…」塞进一个 part 会被 400 拒绝。所以先按 A/B 标签切段，
+     * 每段一个 part，annotations 里同时写 speaker 和 style。
+     */
+    const speakerParts = speakers.length === 2 ? splitSpeakerParts(input.prompt) : [];
+    if (speakers.length === 2 && (!speakerParts.some((item) => item.speaker === "A")
+      || !speakerParts.some((item) => item.speaker === "B"))) {
+      throw new Error("双人对话正文需要用「A：」「B：」标出两个说话人的台词");
+    }
+    const parts = speakers.length === 2
+      ? speakerParts.map((item) => ({
+        text: item.text,
+        annotations: [{ type: "speech_metadata", speaker: item.speaker, ...(style ? { style } : {}) }],
+      }))
+      : [compact({
+        text: input.prompt,
+        // style 必须放在 annotations 里；写进正文有被念出来的风险
+        annotations: style ? [{ type: "speech_metadata", style }] : undefined,
+      })];
+    const speechConfig = compact({
+      ...(input.ttsLanguage?.trim() ? { languageCode: input.ttsLanguage.trim() } : {}),
+      ...(speakers.length === 2
+        ? {
+          multiSpeakerVoiceConfig: {
+            speakerVoiceConfigs: speakers.map((item) => ({
+              speaker: item.speaker.trim(),
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: item.voice.trim() } },
+            })),
+          },
+        }
+        : {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: input.ttsVoice?.trim() || TTS_DEFAULT_VOICE },
+          },
+        }),
+    });
+    body = compact({
+      contents: [{ role: "user", parts }],
+      // 文档实测：只认 AUDIO；不要传 maxOutputTokens，会截断音频
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig },
+      ...raw,
+    });
+  } else if (channel.adapterType === "midjourney") {
+    if (!input.midjourneyAction && input.model === "mj_edits" && !references.length) {
+      throw new Error("mj_edits 需要 1 张参考图；纯文生图请用 mj_imagine");
+    }
+    if (input.midjourneyAction) {
+      body = compact({
+        taskId: input.midjourneyAction.taskId,
+        customId: input.midjourneyAction.customId,
+        ...raw,
+      });
+    } else if (references.length) {
+      // edits 只认 image；实测 base64Array 会被上游当成没传图
+      body = compact({
+        prompt: midjourneyPrompt(input),
+        image: imageDataUrl(references[0]!),
+        ...raw,
+      });
+    } else {
+      body = compact({ prompt: midjourneyPrompt(input), ...raw });
+    }
   } else {
     const referencePayload = references.length === 1 ? { image: imageDataUrl(references[0]) } : references.length > 1 ? { images: references.map(imageDataUrl) } : {};
     body = compact({
@@ -700,6 +811,89 @@ export function extractImageCandidates(payload: unknown): ImageCandidate[] {
 
   walk(payload);
   return candidates;
+}
+
+/** 给裸 PCM 补一个 44 字节 WAV 头；3.1 preview 实测返回 audio/l16，不补浏览器放不了 */
+export function pcmToWav(pcm: Buffer, sampleRate: number, channels: number, bitsPerSample = 16): Buffer {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(channels * (bitsPerSample / 8), 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+export interface AudioCandidate {
+  /** data:audio/wav;base64,... 或公网音频地址 */
+  url: string;
+  mimeType?: string;
+  duration?: number;
+  title?: string;
+}
+
+/**
+ * Gemini TTS 的响应是 `candidates[].content.parts[].inlineData`：
+ * 音频以 base64 内联在 JSON 里，不是可下载的 URL。
+ * 统一转成 data URI，后面的音频保存逻辑就能和 Suno 共用同一套。
+ */
+export function extractAudioCandidates(payload: unknown): AudioCandidate[] {
+  const candidates = (payload && typeof payload === "object")
+    ? (payload as Record<string, unknown>).candidates
+    : null;
+  const list = Array.isArray(candidates)
+    ? candidates
+    : candidates && typeof candidates === "object" ? [candidates] : [];
+  const results: AudioCandidate[] = [];
+  const seen = new Set<string>();
+
+  const push = (url: string, mimeType?: string, title?: string) => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    results.push({ url, ...(mimeType ? { mimeType } : {}), ...(title ? { title } : {}) });
+  };
+
+  for (const candidate of list) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const content = (candidate as Record<string, unknown>).content;
+    const parts = content && typeof content === "object"
+      ? (content as Record<string, unknown>).parts
+      : null;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (!part || typeof part !== "object") continue;
+      const record = part as Record<string, unknown>;
+      const inline = record.inlineData ?? record.inline_data;
+      if (!inline || typeof inline !== "object") continue;
+      const data = (inline as Record<string, unknown>).data;
+      if (typeof data !== "string" || !data) continue;
+      const mimeType = typeof (inline as Record<string, unknown>).mimeType === "string"
+        ? String((inline as Record<string, unknown>).mimeType)
+        : typeof (inline as Record<string, unknown>).mime_type === "string"
+          ? String((inline as Record<string, unknown>).mime_type)
+          : "audio/wav";
+      // 3.1 preview 即使非流式也返回裸 PCM（audio/l16; rate=...; channels=...）
+      if (/audio\/(?:l16|pcm)/i.test(mimeType) && !data.startsWith("data:")) {
+        const rate = Number(/rate=(\d+)/i.exec(mimeType)?.[1] ?? 24_000);
+        const channels = Number(/channels=(\d+)/i.exec(mimeType)?.[1] ?? 1);
+        const pcm = Buffer.from(data, "base64");
+        const wav = pcmToWav(pcm, Number.isFinite(rate) ? rate : 24_000, Number.isFinite(channels) ? channels : 1);
+        push(`data:audio/wav;base64,${wav.toString("base64")}`, "audio/wav");
+        continue;
+      }
+      push(data.startsWith("data:") ? data : `data:${mimeType};base64,${data}`, mimeType);
+    }
+  }
+  return results;
 }
 
 /** 视频地址常见的字段名：顶层 video_url、嵌套 video.url、万相的 output.video_url 等 */

@@ -15,7 +15,8 @@ import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../s
 import type { GenerationInput, WanVideoMode, SeedanceVideoMode, KlingMediaType, VideoMediaType } from "../shared/types.js";
 import type {
   AgentStreamEvent, AskArgs, Conversation, ConversationVideoRole, GenerateImageArgs,
-  GenerateMusicArgs, GenerateVideoArgs, EditImageArgs, OptimizePromptArgs, ReplyArgs, SetCanvasArgs, ToolResult,
+  GenerateMusicArgs, GenerateSpeechArgs, GenerateVideoArgs, EditImageArgs, OptimizePromptArgs,
+  ReplyArgs, SetCanvasArgs, ToolResult,
 } from "../shared/agent-types.js";
 import { assetRef } from "../shared/agent-types.js";
 import {
@@ -30,6 +31,7 @@ import { describeAliasChoice, resolveAlias } from "./capabilities.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "./diagnose.js";
 import { callBrain, type BrainMessage } from "./brain.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
+import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import type { KeyStore } from "./key-store.js";
 
 /** §16：`extraReferences` 上限和现有 MAX_REFERENCE_IMAGES 对齐 */
@@ -115,6 +117,15 @@ export const generateMusicSchema = z.object({
   version: z.string().trim().max(40).optional(),
 });
 
+export const generateSpeechSchema = z.object({
+  text: nonEmpty(20000),
+  voice: z.string().trim().max(40).optional(),
+  style: z.string().trim().max(200).optional(),
+  language: z.string().trim().max(20).optional(),
+  secondVoice: z.string().trim().max(40).optional(),
+  modelHint: z.string().trim().max(80).optional(),
+});
+
 export const askSchema = z.object({
   question: nonEmpty(2000),
   options: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
@@ -132,6 +143,7 @@ export const TOOL_SCHEMAS = {
   optimize_prompt: optimizePromptSchema,
   generate_video: generateVideoSchema,
   generate_music: generateMusicSchema,
+  generate_speech: generateSpeechSchema,
   ask: askSchema,
   reply: replySchema,
 } as const;
@@ -675,10 +687,21 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
 }
 
 async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise<ToolOutcome> {
-  const resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.audio);
+  let resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.audio);
   if (!resolution) return failResult("还没有可用的音乐渠道，请先到「渠道配置」添加", "NO_MUSIC_CHANNEL");
-  const channel = ctx.db.getChannel(resolution.channelId);
+  let channel = ctx.db.getChannel(resolution.channelId);
+  // audio 类里现在同时有 Suno 和 TTS：默认音频模型若被设成配音，音乐工具退回第一个 Suno
+  if (channel && channel.adapterType !== "suno-music") {
+    const suno = ctx.aliases.find((item) => item.adapterType === "suno-music");
+    if (suno) {
+      resolution = { ...suno, usedFallback: true, source: "fallback" };
+      channel = ctx.db.getChannel(suno.channelId);
+    }
+  }
   if (!channel) return failResult("解析到的音乐渠道不存在", "CHANNEL_NOT_FOUND");
+  if (channel.adapterType !== "suno-music") {
+    return failResult("audio 类里没有音乐渠道，不能写歌；配旁白请用 generate_speech", "MUSIC_CHANNEL_MISMATCH");
+  }
 
   const mode = args.mode
     ?? (args.sourceAssetRefs?.length
@@ -787,6 +810,92 @@ async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise
   }
 }
 
+/**
+ * 配音走的是异步任务表里的同步路径：TTS 一次请求就回 WAV。
+ * 它和音乐同属 audio 类，但适配器不同；这里只挑 gemini-tts 的别名，
+ * 不会把 Suno 渠道误当成配音渠道。
+ */
+async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promise<ToolOutcome> {
+  const ttsAliases = ctx.aliases.filter((item) => item.adapterType === "gemini-tts");
+  if (!ttsAliases.length) {
+    return failResult("还没有可用的语音渠道，请先到「模型设置」添加「词元流墟-语音」", "NO_SPEECH_CHANNEL");
+  }
+  const hint = args.modelHint?.trim();
+  const requested = hint ? ctx.aliases.find((item) => item.alias === hint) : undefined;
+  if (requested && requested.adapterType !== "gemini-tts") {
+    return failResult(`${hint} 是音乐渠道，不能朗读文本；配音请用语音渠道的 alias`, "SPEECH_CHANNEL_MISMATCH");
+  }
+  const resolution = requested ?? ttsAliases.find((item) => item.alias === ctx.defaultAliases.audio) ?? ttsAliases[0]!;
+  const channel = ctx.db.getChannel(resolution.channelId);
+  if (!channel) return failResult("解析到的语音渠道不存在", "CHANNEL_NOT_FOUND");
+
+  const normalizeVoice = (value: string | undefined, fallback: string) => {
+    const input = value?.trim();
+    if (!input) return fallback;
+    const match = TTS_VOICES.find((voice) => voice.toLowerCase() === input.toLowerCase());
+    return match ?? null;
+  };
+  const voice = normalizeVoice(args.voice, TTS_DEFAULT_VOICE);
+  if (!voice) return failResult(`音色「${args.voice}」不存在。可用音色：${TTS_VOICES.join("、")}`, "TTS_VOICE_INVALID");
+  const second = args.secondVoice?.trim() ? normalizeVoice(args.secondVoice, TTS_DEFAULT_VOICE) : null;
+  if (args.secondVoice?.trim() && !second) {
+    return failResult(`第二个音色「${args.secondVoice}」不存在。可用音色：${TTS_VOICES.join("、")}`, "TTS_VOICE_INVALID");
+  }
+  const text = args.text.trim();
+  if (!text) return failResult("配音正文不能为空", "SPEECH_TEXT_REQUIRED");
+  if (second && !(/A\s*[：:]/.test(text) && /B\s*[：:]/.test(text))) {
+    return failResult("双人对话正文需要用「A：」「B：」标出两段台词", "SPEECH_SPEAKERS_REQUIRED");
+  }
+
+  const input: GenerationInput = {
+    channelId: channel.id,
+    model: resolution.model,
+    prompt: text,
+    ttsVoice: voice,
+    ttsStyle: args.style?.trim() || undefined,
+    ttsLanguage: args.language?.trim() || undefined,
+    ...(second ? {
+      ttsSpeakers: [
+        { speaker: "A", voice },
+        { speaker: "B", voice: second },
+      ],
+    } : {}),
+    timeoutMs: 300_000,
+  };
+
+  try {
+    const created = await ctx.runner.create(input);
+    ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
+    const task = await ctx.runner.waitFor(created.id, { timeoutMs: 360_000, signal: ctx.signal });
+    const asset = task.assets.find((item) => item.mimeType.startsWith("audio/"));
+    if (task.status !== "succeeded" || !asset) {
+      return failResult(
+        `配音失败：${task.errorMessage || task.errorCode || "没有生成音频"}`,
+        task.errorCode ?? "SPEECH_FAILED",
+      );
+    }
+    const duration = asset.duration ? `，${asset.duration.toFixed(1)} 秒` : "";
+    return okResult(
+      `配音完成${duration}，已保存 ${assetRef(asset.id)}。`,
+      {
+        taskId: task.id,
+        assetId: asset.id,
+        mimeType: asset.mimeType,
+        data: {
+          model: resolution.model,
+          alias: resolution.alias,
+          voice,
+          ...(second ? { secondVoice: second } : {}),
+          ...(args.style?.trim() ? { style: args.style.trim() } : {}),
+          ...(args.language?.trim() ? { language: args.language.trim() } : {}),
+        },
+      },
+    );
+  } catch (error) {
+    return failResult(`生成配音失败：${describeError(error)}`, "SPEECH_FAILED");
+  }
+}
+
 /** 卡片和工具结果里统一的人话角色名 */
 export function roleLabel(role: ConversationVideoRole) {
   if (role === "first_frame") return "首帧";
@@ -847,6 +956,9 @@ async function generateImage(
     references.push(found.asset);
   }
 
+  if (channel.adapterType === "midjourney" && references.length > 1) {
+    notes.push("Midjourney 图生图只使用第 1 张参考图");
+  }
   for (const [index, reference] of references.entries()) {
     const prepared = await prepareImageBytes(ctx.db, reference, REFERENCE_PROFILE);
     if (!prepared) {
@@ -1056,6 +1168,7 @@ export async function runAgentTool(
     case "optimize_prompt": return optimizePrompt(ctx, parsed.data as OptimizePromptArgs);
     case "generate_video": return generateVideo(ctx, parsed.data as GenerateVideoArgs);
     case "generate_music": return generateMusic(ctx, parsed.data as GenerateMusicArgs);
+    case "generate_speech": return generateSpeech(ctx, parsed.data as GenerateSpeechArgs);
     // ask / reply 由 Agent 循环直接处理（它们只需要生成一段文本，没有副作用）
     case "ask": return okResult((parsed.data as AskArgs).question);
     case "reply": return okResult((parsed.data as ReplyArgs).text);

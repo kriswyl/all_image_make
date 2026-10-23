@@ -29,9 +29,12 @@ describe("渠道品类", () => {
 
   it("音乐不是图片，也不会被生图工作台选中", () => {
     expect(isAudioAdapter("suno-music")).toBe(true);
+    expect(isAudioAdapter("gemini-tts")).toBe(true);
+    expect(isImageAdapter("gemini-tts")).toBe(false);
     expect(isImageAdapter("suno-music")).toBe(false);
     expect(isImageAdapter("wan-video")).toBe(false);
     expect(isImageAdapter("openai-images")).toBe(true);
+    expect(isImageAdapter("midjourney")).toBe(true);
   });
 });
 

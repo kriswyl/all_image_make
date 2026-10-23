@@ -19,7 +19,7 @@ type SaveMode = "create" | "skip";
 const UNIT_GROUPS: ReadonlyArray<{ kind: ChannelKind; label: string }> = [
   { kind: "image", label: "生图" },
   { kind: "video", label: "视频" },
-  { kind: "audio", label: "音乐" },
+  { kind: "audio", label: "音频" },
   { kind: "chat", label: "对话（当大脑用）" },
 ];
 

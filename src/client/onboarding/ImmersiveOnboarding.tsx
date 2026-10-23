@@ -95,8 +95,8 @@ const CHAPTERS: Record<ChapterKind, {
     char: "乐",
     poem: "丝竹入耳 · 心声成曲",
     lede: "让旋律落地，\n让歌词有声音。",
-    selectHint: "目前是 Suno；灵感、自定义歌词、翻唱与混音都用它。",
-    note: "音乐独立于图片和视频",
+    selectHint: "Suno 负责写歌，Gemini 负责配音/旁白；可以多选。",
+    note: "音乐和配音都归在音频类",
   },
 };
 

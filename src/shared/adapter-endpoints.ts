@@ -13,6 +13,8 @@ export function defaultEndpointFor(adapterType: AdapterType): string {
     case "openai-chat-image": return "/v1/chat/completions";
     case "openai-chat": return "/v1/chat/completions";
     case "gemini-content": return "/v1beta/models/{model}:generateContent";
+    case "gemini-tts": return "/v1beta/models/{model}:generateContent";
+    case "midjourney": return "/mj/submit/imagine";
     case "wan-video": return "/api/v1/services/aigc/video-generation/video-synthesis";
     case "grok-video": return "/v1/videos/generations";
     case "seedance-video": return "/api/v3/contents/generations/tasks";

@@ -22,8 +22,9 @@ import {
   type AgentStreamEvent, type ConversationInput, type ConversationPatch, type VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
+import { midjourneyModelForCustomId } from "../shared/midjourney.js";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "openai-chat"] as const;
+const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
@@ -139,6 +140,11 @@ const confirmSchema = z.object({
   args: z.record(z.string(), z.unknown()).optional(),
 });
 
+const midjourneyActionSchema = z.object({
+  customId: z.string().trim().min(1).max(500),
+  label: z.string().trim().max(40).optional(),
+});
+
 const generationSchema = z.object({
   channelId: z.string().uuid(),
   model: z.string().trim().min(1).max(200),
@@ -230,6 +236,14 @@ const generationSchema = z.object({
     key: z.string().trim().max(10).optional(),
     loop: z.boolean().optional(),
   }).optional(),
+  midjourneyVersion: z.string().trim().max(20).optional(),
+  ttsVoice: z.string().trim().max(40).optional(),
+  ttsStyle: z.string().trim().max(200).optional(),
+  ttsLanguage: z.string().trim().max(20).optional(),
+  ttsSpeakers: z.array(z.object({
+    speaker: z.string().trim().min(1).max(10),
+    voice: z.string().trim().min(1).max(40),
+  })).length(2).optional(),
   klingVideoMedia: z.array(z.object({
     type: z.enum(["first_frame", "last_frame", "reference_image", "image", "video"]),
     url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
@@ -432,6 +446,52 @@ export function createApp(options: { dataDir?: string } = {}) {
 
   app.post("/api/generations/:id/retry", asyncHandler(async (req, res) => {
     res.status(202).json(ok(await runner.retry(routeParam(req.params.id))));
+  }));
+
+  /**
+   * Midjourney 的后续动作：把结果卡片上的 U1 / V2 / 重绘按钮变成一条新任务。
+   * customId 是上游任务的按钮凭证，不能由前端自己拼；只接受父任务成功后的按钮。
+   */
+  app.post("/api/generations/:id/action", asyncHandler(async (req, res) => {
+    const parent = db.getTaskRow(routeParam(req.params.id));
+    if (!parent) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
+    const channel = db.getChannel(parent.channelId);
+    if (!channel || channel.adapterType !== "midjourney") {
+      return res.status(400).json(fail("NOT_MIDJOURNEY_TASK", "这不是 Midjourney 任务"));
+    }
+    if (parent.status !== "succeeded") {
+      return res.status(409).json(fail("TASK_NOT_READY", "任务还没有成功完成"));
+    }
+    if (!parent.remoteTaskId) {
+      return res.status(409).json(fail("REMOTE_TASK_MISSING", "这个任务没有上游任务 id，不能继续操作"));
+    }
+    const input = midjourneyActionSchema.parse(req.body ?? {});
+    const model = midjourneyModelForCustomId(input.customId, input.label);
+    if (!model) return res.status(400).json(fail("MJ_ACTION_UNKNOWN", "这个 Midjourney 按钮需要额外输入，暂不支持"));
+    // 只接受父任务里真实出现过的按钮，不让前端自己拼 customId
+    let buttons: Array<{ customId?: unknown }> = [];
+    try {
+      const meta = parent.remoteMeta ? JSON.parse(parent.remoteMeta) as Record<string, unknown> : {};
+      const midjourney = meta.midjourney as Record<string, unknown> | undefined;
+      if (Array.isArray(midjourney?.buttons)) buttons = midjourney.buttons as Array<{ customId?: unknown }>;
+    } catch {
+      buttons = [];
+    }
+    if (!buttons.some((button) => button.customId === input.customId)) {
+      return res.status(400).json(fail("MJ_ACTION_INVALID", "这个按钮不属于该 Midjourney 任务"));
+    }
+    const task = await runner.create({
+      channelId: channel.id,
+      model,
+      prompt: input.label?.trim() || "Midjourney 后续操作",
+      midjourneyAction: {
+        taskId: parent.remoteTaskId,
+        customId: input.customId,
+        ...(input.label?.trim() ? { label: input.label.trim() } : {}),
+      },
+      timeoutMs: 180_000,
+    });
+    res.status(202).json(ok(task));
   }));
 
   app.get("/api/generations/:id/diagnostics", (req, res) => {

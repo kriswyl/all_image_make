@@ -60,6 +60,13 @@ const WAN_VIDEO_MODELS = ["wan3.0-video"];
 const SEEDANCE_VIDEO_MODELS = ["sd-2.5", "sd-2.0", "sd-2.0-fast", "sd-2.0-mini"];
 const KLING_VIDEO_MODELS = ["kling-3.0", "kling-3.0-turbo", "kling-3.0-omni"];
 const SUNO_MUSIC_MODELS = ["suno_damobi_music"];
+/** 你给的列表里 3.8-flash 写了两次，按手册补成 3.8-flash-lite */
+const GEMINI_TTS_MODELS = [
+  "gemini-3.8-flash-tts",
+  "gemini-3.8-flash-lite-tts",
+  "gemini-3.1-flash-tts-preview",
+];
+const MIDJOURNEY_MODELS = ["mj_imagine", "mj_edits", "mj_upscale", "mj_variation", "mj_reroll"];
 
 /**
  * 对话（大脑）模型候选。
@@ -129,6 +136,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         channelName: "{provider}",
         secretEnv: "TIANTOKEN_GEMINI_API_KEY",
         models: GEMINI_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-midjourney",
+    label: "词元流墟-Midjourney",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "midjourney",
+        label: "Midjourney 生图",
+        description: "mj_imagine 文生图 / mj_edits 图生图，支持 U/V/R 后续动作",
+        adapterType: "midjourney",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_MIDJOURNEY_API_KEY",
+        models: MIDJOURNEY_MODELS,
       },
     ],
   },
@@ -219,6 +244,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         channelName: "{provider}",
         secretEnv: "TIANTOKEN_SUNO_API_KEY",
         models: SUNO_MUSIC_MODELS,
+      },
+    ],
+  },
+  {
+    id: "tiantoken-gemini-tts",
+    label: "词元流墟-语音",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "gemini-tts",
+        label: "Gemini 语音",
+        description: "配音 / 旁白：30 个预置音色，支持单人与双人对话、风格控制，输出 24kHz WAV",
+        adapterType: "gemini-tts",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_GEMINI_TTS_API_KEY",
+        models: GEMINI_TTS_MODELS,
       },
     ],
   },

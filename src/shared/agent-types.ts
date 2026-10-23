@@ -40,6 +40,7 @@ export const AGENT_TOOL_NAMES = [
   "optimize_prompt",
   "generate_video",
   "generate_music",
+  "generate_speech",
   "ask",
   "reply",
 ] as const;
@@ -48,7 +49,7 @@ export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 /** 产出图片的工具：成功后自动把画布指针挪到新产物上（§10.1 规则 1） */
 export const IMAGE_PRODUCING_TOOLS: AgentToolName[] = ["generate_image", "edit_image"];
 /** 会花钱、会占任务额度的工具：会话任务软上限（§16）和确认流程都看这一份 */
-export const GENERATION_TOOLS: AgentToolName[] = ["generate_image", "edit_image", "generate_video", "generate_music"];
+export const GENERATION_TOOLS: AgentToolName[] = ["generate_image", "edit_image", "generate_video", "generate_music", "generate_speech"];
 
 export const agentToolLabels: Record<AgentToolName, string> = {
   generate_image: "生成图片",
@@ -58,6 +59,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   optimize_prompt: "优化提示词",
   generate_video: "生成视频",
   generate_music: "生成音乐",
+  generate_speech: "生成配音",
   ask: "提问",
   reply: "回复",
 };
@@ -232,6 +234,20 @@ export interface GenerateMusicArgs {
   modelHint?: string;
   /** Suno 模型版本，例如 chirp-v3-5 */
   version?: string;
+}
+
+export interface GenerateSpeechArgs {
+  /** 要朗读的正文；双人对话用 A：/ B： 标注说话人 */
+  text: string;
+  /** 预置音色名，例如 Kore / Puck；不填默认 Kore */
+  voice?: string;
+  /** 风格标注，例如「轻声耳语，放慢语速」 */
+  style?: string;
+  /** BCP-47 语种，例如 zh-CN / en-US；不填自动判断 */
+  language?: string;
+  /** 双人对话的第二个音色；给了就把正文按 A：/ B： 分给两个人 */
+  secondVoice?: string;
+  modelHint?: string;
 }
 
 export interface AskArgs {

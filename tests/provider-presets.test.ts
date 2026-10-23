@@ -28,11 +28,13 @@ describe("provider presets", () => {
       "tiantoken-gpt",
       "tiantoken-gpt-c",
       "tiantoken-gemini",
+      "tiantoken-midjourney",
       "tiantoken-wan-video",
       "tiantoken-grok-video",
       "tiantoken-seedance",
       "tiantoken-kling-video",
       "tiantoken-suno",
+      "tiantoken-gemini-tts",
       "tiantoken-chat",
     ]);
     // 向量引擎模板暂时下线；手工自定义渠道仍然可以填它的 Base URL
@@ -56,6 +58,29 @@ describe("provider presets", () => {
     const grokVideo = findProviderPreset("tiantoken-grok-video")!;
     expect(grokVideo.baseUrl).toBe("https://api.tiantoken.com");
     expect(grokVideo.units.map((unit) => unit.adapterType)).toEqual(["grok-video"]);
+  });
+
+  it("adds the Gemini TTS unit with the three requested models", () => {
+    const tts = findProviderPreset("tiantoken-gemini-tts")!;
+    expect(tts.units.map((unit) => unit.adapterType)).toEqual(["gemini-tts"]);
+    expect(tts.units[0]!.secretEnv).toBe("TIANTOKEN_GEMINI_TTS_API_KEY");
+    expect(tts.units[0]!.models).toEqual([
+      "gemini-3.8-flash-tts",
+      "gemini-3.8-flash-lite-tts",
+      "gemini-3.1-flash-tts-preview",
+    ]);
+    const [draft] = buildChannelDrafts(tts, [selectionFor(tts, "gemini-tts")]);
+    expect(draft!.input.endpoint).toBe("/v1beta/models/{model}:generateContent");
+  });
+
+  it("adds Midjourney with submit and action models", () => {
+    const mj = findProviderPreset("tiantoken-midjourney")!;
+    expect(mj.units.map((unit) => unit.adapterType)).toEqual(["midjourney"]);
+    expect(mj.units[0]!.models).toEqual([
+      "mj_imagine", "mj_edits", "mj_upscale", "mj_variation", "mj_reroll",
+    ]);
+    const [draft] = buildChannelDrafts(mj, [selectionFor(mj, "midjourney")]);
+    expect(draft!.input.endpoint).toBe("/mj/submit/imagine");
   });
 
   it("keeps image presets on the tiantoken relay", () => {

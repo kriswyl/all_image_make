@@ -1,6 +1,7 @@
 // 参数核对结果（需求.md 问题 1）的类型住在 agent-types 里，因为 Agent 卡片先用到它。
 // 这里只要类型、不要运行时的东西，所以用 `import type`——编译后整行消失，不会绕成一个环。
 import type { ParamNote } from "./agent-types.js";
+import type { MidjourneyMeta } from "./midjourney.js";
 import { taskKindOf as taskKindOfFromKinds } from "./kinds.js";
 
 export {
@@ -35,6 +36,8 @@ export type AdapterType =
   | "seedance-video"
   | "kling-video"
   | "suno-music"
+  | "gemini-tts"
+  | "midjourney"
   | "openai-chat";
 
 export type AuthType = "bearer" | "x-api-key" | "query" | "custom-header" | "none";
@@ -243,6 +246,14 @@ export function normalizeImageSize(value: string | null | undefined): ImageSizeV
   return (IMAGE_SIZE_VALUES as readonly string[]).includes(trimmed) ? (trimmed as ImageSizeValue) : undefined;
 }
 
+/** Gemini TTS 双人对话的一个说话人 */
+export interface TtsSpeakerVoice {
+  /** 正文里的说话人标记，例如 A / B */
+  speaker: string;
+  /** 预置音色名，例如 Kore / Puck */
+  voice: string;
+}
+
 export interface GenerationInput {
   channelId: string;
   model: string;
@@ -313,6 +324,23 @@ export interface GenerationInput {
   musicMashupClipIds?: string[];
   /** 音效模式的 BPM / 调性 / 是否循环 */
   musicSoundConfigs?: { tempo?: number; key?: string; loop?: boolean };
+  /** Midjourney 版本参数，例如 7 / 6.1；不填由上游使用默认版本 */
+  midjourneyVersion?: string;
+  /** Midjourney 后续动作：对已有远端任务执行放大/变体/重绘 */
+  midjourneyAction?: {
+    /** 上游 MJ 任务 id（不是本地 task id） */
+    taskId: string;
+    customId: string;
+    label?: string;
+  };
+  /** TTS 音色名；大小写不敏感，不填由适配器补 Kore */
+  ttsVoice?: string;
+  /** TTS 风格标注（annotations.style），例如「轻声耳语，放慢语速」 */
+  ttsStyle?: string;
+  /** TTS 语种 BCP-47，例如 zh-CN / en-US；不填按文本自动判断 */
+  ttsLanguage?: string;
+  /** 双人对话音色；给了就必须正好 2 个，正文里用 A：/ B： 标注说话人 */
+  ttsSpeakers?: TtsSpeakerVoice[];
   /** 本次请求的超时等待时长（毫秒） */
   timeoutMs?: number;
   rawParameters?: Record<string, unknown>;
@@ -360,6 +388,8 @@ export interface Task {
   attemptCount: number;
   errorCode: string | null;
   errorMessage: string | null;
+  /** 上游任务的附加元数据；Midjourney 用它带回按钮（U1-U4 / V1-V4 / 重绘） */
+  remoteMeta?: { midjourney?: MidjourneyMeta } | null;
   assets: Asset[];
   createdAt: string;
   startedAt: string | null;

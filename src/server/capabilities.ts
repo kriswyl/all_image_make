@@ -10,6 +10,7 @@
  */
 import type { AdapterType, TaskKind } from "../shared/types.js";
 import { channelKindOf } from "../shared/kinds.js";
+import { isMidjourneyActionModel } from "../shared/midjourney.js";
 import type { DbChannel } from "./db.js";
 
 export type CapabilityKind = TaskKind;
@@ -39,6 +40,8 @@ const ALIAS_PREFIXES: Array<{ pattern: RegExp; alias: string; kind?: CapabilityK
   { pattern: /seedance/i, alias: "seedance" },
   // 视频类目下的 sd-* 一律视为 Seedance（实测中转站就是拿 sd-2.5 指 Seedance）
   { pattern: /(^|[^a-z])sd[-_.\d]/i, alias: "seedance", kind: "video" },
+  // TTS 模型也带 gemini，必须排在 gemini 前面，否则会被当成生图
+  { pattern: /tts/i, alias: "tts", kind: "audio" },
   { pattern: /gemini|imagen|nano-?banana/i, alias: "gemini" },
   { pattern: /grok/i, alias: "grok" },
   { pattern: /wan|万相|通义/i, alias: "wan" },
@@ -98,6 +101,7 @@ const IMAGE_TRAITS: Record<string, string> = {
   "openai-chat-image": "尺寸(size)=1024x1024|1536x1024|1024x1536  图生图=✔",
   "gemini-content": "宽高比(aspectRatio)=1:1|16:9|9:16|3:2|2:3|21:9  尺寸(imageSize)=1K|2K|4K  图生图=✔",
   "generic-json": "尺寸(size)=1024x1024  图生图=✔",
+  "midjourney": "原生参数(--ar/--v/--no)  图生图=✔  结果=四宫格  支持 U/V/R 后续动作",
 };
 
 const VIDEO_TRAITS: Record<string, string> = {
@@ -109,6 +113,7 @@ const VIDEO_TRAITS: Record<string, string> = {
 
 const AUDIO_TRAITS: Record<string, string> = {
   "suno-music": "一次生成 2 首  灵感|自定义歌词|纯音乐  时长自动（约 2-5 分钟）",
+  "gemini-tts": "配音/旁白  30 个预置音色  单人|双人对话  风格/语种可控  输出 24kHz WAV",
 };
 
 /**
@@ -142,6 +147,8 @@ export function buildCapabilityAliases(channels: DbChannel[]): CapabilityAlias[]
     if (channelKind === "chat") continue;
     const kind: CapabilityKind = channelKind;
     for (const model of channel.models) {
+      // 放大/变体/重绘必须先有 MJ 任务，不能作为普通生图模型交给大脑
+      if (channel.adapterType === "midjourney" && isMidjourneyActionModel(model)) continue;
       entries.push({
         kind, channelId: channel.id, channelName: channel.name, model,
         adapterType: channel.adapterType, traits: traitsFor(channel.adapterType, kind),
@@ -180,7 +187,11 @@ export function buildCapabilityManifest(aliases: CapabilityAlias[]): string {
   const lines: string[] = [];
   for (const item of [...image, ...video, ...audio]) {
     const vision = item.kind === "image" ? `  视觉=${likelySupportsVision(item.adapterType) ? "✔" : "✘"}` : "";
-    const label = item.kind === "video" ? "视频" : item.kind === "audio" ? "音乐" : "图片";
+    const label = item.kind === "video"
+      ? "视频"
+      : item.kind === "audio"
+        ? (item.adapterType === "gemini-tts" ? "配音" : "音乐")
+        : "图片";
     lines.push(`alias=${item.alias}  ${label}  ${item.traits}${vision}`);
   }
   if (!video.length) lines.push("（还没有配置视频渠道，用户要视频时如实说明）");

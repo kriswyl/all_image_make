@@ -97,6 +97,11 @@ export const api = {
   tasks: () => request<Task[]>("/api/generations"),
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
+  midjourneyAction: (id: string, customId: string, label?: string) =>
+    request<Task>(`/api/generations/${id}/action`, {
+      method: "POST",
+      body: JSON.stringify({ customId, ...(label ? { label } : {}) }),
+    }),
   /** keepFiles：只删记录，磁盘上的图片视频留着 */
   deleteTask: (id: string, keepFiles = false) => request<{ deleted: true }>(`/api/generations/${id}${keepFiles ? "?keepFiles=1" : ""}`, { method: "DELETE" }),
   /** 一次请求清空一批记录，避免前端逐条 DELETE 排队 */
@@ -239,7 +244,7 @@ export const api = {
     const separator = asset.url.includes("?") ? "&" : "?";
     const isVideo = asset.mimeType.startsWith("video/");
     const isAudio = asset.mimeType.startsWith("audio/");
-    const fileType = isVideo ? "视频" : isAudio ? "音乐" : "图片";
+    const fileType = isVideo ? "视频" : isAudio ? "音频" : "图片";
 
     if (isTauriRuntime()) {
       const [{ save }, { writeFile }] = await Promise.all([

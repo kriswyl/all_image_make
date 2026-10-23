@@ -25,17 +25,19 @@ describe("model catalog", () => {
       "tiantoken-gpt:gpt",
       "tiantoken-gpt-c:gpt-c",
       "tiantoken-gemini:gemini",
+      "tiantoken-midjourney:midjourney",
       "tiantoken-wan-video:wan-video",
       "tiantoken-grok-video:grok-video",
       "tiantoken-seedance:seedance-video",
       "tiantoken-kling-video:kling-video",
       "tiantoken-suno:suno-music",
+      "tiantoken-gemini-tts:gemini-tts",
       "tiantoken-chat:chat",
     ]);
     expect(MODEL_GROUPS.every((group) => !group.key.startsWith("vectorengine"))).toBe(true);
-    expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(3);
+    expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(4);
     expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(4);
-    expect(MODEL_GROUPS.filter((group) => group.kind === "audio")).toHaveLength(1);
+    expect(MODEL_GROUPS.filter((group) => group.kind === "audio")).toHaveLength(2);
     expect(MODEL_GROUPS.filter((group) => group.kind === "chat")).toHaveLength(1);
     expect(MODEL_GROUP_SECTIONS.map((section) => section.kind)).toEqual(["image", "video", "audio", "chat"]);
   });

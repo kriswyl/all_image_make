@@ -18,6 +18,8 @@ export interface AsyncStatus {
   progress: number | null;
   /** 上游给的失败原因，原样交给用户 */
   error: string | null;
+  /** 要落进任务、再给前端渲染的附加信息（目前是 MJ 的按钮） */
+  meta?: Record<string, unknown>;
 }
 
 export interface AsyncResult {
@@ -62,6 +64,12 @@ export const ASYNC_SUCCESS_STATUSES = [
  * `{ status: "unknown", progress: 0 }`，把它当失败会误杀仍在生成的任务。
  * `fail` 是 Suno 的写法；`FAILURE` 归一后也是 `failure`。
  */
+/** MJ 文档建议 3~5 秒轮询；测试沿用 VIDEO_POLL_INTERVAL_MS 的压缩值 */
+const MJ_POLL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.MJ_POLL_INTERVAL_MS ?? process.env.VIDEO_POLL_INTERVAL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 4_000;
+})();
+
 export const ASYNC_FAILURE_STATUSES = [
   "failed", "failure", "fail", "error", "canceled", "cancelled", "expired", "rejected", "timeout",
 ];
@@ -324,6 +332,50 @@ export const ASYNC_PROVIDER_SPECS: Partial<Record<AdapterType, AsyncProviderSpec
     failureStatuses: ["failed"],
     pollIntervalMs: 10_000,
     maxPolls: 120,
+  },
+  midjourney: {
+    // 提交响应是 { code: 1, result: "179..." }；result 才是任务 id
+    extractTaskId: (payload) => {
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      if (typeof record.result === "string" && record.result) return record.result;
+      const data = record.data && typeof record.data === "object" ? record.data as Record<string, unknown> : {};
+      return typeof data.result === "string" ? data.result : null;
+    },
+    pollPath: (id) => `/mj/task/${encodeURIComponent(id)}/fetch`,
+    extractStatus: (payload) => {
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      const status = typeof record.status === "string" ? record.status.toLowerCase() : null;
+      const progressText = typeof record.progress === "string" ? record.progress : "";
+      const progressNumber = Number(progressText.replace("%", ""));
+      const progress = Number.isFinite(progressNumber)
+        ? Math.min(99, Math.max(0, Math.round(progressNumber)))
+        : null;
+      const failReason = typeof record.failReason === "string" ? record.failReason.trim() : "";
+      const buttons = Array.isArray(record.buttons) ? record.buttons : undefined;
+      return {
+        status,
+        progress,
+        error: status === "failure" ? (failReason || "Midjourney 生成失败") : null,
+        meta: {
+          midjourney: {
+            ...(typeof record.action === "string" ? { action: record.action } : {}),
+            ...(typeof record.promptEn === "string" && record.promptEn ? { promptEn: record.promptEn } : {}),
+            ...(typeof record.description === "string" ? { description: record.description } : {}),
+            ...(buttons?.length ? { buttons } : {}),
+          },
+        },
+      };
+    },
+    extractResults: (payload) => {
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      return typeof record.imageUrl === "string" && record.imageUrl
+        ? [{ kind: "image", url: record.imageUrl, strong: true }]
+        : [];
+    },
+    successStatuses: ["success"],
+    failureStatuses: ["failure"],
+    pollIntervalMs: MJ_POLL_INTERVAL_MS,
+    maxPolls: 150,
   },
   "suno-music": {
     pollPath: (id) => `/api/midjourney/drawInfo4?id=${encodeURIComponent(id)}`,

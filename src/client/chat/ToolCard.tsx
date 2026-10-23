@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Music, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Mic, Music, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -25,6 +25,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   optimize_prompt: Wand2,
   generate_video: Film,
   generate_music: Music,
+  generate_speech: Mic,
   ask: Sparkles,
   reply: Sparkles,
 };
@@ -70,6 +71,7 @@ export function ToolCard({
   assets = [],
   onPreview,
   onDiagnostics,
+  onToast,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
@@ -81,8 +83,10 @@ export function ToolCard({
   onPreview?: (assetId: string) => void;
   /** 打开应用内诊断弹窗；Tauri webview 会拦掉 window.open，所以不能再走新窗口 */
   onDiagnostics?: (taskId: string) => void;
+  onToast?: (kind: "ok" | "error", text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const tool = message.toolName ?? "reply";
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
   const payload = result?.toolResult ?? null;
@@ -116,6 +120,18 @@ export function ToolCard({
     ? produced.mimeType.startsWith("audio/")
     : payload?.mimeType?.startsWith("audio/") ?? false;
   const resultAssetIds = payload?.assetIds?.length ? payload.assetIds : assetId ? [assetId] : [];
+
+  async function downloadFile(asset: Asset) {
+    if (downloadingId) return;
+    setDownloadingId(asset.id);
+    try {
+      if (await api.downloadAsset(asset)) onToast?.("ok", "已保存");
+    } catch (error) {
+      onToast?.("error", error instanceof Error ? error.message : "下载失败");
+    } finally {
+      setDownloadingId(null);
+    }
+  }
 
   /**
    * 胶囊上那一小串参数：优先写提示词，没有提示词就写这次动了哪张画布。
@@ -173,6 +189,11 @@ export function ToolCard({
                   <ImageIcon size={12} />查看结果
                 </button>
               ) : null}
+              {produced ? (
+                <button type="button" className="link-btn" onClick={() => void downloadFile(produced)} disabled={Boolean(downloadingId)}>
+                  {downloadingId === produced.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
+                </button>
+              ) : null}
               {result?.taskId ? (
                 <button
                   type="button"
@@ -207,8 +228,13 @@ export function ToolCard({
                       <strong>{item?.title || "歌曲"}</strong>
                       {item?.duration ? <small>{Math.floor(item.duration / 60)}:{Math.floor(item.duration % 60).toString().padStart(2, "0")}</small> : null}
                     </span>
+                    {item ? (
+                      <button type="button" className="link-btn" onClick={() => void downloadFile(item)} disabled={Boolean(downloadingId)}>
+                        {downloadingId === item.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
+                      </button>
+                    ) : null}
                   </div>
-                  <audio controls preload="metadata" src={api.assetUrl(item?.url ?? `/api/assets/${id}/file`)} />
+                  <audio controls controlsList="nodownload" preload="metadata" src={api.assetUrl(item?.url ?? `/api/assets/${id}/file`)} onContextMenu={(event) => event.preventDefault()} />
                   {item?.lyrics ? (
                     <details className="music-lyrics">
                       <summary>歌词</summary>

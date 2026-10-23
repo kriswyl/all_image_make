@@ -547,6 +547,41 @@ input::placeholder, textarea::placeholder { color: #a1aaa3; }
   .onboarding-group, .onboarding-model { transition: none; }
 }
 
+/* Midjourney：排除内容单独占一行 */
+.mj-no-field { grid-column: 1 / -1; }
+
+/* Midjourney：结果卡片下方的 U/V/R 动作条 */
+.mj-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+.mj-action-button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.mj-action-button:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
+.mj-action-button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 语音生成：风格输入占满参数行，快捷风格用小一号胶囊 */
+.tts-style-field { grid-column: 1 / -1; }
+.tts-style-picker { margin: 8px 0 14px; }
+.tts-style-picker .mode-chip { padding: 5px 10px; font-size: 11.5px; }
+.speech-cover { color: var(--muted); background: var(--surface-soft); }
+.speech-result-panel .music-track { grid-template-columns: 64px minmax(0, 1fr) auto; }
+.speech-download { min-height: 30px; padding: 0 10px; font-size: 11.5px; white-space: nowrap; }
+
 /* 生图工作台：整页占满视口高度，左右面板各自控制内部滚动 */
 .generate-page { display: flex; min-height: 0; flex-direction: column; height: 100%; }
 .generate-page .page-header { flex: 0 0 auto; }
@@ -1964,6 +1999,9 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 /* 视频结果也要能点开（问题 3）。以前只写了 img，视频落进来就是裂图 */
 .chat-lightbox-body video { max-width: 100%; max-height: calc(92vh - 40px); border-radius: var(--radius); background: #000; }
 .chat-lightbox-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; font-size: 12px; color: #fff; background: rgba(36, 31, 56, .85); border-radius: 10px; }
+.chat-lightbox-actions { display: flex; align-items: center; gap: 8px; }
+.chat-lightbox-actions .secondary-button { color: #fff; background: rgba(255, 255, 255, .12); border-color: rgba(255, 255, 255, .24); }
+.chat-lightbox-actions .secondary-button:hover:not(:disabled) { background: rgba(255, 255, 255, .2); }
 
 /* ── 窄侧栏的品牌排版 ─────────────────────────────────────────────────────────
    放在文件**最后**是因为里面的声明和前面的 .brand / .brand-mark 同权重，
@@ -2042,6 +2080,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .tool-card-audio-title { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .tool-card-audio-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-card-audio-title small { flex: 0 0 auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.tool-card-audio-head .link-btn { margin-left: auto; flex: 0 0 auto; }
 
 /* ── 工作台顶栏与结果区（生图 / 生视频 / 音乐共用） ───────────────────────
    用户反馈原页头太像一块悬浮卡片，主区被它压矮；这里统一成一条贴边的轻量栏：

@@ -36,7 +36,7 @@ export const MODEL_GROUPS: ModelGroup[] = PROVIDER_PRESETS.flatMap((preset) => p
 export const MODEL_GROUP_SECTIONS: Array<{ kind: ModelGroupKind; label: string; hint: string }> = [
   { kind: "image", label: "生图", hint: "画图、改图、图生图" },
   { kind: "video", label: "视频", hint: "文生视频、首尾帧、参考生视频" },
-  { kind: "audio", label: "音乐", hint: "灵感描述、自定义歌词、纯音乐" },
+  { kind: "audio", label: "音频", hint: "音乐生成、配音、旁白" },
   { kind: "chat", label: "对话", hint: "对话工作区的大脑，不出图" },
 ];
 

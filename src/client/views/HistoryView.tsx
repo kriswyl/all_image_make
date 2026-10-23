@@ -84,7 +84,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部 ({tasks.length})</button>
             <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片 ({imageTasks.length})</button>
             <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频 ({videoTasks.length})</button>
-            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音乐 ({audioTasks.length})</button>
+            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频 ({audioTasks.length})</button>
           </div>
           {selected.size ? (
             <div className="selection-bar">
@@ -93,7 +93,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
               <button className="secondary-button" onClick={() => setSelected(new Set())}>取消选择</button>
             </div>
           ) : null}
-          {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : filter === "video" ? "视频" : "音乐"}记录`} onClick={() => onClear(filter)}><Trash2 size={16} />清空</button> : null}
+          {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : filter === "video" ? "视频" : "音频"}记录`} onClick={() => onClear(filter)}><Trash2 size={16} />清空</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
           <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
@@ -163,7 +163,7 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
   async function download() {
     if (!asset) return;
     setDownloading(true);
-    try { if (await api.downloadAsset(asset)) onToast("success", isVideo ? "视频已保存" : kind === "audio" ? "音乐已保存" : "图片已保存"); }
+    try { if (await api.downloadAsset(asset)) onToast("success", isVideo ? "视频已保存" : kind === "audio" ? "音频已保存" : "图片已保存"); }
     catch (error) { onToast("error", error instanceof Error ? error.message : "下载失败"); }
     finally { setDownloading(false); }
   }
@@ -178,7 +178,7 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
           <div className="history-audio-preview">
             {asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" /> : <Music size={76} />}
             <strong>{asset.title || task.prompt}</strong>
-            <audio src={api.assetUrl(asset.url)} controls autoPlay />
+            <audio src={api.assetUrl(asset.url)} controls controlsList="nodownload" autoPlay onContextMenu={(event) => event.preventDefault()} />
             {asset.lyrics ? (
               <details className="music-lyrics history-lyrics">
                 <summary>歌词</summary>
@@ -187,7 +187,7 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
             ) : null}
           </div>
         ) : isAssetVideo ? (
-          <video src={api.assetUrl(asset.url)} controls autoPlay loop disablePictureInPicture disableRemotePlayback />
+          <video src={api.assetUrl(asset.url)} controls controlsList="nodownload" autoPlay loop disablePictureInPicture disableRemotePlayback onContextMenu={(event) => event.preventDefault()} />
         ) : (
           <img src={api.assetUrl(asset.url)} alt="历史生成大图" />
         )}
@@ -200,7 +200,7 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
             return (
               <button key={item.id} type="button" className={`stage-thumb ${i === index ? "active" : ""}`} onClick={() => setIndex(i)}>
                 {thumbIsVideo
-                  ? <video src={api.assetUrl(item.url)} muted playsInline preload="metadata" />
+                  ? <video src={api.assetUrl(item.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
                   : thumbIsAudio
                     ? item.thumbUrl ? <img src={api.assetUrl(item.thumbUrl)} alt="" loading="lazy" /> : <Music size={16} />
                     : <img src={api.assetUrl(item.url)} alt={`结果 ${i + 1}`} loading="lazy" decoding="async" />}

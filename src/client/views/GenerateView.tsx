@@ -14,6 +14,7 @@ import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "../task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES } from "../../shared/types";
+import { isMidjourneyActionModel, midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import type { Asset, Channel, ImageSizeValue, Task, TaskStatus } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
@@ -59,6 +60,7 @@ export function GenerateView(props: {
   const [customWidth, setCustomWidth] = usePersistentState("customWidth", "1024");
   const [customHeight, setCustomHeight] = usePersistentState("customHeight", "1024");
   const [aspectRatio, setAspectRatio] = usePersistentState("aspectRatio", "auto");
+  const [mjVersion, setMjVersion] = usePersistentState("mjVersion", "");
   const [quality, setQuality] = usePersistentState("quality", "auto");
   const [background, setBackground] = usePersistentState<"auto" | "opaque" | "transparent">("background", "auto");
   const [outputFormat, setOutputFormat] = usePersistentState<"png" | "jpeg" | "webp">("outputFormat", "png");
@@ -83,7 +85,8 @@ export function GenerateView(props: {
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
-  const showAspectRatio = adapterType === "gemini-content";
+  const isMidjourney = adapterType === "midjourney";
+  const showAspectRatio = adapterType === "gemini-content" || isMidjourney;
   /**
    * 局部重绘：OpenAI Images 渠道 + 恰好一张底图。
    * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
@@ -104,6 +107,9 @@ export function GenerateView(props: {
     if (!channel) return props.onToast("error", "请先添加渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
+    if (isMidjourney && props.selectedModel === "mj_edits" && !referenceImages.length) {
+      return props.onToast("error", "mj_edits 需要先添加 1 张参考图；纯文生图请选 mj_imagine");
+    }
     let requestedSize = size === "auto" ? undefined : size;
     if (size === "custom") {
       requestedSize = customSize(customWidth, customHeight);
@@ -126,6 +132,7 @@ export function GenerateView(props: {
         // 不该让用户以为是他的配置有问题
         size: isOpenAi ? requestedSize : undefined,
         aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
+        midjourneyVersion: isMidjourney ? mjVersion || undefined : undefined,
         count,
         quality: quality === "auto" ? undefined : quality,
         outputFormat,
@@ -175,9 +182,11 @@ export function GenerateView(props: {
               value={props.selectedModel}
               disabled={!channel}
               onChange={props.onModelChange}
-              options={(channel?.models ?? []).map((model) => ({
-                value: model, model, channelName: channel?.name ?? "",
-              }))}
+              options={(channel?.models ?? [])
+                .filter((model) => !isMidjourney || !isMidjourneyActionModel(model))
+                .map((model) => ({
+                  value: model, model, channelName: channel?.name ?? "",
+                }))}
             />
           </label>
         </div>
@@ -198,6 +207,12 @@ export function GenerateView(props: {
                 </div>
               </div>
               <textarea className="prompt-input" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={20000} placeholder="输入画面内容、构图、风格与光线…" />
+              {isMidjourney ? (
+                <p className="mode-hint">
+                  提示词支持 Midjourney 原生参数（如 <code>--ar 16:9</code>、<code>--v 7</code>、<code>--no text</code>）；
+                  加参考图会自动走 mj_edits（只取第 1 张），否则走 mj_imagine。结果是一张四宫格。
+                </p>
+              ) : null}
               <div className="reference-block">
                 <div className="reference-heading">
                   <div><ImagePlus size={16} /><span>参考图</span></div>
@@ -271,17 +286,39 @@ export function GenerateView(props: {
                   <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
                   <label><span>响应格式</span><select value={responseFormat} onChange={(event) => setResponseFormat(event.target.value as typeof responseFormat)}><option value="auto">自动</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>
                 </> : null}
-                {showAspectRatio ? <>
+                {showAspectRatio ? (
                   <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label>
+                ) : null}
+                {adapterType === "gemini-content" ? (
                   <label><span>输出尺寸</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}><option value="auto">自动</option><option>1K</option><option>2K</option><option>4K</option></select></label>
-                </> : null}
+                ) : null}
+                {isMidjourney ? (
+                  <>
+                    <label>
+                      <span>模型版本 <small>--v</small></span>
+                      <select value={mjVersion} onChange={(event) => setMjVersion(event.target.value)}>
+                        <option value="">默认</option>
+                        <option value="8.2">8.2</option>
+                        <option value="7">7</option>
+                        <option value="6.1">6.1</option>
+                        <option value="6">6</option>
+                      </select>
+                    </label>
+                    <label className="mj-no-field">
+                      <span>排除内容 <small>--no</small></span>
+                      <input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="例如 text, watermark" />
+                    </label>
+                  </>
+                ) : null}
               </div>
 
               {/* 高级参数：默认折叠 */}
               <details className="advanced-panel">
                 <summary><Settings2 size={16} /><span>高级参数</span><ChevronRight className="details-chevron" size={16} /></summary>
                 <div className="advanced-body">
-                  <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
+                  {!isMidjourney ? (
+                    <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
+                  ) : null}
                   {isOpenAi ? <>
                     <div className="parameter-subtitle">OpenAI Images</div>
                     <div className="parameter-grid">
@@ -366,6 +403,8 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
+  const [actingCustomId, setActingCustomId] = useState<string | null>(null);
+  const midjourneyButtons = midjourneyUsableButtons(task?.remoteMeta?.midjourney?.buttons ?? []);
   /**
    * 预取当前结果图的字节。Ctrl+C 是用户手势，剪贴板写入要尽量在激活期内完成；
    * 等一次 fetch 再 write 有被浏览器判定「不是用户操作」的风险，所以先缓存。
@@ -452,6 +491,21 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
       setDownloadingAssetId(null);
     }
   }
+
+  async function midjourneyAct(button: MidjourneyButton) {
+    if (!task || actingCustomId) return;
+    setActingCustomId(button.customId);
+    try {
+      const next = await api.midjourneyAction(task.id, button.customId, midjourneyButtonLabel(button));
+      onTask(next);
+      onSelectTask(next);
+      onToast("success", `已提交 ${midjourneyButtonLabel(button)}，任务在后台继续`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "提交 Midjourney 操作失败");
+    } finally {
+      setActingCustomId(null);
+    }
+  }
   return (
     <section className="result-panel">
       <div className="result-toolbar">
@@ -487,6 +541,24 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
               ))}
             </div>
           ) : null}
+        </div>
+      ) : null}
+      {midjourneyButtons.length ? (
+        <div className="mj-actions" aria-label="Midjourney 后续操作">
+          {midjourneyButtons.map((button) => (
+            <button
+              key={button.customId}
+              type="button"
+              className="mj-action-button"
+              disabled={Boolean(actingCustomId)}
+              onClick={() => void midjourneyAct(button)}
+              title={midjourneyButtonLabel(button)}
+            >
+              {actingCustomId === button.customId ? <LoaderCircle className="spin" size={14} /> : null}
+              {button.emoji ? <span aria-hidden="true">{button.emoji}</span> : null}
+              {midjourneyButtonLabel(button)}
+            </button>
+          ))}
         </div>
       ) : null}
       {recentTasks.length ? (

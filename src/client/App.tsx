@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LoaderCircle, Minus, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  ImagePlus, KeyRound, LoaderCircle, Mic, Minus, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
   Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -18,6 +18,7 @@ import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
 import { MaskEditorDialog } from "./MaskEditorDialog";
 import { MusicGenerateView } from "./MusicGenerateView";
+import { SpeechGenerateView } from "./SpeechGenerateView";
 import { GenerateView } from "./views/GenerateView";
 import { ParamChips } from "./ParamChips";
 import { PromptPolishButton } from "./PromptPolishButton";
@@ -27,7 +28,7 @@ import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { LoadingScreen, StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "./task-ui";
-import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isAudioAdapter, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
+import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
 import { useInpaintMask, useReferenceImages } from "./hooks/useReferenceImages";
@@ -76,9 +77,12 @@ export function App() {
   const [videoModel, setVideoModel] = usePersistentState("videoModel", "");
   const [musicChannelId, setMusicChannelId] = usePersistentState("musicChannelId", "");
   const [musicModel, setMusicModel] = usePersistentState("musicModel", "");
+  const [speechChannelId, setSpeechChannelId] = usePersistentState("speechChannelId", "");
+  const [speechModel, setSpeechModel] = usePersistentState("speechModel", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeVideoTaskId, setActiveVideoTaskId] = useState<string | null>(null);
   const [activeMusicTaskId, setActiveMusicTaskId] = useState<string | null>(null);
+  const [activeSpeechTaskId, setActiveSpeechTaskId] = useState<string | null>(null);
   // 上次看过生成历史的时间点，比它新的任务算未读
   const [historySeenAt, setHistorySeenAt] = usePersistentState("historySeenAt", "");
   const [editorChannel, setEditorChannel] = useState<Channel | null | undefined>(undefined);
@@ -260,13 +264,19 @@ export function App() {
   // 对话渠道只是 Agent 的大脑，不出图也不出视频，所以生图 / 视频工作台都要排除它
   const imageChannels = channels.filter((channel) => isImageAdapter(channel.adapterType));
   const videoChannels = channels.filter((channel) => isVideoAdapter(channel.adapterType));
-  const audioChannels = channels.filter((channel) => isAudioAdapter(channel.adapterType));
+  // 音乐和配音都属于 audio 品类，但各自只认自己的适配器
+  const musicChannels = channels.filter((channel) => channel.adapterType === "suno-music");
+  const speechChannels = channels.filter((channel) => channel.adapterType === "gemini-tts");
   const imageTasks = tasks.filter((task) => taskKind(task, channels) === "image");
   const videoTasks = tasks.filter((task) => taskKind(task, channels) === "video");
   const audioTasks = tasks.filter((task) => taskKind(task, channels) === "audio");
+  const adapterOfTask = (task: Task) => channels.find((channel) => channel.id === task.channelId)?.adapterType;
+  const musicTasks = audioTasks.filter((task) => adapterOfTask(task) === "suno-music");
+  const speechTasks = audioTasks.filter((task) => adapterOfTask(task) === "gemini-tts");
   const activeTask = tasks.find((task) => task.id === activeTaskId) ?? null;
   const activeVideoTask = tasks.find((task) => task.id === activeVideoTaskId) ?? null;
   const activeMusicTask = tasks.find((task) => task.id === activeMusicTaskId) ?? null;
+  const activeSpeechTask = tasks.find((task) => task.id === activeSpeechTaskId) ?? null;
   const latestTaskActivity = latestActivity(tasks);
   const historyUnread = latestTaskActivity > historySeenAt;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
@@ -290,7 +300,8 @@ export function App() {
         setDefaultAssetsPath(data.service.defaultAssetsPath);
         const images = data.channels.filter((item) => isImageAdapter(item.adapterType));
         const videos = data.channels.filter((item) => isVideoAdapter(item.adapterType));
-        const musics = data.channels.filter((item) => isAudioAdapter(item.adapterType));
+        const musics = data.channels.filter((item) => item.adapterType === "suno-music");
+        const speeches = data.channels.filter((item) => item.adapterType === "gemini-tts");
         const firstImage = images.find((item) => item.id === selectedChannelId && item.enabled)
           ?? images.find((item) => item.enabled)
           ?? images[0];
@@ -312,15 +323,29 @@ export function App() {
           setMusicChannelId(firstMusic.id);
           setMusicModel(firstMusic.models.includes(musicModel) ? musicModel : firstMusic.models[0] ?? "");
         }
+        const firstSpeech = speeches.find((item) => item.id === speechChannelId && item.enabled)
+          ?? speeches.find((item) => item.enabled)
+          ?? speeches[0];
+        if (firstSpeech) {
+          setSpeechChannelId(firstSpeech.id);
+          setSpeechModel(firstSpeech.models.includes(speechModel) ? speechModel : firstSpeech.models[0] ?? "");
+        }
         const imageHistory = data.tasks.filter((task) => taskKind(task, data.channels) === "image");
         const videoHistory = data.tasks.filter((task) => taskKind(task, data.channels) === "video");
         const latestImage = imageHistory.find((task) => task.status === "succeeded") ?? imageHistory[0];
         if (latestImage) setActiveTaskId(latestImage.id);
         const latestVideo = videoHistory.find((task) => task.status === "succeeded") ?? videoHistory[0];
         if (latestVideo) setActiveVideoTaskId(latestVideo.id);
-        const musicHistory = data.tasks.filter((task) => taskKind(task, data.channels) === "audio");
+        const musicHistory = data.tasks.filter((task) =>
+          taskKind(task, data.channels) === "audio"
+          && data.channels.find((channel) => channel.id === task.channelId)?.adapterType === "suno-music");
         const latestMusic = musicHistory.find((task) => task.status === "succeeded") ?? musicHistory[0];
         if (latestMusic) setActiveMusicTaskId(latestMusic.id);
+        const speechHistory = data.tasks.filter((task) =>
+          taskKind(task, data.channels) === "audio"
+          && data.channels.find((channel) => channel.id === task.channelId)?.adapterType === "gemini-tts");
+        const latestSpeech = speechHistory.find((task) => task.status === "succeeded") ?? speechHistory[0];
+        if (latestSpeech) setActiveSpeechTaskId(latestSpeech.id);
         // 首次启动把手上已有的历史视为已读，避免一打开就顶着未读小红点
         setHistorySeenAt((current) => current || latestActivity(data.tasks));
       })
@@ -362,6 +387,12 @@ export function App() {
     setMusicModel(channel?.models[0] ?? "");
   }
 
+  function selectSpeechChannel(id: string) {
+    const channel = channels.find((item) => item.id === id);
+    setSpeechChannelId(id);
+    setSpeechModel(channel?.models[0] ?? "");
+  }
+
   async function refreshTasks() {
     try { setTasks(await api.tasks()); } catch (error) { showToast("error", error instanceof Error ? error.message : "刷新失败"); }
   }
@@ -387,7 +418,14 @@ export function App() {
       }
       return;
     }
-    if (isAudioAdapter(channel.adapterType)) {
+    if (channel.adapterType === "gemini-tts") {
+      if (!speechChannelId || speechChannelId === channel.id) {
+        setSpeechChannelId(channel.id);
+        setSpeechModel(channel.models[0] ?? "");
+      }
+      return;
+    }
+    if (channel.adapterType === "suno-music") {
       if (!musicChannelId || musicChannelId === channel.id) {
         setMusicChannelId(channel.id);
         setMusicModel(channel.models[0] ?? "");
@@ -423,9 +461,14 @@ export function App() {
       setVideoModel(next?.models[0] ?? "");
     }
     if (musicChannelId === id) {
-      const next = remaining.find((item) => isAudioAdapter(item.adapterType));
+      const next = remaining.find((item) => item.adapterType === "suno-music");
       setMusicChannelId(next?.id ?? "");
       setMusicModel(next?.models[0] ?? "");
+    }
+    if (speechChannelId === id) {
+      const next = remaining.find((item) => item.adapterType === "gemini-tts");
+      setSpeechChannelId(next?.id ?? "");
+      setSpeechModel(next?.models[0] ?? "");
     }
   }
 
@@ -460,7 +503,7 @@ export function App() {
     if (!target.length) return;
     const label = scope === "image" ? "生图记录"
       : scope === "video" ? "视频记录"
-      : scope === "audio" ? "音乐记录"
+      : scope === "audio" ? "音频记录"
       : "记录";
     setClearRequest({ mode: "scope", scope, count: target.length, label, tasks: target });
   }
@@ -615,6 +658,7 @@ export function App() {
           <NavButton active={view === "generate"} icon={<ImageIcon size={16} />} label="图片生成" onClick={() => { dismissWelcome(); setView("generate"); }} />
           <NavButton active={view === "video"} icon={<Film size={16} />} label="视频生成" onClick={() => { dismissWelcome(); setView("video"); }} />
           <NavButton active={view === "music"} icon={<Music size={16} />} label="音乐生成" onClick={() => { dismissWelcome(); setView("music"); }} />
+          <NavButton active={view === "speech"} icon={<Mic size={16} />} label="语音生成" onClick={() => { dismissWelcome(); setView("speech"); }} />
           <NavButton active={view === "history"} icon={<History size={16} />} label="历史记录" unread={historyUnread} onClick={() => { dismissWelcome(); setView("history"); }} />
           <NavButton active={view === "channels"} icon={<Plug size={16} />} label="模型设置" onClick={() => { dismissWelcome(); setView("channels"); }} />
         </nav>
@@ -732,11 +776,11 @@ export function App() {
         ) : null}
         {!loading && view === "music" ? (
           <MusicGenerateView
-            channels={audioChannels}
+            channels={musicChannels}
             selectedChannelId={musicChannelId}
             selectedModel={musicModel}
             activeTask={activeMusicTask}
-            tasks={audioTasks}
+            tasks={musicTasks}
             onChannelChange={selectMusicChannel}
             onModelChange={setMusicModel}
             onAddChannel={() => setWizardOpen(true)}
@@ -746,6 +790,26 @@ export function App() {
               setActiveMusicTaskId(task.id);
             }}
             onSelectTask={(task) => setActiveMusicTaskId(task.id)}
+            onToast={showToast}
+            onDiagnostics={setDiagnosticTask}
+          />
+        ) : null}
+        {!loading && view === "speech" ? (
+          <SpeechGenerateView
+            channels={speechChannels}
+            selectedChannelId={speechChannelId}
+            selectedModel={speechModel}
+            activeTask={activeSpeechTask}
+            tasks={speechTasks}
+            onChannelChange={selectSpeechChannel}
+            onModelChange={setSpeechModel}
+            onAddChannel={() => setWizardOpen(true)}
+            onConfigureChannel={(channel) => setEditorChannel(channel)}
+            onTask={(task) => {
+              setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+              setActiveSpeechTaskId(task.id);
+            }}
+            onSelectTask={(task) => setActiveSpeechTaskId(task.id)}
             onToast={showToast}
             onDiagnostics={setDiagnosticTask}
           />
