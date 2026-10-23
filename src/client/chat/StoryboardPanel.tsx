@@ -273,7 +273,7 @@ export function StoryboardPanel({
 
         <label
           className="storyboard-reference"
-          title="多镜之间保持同一个人物。自动 = 用镜号最小、已经有结果的图片镜头；也可以指定任意一张本会话的图。"
+          title="多镜之间保持同一个人物。自动 = 优先用有人物、已经有结果的图片镜头；也可以指定任意一张本会话的图。多人物剧本请按人物分批：先选该人物的参考图，再只勾选他的镜头重跑，不要把一个人的参考套到所有人物镜头上。"
         >
           {reference?.asset
             ? <img src={api.assetUrl(reference.asset.thumbUrl ?? reference.asset.url)} alt="" />
