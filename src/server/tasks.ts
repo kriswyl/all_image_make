@@ -21,7 +21,7 @@ import {
   type AsyncResult,
 } from "./async-providers.js";
 import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
-import { writeThumbnail } from "./vision.js";
+import { detectImageMime, writeThumbnail } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -654,11 +654,17 @@ export class TaskRunner {
     for (const image of images.slice(0, 8)) {
       const resolved = await this.resolveImage(image, channel);
       if (resolved.bytes.length > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
-      if (!resolved.mimeType.startsWith("image/")) throw new AppError("ASSET_INVALID", "响应内容不是图片", 502);
+      /*
+       * 以字节头为准。Gemini 的 inlineData 经常把 JPEG 标成 image/png，
+       * 之前按声明存成 .png 后，再把这张图当参考图发出去就会被
+       * 「参考图格式与文件内容不匹配」拦住——整批分镜全挂。
+       */
+      const mimeType = detectImageMime(resolved.bytes) ?? resolved.mimeType;
+      if (!mimeType.startsWith("image/")) throw new AppError("ASSET_INVALID", "响应内容不是图片", 502);
       const sha256 = crypto.createHash("sha256").update(resolved.bytes).digest("hex");
       if (seenHashes.has(sha256)) continue;
       seenHashes.add(sha256);
-      const extension = extensionForMime(resolved.mimeType);
+      const extension = extensionForMime(mimeType);
       const id = crypto.randomUUID();
       const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
       const absolutePath = path.join(baseDir, fileName);
@@ -667,7 +673,7 @@ export class TaskRunner {
       // 「用的时候再缩」会让每一轮都白等一次解码。失败不抛异常，静默留空
       const thumbPath = await writeThumbnail(this.db, id, resolved.bytes);
       this.db.insertAsset({
-        id, taskId, fileName, mimeType: resolved.mimeType, byteSize: resolved.bytes.length,
+        id, taskId, fileName, mimeType, byteSize: resolved.bytes.length,
         relativePath: fileName, baseDir, sha256, thumbPath,
       });
       saved += 1;
@@ -913,11 +919,7 @@ function inlineMediaSize(input: GenerationInput) {
 }
 
 export function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
-  if (mimeType === "image/png") {
-    return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  }
-  if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-  return bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+  return detectImageMime(bytes) === mimeType;
 }
 
 export class AppError extends Error {

@@ -47,6 +47,24 @@ export interface EncodeProfile {
 
 /** 图生图的参考图：画质优先，只在超过 10MB 时才动它 */
 export const REFERENCE_PROFILE: EncodeProfile = { maxEdge: 2048, maxBytes: MAX_REFERENCE_BYTES, quality: 92 };
+
+/**
+ * 按字节头判断真实图片类型。
+ *
+ * Gemini 的 inlineData 经常把 JPEG 标成 `image/png`（实测 base64 以 `/9j/` 开头），
+ * 直接用声明的 mimeType 去发给上游，会在「参考图格式与文件内容不匹配」那道校验上炸掉。
+ * 所以落盘和当参考图之前都以字节为准。
+ */
+export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return null;
+}
 /** 视频首帧：必须挤进内容长度限制，1280 对绝大多数视频模型已经够用 */
 export const VIDEO_FRAME_PROFILE: EncodeProfile = { maxEdge: 1280, maxBytes: MAX_INLINE_FRAME_BYTES, quality: 90 };
 
@@ -175,9 +193,10 @@ export async function readThumbBytes(db: AppDatabase, asset: AssetRow): Promise<
 export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profile: EncodeProfile): Promise<EncodedImage | null> {
   const original = await readFileOrNull(assetAbsolutePath(db, asset));
   if (!original) return null;
-  const passThrough = asset.mimeType === "image/png" || asset.mimeType === "image/jpeg" || asset.mimeType === "image/webp";
-  if (passThrough && original.length <= profile.maxBytes) {
-    return { bytes: original, mimeType: asset.mimeType as EncodedImage["mimeType"], fileName: asset.fileName };
+  // 以字节为准：老资产可能声明 image/png、实际是 JPEG
+  const actualMime = detectImageMime(original);
+  if (actualMime && original.length <= profile.maxBytes) {
+    return { bytes: original, mimeType: actualMime, fileName: asset.fileName };
   }
 
   const image = await decode(original);

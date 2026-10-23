@@ -21,6 +21,8 @@ import { MAX_SCRIPT_CHARS } from "../src/shared/storyboard";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const pngBytes = Buffer.from(pngBase64, "base64");
+/** 1×1 JPEG：Gemini 经常把这种字节标成 image/png，用来复现「参考图格式与文件内容不匹配」 */
+const jpegBase64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EH//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EH//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EH//2Q==";
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
@@ -380,7 +382,8 @@ describe("脚本文档与分镜表", () => {
       req.on("end", () => {
         hits.push({ url: req.url ?? "", body: Buffer.concat(chunks) });
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+        // 故意返回 JPEG 字节（上游常把它标成 image/png）：参考图链路必须按字节识别
+        res.end(JSON.stringify({ data: [{ b64_json: jpegBase64 }] }));
       });
     });
     await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
@@ -405,8 +408,8 @@ describe("脚本文档与分镜表", () => {
 
     // 1. 生成角色 / 场景设定图
     let view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
-      characters: Array<{ id: string; name: string; asset: { id: string } | null; status: string; confirmed: boolean }>;
-      scenes: Array<{ id: string; name: string; asset: { id: string } | null; status: string; confirmed: boolean }>;
+      characters: Array<{ id: string; name: string; asset: { id: string; mimeType: string } | null; status: string; confirmed: boolean }>;
+      scenes: Array<{ id: string; name: string; asset: { id: string; mimeType: string } | null; status: string; confirmed: boolean }>;
       shots: Array<{ id: string; character: string; asset: { id: string } | null }>;
     };
     expect(view.characters.map((item) => item.name)).toEqual(["林昭", "少女"]);
@@ -422,6 +425,9 @@ describe("脚本文档与分镜表", () => {
     }
     expect(view.characters.every((item) => item.asset && !item.confirmed)).toBe(true);
     expect(view.scenes.every((item) => item.asset && !item.confirmed)).toBe(true);
+    // JPEG 字节被正确识别，而不是沿用上游声明的 image/png
+    expect(view.characters.every((item) => item.asset?.mimeType === "image/jpeg")).toBe(true);
+    expect(view.scenes.every((item) => item.asset?.mimeType === "image/jpeg")).toBe(true);
 
     // 未确认时生成分镜必须被拒绝，且错误里带名字
     const blocked = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
