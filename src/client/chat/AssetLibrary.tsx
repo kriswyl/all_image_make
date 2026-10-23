@@ -44,6 +44,7 @@ export function AssetLibrary({
   onRemoveFromCanvas,
   onSetFirst,
   onSetLast,
+  initialTab = "all",
 }: {
   open: boolean;
   assets: CanvasAsset[];
@@ -54,8 +55,10 @@ export function AssetLibrary({
   onRemoveFromCanvas: (assetIds: string[]) => void;
   onSetFirst: (assetId: string) => void;
   onSetLast: (assetId: string) => void;
+  /** 从画布条的「管理」打开时直接落在「画布」页 */
+  initialTab?: Tab;
 }) {
-  const [tab, setTab] = useState<Tab>("all");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("newest");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
@@ -64,8 +67,8 @@ export function AssetLibrary({
     if (!open) return;
     setSelected(new Set());
     setQuery("");
-    setTab("all");
-  }, [open]);
+    setTab(initialTab);
+  }, [open, initialTab]);
 
   useEffect(() => {
     if (!open) return;

@@ -12,7 +12,7 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Clapperboard, Eye, EyeOff, Film, Images, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Clapperboard, Eye, EyeOff, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -114,10 +114,14 @@ export function ChatView({
   /** 默认生图 / 生视频模型（需求.md 问题 5），空串表示不指定、用类目里第一个 */
   const [defaults, setDefaults] = useState({ image: "", video: "", audio: "" });
   const [preview, setPreview] = useState<string | null>(null);
-  /** 画布条默认收起：平时只靠对话，需要挑图时从会话头那个开关展开 */
-  const [canvasOpen, setCanvasOpen] = useState(false);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<"all" | "canvas">("all");
+
+  function openLibrary(tab: "all" | "canvas" = "all") {
+    setLibraryTab(tab);
+    setLibraryOpen(true);
+  }
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
@@ -524,26 +528,6 @@ export function ChatView({
     }, CANVAS_PATCH_DEBOUNCE_MS);
   }
 
-  /** 点一张图：在画布里就移出，不在就加到**末尾**（顺序就是画布序号） */
-  function toggleCanvas(assetId: string) {
-    if (!view) return;
-    const ids = view.canvasAssetIds;
-    const next = ids.includes(assetId) ? ids.filter((id) => id !== assetId) : [...ids, assetId];
-    if (next.length > MAX_CANVAS_IMAGES) {
-      toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，先移出一张再加`);
-      return;
-    }
-    writeCanvas(next);
-  }
-
-  /** 把某张提到 `[0]`：只调整画布顺序；用哪张由用户指令和助手的选择决定 */
-  function promoteCanvas(assetId: string) {
-    if (!view) return;
-    const ids = view.canvasAssetIds;
-    if (!ids.includes(assetId) || ids[0] === assetId) return;
-    writeCanvas([assetId, ...ids.filter((id) => id !== assetId)]);
-  }
-
   /** 设为首帧：移到画布第 1 位；不在画布里就加进来 */
   function setCanvasFirst(assetId: string) {
     if (!view) return;
@@ -947,20 +931,10 @@ export function ChatView({
                   type="button"
                   className="chat-control chat-toggle"
                   title="打开素材库：筛选、搜索、批量选图，设为首帧 / 尾帧"
-                  onClick={() => setLibraryOpen(true)}
+                  onClick={() => openLibrary("all")}
                 >
                   <Images size={13} />
                   素材 {sessionImages.length}
-                </button>
-
-                <button
-                  type="button"
-                  className={`chat-control chat-toggle ${canvasOpen ? "is-on" : ""}`}
-                  title={canvasOpen ? "收起画布条" : "展开画布条：挑哪几张一起改图、哪张当视频首帧"}
-                  onClick={() => setCanvasOpen((open) => !open)}
-                >
-                  <Layers size={13} />
-                  画布 {canvasImages.length}
                 </button>
 
                 <button
@@ -1087,19 +1061,15 @@ export function ChatView({
               />
             ) : null}
 
-            {canvasOpen && sessionImages.length ? (
+            {canvasImages.length ? (
               <div className="chat-canvas">
-                {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是第 1 张。
-                    标题行那枚药丸负责说清画布和这一行的关系，详情挂 tooltip */}
                 <div className="canvas-panel">
                   <AssetStrip
                     assets={sessionImages}
                     canvasIds={canvasImages.map((asset) => asset.id)}
-                    onToggle={toggleCanvas}
                     onPreview={setPreview}
-                    onPromote={promoteCanvas}
+                    onOpenLibrary={() => openLibrary("canvas")}
                     onClear={() => writeCanvas([])}
-                    onOpenLibrary={() => setLibraryOpen(true)}
                   />
                 </div>
               </div>
@@ -1189,6 +1159,7 @@ export function ChatView({
         onRemoveFromCanvas={removeCanvasBatch}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
+        initialTab={libraryTab}
       />
 
       {preview ? (

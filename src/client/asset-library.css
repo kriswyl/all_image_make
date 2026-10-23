@@ -252,3 +252,86 @@
 /* 灯箱底部动作变多以后允许换行，不要挤成一条 */
 .chat-lightbox-actions { flex-wrap: wrap; justify-content: flex-end; }
 .chat-lightbox-bar { flex-wrap: wrap; }
+
+/* ── 极简画布条：一行缩略图 + 管理入口 ────────────────────────────────── */
+.canvas-bar { padding: 2px 0 0; }
+.canvas-bar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.canvas-bar-title { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-soft); font-size: 11.5px; font-weight: 650; }
+.canvas-bar-title svg { color: var(--muted); }
+.canvas-bar-roles {
+  min-width: 0;
+  overflow: hidden;
+  padding: 1px 7px;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.canvas-bar-manage {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 8px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 10.5px;
+}
+.canvas-bar-manage:hover { color: var(--ink); background: var(--surface-soft); }
+.canvas-bar-clear {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  font-size: 10.5px;
+}
+.canvas-bar-clear:hover { color: var(--coral); }
+.canvas-bar-items { display: flex; gap: 8px; padding-bottom: 2px; overflow-x: auto; }
+.canvas-bar-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  cursor: zoom-in;
+}
+.canvas-bar-thumb:hover { border-color: var(--line-strong); }
+.canvas-bar-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.canvas-bar-order {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  display: inline-grid;
+  min-width: 14px;
+  height: 14px;
+  place-items: center;
+  padding: 0 3px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.canvas-bar-role {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0 2px;
+  color: #fff;
+  background: rgba(0, 0, 0, .62);
+  font-size: 8.5px;
+  line-height: 1.3;
+  text-align: center;
+}
+.canvas-bar-role.is-last { background: rgba(37, 99, 235, .78); }
+.canvas-bar-role.is-ref { background: rgba(0, 0, 0, .5); }
