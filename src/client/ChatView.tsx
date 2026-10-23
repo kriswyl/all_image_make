@@ -12,7 +12,7 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Clapperboard, Eye, EyeOff, Film, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Clapperboard, Eye, EyeOff, Film, Images, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -37,6 +37,7 @@ import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
 import { StoryboardPanel } from "./chat/StoryboardPanel";
+import { AssetLibrary } from "./chat/AssetLibrary";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
 
@@ -116,6 +117,7 @@ export function ChatView({
   /** 画布条默认收起：平时只靠对话，需要挑图时从会话头那个开关展开 */
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
@@ -542,6 +544,51 @@ export function ChatView({
     writeCanvas([assetId, ...ids.filter((id) => id !== assetId)]);
   }
 
+  /** 设为首帧：移到画布第 1 位；不在画布里就加进来 */
+  function setCanvasFirst(assetId: string) {
+    if (!view) return;
+    const ids = view.canvasAssetIds.filter((id) => id !== assetId);
+    const next = [assetId, ...ids].slice(0, MAX_CANVAS_IMAGES);
+    if (next.length < ids.length + 1) toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，最后一张被移出了`);
+    writeCanvas(next);
+    toast("ok", "已设为首帧");
+  }
+
+  /** 设为尾帧：放到画布第 2 位；画布为空时先把它加进来 */
+  function setCanvasLast(assetId: string) {
+    if (!view) return;
+    const current = view.canvasAssetIds;
+    if (!current.length) {
+      writeCanvas([assetId]);
+      toast("ok", "已加入画布；再选一张设为首帧");
+      return;
+    }
+    if (current.length === 1 && current[0] === assetId) {
+      toast("error", "这已经是唯一一张，先再选一张首帧");
+      return;
+    }
+    const without = current.filter((id) => id !== assetId);
+    const next = [without[0]!, assetId, ...without.slice(1)].slice(0, MAX_CANVAS_IMAGES);
+    writeCanvas(next);
+    toast("ok", "已设为尾帧");
+  }
+
+  function addCanvasBatch(assetIds: string[]) {
+    if (!view || !assetIds.length) return;
+    const current = view.canvasAssetIds;
+    const additions = assetIds.filter((id) => !current.includes(id));
+    const room = Math.max(0, MAX_CANVAS_IMAGES - current.length);
+    if (!additions.length) return;
+    writeCanvas([...current, ...additions.slice(0, room)]);
+    if (additions.length > room) toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，多的没有加入`);
+  }
+
+  function removeCanvasBatch(assetIds: string[]) {
+    if (!view || !assetIds.length) return;
+    const remove = new Set(assetIds);
+    writeCanvas(view.canvasAssetIds.filter((id) => !remove.has(id)));
+  }
+
   /**
    * 往会话里传图（需求.md 问题 4）。
    *
@@ -898,6 +945,16 @@ export function ChatView({
 
                 <button
                   type="button"
+                  className="chat-control chat-toggle"
+                  title="打开素材库：筛选、搜索、批量选图，设为首帧 / 尾帧"
+                  onClick={() => setLibraryOpen(true)}
+                >
+                  <Images size={13} />
+                  素材 {sessionImages.length}
+                </button>
+
+                <button
+                  type="button"
                   className={`chat-control chat-toggle ${canvasOpen ? "is-on" : ""}`}
                   title={canvasOpen ? "收起画布条" : "展开画布条：挑哪几张一起改图、哪张当视频首帧"}
                   onClick={() => setCanvasOpen((open) => !open)}
@@ -1042,6 +1099,7 @@ export function ChatView({
                     onPreview={setPreview}
                     onPromote={promoteCanvas}
                     onClear={() => writeCanvas([])}
+                    onOpenLibrary={() => setLibraryOpen(true)}
                   />
                 </div>
               </div>
@@ -1051,7 +1109,9 @@ export function ChatView({
               running={running}
               uploading={uploading}
               placeholder={canvasImages.length
-                ? `当前画布 ${canvasImages.length > 1 ? `${canvasImages.length} 张（第 1 张 ${assetRef(canvasImages[0]!.id)}）` : assetRef(canvasImages[0]!.id)}，直接说怎么改…`
+                ? canvasImages.length > 1
+                  ? `画布 ${canvasImages.length} 张（① 首帧 ${assetRef(canvasImages[0]!.id)} / ② 尾帧${canvasImages[1] ? ` ${assetRef(canvasImages[1].id)}` : ""}${canvasImages.length > 2 ? " / 其余参考" : ""}），直接说怎么改…`
+                  : `画布 1 张（① 首帧 / 主图 ${assetRef(canvasImages[0]!.id)}），直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
               leftSlot={(
                 <>
@@ -1119,8 +1179,30 @@ export function ChatView({
         )}
       </section>
 
+      <AssetLibrary
+        open={libraryOpen}
+        assets={sessionImages}
+        canvasIds={canvasImages.map((asset) => asset.id)}
+        onClose={() => setLibraryOpen(false)}
+        onPreview={setPreview}
+        onAddToCanvas={addCanvasBatch}
+        onRemoveFromCanvas={removeCanvasBatch}
+        onSetFirst={setCanvasFirst}
+        onSetLast={setCanvasLast}
+      />
+
       {preview ? (
-        <AssetLightbox assetId={preview} asset={previewAsset} onClose={() => setPreview(null)} onToast={toast} />
+        <AssetLightbox
+          assetId={preview}
+          asset={previewAsset}
+          onClose={() => setPreview(null)}
+          onToast={toast}
+          onSetFirst={setCanvasFirst}
+          onSetLast={setCanvasLast}
+          onAddToCanvas={(assetId) => addCanvasBatch([assetId])}
+          onRemoveFromCanvas={(assetId) => removeCanvasBatch([assetId])}
+          inCanvas={Boolean(view?.canvasAssetIds.includes(preview))}
+        />
       ) : null}
     </div>
   );

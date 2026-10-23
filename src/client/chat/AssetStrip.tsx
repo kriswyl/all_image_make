@@ -1,16 +1,9 @@
 /**
- * 画布条（AGENT_PLAN.md §10）。
+ * 画布条（瘦身版）。
  *
- * **每张图只出现一次**：一行放着本会话的全部图，点一下给它打上「在画布里」的记号，
- * 记号带序号，① 是画布第 1 张（排序和展示用；助手会按用户指令选图，不再默认用它）。
- * 副标题那枚浅紫药丸说清这一行和画布的关系——「画布 3 张 · 一起当参考图 · 生视频用 #c904 当首帧」。
- *
- * 为什么不再分上下两段：一开始是「上段当前画布 / 下段本会话的图」两个框，好处是
- * 「哪几张参与下一步」一眼可见，代价是**同一张图会同时出现在两段里**（截图里 3 张图
- * 上下各一份），点了之后行会跳、还要在两处之间来回看。用户的原话是
- * 「所有图只展示一次，点一下，被标记的就是当前画布的」——记号和序号能做到同样的事，
- * 而且不重复占位。画布和本会话的区别仍然说得明明白白：计数分成「全部 N 张」和
- * 「画布 N 张」两个词，谁是谁不会读错。
+ * 只展示「画布里的图」和「最近几张」，不再把本会话 30 张图全铺成一条传送带。
+ * 全部素材在右侧的素材库抽屉里找；这里的序号直接翻译成生视频时看得懂的角色：
+ * ① 首帧、② 尾帧、③ 以后是参考图。
  */
 import { ImageOff, Layers, Upload, X } from "lucide-react";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
@@ -42,6 +35,15 @@ function Thumb({ asset, size }: { asset: Asset; size: number }) {
   );
 }
 
+function roleLabel(position: number): string {
+  if (position === 0) return "首帧";
+  if (position === 1) return "尾帧";
+  return "参考";
+}
+
+const RECENT_WHEN_CANVAS = 3;
+const RECENT_WITHOUT_CANVAS = 6;
+
 export function AssetStrip({
   assets,
   canvasIds,
@@ -49,40 +51,108 @@ export function AssetStrip({
   onPreview,
   onPromote,
   onClear,
+  onOpenLibrary,
 }: {
   assets: CanvasAsset[];
   /** 画布里的图 id，**有序**——下标就是缩略图上的序号，`[0]` 是第 1 张 */
   canvasIds: string[];
-  /** 点一下：不在画布里就加到末尾，在画布里就移出 */
   onToggle: (assetId: string) => void;
   onPreview: (assetId: string) => void;
-  /** 把某张提到 `[0]`：只调整画布顺序；具体用哪张由用户指令和助手的选择决定 */
   onPromote: (assetId: string) => void;
   onClear: () => void;
+  onOpenLibrary: () => void;
 }) {
-  // 序号从这张表里查，而不是数「前面有几张在画布里」——画布顺序是用户点选顺序，
-  // 和 assets 的时间顺序无关，数出来的序号会和药丸上写的对不上
   const positions = new Map(canvasIds.map((id, index) => [id, index]));
   const canvasCount = canvasIds.length;
+  const canvasEntries = canvasIds
+    .map((id) => assets.find((entry) => entry.asset.id === id))
+    .filter((entry): entry is CanvasAsset => Boolean(entry));
+  const recentEntries = assets
+    .filter((entry) => !positions.has(entry.asset.id))
+    .slice(-(canvasCount ? RECENT_WHEN_CANVAS : RECENT_WITHOUT_CANVAS))
+    .reverse();
+  const shown = [...canvasEntries, ...recentEntries];
+  const hiddenCount = assets.length - shown.length;
   const primaryRef = canvasCount ? assetRef(canvasIds[0]!) : "";
+
+  function renderEntry(entry: CanvasAsset) {
+    const position = positions.get(entry.asset.id) ?? -1;
+    const inCanvas = position >= 0;
+    const uploaded = entry.source === "upload";
+    const origin = uploaded ? "你自己传的"
+      : entry.source === "storyboard" ? `分镜第 ${entry.round} 镜`
+        : entry.source === "setting" ? "角色 / 场景设定图"
+          : `第 ${entry.round} 轮`;
+    const role = inCanvas ? roleLabel(position) : "";
+    const action = inCanvas
+      ? `画布第 ${position + 1} 张（${role}） · 单击移出，双击看大图`
+      : "单击加入画布，双击看大图";
+    return (
+      <div key={entry.asset.id} className={`asset-strip-item ${inCanvas ? "is-in-canvas" : ""} ${position === 0 ? "is-primary" : ""}`}>
+        <button
+          type="button"
+          className="asset-strip-thumb"
+          title={`${assetRef(entry.asset.id)} · ${origin} · ${action}（也可以直接拖到下面的输入框）`}
+          onClick={() => onToggle(entry.asset.id)}
+          onDoubleClick={() => onPreview(entry.asset.id)}
+          draggable
+          onDragStart={(event) => event.dataTransfer.setData(ASSET_DRAG_TYPE, entry.asset.id)}
+        >
+          <Thumb asset={entry.asset} size={48} />
+          {uploaded ? <span className="asset-strip-origin" title="你自己上传的图"><Upload size={9} /></span> : null}
+          {inCanvas ? (
+            <span className="asset-strip-order" title={`画布第 ${position + 1} 张`}>
+              {position + 1}
+            </span>
+          ) : null}
+        </button>
+        <div className="asset-strip-foot">
+          <span className="asset-strip-ref">{assetRef(entry.asset.id)}</span>
+          {inCanvas ? <span className={`asset-strip-role is-${role === "参考" ? "ref" : role === "尾帧" ? "last" : "first"}`}>{role}</span> : null}
+          {inCanvas && position !== 0 ? (
+            <button
+              type="button"
+              className="asset-strip-promote"
+              onClick={() => onPromote(entry.asset.id)}
+              title="移到画布第 1 张（首帧）"
+            >
+              移前
+            </button>
+          ) : null}
+          {inCanvas ? (
+            <button
+              type="button"
+              className="asset-strip-remove"
+              onClick={() => onToggle(entry.asset.id)}
+              title="移出画布（图还在本会话里）"
+            >
+              <X size={11} />
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <section className="canvas-section">
       <div className="canvas-section-head">
         <span className="canvas-section-title">
           <Layers size={13} />
-          本会话的图（全部 {assets.length} 张）
+          素材 {assets.length} 张{canvasCount ? ` · 画布 ${canvasCount} 张` : ""}
         </span>
         {canvasCount ? (
           <span
             className="canvas-section-summary"
-            title={`这 ${canvasCount} 张会一起作为参考图发给改图模型；生视频用 ${primaryRef} 当首帧${canvasCount > 1 ? "，其余几张不发给视频模型" : ""}。`}
+            title={`画布顺序就是生视频时的角色：① 首帧、② 尾帧、③ 以后是参考图。${canvasCount > 1 ? `当前用 ${primaryRef} 当首帧。` : ""}`}
           >
-            画布 {canvasCount} 张 · 一起当参考图 · 生视频用 {primaryRef} 当首帧
+            {Array.from({ length: Math.min(canvasCount, 4) }, (_, index) => `${"①②③④"[index]}${roleLabel(index)}`).join(" · ")}
+            {canvasCount > 4 ? ` · 其余参考` : ""}
           </span>
-        ) : assets.length ? (
-          <span className="canvas-section-hint">点一下加入画布 · 双击看大图</span>
         ) : null}
+        <button type="button" className="canvas-section-library" onClick={onOpenLibrary}>
+          查看全部
+        </button>
         {canvasCount ? (
           <button type="button" className="canvas-section-clear" onClick={onClear} title="把画布清空（图都还在本会话里）">
             清空
@@ -91,73 +161,14 @@ export function AssetStrip({
       </div>
       {assets.length ? (
         <div className="asset-strip-row">
-          {assets.map(({ asset, round, source }) => {
-            const position = positions.get(asset.id) ?? -1;
-            const inCanvas = position >= 0;
-            const primary = position === 0;
-            const uploaded = source === "upload";
-            // 上传的图没有「第几轮」，写成第 N 轮会让用户以为它也是生成出来的
-            const origin = uploaded ? "你自己传的"
-              : source === "storyboard" ? `分镜第 ${round} 镜`
-                : source === "setting" ? "角色 / 场景设定图"
-                  : `第 ${round} 轮`;
-            // 动作说明挂在缩略图自己的 tooltip 上：指到哪张就说哪张，比在标题行写一句
-            // 「点一下加入/移出画布」更容易在**想动手的那一刻**被看见
-            const action = inCanvas
-              ? `画布第 ${position + 1} 张${primary ? "（主图）" : ""} · 单击移出，双击看大图`
-              : "单击加入画布，双击看大图";
-            return (
-              <div
-                key={asset.id}
-                className={`asset-strip-item ${inCanvas ? "is-in-canvas" : ""} ${primary ? "is-primary" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="asset-strip-thumb"
-                  title={`${assetRef(asset.id)} · ${origin} · ${action}（也可以直接拖到下面的输入框）`}
-                  onClick={() => onToggle(asset.id)}
-                  onDoubleClick={() => onPreview(asset.id)}
-                  // 拖进输入框：带的是产物 id，不是文件——它已经在会话里了，不必再传一遍
-                  draggable
-                  onDragStart={(event) => event.dataTransfer.setData(ASSET_DRAG_TYPE, asset.id)}
-                >
-                  <Thumb asset={asset} size={44} />
-                  {/* 来源标记：上传的和生成的放在一起，不给标记就分不出哪张是要花钱的产物 */}
-                  {uploaded ? <span className="asset-strip-origin" title="你自己上传的图"><Upload size={9} /></span> : null}
-                  {/* 序号 = 画布里的位置，① 就是第 1 张；不在画布里就没有序号，这也就是「标记」本身 */}
-                  {inCanvas ? (
-                    <span className="asset-strip-order" title={primary ? "画布第 1 张（只能用来排序；助手会按你的指令选图）" : `画布第 ${position + 1} 张`}>
-                      {position + 1}
-                    </span>
-                  ) : null}
-                  {primary ? <span className="asset-strip-primary">主图</span> : null}
-                </button>
-                <div className="asset-strip-foot">
-                  <span className="asset-strip-ref">{assetRef(asset.id)}</span>
-                  {inCanvas && !primary ? (
-                    <button
-                      type="button"
-                      className="asset-strip-promote"
-                      onClick={() => onPromote(asset.id)}
-                      title="移到画布第 1 张（只影响排序；助手会按你的指令选图）"
-                    >
-                      移到最前
-                    </button>
-                  ) : null}
-                  {inCanvas ? (
-                    <button
-                      type="button"
-                      className="asset-strip-remove"
-                      onClick={() => onToggle(asset.id)}
-                      title="移出画布（图还在本会话里）"
-                    >
-                      <X size={11} />
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
+          {shown.map(renderEntry)}
+          <button type="button" className="asset-strip-more" onClick={onOpenLibrary}
+            title={`打开素材库，查看全部 ${assets.length} 张`}>
+            <Layers size={17} />
+            <span>全部</span>
+            <small>{assets.length}</small>
+          </button>
+          {hiddenCount > 0 ? <span className="asset-strip-more-hint">还有 {hiddenCount} 张在素材库</span> : null}
         </div>
       ) : (
         <p className="canvas-section-empty">

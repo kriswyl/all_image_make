@@ -10,11 +10,22 @@ export function AssetLightbox({
   asset,
   onClose,
   onToast,
+  onSetFirst,
+  onSetLast,
+  onAddToCanvas,
+  onRemoveFromCanvas,
+  inCanvas = false,
 }: {
   assetId: string;
   asset: Asset | null;
   onClose: () => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
+  /** 图片可以直接设为首帧 / 尾帧 / 加入画布；故事板里的灯箱不传这些 */
+  onSetFirst?: (assetId: string) => void;
+  onSetLast?: (assetId: string) => void;
+  onAddToCanvas?: (assetId: string) => void;
+  onRemoveFromCanvas?: (assetId: string) => void;
+  inCanvas?: boolean;
 }) {
   const [downloading, setDownloading] = useState(false);
   const isAudio = asset?.mimeType.startsWith("audio/") ?? false;
@@ -60,6 +71,26 @@ export function AssetLightbox({
         <div className="chat-lightbox-bar">
           <span>{assetRef(assetId)}{asset ? ` · ${asset.fileName}` : ""}</span>
           <div className="chat-lightbox-actions">
+            {!isAudio && !isVideo && onSetFirst ? (
+              <button type="button" className="secondary-button" onClick={() => onSetFirst(assetId)} title="放到画布第 1 张（生视频首帧）">
+                设为首帧
+              </button>
+            ) : null}
+            {!isAudio && !isVideo && onSetLast ? (
+              <button type="button" className="secondary-button" onClick={() => onSetLast(assetId)} title="放到画布第 2 张（生视频尾帧）">
+                设为尾帧
+              </button>
+            ) : null}
+            {!isAudio && !isVideo && onAddToCanvas && !inCanvas ? (
+              <button type="button" className="secondary-button" onClick={() => onAddToCanvas(assetId)} title="加入当前画布">
+                加入画布
+              </button>
+            ) : null}
+            {!isAudio && !isVideo && onRemoveFromCanvas && inCanvas ? (
+              <button type="button" className="secondary-button" onClick={() => onRemoveFromCanvas(assetId)} title="从当前画布移出">
+                移出画布
+              </button>
+            ) : null}
             <button
               type="button"
               className="secondary-button"

@@ -1,0 +1,254 @@
+/* ── 素材库抽屉 ─────────────────────────────────────────────────────────── */
+.asset-library-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, .22);
+  backdrop-filter: blur(1px);
+}
+.asset-library {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 94vw);
+  height: 100%;
+  background: var(--surface);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -18px 0 50px rgba(0, 0, 0, .14);
+}
+.asset-library-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.asset-library-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.asset-library-title > svg { color: var(--muted); }
+.asset-library-title h2 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 650; }
+.asset-library-title p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
+.asset-library-head > .icon-button { margin-left: auto; }
+.asset-library-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+.asset-library-tabs > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 9px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  font-size: 11.5px;
+}
+.asset-library-tabs > button:hover { color: var(--ink); }
+.asset-library-tabs > button.is-active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.asset-library-tabs > button > span {
+  padding: 0 5px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+.asset-library-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.asset-library-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px solid transparent;
+  border-radius: 9px;
+}
+.asset-library-search:focus-within { background: var(--surface); border-color: #c9c9c9; box-shadow: 0 0 0 3px rgba(0, 0, 0, .05); }
+.asset-library-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+}
+.asset-library-search input:hover, .asset-library-search input:focus { background: transparent; box-shadow: none; }
+.asset-library-tools > select {
+  flex: 0 0 auto;
+  width: auto;
+  height: 32px;
+  min-height: 0;
+  padding: 0 6px;
+  font-size: 11px;
+}
+.asset-library-grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  align-content: start;
+  gap: 10px 8px;
+  min-height: 0;
+  padding: 4px 14px 16px;
+  overflow-y: auto;
+}
+.asset-library-item { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.asset-library-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border: 2px solid transparent;
+  border-radius: 10px;
+  cursor: zoom-in;
+}
+.asset-library-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.asset-library-item.is-selected .asset-library-thumb { border-color: var(--accent); }
+.asset-library-origin {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  max-width: calc(100% - 14px);
+  padding: 1px 5px;
+  overflow: hidden;
+  color: var(--ink);
+  background: rgba(255, 255, 255, .9);
+  border-radius: 5px;
+  font-size: 9.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-library-order {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  padding: 1px 5px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.asset-library-order.is-last { background: #2563eb; }
+.asset-library-order.is-ref { background: #6b7280; }
+.asset-library-check {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: #fff;
+  background: rgba(0, 0, 0, .28);
+  border: 1px solid rgba(255, 255, 255, .7);
+  border-radius: 6px;
+}
+.asset-library-check.is-on { background: var(--accent); border-color: var(--accent); }
+.asset-library-caption {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-library-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 50px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.asset-library-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--surface-soft);
+  border-top: 1px solid var(--line);
+}
+.asset-library-selected { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.asset-library-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; margin-left: auto; }
+.asset-library-actions .secondary-button.compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+
+/* 横条瘦身后的「全部」入口 */
+.asset-strip-more {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 54px;
+  height: 54px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+.asset-strip-more:hover { color: var(--ink); background: var(--surface-soft); }
+.asset-strip-more span { font-size: 9.5px; }
+.asset-strip-more small { font-size: 9px; color: var(--muted); }
+.asset-strip-more-hint { align-self: center; color: var(--muted-soft); font-size: 10px; white-space: nowrap; }
+.asset-strip-role {
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 9px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.asset-strip-role.is-first { color: var(--accent-dark); background: var(--accent-soft); }
+.asset-strip-role.is-last { color: #1d4ed8; background: #e8efff; }
+.asset-strip-role.is-ref { color: var(--muted); background: var(--surface-soft); }
+.canvas-section-library {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 7px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 10.5px;
+}
+.canvas-section-library:hover { color: var(--ink); background: var(--surface-soft); }
+.canvas-section-head .canvas-section-clear { margin-left: 0; }
+/* 灯箱底部动作变多以后允许换行，不要挤成一条 */
+.chat-lightbox-actions { flex-wrap: wrap; justify-content: flex-end; }
+.chat-lightbox-bar { flex-wrap: wrap; }
