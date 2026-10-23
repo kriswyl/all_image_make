@@ -16,7 +16,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  canvasAfterProducing, mergeConfirmArgs, parsePlan, repairPlan, salvagePlan, shouldConfirm,
+  mergeConfirmArgs, parsePlan, repairPlan, salvagePlan, shouldConfirm,
   withConfirmedVideoSelection,
 } from "../src/server/agent";
 import { DEFAULT_CONVERSATION_TITLE } from "../src/shared/agent-types";
@@ -293,30 +293,6 @@ describe("withConfirmedVideoSelection", () => {
   });
 });
 
-describe("canvas group", () => {
-  it("follows a newly produced image", () => {
-    expect(canvasAfterProducing(["old"], "generate_image", "new")).toEqual(["new"]);
-    expect(canvasAfterProducing(["old"], "edit_image", "new")).toEqual(["new"]);
-    expect(canvasAfterProducing([], "generate_image", "new")).toEqual(["new"]);
-  });
-
-  it("never points the canvas at a video", () => {
-    // 指到视频上之后，「把这张改一下」就没有图可改了
-    expect(canvasAfterProducing(["old"], "generate_video", "video-1")).toEqual(["old"]);
-    expect(canvasAfterProducing(["old"], "optimize_prompt", "text-1")).toEqual(["old"]);
-  });
-
-  it("leaves the canvas alone when the tool produced nothing", () => {
-    expect(canvasAfterProducing(["old"], "generate_image", undefined)).toEqual(["old"]);
-    expect(canvasAfterProducing([], "generate_image", undefined)).toEqual([]);
-  });
-
-  it("replaces a multi-image canvas with the fresh product, not append to it", () => {
-    // 一组参考图用完就散：留着它们的话，下一次「再改改」会悄悄把旧参考又发一遍
-    expect(canvasAfterProducing(["a", "b", "c"], "edit_image", "d")).toEqual(["d"]);
-  });
-});
-
 describe("confirm args round-trip", () => {
   it("persists edited video args so a reload shows what will actually run", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-db-"));
@@ -412,13 +388,11 @@ describe("conversational turn, end to end", () => {
     expect(messages[2]!.toolResult?.ok).toBe(true);
     expect(messages[3]!.content).toBe("画好了，还满意吗？");
 
-    // §10.1 规则 1：画布自动落到新产物上，而且它是**图片**，缩略图和原图都拿得到
+    // 新产物只进素材库，不自动占用画布；图片本身仍然可读
     const producedId = messages[2]!.assetId!;
     expect(producedId).toBeTruthy();
-    expect((view as { canvasAssetIds: string[] }).canvasAssetIds).toEqual([producedId]);
-    const canvas = (view as { canvasImages: Array<{ id: string; thumbUrl: string | null }> }).canvasImages;
-    expect(canvas).toHaveLength(1);
-    expect(canvas[0]!.id).toBe(producedId);
+    expect((view as { canvasAssetIds: string[] }).canvasAssetIds).toEqual([]);
+    expect((view as { canvasImages: unknown[] }).canvasImages).toHaveLength(0);
     await request(app).get(`/api/assets/${producedId}/file`).expect(200);
     await request(app).get(`/api/assets/${producedId}/thumb`).expect(200);
     expect((await request(app).get(`/api/assets/${producedId}/file`).expect(200)).headers["content-type"]).toContain("image/");

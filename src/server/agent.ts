@@ -68,7 +68,6 @@ import {
 import {
   buildConfirmPreview, mergeConfirmArgs, shouldConfirm, withConfirmedVideoSelection,
 } from "./agent-confirm.js";
-import { canvasAfterProducing, sameCanvasIds } from "./agent-canvas.js";
 import {
   EMPTY_REPLY_CORRECTION, IDENTITY_CORRECTION, collectTurnAttachmentIds, looksLikeIdentityDrift,
   toBrainMessage, type BuiltContext,
@@ -87,7 +86,6 @@ export {
 export {
   mergeConfirmArgs, shouldConfirm, withConfirmedVideoSelection,
 } from "./agent-confirm.js";
-export { canvasAfterProducing } from "./agent-canvas.js";
 export { buildSystemPrompt } from "./agent-prompt.js";
 export { collectTurnAttachmentIds, looksLikeIdentityDrift, toBrainMessage } from "./agent-context.js";
 export {
@@ -926,12 +924,7 @@ export class AgentService {
     const ctx = this.toolContext(conversation, controller, options, turnAttachmentIds);
     const outcome = await this.batch.callToolSafely({ tool: plan.tool, args: plan.args }, ctx);
 
-    // §10.1 规则 1：产出图片的工具成功后，画布自动换成新产物
-    const nextCanvas = canvasAfterProducing(conversation.canvasAssetIds, plan.tool, outcome.producedAssetId);
-    if (!sameCanvasIds(nextCanvas, conversation.canvasAssetIds)) {
-      this.db.updateConversation(conversationId, { canvasAssetIds: nextCanvas });
-    }
-
+    // 新产物不自动进画布：画布是用户这一轮明确挑的图，生成结果先去素材库。
     const toolMessage = this.db.appendMessage({
       conversationId, role: "tool", content: outcome.result.summary,
       toolName: plan.tool, toolResult: outcome.result,

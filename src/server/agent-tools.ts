@@ -1100,7 +1100,7 @@ async function generateImage(
       const summary = [
         `${isEdit ? "改图" : "生图"}完成，产物 ${assetRef(first.id)}（${task.model}${choice ? `，${choice}` : ""}）`,
         task.assets.length > 1 ? `，共 ${task.assets.length} 张` : "",
-        "，已设为当前画布。",
+        "，已放进素材库（不会自动占用画布）。",
         salvageNote ? `${salvageNote}。` : "",
         notes.length ? `注意：${notes.join("；")}` : "",
       ].join("");

@@ -5,7 +5,7 @@
  * 哪张被选成了首帧 / 尾帧。这里用网格 + 来源筛选 + 搜索来解决「找图」，
  * 底部动作直接改画布顺序——首帧就是画布第 1 张，尾帧是第 2 张，其余是参考图。
  */
-import { Check, Image as ImageIcon, Layers, Search, X } from "lucide-react";
+import { Image as ImageIcon, Layers, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
@@ -40,8 +40,7 @@ export function AssetLibrary({
   canvasIds,
   onClose,
   onPreview,
-  onAddToCanvas,
-  onRemoveFromCanvas,
+  onToggleCanvas,
   onSetFirst,
   onSetLast,
   initialTab = "all",
@@ -51,8 +50,8 @@ export function AssetLibrary({
   canvasIds: string[];
   onClose: () => void;
   onPreview: (assetId: string) => void;
-  onAddToCanvas: (assetIds: string[]) => void;
-  onRemoveFromCanvas: (assetIds: string[]) => void;
+  /** 点一下就是加入 / 移出画布 */
+  onToggleCanvas: (assetId: string) => void;
   onSetFirst: (assetId: string) => void;
   onSetLast: (assetId: string) => void;
   /** 从画布条的「管理」打开时直接落在「画布」页 */
@@ -61,11 +60,11 @@ export function AssetLibrary({
   const [tab, setTab] = useState<Tab>(initialTab);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("newest");
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [focused, setFocused] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    setSelected(new Set());
+    setFocused(null);
     setQuery("");
     setTab(initialTab);
   }, [open, initialTab]);
@@ -110,21 +109,12 @@ export function AssetLibrary({
 
   if (!open) return null;
 
-  const selectedIds = [...selected];
-  const selectedInCanvas = selectedIds.filter((id) => positions.has(id));
-  const selectedNotInCanvas = selectedIds.filter((id) => !positions.has(id));
+  const focusedEntry = focused ? assets.find((entry) => entry.asset.id === focused) : undefined;
+  const focusedInCanvas = Boolean(focused && positions.has(focused));
 
-  function toggle(id: string) {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }
-
-  function run(action: () => void) {
-    action();
-    setSelected(new Set());
+  function focusAndToggle(id: string) {
+    setFocused(id);
+    onToggleCanvas(id);
   }
 
   const tabs: Array<{ id: Tab; label: string; count: number }> = [
@@ -175,15 +165,14 @@ export function AssetLibrary({
         <div className="asset-library-grid">
           {entries.map(({ entry, position, origin }) => {
             const inCanvas = position >= 0;
-            const checked = selected.has(entry.asset.id);
             return (
-              <div key={entry.asset.id} className={`asset-library-item ${checked ? "is-selected" : ""}`}>
+              <div key={entry.asset.id} className={`asset-library-item ${inCanvas ? "is-in-canvas" : ""} ${focused === entry.asset.id ? "is-focused" : ""}`}>
                 <button
                   type="button"
                   className="asset-library-thumb"
-                  onClick={() => toggle(entry.asset.id)}
+                  onClick={() => focusAndToggle(entry.asset.id)}
                   onDoubleClick={() => onPreview(entry.asset.id)}
-                  title={`${assetRef(entry.asset.id)} · ${inCanvas ? `画布第 ${position + 1} 张（${roleLabel(position)}）` : "双击看大图"}`}
+                  title={`${assetRef(entry.asset.id)} · ${inCanvas ? `画布第 ${position + 1} 张（${roleLabel(position)}）` : "单击加入画布，双击看大图"}`}
                 >
                   <img src={api.assetUrl(entry.asset.thumbUrl ?? entry.asset.url)} alt=""
                     loading="lazy" onError={(event) => { if (entry.asset.thumbUrl) fallbackToFull(event, entry.asset); }} />
@@ -193,9 +182,6 @@ export function AssetLibrary({
                       {position + 1} · {roleLabel(position)}
                     </span>
                   ) : null}
-                  <span className={`asset-library-check ${checked ? "is-on" : ""}`}>
-                    {checked ? <Check size={12} /> : null}
-                  </span>
                 </button>
                 <div className="asset-library-caption" title={entry.prompt || entry.asset.fileName}>
                   {entry.source === "upload" ? entry.asset.fileName : (entry.prompt || entry.asset.fileName)}
@@ -213,30 +199,35 @@ export function AssetLibrary({
 
         <footer className="asset-library-foot">
           <span className="asset-library-selected">
-            {selectedIds.length ? `已选 ${selectedIds.length} 张` : "点图选中，可批量操作"}
+            {focused
+              ? `已选：${focusedEntry?.asset.fileName ?? "这张图"}`
+              : "点图加入 / 移出画布，双击看大图"}
           </span>
           <div className="asset-library-actions">
-            {selectedIds.length === 1 ? (
-              <button type="button" className="secondary-button compact" onClick={() => onPreview(selectedIds[0]!)}>
-                <ImageIcon size={13} />预览
-              </button>
+            {focused ? (
+              <>
+                <button type="button" className="secondary-button compact" onClick={() => onPreview(focused)}>
+                  <ImageIcon size={13} />预览
+                </button>
+                {focusedInCanvas ? (
+                  <>
+                    <button type="button" className="secondary-button compact" onClick={() => onSetFirst(focused)}>
+                      设为首帧
+                    </button>
+                    <button type="button" className="secondary-button compact" onClick={() => onSetLast(focused)}>
+                      设为尾帧
+                    </button>
+                    <button type="button" className="secondary-button compact" onClick={() => onToggleCanvas(focused)}>
+                      移出画布
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="secondary-button compact" onClick={() => onToggleCanvas(focused)}>
+                    加入画布
+                  </button>
+                )}
+              </>
             ) : null}
-            <button type="button" className="secondary-button compact" disabled={!selectedNotInCanvas.length}
-              onClick={() => run(() => onAddToCanvas(selectedNotInCanvas))}>
-              <Layers size={13} />加入画布{selectedNotInCanvas.length ? ` (${selectedNotInCanvas.length})` : ""}
-            </button>
-            <button type="button" className="secondary-button compact" disabled={selectedIds.length !== 1}
-              onClick={() => run(() => onSetFirst(selectedIds[0]!))}>
-              设为首帧
-            </button>
-            <button type="button" className="secondary-button compact" disabled={selectedIds.length !== 1}
-              onClick={() => run(() => onSetLast(selectedIds[0]!))}>
-              设为尾帧
-            </button>
-            <button type="button" className="secondary-button compact" disabled={!selectedInCanvas.length}
-              onClick={() => run(() => onRemoveFromCanvas(selectedInCanvas))}>
-              移出画布{selectedInCanvas.length ? ` (${selectedInCanvas.length})` : ""}
-            </button>
           </div>
         </footer>
       </div>

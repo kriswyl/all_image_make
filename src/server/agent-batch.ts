@@ -6,7 +6,6 @@
  */
 import type { AppDatabase } from "./db.js";
 import { runAgentTool, type ToolContext, type ToolOutcome } from "./agent-tools.js";
-import { canvasAfterProducing, sameCanvasIds } from "./agent-canvas.js";
 import type {
   AgentPlan,
   AgentStreamEvent,
@@ -130,15 +129,8 @@ export class BatchExecutor {
     return { header, rows };
   }
 
-  /** 批量收尾：结果按**计划顺序**算画布，不按谁先跑完 */
-  finishBatch(conversation: Conversation, calls: PlannedCall[], results: ToolOutcome[]): BatchOutcome {
-    let nextCanvas = conversation.canvasAssetIds;
-    for (const [index, call] of calls.entries()) {
-      nextCanvas = canvasAfterProducing(nextCanvas, call.tool, results[index]?.producedAssetId);
-    }
-    if (!sameCanvasIds(nextCanvas, conversation.canvasAssetIds)) {
-      this.host.db.updateConversation(conversation.id, { canvasAssetIds: nextCanvas });
-    }
+  /** 批量收尾：结果按**计划顺序**返回；画布保持用户这次明确挑的那组，不自动替换 */
+  finishBatch(_conversation: Conversation, _calls: PlannedCall[], results: ToolOutcome[]): BatchOutcome {
     return { terminal: results.some((item) => item.terminal), results };
   }
 

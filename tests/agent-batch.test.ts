@@ -300,10 +300,9 @@ describe("批量并行，端到端", () => {
     expect(mock.getMaxInflight()).toBeGreaterThanOrEqual(2);
     expect(mock.imagePrompts).toHaveLength(4);
 
-    // 下区的顺序 = 计划顺序，画布整组落在**最后一个成功的**那张
-    // （第 1 张最慢、最后才回来，所以这条断言真的有区分度：按完成顺序算就会指到第 4 张之外）
+    // 下区的顺序 = 计划顺序；新产物只进素材库，不自动占用画布
     expect(view.sessionImages.map((item) => item.asset.id)).toEqual(cards.map((row) => row.assetId));
-    expect(view.canvasAssetIds).toEqual([cards[3]!.assetId]);
+    expect(view.canvasAssetIds).toEqual([]);
 
     // 4 个任务就是 4 笔额度，自动记上（数的是 messages.task_id）
     expect(view.taskCount).toBe(4);

@@ -335,3 +335,56 @@
 }
 .canvas-bar-role.is-last { background: rgba(37, 99, 235, .78); }
 .canvas-bar-role.is-ref { background: rgba(0, 0, 0, .5); }
+/* 画布缩略图右键菜单：设首帧 / 尾帧 / 看大图 / 移出 */
+.canvas-bar-menu {
+  position: fixed;
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+  min-width: 148px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+.canvas-bar-menu-title { padding: 4px 8px 2px; color: var(--muted); font-size: 10px; }
+.canvas-bar-menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  border-radius: 7px;
+  font-size: 12px;
+  text-align: left;
+}
+.canvas-bar-menu button:hover:not(:disabled) { background: var(--surface-soft); }
+.canvas-bar-menu button:disabled { color: var(--muted-soft); }
+.canvas-bar-menu button.danger { color: var(--coral, #c2410c); }
+.canvas-bar-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+.canvas-bar-toggle:hover { color: var(--ink); background: var(--surface-soft); }
+/* 画布最多 8 张：一排 8 列均分，正好铺满整行 */
+.canvas-bar-items {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+  overflow: visible;
+}
+.canvas-bar-thumb { width: 100%; height: auto; aspect-ratio: 1 / 1; }
+@media (max-width: 720px) {
+  .canvas-bar-items { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}

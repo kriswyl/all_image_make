@@ -176,7 +176,7 @@ describe("画布一组图，真的整组发出去", () => {
     expect(countPngParts(edit!.raw)).toBe(2);
   });
 
-  it("生成成功后画布整组换成新产物一张（不是追加）", async () => {
+  it("生成成功后不自动改动画布：新产物只进素材库", async () => {
     const mock = await startMock({ tool: "generate_image", args: { prompt: "猫" }, say: "画。" });
     await uploadImages(mock.app, mock.conversationId, 2);
     const before = (await request(mock.app).get(`/api/conversations/${mock.conversationId}`).expect(200)).body.data as {
@@ -190,9 +190,8 @@ describe("画布一组图，真的整组发出去", () => {
     const after = (await request(mock.app).get(`/api/conversations/${mock.conversationId}`).expect(200)).body.data as {
       canvasAssetIds: string[]; canvasImages: Array<{ id: string }>; sessionImages: Array<{ asset: { id: string } }>;
     };
-    expect(after.canvasAssetIds).toHaveLength(1);
-    expect(after.canvasAssetIds[0]).not.toBe(before.canvasAssetIds[0]);
-    // 新产物既在画布里也在会话里；刚上传的两张只剩在会话里（仓库不动）
+    // 用户没再挑图，画布保持上传的那两张；新产物只是多进了一份素材库
+    expect(after.canvasAssetIds).toEqual(before.canvasAssetIds);
     expect(after.canvasImages.map((item) => item.id)).toEqual(after.canvasAssetIds);
     expect(after.sessionImages).toHaveLength(3);
   });

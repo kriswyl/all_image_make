@@ -106,6 +106,9 @@ export function ChatView({
   const [list, setList] = useState<Array<ConversationSummary & { running: boolean }>>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [view, setView] = useState<ConversationView | null>(null);
+  // 发送时要在同一次事件里读到「刚上传 / 刚并入」的画布，不等 React 下一次渲染
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const [status, setStatus] = useState<ConversationStatus>("idle");
   const [reasoning, setReasoning] = useState("");
   const [draft, setDraft] = useState("");
@@ -472,13 +475,17 @@ export function ChatView({
 
   async function send(text: string, assetRefs: string[] = []) {
     if (!activeId) return;
+    // 画布是「这一轮要带的图」：连同拖进来的产物一起写进这条消息，
+    // 这样发完清空画布也不会影响助手这一轮看到的图。
+    const refs = [...new Set([...(viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
     // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
     forcedScrollConversation.current = activeId;
     setReasoning("");
     setDraft("");
     try {
-      await api.sendMessage(activeId, text, assetRefs);
+      await api.sendMessage(activeId, text, refs);
       setStatus("running");
+      if (refs.length) writeCanvas([]);
     } catch (error) {
       toastError(error);
       setDraft("");
@@ -526,6 +533,20 @@ export function ChatView({
         void reloadView(target);
       });
     }, CANVAS_PATCH_DEBOUNCE_MS);
+  }
+
+  /** 素材库单击：在画布里就移出，不在就加到末尾（参考图） */
+  function toggleCanvasSelection(assetId: string) {
+    const current = viewRef.current?.canvasAssetIds ?? [];
+    if (current.includes(assetId)) {
+      writeCanvas(current.filter((id) => id !== assetId));
+      return;
+    }
+    if (current.length >= MAX_CANVAS_IMAGES) {
+      toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，先移出一张再加`);
+      return;
+    }
+    writeCanvas([...current, assetId]);
   }
 
   /** 设为首帧：移到画布第 1 位；不在画布里就加进来 */
@@ -585,24 +606,26 @@ export function ChatView({
    * 返回是否成功：发送那条路上要看它决定「图没传上去，这句话还要不要发」——
    * 图传失败还把话发出去，助手会对着上一张图改，用户看到的结果和说的完全不是一件事。
    */
-  async function uploadImages(files: File[]): Promise<boolean> {
-    if (!activeId || !files.length || uploading) return false;
+  async function uploadImages(files: File[]): Promise<string[] | null> {
+    if (!activeId || !files.length || uploading) return null;
     // 先在本地挡住明显不合规的：让用户当场知道哪里不对，比发出去等一个 400 强
     const images = files.filter((file) => file.type.startsWith("image/"));
-    if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return false; }
-    if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return false; }
+    if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return null; }
+    if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return null; }
     const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
-    if (oversized) { toast("error", `${oversized.name} 超过 10 MB`); return false; }
+    if (oversized) { toast("error", `${oversized.name} 超过 10 MB`); return null; }
 
     setUploading(true);
     try {
-      setView(await api.uploadConversationImages(activeId, images));
+      const next = await api.uploadConversationImages(activeId, images);
+      setView(next);
       await reloadList();
-      toast("ok", images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，现在是当前画布");
-      return true;
+      toast("ok", images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
+      // 返回新上传的产物 id：发送时要把它们一起写进这条消息
+      return next.canvasAssetIds;
     } catch (error) {
       toastError(error);
-      return false;
+      return null;
     } finally {
       setUploading(false);
     }
@@ -679,15 +702,15 @@ export function ChatView({
     // 图和文档分开传；文档放在最后，这样「文档消息 + 这句话」在库里是紧挨着的
     const images = files.filter((file) => !isScriptDocument(file));
     const documents = files.filter(isScriptDocument);
-    if (images.length && !(await uploadImages(images))) return;
+    const uploadedIds = images.length ? await uploadImages(images) : [];
+    if (uploadedIds === null) return;
     if (documents.length && !(await uploadDocuments(documents))) return;
-    if (assetIds.length && view) {
-      // 并进画布而不是替换：用户拖第二张进来通常是想「这两张一起改」
-      const merged = [...new Set([...view.canvasAssetIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
-      await flushCanvas(merged);
-    }
+    // 本地新传的、拖进来的既有产物、画布里已经挑好的，合并成「这一轮要带的图」
+    const base = viewRef.current?.canvasAssetIds ?? [];
+    const merged = [...new Set([...base, ...uploadedIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
+    if (merged.length) await flushCanvas(merged);
     // 引用的是哪几张也记在这句话上：画布条默认收着，只留文字的话回头根本看不出指的是哪张
-    await send(text, assetIds);
+    await send(text, merged);
   }
 
   async function removeConversation(id: string) {
@@ -1068,6 +1091,9 @@ export function ChatView({
                     assets={sessionImages}
                     canvasIds={canvasImages.map((asset) => asset.id)}
                     onPreview={setPreview}
+                    onSetFirst={setCanvasFirst}
+                    onSetLast={setCanvasLast}
+                    onRemove={(assetId) => removeCanvasBatch([assetId])}
                     onOpenLibrary={() => openLibrary("canvas")}
                     onClear={() => writeCanvas([])}
                   />
@@ -1144,6 +1170,8 @@ export function ChatView({
               ) : undefined}
               onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
+              onAssetAttached={(assetId) => addCanvasBatch([assetId])}
+              onAssetDetached={(assetId) => removeCanvasBatch([assetId])}
             />
           </>
         )}
@@ -1155,8 +1183,7 @@ export function ChatView({
         canvasIds={canvasImages.map((asset) => asset.id)}
         onClose={() => setLibraryOpen(false)}
         onPreview={setPreview}
-        onAddToCanvas={addCanvasBatch}
-        onRemoveFromCanvas={removeCanvasBatch}
+        onToggleCanvas={toggleCanvasSelection}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
         initialTab={libraryTab}

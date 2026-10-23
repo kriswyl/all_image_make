@@ -60,6 +60,8 @@ export function Composer({
   statusSlot,
   onSend,
   onInterrupt,
+  onAssetAttached,
+  onAssetDetached,
 }: {
   running: boolean;
   /** 图正在上传：按钮转圈，这期间不许再放进来 */
@@ -78,6 +80,9 @@ export function Composer({
    */
   onSend: (text: string, files: File[], assetIds: string[]) => void;
   onInterrupt: () => void;
+  /** 把已有产物拖进输入框时，立刻同步到画布；移除附件时再移出 */
+  onAssetAttached?: (assetId: string) => void;
+  onAssetDetached?: (assetId: string) => void;
 }) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]);
@@ -123,11 +128,14 @@ export function Composer({
       ...documents.map((file) => ({ file, name: file.name, url: "", kind: "document" as const })),
       ...fromCanvas.map((assetId) => ({ assetId, name: assetId, url: api.assetUrl(`/api/assets/${assetId}/thumb`), kind: "image" as const })),
     ]);
+    // 拖进来的既有产物立刻进画布：用户看到的就是「这一轮要带的图」
+    for (const assetId of fromCanvas) onAssetAttached?.(assetId);
   }
 
   function removePending(item: PendingAttachment) {
     // 只有本地图片才有 blob 地址要回收；文档和产物都没有 blob
     if (item.file && item.url) URL.revokeObjectURL(item.url);
+    if (item.assetId) onAssetDetached?.(item.assetId);
     setPending((current) => current.filter((entry) => entry !== item));
   }
 

@@ -155,8 +155,8 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     const canvas = (view as { sessionImages: Array<{ asset: { id: string }; source: string }> }).sessionImages;
     expect(canvas.map((item) => item.source)).toEqual(["upload", "generate"]);
     expect(canvas[0]!.asset.id).toBe(uploadedId);
-    // 画布整组换成新产物，下一步「再改一次」改的是刚产出的那张
-    expect((view as { canvasAssetIds: string[] }).canvasAssetIds).toEqual([canvas[1]!.asset.id]);
+    // 新产物不自动进画布：画布仍是用户当初上传的那张
+    expect((view as { canvasAssetIds: string[] }).canvasAssetIds).toEqual([uploadedId]);
   });
 
   it("文件名洗过之后才写进那句话：路径和换行进不去，中文名留得住", async () => {
