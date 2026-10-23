@@ -64,9 +64,6 @@ export function AssetStrip({
           >
             <img src={api.assetUrl(entry.asset.thumbUrl ?? entry.asset.url)} alt="" loading="lazy" />
             <span className="canvas-bar-order">{index + 1}</span>
-            <span className={`canvas-bar-role is-${index === 0 ? "first" : index === 1 ? "last" : "ref"}`}>
-              {roleLabel(index)}
-            </span>
           </button>
         ))}
       </div>
