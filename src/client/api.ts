@@ -219,22 +219,51 @@ export const api = {
   updateStoryboardShot: (
     id: string,
     shotId: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "kind" | "aspectRatio">>,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "scene" | "kind" | "aspectRatio">>,
   ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   }),
-  updateStoryboardCharacter: (id: string, characterId: string, assetId: string | null) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard/characters/${characterId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ assetId }),
+  updateStoryboardCharacter: (
+    id: string,
+    characterId: string,
+    patch: { assetId?: string | null; prompt?: string; confirmed?: boolean },
+  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/characters/${characterId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  }),
+  updateStoryboardScene: (
+    id: string,
+    sceneId: string,
+    patch: { assetId?: string | null; prompt?: string; confirmed?: boolean },
+  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/scenes/${sceneId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  }),
+  generateStoryboardSettings: (id: string, characterIds: string[], sceneIds: string[]) =>
+    request<{
+      submitted: number;
+      failures: Array<{ id: string; name: string; kind: "character" | "scene"; error: string }>;
+      view: StoryboardView;
+    }>(`/api/conversations/${id}/storyboard/settings/generate`, {
+      method: "POST",
+      body: JSON.stringify({ characterIds, sceneIds }),
     }),
+  uploadStoryboardSetting: (id: string, kind: "character" | "scene", settingId: string, file: File) => {
+    const form = new FormData();
+    form.append("image", file, file.name);
+    return request<StoryboardView>(`/api/conversations/${id}/storyboard/settings/${kind}/${settingId}/upload`, {
+      method: "POST",
+      body: form,
+    });
+  },
   generateStoryboardShots: (id: string, shotIds: string[]) => request<{
     submitted: number;
     failures: Array<{ shotId: string; index: number; error: string }>;
     shots: StoryboardShot[];
     referenceAssetId: string | null;
     characterReferences: Array<{ character: string; assetId: string }>;
+    sceneReferences: Array<{ scene: string; assetId: string }>;
     note?: string;
   }>(`/api/conversations/${id}/storyboard/generate`, {
     method: "POST",

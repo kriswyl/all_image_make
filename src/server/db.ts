@@ -10,7 +10,9 @@ import type {
   AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
-import type { StoryboardShot, StoryboardShotKind, StoryboardShotStatus } from "../shared/storyboard.js";
+import {
+  parseCharacterNames, type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus,
+} from "../shared/storyboard.js";
 
 export interface DbChannel {
   id: string;
@@ -28,8 +30,8 @@ export interface DbChannel {
   updatedAt: string;
 }
 
-/** 会话产物的来源：正常生成、用户上传，或分镜面板直接提交 */
-export type ConversationAssetSource = TaskOrigin | "storyboard";
+/** 会话产物的来源：正常生成、用户上传、分镜面板提交，或角色/场景设定图 */
+export type ConversationAssetSource = TaskOrigin | "storyboard" | "setting";
 
 export interface StoredDocument {
   id: string;
@@ -232,6 +234,8 @@ export class AppDatabase {
         prompt           TEXT NOT NULL DEFAULT '',
         -- 出场角色名；空串 = 空镜 / 道具 / 字幕，不带角色参考
         character_name   TEXT NOT NULL DEFAULT '',
+        -- 场景名；空串 = 没有场景设定
+        scene_name       TEXT NOT NULL DEFAULT '',
         kind             TEXT NOT NULL DEFAULT 'image',
         aspect_ratio     TEXT NOT NULL DEFAULT '',
         task_id          TEXT,
@@ -245,13 +249,32 @@ export class AppDatabase {
         id               TEXT PRIMARY KEY,
         conversation_id  TEXT NOT NULL,
         name             TEXT NOT NULL,
+        -- 设定图提示词（外貌 / 服装 / 年龄…）
+        prompt           TEXT NOT NULL DEFAULT '',
         asset_id         TEXT,
+        task_id          TEXT,
+        confirmed        INTEGER NOT NULL DEFAULT 0,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL,
         UNIQUE(conversation_id, name)
       );
       CREATE INDEX IF NOT EXISTS conversation_characters_conv_idx
         ON conversation_characters(conversation_id, name);
+      -- 场景设定图：同一套「先生成、确认、再进分镜」的流程
+      CREATE TABLE IF NOT EXISTS conversation_scenes (
+        id               TEXT PRIMARY KEY,
+        conversation_id  TEXT NOT NULL,
+        name             TEXT NOT NULL,
+        prompt           TEXT NOT NULL DEFAULT '',
+        asset_id         TEXT,
+        task_id          TEXT,
+        confirmed        INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        UNIQUE(conversation_id, name)
+      );
+      CREATE INDEX IF NOT EXISTS conversation_scenes_conv_idx
+        ON conversation_scenes(conversation_id, name);
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
@@ -338,6 +361,17 @@ export class AppDatabase {
     if (!shotColumns.some((col) => col.name === "character_name")) {
       this.db.exec("ALTER TABLE conversation_shots ADD COLUMN character_name TEXT NOT NULL DEFAULT ''");
     }
+    if (!shotColumns.some((col) => col.name === "scene_name")) {
+      this.db.exec("ALTER TABLE conversation_shots ADD COLUMN scene_name TEXT NOT NULL DEFAULT ''");
+    }
+    const characterColumns = this.db.prepare("PRAGMA table_info(conversation_characters)").all() as Array<{ name: string }>;
+    for (const [column, ddl] of [
+      ["prompt", "ALTER TABLE conversation_characters ADD COLUMN prompt TEXT NOT NULL DEFAULT ''"],
+      ["task_id", "ALTER TABLE conversation_characters ADD COLUMN task_id TEXT"],
+      ["confirmed", "ALTER TABLE conversation_characters ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0"],
+    ] as const) {
+      if (!characterColumns.some((item) => item.name === column)) this.db.exec(ddl);
+    }
     // 分镜角色参考：老会话默认走 auto（第一个已完成的图片镜头）
     if (!conversationColumns.some((col) => col.name === "storyboard_reference_asset_id")) {
       this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_asset_id TEXT");
@@ -362,8 +396,29 @@ export class AppDatabase {
       writeCanvas.run(JSON.stringify(row.current_asset_id ? [row.current_asset_id] : []), row.id);
     }
 
+    // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
+    // 否则面板里会出现一个「林小满、老陈」的卡片，谁都没法单独绑设定图。
+    this.normalizeStoryboardCharacterNames();
+
     this.currentAssetsDir = this.resolveAssetsDir();
     fs.mkdirSync(this.currentAssetsDir, { recursive: true });
+  }
+
+  private normalizeStoryboardCharacterNames() {
+    const rows = this.db.prepare(
+      "SELECT conversation_id, character_name FROM conversation_shots WHERE character_name <> ''",
+    ).all() as Array<{ conversation_id: string; character_name: string }>;
+    const byConversation = new Map<string, string[]>();
+    for (const row of rows) {
+      const names = parseCharacterNames(row.character_name);
+      if (names.length < 2) continue;
+      byConversation.set(row.conversation_id, [
+        ...(byConversation.get(row.conversation_id) ?? []), ...names,
+      ]);
+    }
+    for (const [conversationId, names] of byConversation) {
+      this.upsertStoryboardCharacters(conversationId, names);
+    }
   }
 
   /** 读取用户配置的产物目录；配置缺失或不可用时退回数据目录下的 assets/ */
@@ -800,64 +855,184 @@ export class AppDatabase {
    */
   replaceStoryboard(
     conversationId: string,
-    shots: Array<{ sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string; character?: string }>,
+    shots: Array<{
+      sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string;
+      character?: string; scene?: string;
+    }>,
+    settings: {
+      characters?: Array<{ name: string; prompt?: string }>;
+      scenes?: Array<{ name: string; prompt?: string }>;
+    } = {},
   ): StoryboardShot[] {
     const at = now();
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
     const insert = this.db.prepare(`
       INSERT INTO conversation_shots
-      (id, conversation_id, shot_index, source_text, prompt, character_name, kind, aspect_ratio, task_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio, task_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `);
     for (const [position, shot] of shots.entries()) {
       insert.run(
         crypto.randomUUID(), conversationId, position + 1,
-        shot.sourceText, shot.prompt, shot.character ?? "", shot.kind, shot.aspectRatio, at, at,
+        shot.sourceText, shot.prompt, shot.character ?? "", shot.scene ?? "", shot.kind, shot.aspectRatio, at, at,
       );
     }
-    this.upsertStoryboardCharacters(conversationId, shots.map((shot) => shot.character ?? ""));
+    // 设定表里的名字和镜头里实际用到的名字取并集：模型偶尔会漏写一个设定，
+    // 不能让那一镜变成「没有设定卡」的孤儿。
+    this.upsertStoryboardCharacters(conversationId, [
+      ...(settings.characters ?? []),
+      ...shots.flatMap((shot) => parseCharacterNames(shot.character ?? "")).map((name) => ({ name })),
+    ]);
+    this.upsertStoryboardScenes(conversationId, [
+      ...(settings.scenes ?? []),
+      ...shots.map((shot) => shot.scene ?? "").filter(Boolean).map((name) => ({ name })),
+    ]);
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
     return this.listStoryboardShots(conversationId);
   }
 
-  /** 把镜头里出现的角色名补进 characters 表；已有的名字不动（保留绑定好的参考图） */
-  upsertStoryboardCharacters(conversationId: string, names: string[]) {
-    const unique = [...new Set(names.map((name) => name.trim()).filter(Boolean))];
-    if (!unique.length) return;
+  /**
+   * 把角色名补进 characters 表。`林小满、老陈` 会被拆成两个独立角色；
+   * 同名角色已存在时只更新提示词（如果这次给了），不会清掉已绑定的设定图。
+   */
+  upsertStoryboardCharacters(conversationId: string, items: Array<string | { name: string; prompt?: string }>) {
+    const seen = new Set<string>();
     const at = now();
     const insert = this.db.prepare(`
-      INSERT INTO conversation_characters (id, conversation_id, name, asset_id, created_at, updated_at)
-      VALUES (?, ?, ?, NULL, ?, ?)
-      ON CONFLICT(conversation_id, name) DO NOTHING
+      INSERT INTO conversation_characters (id, conversation_id, name, prompt, asset_id, task_id, confirmed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, NULL, 0, ?, ?)
+      ON CONFLICT(conversation_id, name) DO UPDATE SET
+        prompt = CASE WHEN excluded.prompt <> '' THEN excluded.prompt ELSE conversation_characters.prompt END,
+        updated_at = excluded.updated_at
     `);
-    for (const name of unique) insert.run(crypto.randomUUID(), conversationId, name, at, at);
+    for (const item of items) {
+      const name = typeof item === "string" ? item : item.name;
+      const prompt = typeof item === "string" ? "" : item.prompt?.trim() ?? "";
+      for (const part of parseCharacterNames(name)) {
+        if (seen.has(part)) continue;
+        seen.add(part);
+        insert.run(crypto.randomUUID(), conversationId, part, prompt, at, at);
+      }
+    }
+  }
+
+  upsertStoryboardScenes(conversationId: string, items: Array<string | { name: string; prompt?: string }>) {
+    const seen = new Set<string>();
+    const at = now();
+    const insert = this.db.prepare(`
+      INSERT INTO conversation_scenes (id, conversation_id, name, prompt, asset_id, task_id, confirmed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, NULL, 0, ?, ?)
+      ON CONFLICT(conversation_id, name) DO UPDATE SET
+        prompt = CASE WHEN excluded.prompt <> '' THEN excluded.prompt ELSE conversation_scenes.prompt END,
+        updated_at = excluded.updated_at
+    `);
+    for (const item of items) {
+      const name = (typeof item === "string" ? item : item.name).trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const prompt = typeof item === "string" ? "" : item.prompt?.trim() ?? "";
+      insert.run(crypto.randomUUID(), conversationId, name, prompt, at, at);
+    }
   }
 
   listStoryboardCharacters(conversationId: string): Array<{
-    id: string; name: string; assetId: string | null; createdAt: string; updatedAt: string;
+    id: string; name: string; prompt: string; assetId: string | null; taskId: string | null;
+    confirmed: boolean; createdAt: string; updatedAt: string;
   }> {
     const rows = this.db.prepare(
       "SELECT * FROM conversation_characters WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
     ).all(conversationId) as DbRow[];
     return rows.map((row) => ({
-      id: String(row.id), name: String(row.name),
+      id: String(row.id), name: String(row.name), prompt: String(row.prompt ?? ""),
       assetId: row.asset_id == null ? null : String(row.asset_id),
+      taskId: row.task_id == null ? null : String(row.task_id),
+      confirmed: Boolean(row.confirmed),
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     }));
   }
 
-  getStoryboardCharacter(id: string): { id: string; conversationId: string; name: string; assetId: string | null } | null {
+  listStoryboardScenes(conversationId: string): Array<{
+    id: string; name: string; prompt: string; assetId: string | null; taskId: string | null;
+    confirmed: boolean; createdAt: string; updatedAt: string;
+  }> {
+    const rows = this.db.prepare(
+      "SELECT * FROM conversation_scenes WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+    ).all(conversationId) as DbRow[];
+    return rows.map((row) => ({
+      id: String(row.id), name: String(row.name), prompt: String(row.prompt ?? ""),
+      assetId: row.asset_id == null ? null : String(row.asset_id),
+      taskId: row.task_id == null ? null : String(row.task_id),
+      confirmed: Boolean(row.confirmed),
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    }));
+  }
+
+  getStoryboardCharacter(id: string): {
+    id: string; conversationId: string; name: string; prompt: string; assetId: string | null;
+    taskId: string | null; confirmed: boolean;
+  } | null {
     const row = this.db.prepare("SELECT * FROM conversation_characters WHERE id = ?").get(id) as DbRow | undefined;
     if (!row) return null;
     return {
       id: String(row.id), conversationId: String(row.conversation_id), name: String(row.name),
-      assetId: row.asset_id == null ? null : String(row.asset_id),
+      prompt: String(row.prompt ?? ""), assetId: row.asset_id == null ? null : String(row.asset_id),
+      taskId: row.task_id == null ? null : String(row.task_id), confirmed: Boolean(row.confirmed),
+    };
+  }
+
+  getStoryboardScene(id: string): {
+    id: string; conversationId: string; name: string; prompt: string; assetId: string | null;
+    taskId: string | null; confirmed: boolean;
+  } | null {
+    const row = this.db.prepare("SELECT * FROM conversation_scenes WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id), conversationId: String(row.conversation_id), name: String(row.name),
+      prompt: String(row.prompt ?? ""), assetId: row.asset_id == null ? null : String(row.asset_id),
+      taskId: row.task_id == null ? null : String(row.task_id), confirmed: Boolean(row.confirmed),
     };
   }
 
   setStoryboardCharacterAsset(characterId: string, assetId: string | null) {
-    this.db.prepare("UPDATE conversation_characters SET asset_id = ?, updated_at = ? WHERE id = ?")
+    // 换图后必须重新确认：旧图的确认不能顺延到新图
+    this.db.prepare("UPDATE conversation_characters SET asset_id = ?, confirmed = 0, updated_at = ? WHERE id = ?")
       .run(assetId, now(), characterId);
+  }
+
+  setStoryboardSceneAsset(sceneId: string, assetId: string | null) {
+    this.db.prepare("UPDATE conversation_scenes SET asset_id = ?, confirmed = 0, updated_at = ? WHERE id = ?")
+      .run(assetId, now(), sceneId);
+  }
+
+  setStoryboardCharacterPrompt(characterId: string, prompt: string) {
+    this.db.prepare("UPDATE conversation_characters SET prompt = ?, updated_at = ? WHERE id = ?")
+      .run(prompt, now(), characterId);
+  }
+
+  setStoryboardScenePrompt(sceneId: string, prompt: string) {
+    this.db.prepare("UPDATE conversation_scenes SET prompt = ?, updated_at = ? WHERE id = ?")
+      .run(prompt, now(), sceneId);
+  }
+
+  setStoryboardCharacterTask(characterId: string, taskId: string | null) {
+    // 重生成时清掉手动绑定：否则「手动图优先」会让新生成的设定图永远显示不出来
+    this.db.prepare("UPDATE conversation_characters SET task_id = ?, asset_id = NULL, confirmed = 0, updated_at = ? WHERE id = ?")
+      .run(taskId, now(), characterId);
+  }
+
+  setStoryboardSceneTask(sceneId: string, taskId: string | null) {
+    this.db.prepare("UPDATE conversation_scenes SET task_id = ?, asset_id = NULL, confirmed = 0, updated_at = ? WHERE id = ?")
+      .run(taskId, now(), sceneId);
+  }
+
+  confirmStoryboardCharacter(characterId: string, confirmed: boolean) {
+    this.db.prepare("UPDATE conversation_characters SET confirmed = ?, updated_at = ? WHERE id = ?")
+      .run(confirmed ? 1 : 0, now(), characterId);
+  }
+
+  confirmStoryboardScene(sceneId: string, confirmed: boolean) {
+    this.db.prepare("UPDATE conversation_scenes SET confirmed = ?, updated_at = ? WHERE id = ?")
+      .run(confirmed ? 1 : 0, now(), sceneId);
   }
 
   /**
@@ -886,6 +1061,8 @@ export class AppDatabase {
         index: Number(row.shot_index),
         sourceText: String(row.source_text ?? ""), prompt: String(row.prompt ?? ""),
         character: String(row.character_name ?? ""),
+        characters: parseCharacterNames(String(row.character_name ?? "")),
+        scene: String(row.scene_name ?? ""),
         kind: String(row.kind) === "video" ? "video" as const : "image" as const,
         aspectRatio: String(row.aspect_ratio ?? ""),
         taskId, status,
@@ -905,12 +1082,12 @@ export class AppDatabase {
 
   updateStoryboardShot(
     id: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "kind" | "aspectRatio" | "taskId">>,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "scene" | "kind" | "aspectRatio" | "taskId">>,
   ): StoryboardShot | null {
     const fields: string[] = [];
     const values: Array<string | null> = [];
     const mapping: Record<string, string> = {
-      prompt: "prompt", sourceText: "source_text", character: "character_name",
+      prompt: "prompt", sourceText: "source_text", character: "character_name", scene: "scene_name",
       kind: "kind", aspectRatio: "aspect_ratio", taskId: "task_id",
     };
     for (const [key, column] of Object.entries(mapping)) {
@@ -1022,7 +1199,17 @@ export class AppDatabase {
       JOIN assets ON assets.id = messages.asset_id
       JOIN tasks ON tasks.id = assets.task_id
       WHERE messages.conversation_id = ? AND tasks.origin = 'upload'
-    `).all(id) as DbRow[];
+      UNION
+      SELECT DISTINCT tasks.id AS id FROM conversation_characters c
+      JOIN assets ON assets.id = c.asset_id
+      JOIN tasks ON tasks.id = assets.task_id
+      WHERE c.conversation_id = ? AND tasks.origin = 'upload'
+      UNION
+      SELECT DISTINCT tasks.id AS id FROM conversation_scenes s
+      JOIN assets ON assets.id = s.asset_id
+      JOIN tasks ON tasks.id = assets.task_id
+      WHERE s.conversation_id = ? AND tasks.origin = 'upload'
+    `).all(id, id, id) as DbRow[];
 
     const assets: StoredFileRef[] = [];
     for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
@@ -1030,6 +1217,7 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };
@@ -1186,6 +1374,37 @@ export class AppDatabase {
     return rows.map((row) => ({ asset: this.assetFromRow(row), index: Number(row.shot_index), prompt: String(row.shot_prompt ?? "") }));
   }
 
+  /** 角色 / 场景设定图（手动绑定的，或最近一次生成任务产出的） */
+  listStoryboardSettingAssets(conversationId: string): Array<{ asset: AssetRow; label: string }> {
+    const rows = this.db.prepare(`
+      SELECT assets.*, '角色「' || c.name || '」' AS setting_label, 0 AS sort_group
+      FROM conversation_characters c JOIN assets ON assets.id = c.asset_id
+      WHERE c.conversation_id = ?
+      UNION ALL
+      SELECT assets.*, '角色「' || c.name || '」' AS setting_label, 0 AS sort_group
+      FROM conversation_characters c JOIN assets ON assets.task_id = c.task_id
+      WHERE c.conversation_id = ?
+      UNION ALL
+      SELECT assets.*, '场景「' || s.name || '」' AS setting_label, 1 AS sort_group
+      FROM conversation_scenes s JOIN assets ON assets.id = s.asset_id
+      WHERE s.conversation_id = ?
+      UNION ALL
+      SELECT assets.*, '场景「' || s.name || '」' AS setting_label, 1 AS sort_group
+      FROM conversation_scenes s JOIN assets ON assets.task_id = s.task_id
+      WHERE s.conversation_id = ?
+      ORDER BY sort_group ASC, created_at ASC
+    `).all(conversationId, conversationId, conversationId, conversationId) as DbRow[];
+    const seen = new Set<string>();
+    const result: Array<{ asset: AssetRow; label: string }> = [];
+    for (const row of rows) {
+      const id = String(row.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      result.push({ asset: this.assetFromRow(row), label: String(row.setting_label ?? "设定图") });
+    }
+    return result;
+  }
+
   /** 会话里产出过图片的产物，按顺序排列，供「设为当前」回溯（§10.1 规则 3） */
   listConversationAssets(conversationId: string): Array<{ asset: AssetRow; round: number; prompt: string; source: ConversationAssetSource }> {
     const rows = this.db.prepare(`
@@ -1232,6 +1451,12 @@ export class AppDatabase {
       if (seen.has(entry.asset.id)) continue;
       seen.add(entry.asset.id);
       entries.push({ asset: entry.asset, round: entry.index, prompt: entry.prompt, source: "storyboard" });
+    }
+    // 角色 / 场景设定图也进「本会话的图」：上传或生成之后，其它设定卡的下拉里也能选到
+    for (const entry of this.listStoryboardSettingAssets(conversationId)) {
+      if (seen.has(entry.asset.id)) continue;
+      seen.add(entry.asset.id);
+      entries.push({ asset: entry.asset, round: 0, prompt: entry.label, source: "setting" });
     }
     return entries;
   }

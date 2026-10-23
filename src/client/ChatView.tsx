@@ -1024,7 +1024,7 @@ export function ChatView({
                   toast("ok", "已加入画布");
                 }}
                 onTagCharacters={() => {
-                  void send("请根据当前分镜表，为每一镜标注出场角色：同一个人全片用同一个名字，空镜、道具、字幕留空。用 tag_storyboard_characters 工具更新现有分镜，不要重新拆分，也不要重新生成。");
+                  void send("请根据当前分镜表，为每一镜标注出场角色和场景：同一个人物 / 同一个地点全片用同一个名字，多个人物用「、」连接；空镜、道具、字幕的角色留空，但场景尽量标。顺便给每个角色一句外貌/服装描述、每个场景一句空间/光线描述。用 tag_storyboard_characters 更新现有分镜，不要重新拆分，也不要重新生成。");
                 }}
                 tagCharactersDisabled={running}
               />

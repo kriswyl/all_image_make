@@ -9,6 +9,8 @@ import "@fontsource-variable/inter/wght.css";
 import "@fontsource/ma-shan-zheng/chinese-simplified-400.css";
 import "@fontsource/ma-shan-zheng/latin-400.css";
 import "./styles.css";
+// 分镜工作台的独立样式：大浮层、设定卡、镜头表，避免继续把 styles.css 撑大
+import "./storyboard.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里
 import "./onboarding.css";
 

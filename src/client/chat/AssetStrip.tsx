@@ -97,7 +97,10 @@ export function AssetStrip({
             const primary = position === 0;
             const uploaded = source === "upload";
             // 上传的图没有「第几轮」，写成第 N 轮会让用户以为它也是生成出来的
-            const origin = uploaded ? "你自己传的" : source === "storyboard" ? `分镜第 ${round} 镜` : `第 ${round} 轮`;
+            const origin = uploaded ? "你自己传的"
+              : source === "storyboard" ? `分镜第 ${round} 镜`
+                : source === "setting" ? "角色 / 场景设定图"
+                  : `第 ${round} 轮`;
             // 动作说明挂在缩略图自己的 tooltip 上：指到哪张就说哪张，比在标题行写一句
             // 「点一下加入/移出画布」更容易在**想动手的那一刻**被看见
             const action = inCanvas

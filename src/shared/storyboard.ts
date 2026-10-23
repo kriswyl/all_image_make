@@ -35,8 +35,12 @@ export interface StoryboardShot {
   sourceText: string;
   /** 真正发给渠道的画面描述 */
   prompt: string;
-  /** 这一镜的出场角色名；空串 = 空镜 / 道具 / 字幕，不带角色参考 */
+  /** 这一镜的出场角色名（用于显示的原始串）；空串 = 空镜 / 道具 / 字幕 */
   character: string;
+  /** 拆开后的角色名；多人物镜头会有多个 */
+  characters: string[];
+  /** 这一镜发生在哪个场景；空串 = 没有场景设定 */
+  scene: string;
   kind: StoryboardShotKind;
   aspectRatio: string;
   taskId: string | null;
@@ -59,15 +63,37 @@ export interface StoryboardReference {
   shotIndex: number | null;
 }
 
-/** 一个角色在分镜里的出场统计和参考图 */
+/** 设定图（角色 / 场景）的生成状态 */
+export type StoryboardSettingStatus = "none" | TaskStatus;
+
+/** 一个角色在分镜里的出场统计和设定图 */
 export interface StoryboardCharacter {
   id: string;
   name: string;
-  /** 用户手动绑定的参考图；null = 自动用该角色第一个已完成的镜头 */
+  /** 设定图提示词；生成设定图时用 */
+  prompt: string;
+  /** 用户手动选的图；null = 没手动选 */
   assetId: string | null;
-  /** 解析后的参考图（手动优先，其次该角色第一个已完成镜头） */
+  /** 当前可用的设定图（手动选的，或最近一次生成的结果） */
   asset: Asset | null;
-  mode: "manual" | "auto" | "none";
+  source: "manual" | "generated" | "none";
+  taskId: string | null;
+  status: StoryboardSettingStatus;
+  /** 用户确认这张设定图可以作为参考 */
+  confirmed: boolean;
+  shotCount: number;
+}
+
+export interface StoryboardScene {
+  id: string;
+  name: string;
+  prompt: string;
+  assetId: string | null;
+  asset: Asset | null;
+  source: "manual" | "generated" | "none";
+  taskId: string | null;
+  status: StoryboardSettingStatus;
+  confirmed: boolean;
   shotCount: number;
 }
 
@@ -77,10 +103,12 @@ export interface StoryboardView {
   canGenerateImage: boolean;
   canGenerateVideo: boolean;
   maxBatch: number;
-  /** 老分镜（没有角色标签）才用的全局参考 */
+  /** 老分镜（没有角色/场景标签）才用的全局参考 */
   reference: StoryboardReference;
-  /** 按角色拆分的参考图；有角色标签时生成逻辑优先用这一份 */
+  /** 按角色拆分的设定图；有角色标签时生成逻辑优先用这一份 */
   characters: StoryboardCharacter[];
+  /** 场景设定图；有场景标签时按场景带参考 */
+  scenes: StoryboardScene[];
 }
 
 /**
@@ -104,6 +132,23 @@ export const STORYBOARD_PERSON_HINT =
 
 export function shotNeedsCharacterReference(shot: Pick<StoryboardShot, "prompt" | "sourceText">): boolean {
   return STORYBOARD_PERSON_HINT.test(`${shot.prompt}\n${shot.sourceText}`);
+}
+
+/**
+ * 「林小满、老陈」这类多人物标签拆成独立角色。
+ *
+ * 只按明确的分隔符拆，不猜名字：模型经常把一镜里的两个人写在一起，
+ * 不拆开的话每个组合都会变成一个新「角色」，谁都没有参考图。
+ */
+export function parseCharacterNames(value: string): string[] {
+  return [...new Set(
+    value.split(/[、,，/／+&]/).map((name) => name.trim()).filter(Boolean),
+  )];
+}
+
+/** 把独立角色名合成展示串，顺序不变 */
+export function joinCharacterNames(names: string[]): string {
+  return [...new Set(names.map((name) => name.trim()).filter(Boolean))].join("、");
 }
 
 export function storyboardKindLabel(kind: StoryboardShotKind): string {

@@ -1,22 +1,46 @@
 /**
- * 会话内分镜面板。
+ * 分镜工作台（大浮层）。
  *
- * 它不是聊天记录的一部分：20 个镜头如果长在消息流里，用户既找不到「第 7 镜」，
- * 也没法在生成前统一改描述。这里把「拆镜」和「生成」分成两步——
- * 大脑只负责拆，真正花钱的动作由用户在这张表上确认后触发。
+ * 结构刻意分成左右两栏：
+ * - 左：角色 / 场景设定图。每张设定图先给用户看大图、确认，之后才会被用于分镜；
+ * - 右：镜头表。每镜的 prompt、角色、场景、画幅、状态和结果都在这里改、这里重跑。
+ *
+ * 一镜一镜从零画，人物和场景都会漂；所以生成分镜前先要求「设定图已确认」，
+ * 缺哪张就在镜头行里直接写出来，而不是让用户花了钱才发现人物又变了。
  */
-import { Check, ChevronDown, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle, RefreshCw, Sparkles, UserRound, X } from "lucide-react";
+import {
+  CheckCircle2, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle,
+  Mountain, RefreshCw, Sparkles, Upload, UserRound, X,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
-  isStoryboardShotActive, shotNeedsCharacterReference, storyboardKindLabel, storyboardShotMissing,
-  STORYBOARD_ASPECT_RATIOS, type StoryboardShot, type StoryboardView,
+  isStoryboardShotActive, storyboardShotMissing,
+  STORYBOARD_ASPECT_RATIOS, type StoryboardCharacter, type StoryboardScene, type StoryboardShot,
+  type StoryboardView,
 } from "../../shared/storyboard";
 import type { CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { AssetLightbox } from "./AssetLightbox";
 
 type ToastKind = "ok" | "error";
+type SettingKind = "character" | "scene";
+type SettingItem = StoryboardCharacter | StoryboardScene;
+
+const ACTIVE_SETTING_STATUS = new Set(["queued", "validating", "submitting", "running"]);
+
+function statusLabel(status: string): string {
+  if (status === "planned" || status === "none") return "未生成";
+  if (status === "succeeded") return "已生成";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "expired") return "已过期";
+  return "生成中";
+}
+
+function shotStatusLabel(shot: StoryboardShot): string {
+  return statusLabel(shot.status);
+}
 
 export function StoryboardPanel({
   conversationId,
@@ -30,35 +54,38 @@ export function StoryboardPanel({
   tagCharactersDisabled = false,
 }: {
   conversationId: string;
-  /** 消息数变化时重新拉一次：大脑刚拆完镜，面板要立刻出现 */
   refreshKey: number;
   canvasIds: string[];
-  /** 本会话的全部图片产物，角色参考从这里选 */
   images: CanvasAsset[];
   onClose: () => void;
   onToast: (kind: ToastKind, text: string) => void;
   onAddToCanvas: (assetId: string) => void;
-  /** 让助手给已有分镜补角色标签（不重新拆分） */
   onTagCharacters: () => void;
   tagCharactersDisabled?: boolean;
 }) {
   const [data, setData] = useState<StoryboardView | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
+  const [characterDrafts, setCharacterDrafts] = useState<Record<string, string>>({});
+  const [sceneDrafts, setSceneDrafts] = useState<Record<string, string>>({});
+  const [settingPromptDrafts, setSettingPromptDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<Record<string, boolean>>({});
   const [confirming, setConfirming] = useState<string[] | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<Asset | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
-  const [referenceBusy, setReferenceBusy] = useState(false);
-  const [characterDrafts, setCharacterDrafts] = useState<Record<string, string>>({});
+  const [settingBusy, setSettingBusy] = useState<string | null>(null);
+  const [uploadTarget, setUploadTarget] = useState<{ kind: SettingKind; id: string } | null>(null);
+  const uploadRef = useRef<HTMLInputElement>(null);
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  // 切换会话时旧请求可能后到；只让最后一次发出的请求回写
   const loadSeq = useRef(0);
 
   const shots = data?.shots ?? [];
-  const active = shots.some((shot) => isStoryboardShotActive(shot.status));
+  const characters = data?.characters ?? [];
+  const scenes = data?.scenes ?? [];
+  const active = shots.some((shot) => isStoryboardShotActive(shot.status))
+    || [...characters, ...scenes].some((item) => ACTIVE_SETTING_STATUS.has(item.status));
 
   async function load(quiet = true) {
     const seq = ++loadSeq.current;
@@ -67,17 +94,12 @@ export function StoryboardPanel({
       const next = await api.storyboard(conversationId);
       if (seq !== loadSeq.current) return;
       setData(next);
-      setDrafts((current) => {
-        const merged: Record<string, string> = {};
-        for (const shot of next.shots) merged[shot.id] = current[shot.id] ?? shot.prompt;
-        return merged;
-      });
-      setCharacterDrafts((current) => {
-        const merged: Record<string, string> = {};
-        for (const shot of next.shots) merged[shot.id] = current[shot.id] ?? shot.character;
-        return merged;
-      });
-      // 已经在跑的镜头不该还留在勾选里；已完成的可以留——用户可能是勾起来批量重跑
+      setPromptDrafts((current) => Object.fromEntries(next.shots.map((shot) => [shot.id, current[shot.id] ?? shot.prompt])));
+      setCharacterDrafts((current) => Object.fromEntries(next.shots.map((shot) => [shot.id, current[shot.id] ?? shot.character])));
+      setSceneDrafts((current) => Object.fromEntries(next.shots.map((shot) => [shot.id, current[shot.id] ?? shot.scene])));
+      setSettingPromptDrafts((current) => Object.fromEntries(
+        [...next.characters, ...next.scenes].map((item) => [item.id, current[item.id] ?? item.prompt]),
+      ));
       setSelected((current) => new Set([...current].filter((id) => {
         const shot = next.shots.find((item) => item.id === id);
         return Boolean(shot) && !isStoryboardShotActive(shot!.status);
@@ -91,21 +113,20 @@ export function StoryboardPanel({
 
   useEffect(() => {
     setData(null);
-    setDrafts({});
+    setPromptDrafts({});
     setCharacterDrafts({});
+    setSceneDrafts({});
+    setSettingPromptDrafts({});
     setSelected(new Set());
     void load(false);
-    // conversationId 变化时必须重拉；load 是每次渲染新建的函数，故意不进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
-  // 大脑刚拆完镜时消息数会变；面板开着就跟着刷新
   useEffect(() => {
     if (data) void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
-  // 有任务在跑才轮询；全都停在终态时不动，避免空转
   useEffect(() => {
     if (!active) return;
     const timer = setInterval(() => void load(), 2500);
@@ -118,94 +139,66 @@ export function StoryboardPanel({
     saveTimers.current.clear();
   }, []);
 
+  const imageOptions = useMemo(() => {
+    const result: Array<{ asset: Asset; label: string }> = [];
+    const seen = new Set<string>();
+    for (const entry of images) {
+      if (seen.has(entry.asset.id)) continue;
+      seen.add(entry.asset.id);
+      result.push({ asset: entry.asset, label: entry.source === "storyboard" ? `分镜第 ${entry.round} 镜` : entry.source === "setting" ? "设定图" : entry.source === "upload" ? `上传 · ${entry.asset.fileName}` : `第 ${entry.round} 轮` });
+    }
+    for (const item of [...characters, ...scenes]) {
+      if (!item.asset || seen.has(item.asset.id)) continue;
+      seen.add(item.asset.id);
+      result.push({ asset: item.asset, label: `设定：${item.name}` });
+    }
+    return result;
+  }, [images, characters, scenes]);
+
+  const settingsConfirmed = [...characters, ...scenes].filter((item) => item.confirmed).length;
+  const settingsTotal = characters.length + scenes.length;
+  const shotDone = shots.filter((shot) => shot.status === "succeeded").length;
+
+  function settingMissing(shot: StoryboardShot): string[] {
+    if (shot.kind !== "image" || !data) return [];
+    const missing: string[] = [];
+    for (const name of shot.characters) {
+      const character = characters.find((item) => item.name === name);
+      if (!character?.asset) missing.push(`角色「${name}」还没有设定图`);
+      else if (!character.confirmed) missing.push(`角色「${name}」的设定图还没确认`);
+    }
+    if (shot.scene) {
+      const scene = scenes.find((item) => item.name === shot.scene);
+      if (!scene?.asset) missing.push(`场景「${shot.scene}」还没有设定图`);
+      else if (!scene.confirmed) missing.push(`场景「${shot.scene}」的设定图还没确认`);
+    }
+    return missing;
+  }
+
   const selectable = useMemo(
-    () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status !== "succeeded" && !isStoryboardShotActive(shot.status)),
-    [shots],
+    () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status !== "succeeded"
+      && !isStoryboardShotActive(shot.status) && settingMissing(shot).length === 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shots, data],
   );
   const rerunnable = useMemo(
-    () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status === "succeeded"),
-    [shots],
+    () => shots.filter((shot) => !storyboardShotMissing(shot) && shot.status === "succeeded"
+      && settingMissing(shot).length === 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shots, data],
   );
   const maxBatch = data?.maxBatch ?? 8;
   const canGenerateAny = data?.canGenerateImage || data?.canGenerateVideo;
-  const reference = data?.reference;
-  const characters = data?.characters ?? [];
-  const referenceValue = reference?.mode === "manual" && reference.asset
-    ? `asset:${reference.asset.id}`
-    : reference?.mode ?? "auto";
-
-  function imageLabel(entry: CanvasAsset): string {
-    const name = entry.asset.fileName.replace(/\.[^.]+$/, "");
-    if (entry.source === "storyboard") return `第 ${entry.round} 镜 · ${name.slice(0, 12)}`;
-    if (entry.source === "upload") return `上传 · ${name.slice(0, 12)}`;
-    return `第 ${entry.round} 轮 · ${name.slice(0, 12)}`;
-  }
-
-  async function changeReference(value: string) {
-    if (referenceBusy) return;
-    setReferenceBusy(true);
-    try {
-      const next = value.startsWith("asset:")
-        ? await api.updateStoryboardReference(conversationId, { referenceMode: "manual", referenceAssetId: value.slice(6) })
-        : await api.updateStoryboardReference(conversationId, { referenceMode: value as "auto" | "off" });
-      setData(next);
-      onToast("ok", next.reference.asset ? "角色参考已更新" : "已关闭角色参考");
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "设置角色参考失败");
-    } finally {
-      setReferenceBusy(false);
-    }
-  }
-
-  async function changeCharacterReference(characterId: string, value: string) {
-    if (referenceBusy) return;
-    setReferenceBusy(true);
-    try {
-      const next = await api.updateStoryboardCharacter(
-        conversationId,
-        characterId,
-        value.startsWith("asset:") ? value.slice(6) : null,
-      );
-      setData(next);
-      onToast("ok", "角色参考已更新");
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "设置角色参考失败");
-    } finally {
-      setReferenceBusy(false);
-    }
-  }
-
-  function changeCharacter(shot: StoryboardShot, value: string) {
-    setCharacterDrafts((current) => ({ ...current, [shot.id]: value }));
-    const key = `character:${shot.id}`;
-    const timer = saveTimers.current.get(key);
-    if (timer) clearTimeout(timer);
-    saveTimers.current.set(key, setTimeout(() => {
-      saveTimers.current.delete(key);
-      void saveShot(shot.id, { character: value.trim() });
-    }, 700));
-  }
-
-  function flushCharacter(shot: StoryboardShot) {
-    const key = `character:${shot.id}`;
-    const timer = saveTimers.current.get(key);
-    if (!timer) return;
-    clearTimeout(timer);
-    saveTimers.current.delete(key);
-    void saveShot(shot.id, { character: (characterDrafts[shot.id] ?? shot.character).trim() });
-  }
 
   function toggle(id: string) {
     setSelected((current) => {
       const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else {
-        if (next.size >= maxBatch) {
-          onToast("error", `一次最多提交 ${maxBatch} 个镜头`);
-          return current;
-        }
-        next.add(id);
-      }
+      if (next.has(id)) { next.delete(id); return next; }
+      if (next.size >= maxBatch) { onToast("error", `一次最多提交 ${maxBatch} 个镜头`); return current; }
+      const shot = shots.find((item) => item.id === id);
+      const missing = shot ? settingMissing(shot) : [];
+      if (missing.length) { onToast("error", missing.join("；")); return current; }
+      next.add(id);
       return next;
     });
   }
@@ -218,22 +211,12 @@ export function StoryboardPanel({
     setSelected(new Set(rerunnable.slice(0, maxBatch).map((shot) => shot.id)));
   }
 
-  function changePrompt(shot: StoryboardShot, value: string) {
-    setDrafts((current) => ({ ...current, [shot.id]: value }));
-    const timer = saveTimers.current.get(shot.id);
-    if (timer) clearTimeout(timer);
-    saveTimers.current.set(shot.id, setTimeout(() => {
-      saveTimers.current.delete(shot.id);
-      void saveShot(shot.id, { prompt: value });
-    }, 700));
-  }
-
-  async function saveShot(shotId: string, patch: Partial<Pick<StoryboardShot, "prompt" | "character" | "kind" | "aspectRatio">>): Promise<boolean> {
-    const pendingTimer = saveTimers.current.get(shotId);
-    if (pendingTimer) {
-      clearTimeout(pendingTimer);
-      saveTimers.current.delete(shotId);
-    }
+  async function saveShot(
+    shotId: string,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "character" | "scene" | "kind" | "aspectRatio">>,
+  ): Promise<boolean> {
+    const timer = saveTimers.current.get(shotId);
+    if (timer) { clearTimeout(timer); saveTimers.current.delete(shotId); }
     setSaving((current) => ({ ...current, [shotId]: true }));
     try {
       const next = await api.updateStoryboardShot(conversationId, shotId, patch);
@@ -248,27 +231,138 @@ export function StoryboardPanel({
     }
   }
 
+  function debounce(key: string, action: () => void) {
+    const timer = saveTimers.current.get(key);
+    if (timer) clearTimeout(timer);
+    saveTimers.current.set(key, setTimeout(() => { saveTimers.current.delete(key); action(); }, 700));
+  }
+
+  function changePrompt(shot: StoryboardShot, value: string) {
+    setPromptDrafts((current) => ({ ...current, [shot.id]: value }));
+    debounce(`prompt:${shot.id}`, () => void saveShot(shot.id, { prompt: value }));
+  }
+
   function flushPrompt(shot: StoryboardShot) {
-    const timer = saveTimers.current.get(shot.id);
+    const timer = saveTimers.current.get(`prompt:${shot.id}`);
     if (!timer) return;
     clearTimeout(timer);
-    saveTimers.current.delete(shot.id);
-    void saveShot(shot.id, { prompt: drafts[shot.id] ?? shot.prompt });
+    saveTimers.current.delete(`prompt:${shot.id}`);
+    void saveShot(shot.id, { prompt: promptDrafts[shot.id] ?? shot.prompt });
+  }
+
+  function changeCharacter(shot: StoryboardShot, value: string) {
+    setCharacterDrafts((current) => ({ ...current, [shot.id]: value }));
+    debounce(`character:${shot.id}`, () => void saveShot(shot.id, { character: value.trim() }));
+  }
+
+  function changeScene(shot: StoryboardShot, value: string) {
+    setSceneDrafts((current) => ({ ...current, [shot.id]: value }));
+    debounce(`scene:${shot.id}`, () => void saveShot(shot.id, { scene: value.trim() }));
+  }
+
+  async function saveSettingPrompt(kind: SettingKind, item: SettingItem, value: string) {
+    setSettingBusy(item.id);
+    try {
+      const next = kind === "character"
+        ? await api.updateStoryboardCharacter(conversationId, item.id, { prompt: value })
+        : await api.updateStoryboardScene(conversationId, item.id, { prompt: value });
+      setData(next);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "保存设定描述失败");
+    } finally {
+      setSettingBusy(null);
+    }
+  }
+
+  function changeSettingPrompt(kind: SettingKind, item: SettingItem, value: string) {
+    setSettingPromptDrafts((current) => ({ ...current, [item.id]: value }));
+    debounce(`setting:${item.id}`, () => void saveSettingPrompt(kind, item, value));
+  }
+
+  async function generateSettings(characterIds: string[], sceneIds: string[]) {
+    const total = characterIds.length + sceneIds.length;
+    if (!total) return;
+    setSettingBusy("all");
+    try {
+      const result = await api.generateStoryboardSettings(conversationId, characterIds, sceneIds);
+      setData(result.view);
+      if (result.failures.length) onToast("error", result.failures.map((item) => `${item.name}：${item.error}`).join("；"));
+      else onToast("ok", `已提交 ${result.submitted} 张设定图，完成后会显示在左侧`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "提交设定图失败");
+    } finally {
+      setSettingBusy(null);
+    }
+  }
+
+  function generateMissingSettings() {
+    const missingCharacters = characters.filter((item) => !item.asset && !ACTIVE_SETTING_STATUS.has(item.status));
+    const missingScenes = scenes.filter((item) => !item.asset && !ACTIVE_SETTING_STATUS.has(item.status));
+    if (!missingCharacters.length && !missingScenes.length) {
+      onToast("ok", "所有设定图都已经有了，点卡片上的「确认使用」即可");
+      return;
+    }
+    // 两类一起提交时也守住 8 张上限
+    const charactersToGenerate = missingCharacters.slice(0, maxBatch).map((item) => item.id);
+    const scenesToGenerate = missingScenes.slice(0, Math.max(0, maxBatch - charactersToGenerate.length)).map((item) => item.id);
+    void generateSettings(charactersToGenerate, scenesToGenerate);
+  }
+
+  async function confirmSetting(kind: SettingKind, item: SettingItem) {
+    setSettingBusy(item.id);
+    try {
+      const next = kind === "character"
+        ? await api.updateStoryboardCharacter(conversationId, item.id, { confirmed: true })
+        : await api.updateStoryboardScene(conversationId, item.id, { confirmed: true });
+      setData(next);
+      onToast("ok", `已确认「${item.name}」的设定图`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "确认失败");
+    } finally {
+      setSettingBusy(null);
+    }
+  }
+
+  async function chooseSettingAsset(kind: SettingKind, item: SettingItem, assetId: string) {
+    if (!assetId) return;
+    setSettingBusy(item.id);
+    try {
+      // 手动选图就是用户的确认动作，直接置为已确认
+      const next = kind === "character"
+        ? await api.updateStoryboardCharacter(conversationId, item.id, { assetId, confirmed: true })
+        : await api.updateStoryboardScene(conversationId, item.id, { assetId, confirmed: true });
+      setData(next);
+      onToast("ok", `「${item.name}」的设定图已更新`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "设置失败");
+    } finally {
+      setSettingBusy(null);
+    }
+  }
+
+  async function uploadSettingFile(file: File) {
+    if (!uploadTarget) return;
+    setSettingBusy(uploadTarget.id);
+    try {
+      const next = await api.uploadStoryboardSetting(conversationId, uploadTarget.kind, uploadTarget.id, file);
+      setData(next);
+      onToast("ok", "已上传并确认设定图");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "上传失败");
+    } finally {
+      setSettingBusy(null);
+      setUploadTarget(null);
+      if (uploadRef.current) uploadRef.current.value = "";
+    }
   }
 
   async function submitGenerate(ids: string[]) {
     if (!ids.length) return;
     setSubmitting(true);
     try {
-      /*
-       * 点「确认提交」之前先把还没落库的提示词存掉。
-       * 只靠 700ms 防抖 / blur 保存的话，用户改完立刻点生成，
-       * 请求可能先带着旧提示词发出去——界面上看到的是新描述，生成的是旧的。
-       */
-      const toSave = shots.filter((shot) => ids.includes(shot.id) && drafts[shot.id] !== undefined && drafts[shot.id] !== shot.prompt);
-      const saved = await Promise.all(toSave.map((shot) => saveShot(shot.id, { prompt: drafts[shot.id]! })));
+      const toSave = shots.filter((shot) => ids.includes(shot.id) && promptDrafts[shot.id] !== undefined && promptDrafts[shot.id] !== shot.prompt);
+      const saved = await Promise.all(toSave.map((shot) => saveShot(shot.id, { prompt: promptDrafts[shot.id]! })));
       if (saved.some((ok) => !ok)) return;
-      // 并行保存的响应可能乱序回来；提交前拉一次权威视图，别让界面停在半新半旧的状态
       await load();
 
       const result = await api.generateStoryboardShots(conversationId, ids);
@@ -301,265 +395,336 @@ export function StoryboardPanel({
     }
   }
 
-  const confirmShots = confirming
-    ? shots.filter((shot) => confirming.includes(shot.id))
-    : [];
+  const confirmShots = confirming ? shots.filter((shot) => confirming.includes(shot.id)) : [];
   const confirmImages = confirmShots.filter((shot) => shot.kind === "image").length;
   const confirmVideos = confirmShots.length - confirmImages;
-  const firstImageShot = confirmShots.filter((shot) => shot.kind === "image").sort((left, right) => left.index - right.index)[0];
-  const usingCharacters = characters.length > 0;
-  const selectedCharacters = [...new Set(confirmShots.map((shot) => shot.character.trim()).filter(Boolean))];
-  const charactersWithoutRef = selectedCharacters.filter((name) => !characters.find((character) => character.name === name)?.asset);
-  const willAutoBase = !usingCharacters && reference?.mode === "auto" && !reference.asset && confirmImages >= 2;
+  const confirmCharacterNames = [...new Set(confirmShots.flatMap((shot) => shot.characters))];
+  const confirmSceneNames = [...new Set(confirmShots.map((shot) => shot.scene).filter(Boolean))];
+  const confirmMissing = [...new Set(confirmShots.flatMap((shot) => settingMissing(shot)))];
   const rerunCount = confirmShots.filter((shot) => shot.status === "succeeded").length;
-  const referenceShot = reference?.shotIndex ? shots.find((shot) => shot.index === reference.shotIndex) : undefined;
-  const referenceLooksLikeScene = Boolean(!usingCharacters && referenceShot && !shotNeedsCharacterReference(referenceShot));
+  const legacyReference = data?.reference;
+  const legacyAutoBase = characters.length === 0 && scenes.length === 0
+    && legacyReference?.mode === "auto" && !legacyReference.asset && confirmImages >= 2;
+
+  function renderSettingCard(kind: SettingKind, item: SettingItem) {
+    const Icon = kind === "character" ? UserRound : Mountain;
+    const isBusy = settingBusy === item.id;
+    const anyBusy = settingBusy !== null;
+    const isActive = ACTIVE_SETTING_STATUS.has(item.status);
+    return (
+      <div key={`${kind}:${item.id}`} className={`setting-card ${item.confirmed ? "is-confirmed" : ""}`}>
+        <button
+          type="button"
+          className={`setting-card-image is-${kind}`}
+          title={item.asset ? "点开看大图" : "还没有设定图"}
+          onClick={() => item.asset && setPreview(item.asset)}
+        >
+          {item.asset
+            ? <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" />
+            : <span className="setting-card-placeholder"><Icon size={22} /><small>{statusLabel(item.status)}</small></span>}
+          <span className={`setting-status is-${item.status}`}>
+            {isActive ? <LoaderCircle size={11} className="spin" /> : item.confirmed ? <CheckCircle2 size={11} /> : null}
+            {item.confirmed ? "已确认" : item.asset ? "待确认" : statusLabel(item.status)}
+          </span>
+        </button>
+        <div className="setting-card-body">
+          <div className="setting-card-title">
+            <strong>{item.name}</strong>
+            <small>{item.shotCount} 镜</small>
+          </div>
+          <textarea
+            className="setting-card-prompt"
+            rows={2}
+            maxLength={2000}
+            value={settingPromptDrafts[item.id] ?? item.prompt}
+            placeholder={kind === "character" ? "外貌、年龄、发型、服装…" : "空间、陈设、光线、色调…"}
+            onChange={(event) => changeSettingPrompt(kind, item, event.target.value)}
+            onBlur={() => {
+              const timer = saveTimers.current.get(`setting:${item.id}`);
+              if (!timer) return;
+              clearTimeout(timer);
+              saveTimers.current.delete(`setting:${item.id}`);
+              void saveSettingPrompt(kind, item, settingPromptDrafts[item.id] ?? item.prompt);
+            }}
+          />
+          <div className="setting-card-actions">
+            <button type="button" className="secondary-button compact" disabled={anyBusy || isActive}
+              onClick={() => void generateSettings(kind === "character" ? [item.id] : [], kind === "scene" ? [item.id] : [])}>
+              {isBusy || isActive ? <LoaderCircle size={12} className="spin" /> : <Sparkles size={12} />}
+              {item.asset ? "重生成" : "生成"}
+            </button>
+            <button type="button" className="secondary-button compact" disabled={anyBusy}
+              onClick={() => { setUploadTarget({ kind, id: item.id }); uploadRef.current?.click(); }}>
+              <Upload size={12} />上传
+            </button>
+            <select
+              className="setting-card-pick"
+              value=""
+              disabled={anyBusy || !imageOptions.length}
+              onChange={(event) => void chooseSettingAsset(kind, item, event.target.value)}
+              title="用本会话已有的一张图作为设定图"
+            >
+              <option value="">选已有图</option>
+              {imageOptions.map((option) => (
+                <option key={option.asset.id} value={option.asset.id}>{option.label}</option>
+              ))}
+            </select>
+            {item.asset && !item.confirmed ? (
+              <button type="button" className="primary-button compact" disabled={anyBusy}
+                onClick={() => void confirmSetting(kind, item)}>
+                <CheckCircle2 size={12} />确认使用
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="storyboard-panel">
-      <div className="storyboard-head">
-        <div className="storyboard-title">
-          <Clapperboard size={15} />
-          <strong>分镜表</strong>
-          <span>{shots.length} 镜</span>
-          {loading ? <LoaderCircle size={13} className="spin" /> : null}
-        </div>
-
-        {!characters.length ? (
-          <label
-            className="storyboard-reference"
-            title="多镜之间保持同一个人物。自动 = 优先用有人物、已经有结果的图片镜头；也可以指定任意一张本会话的图。多人物剧本建议让助手先标注角色，再给每个角色绑参考图。"
-          >
-            {reference?.asset
-              ? <img src={api.assetUrl(reference.asset.thumbUrl ?? reference.asset.url)} alt="" />
-              : <UserRound size={13} />}
-            <select
-              value={referenceValue}
-              disabled={referenceBusy || !shots.length}
-              onChange={(event) => void changeReference(event.target.value)}
-            >
-              <option value="auto">角色参考：自动</option>
-              <option value="off">角色参考：不使用</option>
-              {images.map((entry) => (
-                <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
-              ))}
-              {reference?.mode === "manual" && reference.asset && !images.some((entry) => entry.asset.id === reference.asset!.id) ? (
-                <option value={`asset:${reference.asset.id}`}>当前指定的参考图</option>
-              ) : null}
-            </select>
-            {referenceBusy ? <LoaderCircle size={12} className="spin" /> : null}
-          </label>
-        ) : null}
-
-        <div className="storyboard-head-actions">
-          {shots.length ? (
-            <button
-              type="button"
-              className="link-btn"
-              disabled={tagCharactersDisabled}
-              onClick={onTagCharacters}
-              title="让助手根据分镜表补角色标签；不会重新拆分，也不会动已经生成的图"
-            >
-              {characters.length ? "重新标注" : "标注角色"}
+    <div className="storyboard-overlay" role="dialog" aria-modal="true" aria-label="分镜工作台"
+      onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}>
+      <div className="storyboard-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="storyboard-modal-head">
+          <div className="storyboard-modal-title">
+            <Clapperboard size={18} />
+            <div>
+              <h2>分镜工作台</h2>
+              <p>先生成并确认人物 / 场景设定图，再生成分镜图</p>
+            </div>
+          </div>
+          <div className="storyboard-progress">
+            <span className={settingsConfirmed === settingsTotal && settingsTotal ? "is-done" : ""}>
+              设定图 {settingsConfirmed}/{settingsTotal}
+            </span>
+            <span>分镜 {shotDone}/{shots.length}</span>
+            {loading ? <LoaderCircle size={13} className="spin" /> : null}
+          </div>
+          <div className="storyboard-modal-actions">
+            {shots.length ? (
+              <button type="button" className="secondary-button compact" disabled={tagCharactersDisabled} onClick={onTagCharacters}>
+                <UserRound size={13} />{characters.length || scenes.length ? "重新标注" : "标注角色/场景"}
+              </button>
+            ) : null}
+            <button type="button" className="secondary-button compact" disabled={Boolean(settingBusy)}
+              onClick={generateMissingSettings}>
+              <Sparkles size={13} />生成缺失设定图
             </button>
-          ) : null}
-          <button type="button" className="link-btn" onClick={selectReady} disabled={!selectable.length}>
-            选中可生成
-          </button>
-          {rerunnable.length ? (
-            <button type="button" className="link-btn" onClick={selectRerun} title="勾选已完成的前 8 镜，一起重跑">
-              选中已完成
+            <button type="button" className="icon-button compact" title="刷新" onClick={() => void load(false)}>
+              <RefreshCw size={14} />
             </button>
-          ) : null}
-          <button
-            type="button"
-            className="primary-button compact"
-            disabled={!selected.size || !canGenerateAny || submitting}
-            onClick={() => setConfirming([...selected])}
-          >
-            <Sparkles size={13} />生成选中 {selected.size ? `(${selected.size})` : ""}
-          </button>
-          <button type="button" className="icon-button compact" title="刷新" onClick={() => void load(false)}>
-            <RefreshCw size={14} />
-          </button>
-          <button type="button" className="icon-button compact" title="收起分镜表" onClick={onClose}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+            <button type="button" className="icon-button compact" title="关闭" onClick={onClose}><X size={15} /></button>
+          </div>
+        </header>
 
-      {characters.length ? (
-        <div className="storyboard-characters">
-          {characters.map((character) => {
-            const sourceShot = character.assetId ? shots.find((shot) => shot.assetId === character.assetId) : undefined;
-            const mismatch = Boolean(sourceShot?.character && sourceShot.character !== character.name);
-            return (
-            <label
-              key={character.id}
-              className={`storyboard-character ${character.asset ? "has-ref" : ""} ${mismatch ? "is-mismatch" : ""}`}
-              title={mismatch
-                ? `这张参考来自第 ${sourceShot!.index} 镜（角色：${sourceShot!.character}），和「${character.name}」不是同一个角色；确认是有意复用再保留`
-                : character.mode === "auto"
-                  ? "自动：用这个角色第一个已完成的镜头当参考"
-                  : character.mode === "manual" ? "已手动绑定参考图" : "还没有参考图：这一角色会先生成一个基准镜头"}
-            >
-              {character.asset
-                ? <img src={api.assetUrl(character.asset.thumbUrl ?? character.asset.url)} alt="" />
-                : <UserRound size={13} />}
-              <span className="storyboard-character-name">{character.name}</span>
-              <small>{character.shotCount} 镜</small>
-              <select
-                value={character.assetId ?? "auto"}
-                disabled={referenceBusy}
-                onChange={(event) => void changeCharacterReference(character.id, event.target.value)}
-              >
-                <option value="auto">自动参考</option>
-                {images.map((entry) => (
-                  <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
-                ))}
-                {character.assetId && !images.some((entry) => entry.asset.id === character.assetId) ? (
-                  <option value={`asset:${character.assetId}`}>当前参考</option>
+        <div className="storyboard-modal-body">
+          <aside className="storyboard-settings">
+            <section className="setting-section">
+              <div className="setting-section-head">
+                <div><UserRound size={14} /><h3>角色设定</h3><span>{characters.length}</span></div>
+                {characters.length ? (
+                  <button type="button" className="link-btn"
+                    onClick={() => void generateSettings(characters.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch), [])}>
+                    生成全部
+                  </button>
                 ) : null}
-              </select>
-            </label>
-            );
-          })}
-          <span className="storyboard-character-hint">每个角色只带自己的参考图</span>
-        </div>
-      ) : null}
-
-      {!canGenerateAny && shots.length ? (
-        <div className="storyboard-note">还没有可用的生图 / 生视频渠道，请先到「模型配置」里添加。</div>
-      ) : null}
-
-      <div className="storyboard-list">
-        {shots.map((shot) => {
-          const missing = storyboardShotMissing(shot);
-          const activeShot = isStoryboardShotActive(shot.status);
-          const succeeded = shot.status === "succeeded";
-          const checked = selected.has(shot.id);
-          const kindAvailable = shot.kind === "video" ? data?.canGenerateVideo : data?.canGenerateImage;
-          return (
-            <div key={shot.id} className={`storyboard-row ${checked ? "is-selected" : ""} ${succeeded ? "is-done" : ""}`}>
-              <div className="storyboard-row-pick">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={Boolean(missing) || activeShot}
-                  onChange={() => toggle(shot.id)}
-                  title={succeeded ? "已生成，勾选可以一起重跑" : undefined}
-                  aria-label={`选择第 ${shot.index} 镜`}
-                />
-                <span className="storyboard-index">{shot.index}</span>
               </div>
+              {characters.length
+                ? characters.map((item) => renderSettingCard("character", item))
+                : <div className="setting-empty">还没有角色标签。点右上角「标注角色/场景」，或直接在镜头里填角色名。</div>}
+            </section>
 
-              <div className="storyboard-row-main">
-                <div className="storyboard-row-meta">
-                  <label className="storyboard-kind" title="这一镜生成图片还是视频">
-                    {shot.kind === "video" ? <Film size={12} /> : <ImageIcon size={12} />}
-                    <select
-                      value={shot.kind}
-                      onChange={(event) => void saveShot(shot.id, { kind: event.target.value as "image" | "video" })}
-                      disabled={activeShot}
-                    >
-                      <option value="image">图片</option>
-                      <option value="video">视频</option>
-                    </select>
-                  </label>
-                  <label className="storyboard-aspect" title="画幅">
-                    <select
-                      value={shot.aspectRatio}
-                      onChange={(event) => void saveShot(shot.id, { aspectRatio: event.target.value })}
-                      disabled={activeShot}
-                    >
-                      {STORYBOARD_ASPECT_RATIOS.map((ratio) => (
-                        <option key={ratio || "auto"} value={ratio}>{ratio || "默认画幅"}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="storyboard-character-field" title="这一镜的出场角色；空镜 / 道具 / 字幕留空">
-                    <UserRound size={11} />
-                    <input
-                      list={`storyboard-characters-${conversationId}`}
-                      value={characterDrafts[shot.id] ?? shot.character}
-                      placeholder="空镜"
-                      maxLength={40}
-                      disabled={activeShot}
-                      onChange={(event) => changeCharacter(shot, event.target.value)}
-                      onBlur={() => flushCharacter(shot)}
-                    />
-                  </label>
-                  <span className={`storyboard-status is-${shot.status}`} title={shot.errorMessage ?? undefined}>
-                    {statusLabel(shot)}
-                  </span>
-                  {missing ? <span className="storyboard-missing">{missing}</span> : null}
-                  {saving[shot.id] ? <span className="storyboard-saving">保存中…</span> : null}
-                </div>
-                {shot.sourceText ? <div className="storyboard-source" title={shot.sourceText}>{shot.sourceText}</div> : null}
-                <textarea
-                  className="storyboard-prompt"
-                  value={drafts[shot.id] ?? shot.prompt}
-                  rows={2}
-                  maxLength={20000}
-                  placeholder="画面描述：人物、场景、构图、光线、风格…"
-                  disabled={activeShot}
-                  onChange={(event) => changePrompt(shot, event.target.value)}
-                  onBlur={() => flushPrompt(shot)}
-                />
+            <section className="setting-section">
+              <div className="setting-section-head">
+                <div><Mountain size={14} /><h3>场景设定</h3><span>{scenes.length}</span></div>
+                {scenes.length ? (
+                  <button type="button" className="link-btn"
+                    onClick={() => void generateSettings([], scenes.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch))}>
+                    生成全部
+                  </button>
+                ) : null}
               </div>
+              {scenes.length
+                ? scenes.map((item) => renderSettingCard("scene", item))
+                : <div className="setting-empty">还没有场景标签。标注后可以给每个地点生成一张空镜设定图。</div>}
+            </section>
+          </aside>
 
-              <div className="storyboard-row-side">
-                {shot.asset ? (
-                  <button type="button" className="storyboard-thumb" title="点开看结果" onClick={() => setPreview(shot.asset)}>
-                    {shot.kind === "video"
-                      ? <video src={api.assetUrl(shot.asset.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
-                      : <img src={api.assetUrl(shot.asset.thumbUrl ?? shot.asset.url)} alt="" loading="lazy" />}
-                  </button>
-                ) : <span className="storyboard-thumb is-empty">{shot.kind === "video" ? <Film size={16} /> : <ImageIcon size={16} />}</span>}
-                <div className="storyboard-row-actions">
-                  <button
-                    type="button"
-                    className="link-btn"
-                    disabled={Boolean(missing) || activeShot || submitting || !kindAvailable}
-                    onClick={() => setConfirming([shot.id])}
-                  >
-                    {activeShot ? <LoaderCircle size={12} className="spin" /> : succeeded ? <RefreshCw size={12} /> : <Sparkles size={12} />}
-                    {activeShot ? "生成中" : succeeded ? "重跑" : "生成"}
-                  </button>
-                  {shot.asset ? (
-                    <>
-                      <button type="button" className="link-btn" onClick={() => setPreview(shot.asset)}>预览</button>
-                      <button type="button" className="link-btn" onClick={() => onAddToCanvas(shot.asset!.id)} disabled={canvasIds.includes(shot.asset.id)}>
-                        <Layers size={12} />{canvasIds.includes(shot.asset.id) ? "在画布" : "加画布"}
-                      </button>
-                      <button type="button" className="link-btn" disabled={Boolean(downloading)} onClick={() => void download(shot.asset!)}>
-                        {downloading === shot.asset.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
-                      </button>
-                    </>
-                  ) : null}
-                </div>
+          <main className="storyboard-shots">
+            <div className="storyboard-shots-toolbar">
+              <div className="storyboard-shots-title">
+                <strong>分镜图</strong>
+                <span>{shots.length} 镜 · 已完成 {shotDone}</span>
+              </div>
+              <div className="storyboard-shots-actions">
+                <button type="button" className="link-btn" onClick={selectReady} disabled={!selectable.length}>选中可生成</button>
+                {rerunnable.length ? (
+                  <button type="button" className="link-btn" onClick={selectRerun}>选中已完成</button>
+                ) : null}
+                <button
+                  type="button"
+                  className="primary-button compact"
+                  disabled={!selected.size || !canGenerateAny || submitting}
+                  onClick={() => setConfirming([...selected])}
+                >
+                  <Sparkles size={13} />生成选中 {selected.size ? `(${selected.size})` : ""}
+                </button>
               </div>
             </div>
-          );
-        })}
+
+            {!canGenerateAny && shots.length ? (
+              <div className="storyboard-note">还没有可用的生图 / 生视频渠道，请先到「模型配置」里添加。</div>
+            ) : null}
+
+            <div className="shot-list">
+              {shots.map((shot) => {
+                const missing = storyboardShotMissing(shot);
+                const missingSettings = settingMissing(shot);
+                const activeShot = isStoryboardShotActive(shot.status);
+                const succeeded = shot.status === "succeeded";
+                const checked = selected.has(shot.id);
+                const kindAvailable = shot.kind === "video" ? data?.canGenerateVideo : data?.canGenerateImage;
+                return (
+                  <div key={shot.id} className={`shot-card ${checked ? "is-selected" : ""} ${succeeded ? "is-done" : ""}`}>
+                    <div className="shot-pick">
+                      <input type="checkbox" checked={checked}
+                        disabled={Boolean(missing) || activeShot || missingSettings.length > 0}
+                        onChange={() => toggle(shot.id)}
+                        title={missingSettings.length ? "先处理左侧设定图" : undefined}
+                        aria-label={`选择第 ${shot.index} 镜`} />
+                      <span className="shot-index">{shot.index}</span>
+                    </div>
+
+                    <div className="shot-main">
+                      <div className="shot-meta">
+                        <label className="shot-kind">
+                          {shot.kind === "video" ? <Film size={12} /> : <ImageIcon size={12} />}
+                          <select value={shot.kind} disabled={activeShot}
+                            onChange={(event) => void saveShot(shot.id, { kind: event.target.value as "image" | "video" })}>
+                            <option value="image">图片</option>
+                            <option value="video">视频</option>
+                          </select>
+                        </label>
+                        <label className="shot-aspect">
+                          <select value={shot.aspectRatio} disabled={activeShot}
+                            onChange={(event) => void saveShot(shot.id, { aspectRatio: event.target.value })}>
+                            {STORYBOARD_ASPECT_RATIOS.map((ratio) => (
+                              <option key={ratio || "auto"} value={ratio}>{ratio || "默认画幅"}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="shot-character" title="出场角色；多个人物用「、」分隔">
+                          <UserRound size={11} />
+                          <input list={`storyboard-characters-${conversationId}`}
+                            value={characterDrafts[shot.id] ?? shot.character}
+                            placeholder="无人物" maxLength={120} disabled={activeShot}
+                            onChange={(event) => changeCharacter(shot, event.target.value)}
+                            onBlur={() => {
+                              const timer = saveTimers.current.get(`character:${shot.id}`);
+                              if (!timer) return;
+                              clearTimeout(timer);
+                              saveTimers.current.delete(`character:${shot.id}`);
+                              void saveShot(shot.id, { character: (characterDrafts[shot.id] ?? shot.character).trim() });
+                            }} />
+                        </label>
+                        <label className="shot-character" title="场景名；同一地点用同一个名字">
+                          <Mountain size={11} />
+                          <input list={`storyboard-scenes-${conversationId}`}
+                            value={sceneDrafts[shot.id] ?? shot.scene}
+                            placeholder="无场景" maxLength={80} disabled={activeShot}
+                            onChange={(event) => changeScene(shot, event.target.value)}
+                            onBlur={() => {
+                              const timer = saveTimers.current.get(`scene:${shot.id}`);
+                              if (!timer) return;
+                              clearTimeout(timer);
+                              saveTimers.current.delete(`scene:${shot.id}`);
+                              void saveShot(shot.id, { scene: (sceneDrafts[shot.id] ?? shot.scene).trim() });
+                            }} />
+                        </label>
+                        <span className={`shot-status is-${shot.status}`} title={shot.errorMessage ?? undefined}>
+                          {shotStatusLabel(shot)}
+                        </span>
+                        {saving[shot.id] ? <span className="shot-saving">保存中…</span> : null}
+                      </div>
+                      {shot.sourceText ? <div className="shot-source" title={shot.sourceText}>{shot.sourceText}</div> : null}
+                      <textarea className="shot-prompt" rows={2} maxLength={20000}
+                        value={promptDrafts[shot.id] ?? shot.prompt}
+                        placeholder="画面描述：人物、场景、构图、光线、风格…"
+                        disabled={activeShot}
+                        onChange={(event) => changePrompt(shot, event.target.value)}
+                        onBlur={() => flushPrompt(shot)} />
+                      {missing ? <div className="shot-warning">{missing}</div> : null}
+                      {missingSettings.length ? <div className="shot-warning">先处理设定图：{missingSettings.join("；")}</div> : null}
+                    </div>
+
+                    <div className="shot-side">
+                      {shot.asset ? (
+                        <button type="button" className="shot-thumb" title="点开看大图" onClick={() => setPreview(shot.asset)}>
+                          {shot.kind === "video"
+                            ? <video src={api.assetUrl(shot.asset.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
+                            : <img src={api.assetUrl(shot.asset.thumbUrl ?? shot.asset.url)} alt="" loading="lazy" />}
+                        </button>
+                      ) : <span className="shot-thumb is-empty">{shot.kind === "video" ? <Film size={18} /> : <ImageIcon size={18} />}</span>}
+                      <div className="shot-actions">
+                        <button type="button" className="link-btn"
+                          disabled={Boolean(missing) || activeShot || submitting || !kindAvailable || missingSettings.length > 0}
+                          onClick={() => setConfirming([shot.id])}>
+                          {activeShot ? <LoaderCircle size={12} className="spin" /> : succeeded ? <RefreshCw size={12} /> : <Sparkles size={12} />}
+                          {activeShot ? "生成中" : succeeded ? "重跑" : "生成"}
+                        </button>
+                        {shot.asset ? (
+                          <>
+                            <button type="button" className="link-btn" onClick={() => setPreview(shot.asset)}>预览</button>
+                            <button type="button" className="link-btn" onClick={() => onAddToCanvas(shot.asset!.id)}
+                              disabled={canvasIds.includes(shot.asset.id)}>
+                              <Layers size={12} />{canvasIds.includes(shot.asset.id) ? "在画布" : "加画布"}
+                            </button>
+                            <button type="button" className="link-btn" disabled={Boolean(downloading)}
+                              onClick={() => void download(shot.asset!)}>
+                              {downloading === shot.asset.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {!shots.length && !loading ? (
+              <div className="storyboard-empty">
+                <Clapperboard size={20} />
+                <span>还没有分镜。上传 .txt / .md 剧本，让助手「拆成分镜」。</span>
+              </div>
+            ) : null}
+          </main>
+        </div>
+
+        <datalist id={`storyboard-characters-${conversationId}`}>
+          {characters.map((character) => <option key={character.id} value={character.name} />)}
+        </datalist>
+        <datalist id={`storyboard-scenes-${conversationId}`}>
+          {scenes.map((scene) => <option key={scene.id} value={scene.name} />)}
+        </datalist>
+        <input
+          ref={uploadRef}
+          className="file-input"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void uploadSettingFile(file);
+          }}
+        />
       </div>
 
-      <datalist id={`storyboard-characters-${conversationId}`}>
-        {characters.map((character) => <option key={character.id} value={character.name} />)}
-      </datalist>
-
-      {!shots.length && !loading ? (
-        <div className="storyboard-empty">
-          <ChevronDown size={16} />
-          <span>还没有分镜。上传 .txt / .md 剧本，让助手「拆成分镜」。</span>
-        </div>
-      ) : null}
-
       {confirming ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setConfirming(null); }}>
-          <div className="modal narrow" role="dialog" aria-modal="true" aria-label="确认生成分镜">
+        <div className="modal-backdrop storyboard-confirm-backdrop" role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setConfirming(null); }}>
+          <div className="modal storyboard-confirm" role="dialog" aria-modal="true" aria-label="确认生成分镜">
             <div className="modal-header">
-              <div><Clapperboard size={18} /><h2>确认生成</h2></div>
+              <div><Clapperboard size={18} /><h2>确认生成分镜</h2></div>
               <button type="button" className="icon-button" onClick={() => setConfirming(null)} disabled={submitting}><X size={18} /></button>
             </div>
             <div className="modal-body">
@@ -568,49 +733,33 @@ export function StoryboardPanel({
                 {confirmImages ? `：图片 ${confirmImages} 个` : ""}
                 {confirmVideos ? `${confirmImages ? "，" : "："}视频 ${confirmVideos} 个` : ""}。
               </p>
-              <div className="storyboard-confirm-list">
-                {confirmShots.map((shot) => (
-                  <div key={shot.id} className="storyboard-confirm-item">
-                    <span className="storyboard-index">{shot.index}</span>
-                    <span className="storyboard-confirm-kind">{storyboardKindLabel(shot.kind)}{shot.aspectRatio ? ` · ${shot.aspectRatio}` : ""}</span>
-                    <span className="storyboard-confirm-prompt">{drafts[shot.id] ?? shot.prompt}</span>
-                    <Check size={13} />
-                  </div>
-                ))}
+              <div className="storyboard-ref-summary">
+                {confirmCharacterNames.length ? (
+                  <div><strong>角色参考</strong>{confirmCharacterNames.map((name) => {
+                    const item = characters.find((character) => character.name === name);
+                    return <span key={name} className={item?.confirmed ? "is-ok" : "is-missing"}>{name}{item?.confirmed ? " · 已确认" : " · 未确认"}</span>;
+                  })}</div>
+                ) : null}
+                {confirmSceneNames.length ? (
+                  <div><strong>场景参考</strong>{confirmSceneNames.map((name) => {
+                    const item = scenes.find((scene) => scene.name === name);
+                    return <span key={name} className={item?.confirmed ? "is-ok" : "is-missing"}>{name}{item?.confirmed ? " · 已确认" : " · 未确认"}</span>;
+                  })}</div>
+                ) : null}
+                {!confirmCharacterNames.length && !confirmSceneNames.length ? (
+                  <div className="storyboard-ref-none">这一批没有角色 / 场景参考</div>
+                ) : null}
               </div>
-              {usingCharacters ? (
-                <p className={`storyboard-reference-note ${charactersWithoutRef.length ? "is-warning" : ""}`}>
-                  {selectedCharacters.length
-                    ? `按角色带参考：${selectedCharacters.map((name) => {
-                      const character = characters.find((item) => item.name === name);
-                      return `${name}（${character?.mode === "manual" ? "已绑定" : character?.mode === "auto" ? "自动参考" : "待生成基准"}）`;
-                    }).join("、")}。`
-                    : "这一批镜头没有标注角色，不会带角色参考图。"}
-                  {charactersWithoutRef.length
-                    ? ` 其中 ${charactersWithoutRef.join("、")} 还没有参考图：会先生成一个基准镜头，再生成其余镜头（每个角色最多多等一次，约 3 分钟）。`
-                    : ""}
-                </p>
-              ) : (
-                <p className={`storyboard-reference-note ${reference?.mode === "off" ? "is-warning" : ""}`}>
-                  {reference?.mode === "off"
-                    ? "已关闭角色参考：多个镜头里的人物可能对不上。"
-                    : reference?.asset
-                      ? `本次会以${reference.shotIndex ? `第 ${reference.shotIndex} 镜` : "指定的图片"}作为角色 / 画风参考。`
-                      : willAutoBase
-                        ? `还没有角色基准：会先生成第 ${firstImageShot?.index ?? 1} 镜，等它完成后自动提交其余镜头（需要多等一次生成，最长约 3 分钟）。`
-                        : confirmImages > 1
-                          ? "还没有可用的角色基准，本批图片会各自生成；先从这一批里验收一张，下一次生成就会自动以它为参考。"
-                          : "本批只有 1 个图片镜头，暂不需要角色参考；它完成后会自动成为后续镜头的参考。"}
-                </p>
-              )}
-              {referenceLooksLikeScene ? (
-                <p className="storyboard-reference-note is-warning">
-                  当前角色参考是第 {reference!.shotIndex} 镜，看起来是空镜 / 环境，不是人物镜头；用它可能起不到保持人物一致的作用。建议改选一张有人物的图。
-                </p>
+              {confirmMissing.length ? (
+                <p className="storyboard-reference-note is-warning">先处理：{confirmMissing.join("；")}</p>
               ) : null}
               {rerunCount ? (
                 <p className="storyboard-reference-note">
                   其中 {rerunCount} 镜已经有结果，会重新生成并替换分镜表里的最新结果；旧结果仍保留在生成历史里。
+                </p>
+              ) : legacyAutoBase ? (
+                <p className="storyboard-reference-note is-warning">
+                  还没有角色基准：会先生成一个有人物的镜头，再提交其余镜头（需要多等一次生成，最长约 3 分钟）。
                 </p>
               ) : null}
               <p className="storyboard-billing">
@@ -619,25 +768,17 @@ export function StoryboardPanel({
             </div>
             <div className="modal-footer">
               <button type="button" className="secondary-button" onClick={() => setConfirming(null)} disabled={submitting}>取消</button>
-              <button type="button" className="primary-button" onClick={() => void submitGenerate(confirming)} disabled={submitting}>
+              <button type="button" className="primary-button" disabled={submitting || confirmMissing.length > 0}
+                onClick={() => void submitGenerate(confirming)}>
                 {submitting ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
-                {submitting ? (willAutoBase || charactersWithoutRef.length ? "先生成角色基准…" : "提交中…") : `确认提交 ${confirmShots.length} 镜`}
+                {submitting ? "提交中…" : `确认提交 ${confirmShots.length} 镜`}
               </button>
             </div>
           </div>
         </div>
       ) : null}
 
-      {preview ? <AssetLightbox assetId={preview.id} asset={preview} onClose={() => setPreview(null)} onToast={(kind, text) => onToast(kind, text)} /> : null}
+      {preview ? <AssetLightbox assetId={preview.id} asset={preview} onClose={() => setPreview(null)} onToast={onToast} /> : null}
     </div>
   );
-}
-
-function statusLabel(shot: StoryboardShot): string {
-  if (shot.status === "planned") return "未生成";
-  if (shot.status === "succeeded") return "已完成";
-  if (shot.status === "failed") return "失败";
-  if (shot.status === "cancelled") return "已取消";
-  if (shot.status === "expired") return "已过期";
-  return "生成中";
 }

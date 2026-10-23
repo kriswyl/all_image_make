@@ -27,7 +27,7 @@ import {
   MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS, STORYBOARD_SHOT_KINDS,
   normalizeStoryboardAspect,
 } from "../shared/storyboard.js";
-import { buildStoryboardView, generateStoryboardShots } from "./storyboard.js";
+import { buildStoryboardView, generateStoryboardSettings, generateStoryboardShots } from "./storyboard.js";
 
 const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
@@ -168,14 +168,23 @@ const storyboardShotPatchSchema = z.object({
   prompt: z.string().trim().max(20000).optional(),
   sourceText: z.string().trim().max(20000).optional(),
   /** 出场角色名；空串表示空镜 / 道具 / 字幕 */
-  character: z.string().trim().max(40).optional(),
+  character: z.string().trim().max(120).optional(),
+  /** 场景名；空串表示没有场景设定 */
+  scene: z.string().trim().max(80).optional(),
   kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
   aspectRatio: z.string().trim().max(10).optional(),
 });
 
-const storyboardCharacterPatchSchema = z.object({
-  /** null = 自动用该角色第一个已完成的镜头 */
-  assetId: z.string().uuid().nullable(),
+const storyboardSettingPatchSchema = z.object({
+  /** null = 清掉手动绑定，回到「看最近一次生成」 */
+  assetId: z.string().uuid().nullable().optional(),
+  prompt: z.string().trim().max(2000).optional(),
+  confirmed: z.boolean().optional(),
+});
+
+const storyboardSettingsGenerateSchema = z.object({
+  characterIds: z.array(z.string().uuid()).max(8).default([]),
+  sceneIds: z.array(z.string().uuid()).max(8).default([]),
 });
 
 const storyboardGenerateSchema = z.object({
@@ -861,33 +870,142 @@ export function createApp(options: { dataDir?: string } = {}) {
       ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
       ...(input.sourceText !== undefined ? { sourceText: input.sourceText } : {}),
       ...(input.character !== undefined ? { character: input.character } : {}),
+      ...(input.scene !== undefined ? { scene: input.scene } : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),
       ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
     });
-    // 用户手填的新角色名也要进 characters 表，否则没法给它绑参考图
+    // 用户手填的新角色 / 场景名也要进设定表，否则没法给它绑参考图
     if (input.character) db.upsertStoryboardCharacters(id, [input.character]);
+    if (input.scene) db.upsertStoryboardScenes(id, [input.scene]);
     res.json(ok(buildStoryboardView(db, id)));
   });
 
   /** 给一个角色绑定参考图；传 null 回到「自动用该角色第一个已完成镜头」 */
-  app.patch("/api/conversations/:id/storyboard/characters/:characterId", (req, res) => {
+  /** 校验「这张图属于本会话」——设定图只能从会话素材里选，不能指到别人的产物 */
+  function assertConversationImage(conversationId: string, assetId: string) {
+    const asset = db.getAsset(assetId);
+    if (!asset || !asset.mimeType.startsWith("image/")) {
+      throw new AppError("STORYBOARD_REFERENCE_INVALID", "设定图必须是图片", 400);
+    }
+    if (!db.listConversationAssets(conversationId).some((entry) => entry.asset.id === assetId)) {
+      throw new AppError("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话", 400);
+    }
+    return asset;
+  }
+
+  function settingHasAsset(assetId: string | null, taskId: string | null): boolean {
+    if (assetId && db.getAsset(assetId)) return true;
+    if (!taskId) return false;
+    return Boolean(db.getTaskView(taskId)?.assets?.[0]);
+  }
+
+  app.patch("/api/conversations/:id/storyboard/characters/:characterId", asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     const character = db.getStoryboardCharacter(routeParam(req.params.characterId));
     if (!character || character.conversationId !== id) {
-      return res.status(404).json(fail("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话"));
+      throw new AppError("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话", 404);
     }
-    const input = storyboardCharacterPatchSchema.parse(req.body ?? {});
-    if (input.assetId) {
-      const asset = db.getAsset(input.assetId);
-      if (!asset || !asset.mimeType.startsWith("image/")) {
-        return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "角色参考必须是图片"));
+    const input = storyboardSettingPatchSchema.parse(req.body ?? {});
+    if (input.assetId !== undefined) {
+      if (input.assetId) assertConversationImage(id, input.assetId);
+      db.setStoryboardCharacterAsset(character.id, input.assetId);
+    }
+    if (input.prompt !== undefined) db.setStoryboardCharacterPrompt(character.id, input.prompt);
+    if (input.confirmed !== undefined) {
+      const latest = db.getStoryboardCharacter(character.id)!;
+      if (input.confirmed && !settingHasAsset(latest.assetId, latest.taskId)) {
+        throw new AppError("STORYBOARD_SETTING_EMPTY", "先生成或上传设定图，再确认", 400);
       }
-      const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === input.assetId);
-      if (!belongs) return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话"));
+      db.confirmStoryboardCharacter(character.id, input.confirmed);
     }
-    db.setStoryboardCharacterAsset(character.id, input.assetId);
     res.json(ok(buildStoryboardView(db, id)));
-  });
+  }));
+
+  app.patch("/api/conversations/:id/storyboard/scenes/:sceneId", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    const scene = db.getStoryboardScene(routeParam(req.params.sceneId));
+    if (!scene || scene.conversationId !== id) {
+      throw new AppError("STORYBOARD_SCENE_NOT_FOUND", "场景不存在或不属于这个会话", 404);
+    }
+    const input = storyboardSettingPatchSchema.parse(req.body ?? {});
+    if (input.assetId !== undefined) {
+      if (input.assetId) assertConversationImage(id, input.assetId);
+      db.setStoryboardSceneAsset(scene.id, input.assetId);
+    }
+    if (input.prompt !== undefined) db.setStoryboardScenePrompt(scene.id, input.prompt);
+    if (input.confirmed !== undefined) {
+      const latest = db.getStoryboardScene(scene.id)!;
+      if (input.confirmed && !settingHasAsset(latest.assetId, latest.taskId)) {
+        throw new AppError("STORYBOARD_SETTING_EMPTY", "先生成或上传设定图，再确认", 400);
+      }
+      db.confirmStoryboardScene(scene.id, input.confirmed);
+    }
+    res.json(ok(buildStoryboardView(db, id)));
+  }));
+
+  /** 生成角色 / 场景设定图。只提交任务，结果由面板轮询 */
+  app.post("/api/conversations/:id/storyboard/settings/generate", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    const input = storyboardSettingsGenerateSchema.parse(req.body ?? {});
+    const result = await generateStoryboardSettings({
+      db, runner, conversationId: id,
+      characterIds: input.characterIds, sceneIds: input.sceneIds,
+    });
+    res.status(202).json(ok(result));
+  }));
+
+  /**
+   * 上传一张图当角色 / 场景设定图。
+   *
+   * 和对话框上传图同一套落盘与校验；区别是**不写聊天消息、不动画布**——
+   * 这是设定卡上的动作，不该在对话里多出一条「上传了图片」。
+   */
+  app.post(
+    "/api/conversations/:id/storyboard/settings/:kind/:settingId/upload",
+    conversationUpload.single("image"),
+    asyncHandler(async (req, res) => {
+      const id = routeParam(req.params.id);
+      const kind = routeParam(req.params.kind);
+      const settingId = routeParam(req.params.settingId);
+      if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+      const character = kind === "character" ? db.getStoryboardCharacter(settingId) : null;
+      const scene = kind === "scene" ? db.getStoryboardScene(settingId) : null;
+      const setting = character ?? scene;
+      if (!setting || setting.conversationId !== id) {
+        throw new AppError("STORYBOARD_SETTING_NOT_FOUND", "设定卡不存在或不属于这个会话", 404);
+      }
+      const file = req.file;
+      if (!file) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
+      if (!matchesImageSignature(file.buffer, file.mimetype as ReferenceImageUpload["mimeType"])) {
+        throw new AppError("REFERENCE_IMAGE_INVALID", "图片格式与文件内容不匹配", 400);
+      }
+
+      const assetId = crypto.randomUUID();
+      const taskId = crypto.randomUUID();
+      const fileName = safeFileName(`${taskId}-1.${extensionForMime(file.mimetype)}`);
+      await fs.promises.writeFile(path.join(db.assetsDir, fileName), file.buffer);
+      const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
+      const thumbPath = await writeThumbnail(db, assetId, file.buffer);
+      db.createTask({
+        id: taskId, channelId: "", model: "", prompt: "设定图上传",
+        input: {}, origin: "upload", status: "succeeded",
+      });
+      db.insertAsset({
+        id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
+        relativePath: fileName, baseDir: db.assetsDir, sha256, thumbPath,
+      });
+      if (character) {
+        db.setStoryboardCharacterAsset(character.id, assetId);
+        // 用户主动上传的图就是他要用的设定图，不再让他多点一次确认
+        db.confirmStoryboardCharacter(character.id, true);
+      } else {
+        db.setStoryboardSceneAsset(setting.id, assetId);
+        db.confirmStoryboardScene(setting.id, true);
+      }
+      res.status(201).json(ok(buildStoryboardView(db, id)));
+    }),
+  );
 
   /**
    * 生成选中的镜头。

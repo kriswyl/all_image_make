@@ -33,7 +33,7 @@ import { callBrain, type BrainMessage } from "./brain.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import {
-  MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS, normalizeStoryboardAspect, storyboardShotMissing,
+  MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS, normalizeStoryboardAspect, parseCharacterNames, storyboardShotMissing,
 } from "../shared/storyboard.js";
 import type { KeyStore } from "./key-store.js";
 
@@ -130,23 +130,47 @@ export const generateSpeechSchema = z.object({
 });
 
 export const createStoryboardSchema = z.object({
+  /** 角色设定：名字 + 一句外貌/服装描述，用来生成角色设定图 */
+  characters: z.array(z.object({
+    name: nonEmpty(40),
+    prompt: z.string().trim().max(2000).optional(),
+  })).max(20).optional(),
+  /** 场景设定：名字 + 一句空间/光线描述，用来生成场景设定图 */
+  scenes: z.array(z.object({
+    name: nonEmpty(80),
+    prompt: z.string().trim().max(2000).optional(),
+  })).max(20).optional(),
   shots: z.array(z.object({
     /** 剧本原文。模型拆镜时保留，用来核对有没有漏段 */
     sourceText: z.string().trim().max(20000).optional(),
     prompt: nonEmpty(20000),
-    /** 出场角色名；同一个人必须用同一个名字，空镜留空 */
-    character: z.string().trim().max(40).optional(),
+    /** 出场角色名；多个人物用「、」分隔，必须用和设定里一致的名字 */
+    character: z.string().trim().max(120).optional(),
+    /** 场景名，必须用和设定里一致的名字 */
+    scene: z.string().trim().max(80).optional(),
     kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
     aspectRatio: z.string().trim().max(10).optional(),
   })).min(1).max(MAX_STORYBOARD_SHOTS),
 });
 
 export const tagStoryboardCharactersSchema = z.object({
+  /** 顺便补充角色设定描述；已有角色只更新非空描述 */
+  characters: z.array(z.object({
+    name: nonEmpty(40),
+    prompt: z.string().trim().max(2000).optional(),
+  })).max(20).optional(),
+  /** 顺便补充场景设定描述 */
+  scenes: z.array(z.object({
+    name: nonEmpty(80),
+    prompt: z.string().trim().max(2000).optional(),
+  })).max(20).optional(),
   assignments: z.array(z.object({
     /** 镜号，从 1 开始 */
     index: z.coerce.number().int().min(1),
-    /** 角色名；空串表示这一镜是空镜 / 道具 / 字幕 */
-    character: z.string().trim().max(40),
+    /** 角色名；多个人物用「、」分隔；空串表示这一镜是空镜 / 道具 / 字幕 */
+    character: z.string().trim().max(120).optional(),
+    /** 场景名；空串表示没有场景设定 */
+    scene: z.string().trim().max(80).optional(),
   })).min(1).max(MAX_STORYBOARD_SHOTS),
 });
 
@@ -1184,17 +1208,22 @@ async function createStoryboard(
     sourceText: shot.sourceText ?? "",
     prompt: shot.prompt,
     character: shot.character?.trim() ?? "",
+    scene: shot.scene?.trim() ?? "",
     kind: shot.kind ?? "image" as const,
     aspectRatio: normalizeStoryboardAspect(shot.aspectRatio),
   }));
-  const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots);
+  const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots, {
+    characters: args.characters, scenes: args.scenes,
+  });
   const incomplete = saved.filter((shot) => storyboardShotMissing(shot));
   const videoCount = saved.filter((shot) => shot.kind === "video").length;
-  const characterNames = [...new Set(shots.map((shot) => shot.character).filter(Boolean))];
+  const characterNames = [...new Set(shots.flatMap((shot) => parseCharacterNames(shot.character)))];
+  const sceneNames = [...new Set(shots.map((shot) => shot.scene).filter(Boolean))];
   const summary = [
     `已拆成 ${saved.length} 个镜头`,
     videoCount ? `（其中 ${videoCount} 个视频镜头）` : "",
     characterNames.length ? `，角色：${characterNames.join("、")}` : "",
+    sceneNames.length ? `，场景：${sceneNames.join("、")}` : "",
     "，还没有提交生成。",
     incomplete.length ? `有 ${incomplete.length} 个镜头的画面描述太短（第 ${incomplete.map((shot) => shot.index).join("、")} 镜），请先补全。` : "",
     previous.length ? "旧的镜头表已替换，之前生成的结果仍在生成历史里。" : "",
@@ -1205,6 +1234,7 @@ async function createStoryboard(
       storyboardCount: saved.length,
       storyboardVideoCount: videoCount,
       storyboardCharacters: characterNames,
+      storyboardScenes: sceneNames,
       storyboardIncomplete: incomplete.map((shot) => shot.index),
     },
   });
@@ -1229,19 +1259,31 @@ async function tagStoryboardCharacters(
   for (const assignment of args.assignments) {
     const shot = byIndex.get(assignment.index);
     if (!shot) { unknown.push(assignment.index); continue; }
-    ctx.db.updateStoryboardShot(shot.id, { character: assignment.character.trim() });
+    ctx.db.updateStoryboardShot(shot.id, {
+      ...(assignment.character !== undefined ? { character: assignment.character.trim() } : {}),
+      ...(assignment.scene !== undefined ? { scene: assignment.scene.trim() } : {}),
+    });
     updated += 1;
   }
-  ctx.db.upsertStoryboardCharacters(ctx.conversation.id, args.assignments.map((item) => item.character));
-  const names = [...new Set(args.assignments.map((item) => item.character.trim()).filter(Boolean))];
+  ctx.db.upsertStoryboardCharacters(ctx.conversation.id, [
+    ...(args.characters ?? []),
+    ...args.assignments.flatMap((item) => parseCharacterNames(item.character ?? "")).map((name) => ({ name })),
+  ]);
+  ctx.db.upsertStoryboardScenes(ctx.conversation.id, [
+    ...(args.scenes ?? []),
+    ...args.assignments.map((item) => item.scene ?? "").filter(Boolean).map((name) => ({ name })),
+  ]);
+  const names = [...new Set(args.assignments.flatMap((item) => parseCharacterNames(item.character ?? "")))];
+  const sceneNames = [...new Set(args.assignments.map((item) => (item.scene ?? "").trim()).filter(Boolean))];
   const summary = [
-    `已给 ${updated} 镜标注角色`,
+    `已给 ${updated} 镜标注角色 / 场景`,
     names.length ? `（角色：${names.join("、")}）` : "",
+    sceneNames.length ? `（场景：${sceneNames.join("、")}）` : "",
     unknown.length ? `；第 ${unknown.join("、")} 镜不存在，已跳过` : "",
-    "。已经生成的结果没有被改动。",
+    "。已经生成的结果没有被改动；接着可以生成设定图。",
   ].join("");
   return okResult(summary, {
-    data: { taggedCount: updated, characters: names },
+    data: { taggedCount: updated, characters: names, scenes: sceneNames },
   });
 }
 

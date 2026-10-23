@@ -20,6 +20,7 @@ import { runAgentTool, type ToolContext } from "../src/server/agent-tools";
 import { MAX_SCRIPT_CHARS } from "../src/shared/storyboard";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const pngBytes = Buffer.from(pngBase64, "base64");
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
@@ -371,7 +372,7 @@ describe("脚本文档与分镜表", () => {
     expect(editBodies[0]).not.toContain("空无一人的冷白走廊");
   });
 
-  it("按角色分别带参考：每个角色先生成自己的基准镜头", async () => {
+  it("先确认角色 / 场景设定图，再生成分镜；多人物镜头带多张参考", async () => {
     const hits: Array<{ url: string; body: Buffer }> = [];
     const mock = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -388,52 +389,122 @@ describe("脚本文档与分镜表", () => {
     if (!address || typeof address === "string") throw new Error("mock server did not start");
     const base = `http://127.0.0.1:${address.port}`;
 
-    const { app, context, conversationId } = await bootConversation("storyboard-characters-", base);
+    const { app, context, conversationId } = await bootConversation("storyboard-settings-", base);
     await context.db.saveChannel({
       name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
       authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
       models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
     });
     const shots = context.db.replaceStoryboard(conversationId, [
-      { sourceText: "林昭走进来。", prompt: "林昭走进冷白实验室，中景", character: "林昭", kind: "image", aspectRatio: "16:9" },
-      { sourceText: "林昭抬头。", prompt: "林昭抬头看向低温舱，近景", character: "林昭", kind: "image", aspectRatio: "16:9" },
-      { sourceText: "少女睁眼。", prompt: "舱内少女睁开眼睛，特写", character: "少女", kind: "image", aspectRatio: "16:9" },
-      { sourceText: "少女拍门。", prompt: "少女双手拍打舱门，惊恐", character: "少女", kind: "image", aspectRatio: "16:9" },
-      { sourceText: "走廊空无一人。", prompt: "空无一人的走廊，长透视", character: "", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "林昭走进来。", prompt: "林昭走进冷白实验室，中景", character: "林昭", scene: "冷白实验室", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "林昭抬头。", prompt: "林昭抬头看向低温舱，近景", character: "林昭", scene: "冷白实验室", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "两人对视。", prompt: "林昭看着舱内少女，双人中景", character: "林昭、少女", scene: "冷白实验室", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "少女拍门。", prompt: "少女双手拍打舱门，惊恐", character: "少女", scene: "冷白实验室", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "走廊空无一人。", prompt: "空无一人的走廊，长透视", character: "", scene: "冷白实验室", kind: "image", aspectRatio: "16:9" },
     ]);
 
+    // 1. 生成角色 / 场景设定图
+    let view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      characters: Array<{ id: string; name: string; asset: { id: string } | null; status: string; confirmed: boolean }>;
+      scenes: Array<{ id: string; name: string; asset: { id: string } | null; status: string; confirmed: boolean }>;
+      shots: Array<{ id: string; character: string; asset: { id: string } | null }>;
+    };
+    expect(view.characters.map((item) => item.name)).toEqual(["林昭", "少女"]);
+    expect(view.scenes.map((item) => item.name)).toEqual(["冷白实验室"]);
+
+    await request(app).post(`/api/conversations/${conversationId}/storyboard/settings/generate`)
+      .send({ characterIds: view.characters.map((item) => item.id), sceneIds: view.scenes.map((item) => item.id) })
+      .expect(202);
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data;
+      if ([...view.characters, ...view.scenes].every((item) => item.asset)) break;
+    }
+    expect(view.characters.every((item) => item.asset && !item.confirmed)).toBe(true);
+    expect(view.scenes.every((item) => item.asset && !item.confirmed)).toBe(true);
+
+    // 未确认时生成分镜必须被拒绝，且错误里带名字
+    const blocked = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [shots[0]!.id] })
+      .expect(202);
+    expect(blocked.body.data.submitted).toBe(0);
+    expect(blocked.body.data.failures[0].error).toContain("还没确认");
+
+    // 2. 逐张确认
+    for (const item of view.characters) {
+      view = (await request(app).patch(`/api/conversations/${conversationId}/storyboard/characters/${item.id}`)
+        .send({ confirmed: true }).expect(200)).body.data;
+    }
+    for (const item of view.scenes) {
+      view = (await request(app).patch(`/api/conversations/${conversationId}/storyboard/scenes/${item.id}`)
+        .send({ confirmed: true }).expect(200)).body.data;
+    }
+    expect(view.characters.every((item) => item.confirmed)).toBe(true);
+    expect(view.scenes.every((item) => item.confirmed)).toBe(true);
+
+    // 3. 生成分镜：每镜带自己的角色 + 场景参考
     const response = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
       .send({ shotIds: shots.map((shot) => shot.id) })
       .expect(202);
     expect(response.body.data.submitted).toBe(5);
     expect(response.body.data.characterReferences).toHaveLength(2);
-    expect(response.body.data.referenceAssetId).toBeNull();
+    expect(response.body.data.sceneReferences).toHaveLength(1);
     for (const shot of shots) await waitShotDone(app, conversationId, shot.id);
 
+    const shotEdits = hits
+      .filter((hit) => hit.url.includes("/images/edits"))
+      .map((hit) => hit.body.toString("utf8"))
+      .filter((body) => body.includes("冷白实验室") || body.includes("林昭走进") || body.includes("林昭抬头") || body.includes("两人对视") || body.includes("少女双手") || body.includes("空无一人"));
+    expect(shotEdits.length).toBeGreaterThanOrEqual(5);
+    const single = shotEdits.find((body) => body.includes("林昭走进"));
+    expect(single).toContain("参考图 1 是角色「林昭」");
+    expect(single).toContain("参考图 2 是场景「冷白实验室」");
+    const duo = shotEdits.find((body) => body.includes("林昭看着舱内少女"));
+    expect(duo).toContain("参考图 1 是角色「林昭」");
+    expect(duo).toContain("参考图 2 是角色「少女」");
+    expect(duo).toContain("参考图 3 是场景「冷白实验室」");
+    const empty = shotEdits.find((body) => body.includes("空无一人"));
+    expect(empty).toContain("参考图 1 是场景「冷白实验室」");
+    expect(empty).not.toContain("是角色「");
+  });
+
+  it("角色 / 场景设定图支持直接上传，上传后自动确认", async () => {
+    const { app, context, conversationId } = await bootConversation("storyboard-setting-upload-");
+    context.db.replaceStoryboard(conversationId, [
+      { sourceText: "林昭站在门口。", prompt: "林昭站在门口，中景", character: "林昭", scene: "老巷", kind: "image", aspectRatio: "" },
+    ]);
     const view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
-      characters: Array<{ id: string; name: string; mode: string; asset: { id: string } | null; shotCount: number }>;
-      shots: Array<{ id: string; character: string; asset: { id: string } | null }>;
+      characters: Array<{ id: string; name: string }>;
+      scenes: Array<{ id: string; name: string }>;
     };
-    expect(view.characters.map((character) => character.name)).toEqual(["林昭", "少女"]);
-    expect(view.characters.every((character) => character.shotCount === 2)).toBe(true);
-    expect(view.characters.every((character) => character.asset)).toBe(true);
+    const character = view.characters[0]!;
+    const scene = view.scenes[0]!;
 
-    const edits = hits.filter((hit) => hit.url.includes("/images/edits")).map((hit) => hit.body.toString("utf8"));
-    expect(edits).toHaveLength(2);
-    expect(edits.some((body) => body.includes("林昭抬头") && !body.includes("少女双手拍打"))).toBe(true);
-    expect(edits.some((body) => body.includes("少女双手拍打") && !body.includes("林昭抬头"))).toBe(true);
-    // 空镜走普通文生图，不带参考
-    const landscape = hits.find((hit) => hit.body.toString("utf8").includes("空无一人的走廊"));
-    expect(landscape?.url.includes("/images/edits")).toBe(false);
+    const uploaded = (await request(app)
+      .post(`/api/conversations/${conversationId}/storyboard/settings/character/${character.id}/upload`)
+      .attach("image", pngBytes, "林昭.png")
+      .expect(201)).body.data as {
+        characters: Array<{ id: string; assetId: string | null; asset: { mimeType: string } | null; confirmed: boolean }>;
+      };
+    const savedCharacter = uploaded.characters.find((item) => item.id === character.id)!;
+    expect(savedCharacter.assetId).toBeTruthy();
+    expect(savedCharacter.asset?.mimeType).toBe("image/png");
+    expect(savedCharacter.confirmed).toBe(true);
 
-    // 手动给「林昭」换一张参考图：下一次只重跑一镜，也应当用它
-    const lin = view.characters.find((character) => character.name === "林昭")!;
-    const landscapeAsset = view.shots.find((shot) => shot.character === "")!.asset!;
-    const patched = (await request(app).patch(`/api/conversations/${conversationId}/storyboard/characters/${lin.id}`)
-      .send({ assetId: landscapeAsset.id })
-      .expect(200)).body.data as { characters: Array<{ name: string; mode: string; asset: { id: string } | null }> };
-    expect(patched.characters.find((character) => character.name === "林昭")!.mode).toBe("manual");
-    expect(patched.characters.find((character) => character.name === "林昭")!.asset!.id).toBe(landscapeAsset.id);
+    // 场景同样支持；上传的图不写聊天消息，也不占生成历史
+    await request(app)
+      .post(`/api/conversations/${conversationId}/storyboard/settings/scene/${scene.id}/upload`)
+      .attach("image", pngBytes, "老巷.png")
+      .expect(201);
+    const after = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data as {
+      messages: Array<{ content: string | null }>;
+    };
+    expect(after.messages.some((message) => message.content?.includes("上传了图片"))).toBe(false);
+    // 设定图会出现在会话素材里，之后别的设定卡也能选它
+    const storyboard = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      scenes: Array<{ id: string; asset: { id: string } | null; confirmed: boolean }>;
+    };
+    expect(storyboard.scenes.find((item) => item.id === scene.id)?.confirmed).toBe(true);
   });
 
   it("给已有分镜补角色标签不会重新拆分，也不动生成结果", async () => {

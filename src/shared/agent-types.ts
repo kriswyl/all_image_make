@@ -63,7 +63,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_music: "生成音乐",
   generate_speech: "生成配音",
   create_storyboard: "拆分镜",
-  tag_storyboard_characters: "标注角色",
+  tag_storyboard_characters: "标注角色/场景",
   ask: "提问",
   reply: "回复",
 };
@@ -538,7 +538,7 @@ export interface CanvasAsset {
    * 两者的可预期行为不一样——上传的图没有提示词、也没花钱——所以「本会话的图」
    * 里要能一眼看出来源，不能长得一模一样。
    */
-  source: "generate" | "upload" | "storyboard";
+  source: "generate" | "upload" | "storyboard" | "setting";
 }
 
 /** 简短的产物编号，展示和大脑引用都用它 */

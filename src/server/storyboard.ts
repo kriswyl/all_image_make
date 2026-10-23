@@ -1,32 +1,127 @@
 /**
- * 分镜执行：把「分镜表里的镜头」提交成真正的生成任务。
+ * 分镜执行：设定图（角色 / 场景）→ 分镜图。
  *
- * 和 Agent 的批量生图刻意分开：
- * - 分镜批次由用户在面板上确认后触发，不受 `MAX_ROUNDS` / 一轮对话生命周期限制；
- * - 提交后不等结果，任务完成状态由 `listStoryboardShots` 从 tasks 表实时读出来；
- * - 每镜独立失败，一镜报错不带走整批。
+ * 为什么要分两步：一镜一镜从零生成，人物和场景都会漂。先把「林昭长什么样」
+ * 「实验室长什么样」各生成一张、让用户确认，再把它们作为参考图带进每一镜，
+ * 人物和空间才有稳定的锚点。
  */
 import type { AppDatabase, AssetRow } from "./db.js";
 import { AppError, type ReferenceImageUpload, type TaskRunner } from "./tasks.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
 import { VIDEO_DEFAULTS } from "./agent-tools.js";
 import { prepareImageBytes, REFERENCE_PROFILE } from "./vision.js";
-import { isImageAsset, type GenerationInput } from "../shared/types.js";
+import { isImageAsset, type Asset, type GenerationInput } from "../shared/types.js";
 import {
   MAX_STORYBOARD_BATCH, STORYBOARD_CHARACTER_PREFIX, shotNeedsCharacterReference, storyboardShotMissing,
-  type StoryboardCharacter, type StoryboardReference, type StoryboardShot, type StoryboardView,
+  type StoryboardCharacter, type StoryboardReference, type StoryboardScene, type StoryboardSettingStatus,
+  type StoryboardShot, type StoryboardView,
 } from "../shared/storyboard.js";
 
 export interface StoryboardGenerateResult {
   submitted: number;
   failures: Array<{ shotId: string; index: number; error: string }>;
   shots: StoryboardShot[];
-  /** 老分镜（没有角色标签）用的全局参考；按角色参考时是 null */
+  /** 老分镜（没有角色/场景标签）用的全局参考；按设定图参考时是 null */
   referenceAssetId: string | null;
-  /** 按角色拆分的参考：这一批每个角色实际用了哪张图 */
+  /** 这一批实际用了哪些角色 / 场景设定图 */
   characterReferences: Array<{ character: string; assetId: string }>;
-  /** 自动基准 / 参考图读取失败之类，需要让用户知道的一句话 */
+  sceneReferences: Array<{ scene: string; assetId: string }>;
   note?: string;
+}
+
+export interface StoryboardSettingsResult {
+  submitted: number;
+  failures: Array<{ id: string; name: string; kind: "character" | "scene"; error: string }>;
+  view: StoryboardView;
+}
+
+interface SettingRow {
+  id: string;
+  conversationId: string;
+  name: string;
+  prompt: string;
+  assetId: string | null;
+  taskId: string | null;
+  confirmed: boolean;
+}
+
+interface ResolvedSetting {
+  row: SettingRow;
+  asset: AssetRow | null;
+  assetView: Asset | null;
+  source: "manual" | "generated" | "none";
+  status: StoryboardSettingStatus;
+  confirmed: boolean;
+}
+
+function settingTask(db: AppDatabase, taskId: string | null) {
+  return taskId ? db.getTaskView(taskId) : null;
+}
+
+/**
+ * 设定图从哪来：手动选的图优先；否则看最近一次生成任务的结果。
+ * 任务还在跑时 asset 为 null，但 status 会让前端显示「生成中」。
+ */
+function resolveSetting(db: AppDatabase, row: SettingRow): ResolvedSetting {
+  const manual = row.assetId ? db.getAsset(row.assetId) : null;
+  const task = settingTask(db, row.taskId);
+  const generated = task?.assets?.[0] ?? null;
+  const asset = manual && isImageAsset(manual)
+    ? manual
+    : generated ? db.getAsset(generated.id) : null;
+  const source: ResolvedSetting["source"] = manual && isImageAsset(manual)
+    ? "manual"
+    : asset ? "generated" : "none";
+  const status: StoryboardSettingStatus = asset
+    ? "succeeded"
+    : task ? task.status : "none";
+  return {
+    row,
+    asset: asset && isImageAsset(asset) ? asset : null,
+    assetView: asset && isImageAsset(asset) ? db.assetView(asset) : null,
+    source,
+    status,
+    // 图被删/换过之后旧确认不能继续生效
+    confirmed: Boolean(row.confirmed && asset),
+  };
+}
+
+function characterRows(db: AppDatabase, conversationId: string): SettingRow[] {
+  return db.listStoryboardCharacters(conversationId).map((row) => ({
+    id: row.id, conversationId, name: row.name, prompt: row.prompt,
+    assetId: row.assetId, taskId: row.taskId, confirmed: row.confirmed,
+  }));
+}
+
+function sceneRows(db: AppDatabase, conversationId: string): SettingRow[] {
+  return db.listStoryboardScenes(conversationId).map((row) => ({
+    id: row.id, conversationId, name: row.name, prompt: row.prompt,
+    assetId: row.assetId, taskId: row.taskId, confirmed: row.confirmed,
+  }));
+}
+
+function charactersView(db: AppDatabase, conversationId: string, shots: StoryboardShot[]): StoryboardCharacter[] {
+  return characterRows(db, conversationId).map((row) => {
+    const resolved = resolveSetting(db, row);
+    return {
+      id: row.id, name: row.name, prompt: row.prompt,
+      assetId: row.assetId, asset: resolved.assetView, source: resolved.source,
+      taskId: row.taskId, status: resolved.status, confirmed: resolved.confirmed,
+      shotCount: shots.filter((shot) => shot.characters.includes(row.name)).length,
+    };
+  }).filter((character) => character.shotCount > 0);
+}
+
+function scenesView(db: AppDatabase, conversationId: string, shots: StoryboardShot[]): StoryboardScene[] {
+  return sceneRows(db, conversationId).map((row) => {
+    const resolved = resolveSetting(db, row);
+    return {
+      id: row.id, name: row.name, prompt: row.prompt,
+      assetId: row.assetId, asset: resolved.assetView, source: resolved.source,
+      taskId: row.taskId, status: resolved.status, confirmed: resolved.confirmed,
+      shotCount: shots.filter((shot) => shot.scene === row.name).length,
+    };
+  }).filter((scene) => scene.shotCount > 0);
 }
 
 interface ResolvedReference {
@@ -34,17 +129,7 @@ interface ResolvedReference {
   mode: "auto" | "manual" | "off";
 }
 
-interface ResolvedCharacter extends StoryboardCharacter {
-  /** 生成时真正要读字节的那一行；前端视图只拿 asset */
-  row: AssetRow | null;
-}
-
-/**
- * 老分镜（没有角色标签）的全局参考。
- *
- * auto 选**镜号最小且已经有结果的人物镜头**——空镜常是第一镜，拿它当角色参考
- * 等于参考了一盏灯。指定图被删了也退回 auto，而不是让整批在无参考下悄悄跑。
- */
+/** 老分镜（没有角色/场景标签）的全局参考 */
 function resolveReference(db: AppDatabase, conversationId: string, shots: StoryboardShot[]): ResolvedReference {
   const setting = db.getStoryboardReference(conversationId);
   if (setting.mode === "off") return { asset: null, mode: "off" };
@@ -69,55 +154,132 @@ function referenceView(db: AppDatabase, reference: ResolvedReference, shots: Sto
   };
 }
 
-/**
- * 每个角色各自的参考图：手动绑定的优先，否则用该角色第一个已完成的镜头。
- * 一个全局参考做不到这件事——它会把少女和助手都画成同一个男人。
- */
-function resolveCharacters(db: AppDatabase, conversationId: string, shots: StoryboardShot[]): ResolvedCharacter[] {
-  return db.listStoryboardCharacters(conversationId).map((character) => {
-    const characterShots = shots.filter((shot) => shot.character === character.name);
-    const manual = character.assetId ? db.getAsset(character.assetId) : null;
-    if (manual && isImageAsset(manual)) {
-      return {
-        id: character.id, name: character.name, assetId: character.assetId,
-        asset: db.assetView(manual), row: manual, mode: "manual", shotCount: characterShots.length,
-      };
-    }
-    const firstShot = characterShots
-      .filter((shot) => shot.kind === "image" && shot.assetId)
-      .sort((left, right) => left.index - right.index)[0];
-    const auto = firstShot?.assetId ? db.getAsset(firstShot.assetId) : null;
-    return {
-      id: character.id, name: character.name, assetId: character.assetId,
-      asset: auto && isImageAsset(auto) ? db.assetView(auto) : null,
-      row: auto && isImageAsset(auto) ? auto : null,
-      mode: auto && isImageAsset(auto) ? "auto" : "none",
-      shotCount: characterShots.length,
-    };
-  });
-}
-
 export function buildStoryboardView(db: AppDatabase, conversationId: string): StoryboardView {
   const aliases = buildCapabilityAliases(db.listChannels());
   const shots = db.listStoryboardShots(conversationId);
-  const characters: StoryboardCharacter[] = resolveCharacters(db, conversationId, shots)
-    .filter((character) => character.shotCount > 0)
-    .map(({ row: _row, ...character }) => character);
   return {
     shots,
     canGenerateImage: Boolean(resolveAlias(aliases, undefined, "image", db.getSetting("agentDefaultImageAlias") ?? undefined)),
     canGenerateVideo: Boolean(resolveAlias(aliases, undefined, "video", db.getSetting("agentDefaultVideoAlias") ?? undefined)),
     maxBatch: MAX_STORYBOARD_BATCH,
     reference: referenceView(db, resolveReference(db, conversationId, shots), shots),
-    characters,
+    characters: charactersView(db, conversationId, shots),
+    scenes: scenesView(db, conversationId, shots),
   };
 }
 
+// ── 设定图 ─────────────────────────────────────────────────────────────────
+
+function characterSettingPrompt(name: string, prompt: string) {
+  const detail = prompt.trim();
+  return [
+    `角色设定图：${name}。`,
+    detail ? `${detail}。` : "",
+    "单人角色设定图，正面半身像，清晰完整地展示脸型、五官、发型、肤色、年龄和服装，",
+    "干净纯色背景，均匀柔光，写实电影质感，不要文字，不要多余人物。",
+  ].join("");
+}
+
+function sceneSettingPrompt(name: string, prompt: string) {
+  const detail = prompt.trim();
+  return [
+    `场景设定图：${name}。`,
+    detail ? `${detail}。` : "",
+    "无人空镜，广角建立镜头，完整展示空间布局、主要陈设、光线方向和整体色调，",
+    "写实电影质感，不要人物，不要文字。",
+  ].join("");
+}
+
 /**
- * 提交选中的镜头。
+ * 生成角色 / 场景设定图。
  *
- * 调用方负责「用户确认过」这件事：这里只做参数和渠道校验，不再弹确认。
- * 一次最多 8 镜，和对话批量生图同一个理由——别让中转站把并发的 20 路当攻击。
+ * 只提交、不等待；结果由 `buildStoryboardView` 从任务表实时解析出来。
+ * 一次最多 8 张，和分镜批次同一个上限。
+ */
+export async function generateStoryboardSettings(input: {
+  db: AppDatabase;
+  runner: TaskRunner;
+  conversationId: string;
+  characterIds: string[];
+  sceneIds: string[];
+}): Promise<StoryboardSettingsResult> {
+  const { db, runner, conversationId } = input;
+  const characterIds = [...new Set(input.characterIds)];
+  const sceneIds = [...new Set(input.sceneIds)];
+  const total = characterIds.length + sceneIds.length;
+  if (!total) throw new AppError("STORYBOARD_SETTING_EMPTY", "没有选中任何设定图", 400);
+  if (total > MAX_STORYBOARD_BATCH) {
+    throw new AppError("STORYBOARD_SETTING_TOO_LARGE", `一次最多生成 ${MAX_STORYBOARD_BATCH} 张设定图`, 400);
+  }
+
+  const aliases = buildCapabilityAliases(db.listChannels());
+  const resolution = resolveAlias(aliases, undefined, "image", db.getSetting("agentDefaultImageAlias") ?? undefined);
+  if (!resolution) throw new AppError("NO_IMAGE_CHANNEL", "还没有可用的生图渠道", 400);
+  const channel = db.getChannel(resolution.channelId);
+  if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "解析到的生图渠道不存在或未启用", 404);
+
+  const failures: StoryboardSettingsResult["failures"] = [];
+  let submitted = 0;
+
+  async function submit(kind: "character" | "scene", id: string, name: string, prompt: string) {
+    try {
+      const created = await runner.create({
+        channelId: channel!.id,
+        model: resolution!.model,
+        prompt,
+        count: 1,
+        aspectRatio: kind === "character" ? "1:1" : "16:9",
+      });
+      if (kind === "character") db.setStoryboardCharacterTask(id, created.id);
+      else db.setStoryboardSceneTask(id, created.id);
+      submitted += 1;
+    } catch (error) {
+      failures.push({ id, name, kind, error: error instanceof Error ? error.message : "提交失败" });
+    }
+  }
+
+  await Promise.all([
+    ...characterIds.map(async (id) => {
+      const row = db.getStoryboardCharacter(id);
+      if (!row || row.conversationId !== conversationId) {
+        failures.push({ id, name: id, kind: "character", error: "角色不存在" });
+        return;
+      }
+      await submit("character", id, row.name, characterSettingPrompt(row.name, row.prompt));
+    }),
+    ...sceneIds.map(async (id) => {
+      const row = db.getStoryboardScene(id);
+      if (!row || row.conversationId !== conversationId) {
+        failures.push({ id, name: id, kind: "scene", error: "场景不存在" });
+        return;
+      }
+      await submit("scene", id, row.name, sceneSettingPrompt(row.name, row.prompt));
+    }),
+  ]);
+
+  return { submitted, failures, view: buildStoryboardView(db, conversationId) };
+}
+
+// ── 分镜图 ─────────────────────────────────────────────────────────────────
+
+function referencePrefix(characters: Array<{ name: string }>, scene?: { name: string }): string {
+  if (!characters.length && !scene) return "";
+  const labels: string[] = [];
+  characters.forEach((character, index) => labels.push(`参考图 ${index + 1} 是角色「${character.name}」`));
+  if (scene) labels.push(`参考图 ${labels.length + 1} 是场景「${scene.name}」`);
+  const constraints = [
+    characters.length ? "严格保持参考图中对应人物的脸型、五官、发型、肤色、服装完全一致" : "",
+    scene ? "保持参考场景的空间布局、主要陈设、光线方向和色调一致" : "",
+    "只改变机位、姿态与构图",
+  ].filter(Boolean).join("；");
+  return `${labels.join("；")}。${constraints}：\n`;
+}
+
+/**
+ * 提交选中的分镜。
+ *
+ * 有角色/场景标签时走「设定图」路线：每一镜把相关角色和场景的设定图一起发出去。
+ * 缺设定图或未确认的镜头会明确失败并带镜号，不会悄悄在没有参考的情况下生成。
  */
 export async function generateStoryboardShots(input: {
   db: AppDatabase;
@@ -150,44 +312,20 @@ export async function generateStoryboardShots(input: {
   };
   const failures: StoryboardGenerateResult["failures"] = [];
   const characterReferences: StoryboardGenerateResult["characterReferences"] = [];
-  const baseShotIds = new Set<string>();
+  const sceneReferences: StoryboardGenerateResult["sceneReferences"] = [];
   let note: string | undefined;
+  let referenceAssetId: string | null = null;
 
-  /** 提交一镜；成功与否都只影响这一镜 */
-  async function submitShot(
-    shot: StoryboardShot,
-    uploads: ReferenceImageUpload[],
-    allowReference: boolean,
-  ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
-    try {
-      const resolution = resolveAlias(aliases, undefined, shot.kind, defaults[shot.kind]);
-      if (!resolution) return { ok: false, error: shot.kind === "video" ? "没有可用的视频渠道" : "没有可用的生图渠道" };
-      const channel = db.getChannel(resolution.channelId);
-      if (!channel || !channel.enabled) return { ok: false, error: "解析到的渠道不存在或未启用" };
-
-      // 只给有人物的镜头带角色参考；空镜/字幕/道具特写带了反而会多画出一个人
-      const withReference = shot.kind === "image" && allowReference && uploads.length > 0;
-      const generation: GenerationInput = shot.kind === "video"
-        ? videoInput(shot, channel.id, resolution.model, channel.adapterType)
-        : {
-          channelId: channel.id,
-          model: resolution.model,
-          prompt: withReference ? `${STORYBOARD_CHARACTER_PREFIX}${shot.prompt}` : shot.prompt,
-          count: 1,
-          ...(shot.aspectRatio ? { aspectRatio: shot.aspectRatio } : {}),
-        };
-
-      const created = await runner.create(generation, withReference ? uploads : []);
-      db.updateStoryboardShot(shot.id, { taskId: created.id });
-      return { ok: true, taskId: created.id };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : "提交失败" };
-    }
-  }
+  const characterSettings = new Map(
+    characterRows(db, conversationId).map((row) => [row.name, resolveSetting(db, row)]),
+  );
+  const sceneSettings = new Map(
+    sceneRows(db, conversationId).map((row) => [row.name, resolveSetting(db, row)]),
+  );
+  const hasTags = all.some((shot) => shot.characters.length > 0 || Boolean(shot.scene));
 
   const uploadCache = new Map<string, ReferenceImageUpload[]>();
-  async function uploadsFor(asset: AssetRow | null): Promise<ReferenceImageUpload[]> {
-    if (!asset) return [];
+  async function uploadsFor(asset: AssetRow): Promise<ReferenceImageUpload[]> {
     const cached = uploadCache.get(asset.id);
     if (cached) return cached;
     const prepared = await prepareImageBytes(db, asset, REFERENCE_PROFILE);
@@ -199,118 +337,142 @@ export async function generateStoryboardShots(input: {
     return uploads;
   }
 
-  /** 生成基准镜头并等它落盘；成功返回产物，失败返回 null（失败原因已经记进 failures） */
-  async function generateBase(
+  async function submitShot(
     shot: StoryboardShot,
-    label: string,
-  ): Promise<{ asset: AssetRow | null }> {
-    const submittedBase = await submitShot(shot, [], false);
-    baseShotIds.add(shot.id);
-    if (!submittedBase.ok) {
-      failures.push({ shotId: shot.id, index: shot.index, error: submittedBase.error });
-      note = `${label}提交失败，其余镜头将不使用参考图。`;
-      return { asset: null };
-    }
+    uploads: ReferenceImageUpload[],
+    promptPrefix: string,
+  ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
     try {
-      const task = await runner.waitFor(submittedBase.taskId, { timeoutMs: 180_000 });
-      const asset = task.status === "succeeded" ? task.assets[0] : undefined;
-      const row = asset ? db.getAsset(asset.id) : null;
-      if (row && isImageAsset(row)) return { asset: row };
-      note = note ?? `${label}没有产出可用图片，其余镜头将不使用参考图。`;
-      return { asset: null };
-    } catch {
-      note = note ?? `${label}没有在 3 分钟内完成，其余镜头将不使用参考图。`;
-      return { asset: null };
+      const resolution = resolveAlias(aliases, undefined, shot.kind, defaults[shot.kind]);
+      if (!resolution) return { ok: false, error: shot.kind === "video" ? "没有可用的视频渠道" : "没有可用的生图渠道" };
+      const channel = db.getChannel(resolution.channelId);
+      if (!channel || !channel.enabled) return { ok: false, error: "解析到的渠道不存在或未启用" };
+
+      const generation: GenerationInput = shot.kind === "video"
+        ? videoInput(shot, channel.id, resolution.model, channel.adapterType)
+        : {
+          channelId: channel.id,
+          model: resolution.model,
+          prompt: `${promptPrefix}${shot.prompt}`,
+          count: 1,
+          ...(shot.aspectRatio ? { aspectRatio: shot.aspectRatio } : {}),
+        };
+
+      const created = await runner.create(generation, shot.kind === "image" ? uploads : []);
+      db.updateStoryboardShot(shot.id, { taskId: created.id });
+      return { ok: true, taskId: created.id };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "提交失败" };
     }
   }
 
-  const hasCharacterTags = all.some((shot) => Boolean(shot.character.trim()));
-  let referenceAssetId: string | null = null;
-  const pending: Array<{ shot: StoryboardShot; uploads: ReferenceImageUpload[]; allowReference: boolean }> = [];
+  if (hasTags) {
+    // ── 设定图路线：角色 + 场景一起带 ──────────────────────────────────────
+    const jobs: Array<Promise<void>> = [];
+    for (const shot of selected) {
+      if (shot.kind !== "image") {
+        jobs.push(submitShot(shot, [], "").then((outcome) => {
+          if (!outcome.ok) failures.push({ shotId: shot.id, index: shot.index, error: outcome.error });
+        }));
+        continue;
+      }
 
-  if (!hasCharacterTags) {
-    // ── 老分镜：沿用全局参考 ────────────────────────────────────────────────
+      const requiredCharacters = shot.characters;
+      const requiredScene = shot.scene.trim();
+      const problems: string[] = [];
+      for (const name of requiredCharacters) {
+        const setting = characterSettings.get(name);
+        if (!setting?.asset) problems.push(`角色「${name}」还没有设定图`);
+        else if (!setting.confirmed) problems.push(`角色「${name}」的设定图还没确认`);
+      }
+      if (requiredScene) {
+        const setting = sceneSettings.get(requiredScene);
+        if (!setting?.asset) problems.push(`场景「${requiredScene}」还没有设定图`);
+        else if (!setting.confirmed) problems.push(`场景「${requiredScene}」的设定图还没确认`);
+      }
+      if (problems.length) {
+        failures.push({ shotId: shot.id, index: shot.index, error: problems.join("；") });
+        continue;
+      }
+
+      const characterAssets = requiredCharacters.map((name) => characterSettings.get(name)!.asset!);
+      const sceneAsset = requiredScene ? sceneSettings.get(requiredScene)!.asset! : null;
+      const uploads: ReferenceImageUpload[] = [];
+      const seen = new Set<string>();
+      for (const asset of [...characterAssets, ...(sceneAsset ? [sceneAsset] : [])]) {
+        if (seen.has(asset.id)) continue;
+        seen.add(asset.id);
+        uploads.push(...await uploadsFor(asset));
+      }
+      if (!uploads.length) {
+        failures.push({ shotId: shot.id, index: shot.index, error: "设定图读取失败，无法作为参考" });
+        continue;
+      }
+
+      for (const [index, name] of requiredCharacters.entries()) {
+        if (!characterReferences.some((item) => item.character === name)) {
+          characterReferences.push({ character: name, assetId: characterAssets[index]!.id });
+        }
+      }
+      if (requiredScene && !sceneReferences.some((item) => item.scene === requiredScene)) {
+        sceneReferences.push({ scene: requiredScene, assetId: sceneAsset!.id });
+      }
+
+      const prefix = referencePrefix(
+        requiredCharacters.map((name) => ({ name })),
+        requiredScene ? { name: requiredScene } : undefined,
+      );
+      jobs.push(submitShot(shot, uploads, prefix).then((outcome) => {
+        if (!outcome.ok) failures.push({ shotId: shot.id, index: shot.index, error: outcome.error });
+      }));
+    }
+    await Promise.all(jobs);
+  } else {
+    // ── 老分镜：沿用全局参考 ─────────────────────────────────────────────────
     const resolved = resolveReference(db, conversationId, all);
     let reference = resolved.asset;
     const imageShots = selected.filter((shot) => shot.kind === "image").sort((left, right) => left.index - right.index);
+    let baseShotId: string | null = null;
     if (!reference && resolved.mode === "auto" && imageShots.length >= 2) {
       const base = imageShots.find(shotNeedsCharacterReference) ?? imageShots[0]!;
-      reference = (await generateBase(base, "角色基准镜头")).asset;
+      const submittedBase = await submitShot(base, [], "");
+      baseShotId = base.id;
+      if (submittedBase.ok) {
+        try {
+          const task = await runner.waitFor(submittedBase.taskId, { timeoutMs: 180_000 });
+          const asset = task.status === "succeeded" ? task.assets[0] : undefined;
+          if (asset) reference = db.getAsset(asset.id);
+        } catch {
+          note = "角色基准镜头没有在 3 分钟内完成，其余镜头将不使用参考图。";
+        }
+        if (!reference) note = note ?? "角色基准镜头没有产出可用图片，其余镜头将不使用参考图。";
+      } else {
+        failures.push({ shotId: base.id, index: base.index, error: submittedBase.error });
+        note = "角色基准镜头提交失败，其余镜头将不使用参考图。";
+      }
     }
-    const uploads = await uploadsFor(reference);
+    const uploads = reference ? await uploadsFor(reference) : [];
     if (reference && !uploads.length) {
       reference = null;
       note = "角色参考图读取失败，本次未使用参考图。";
     }
     referenceAssetId = reference?.id ?? null;
-    for (const shot of selected) {
-      if (baseShotIds.has(shot.id)) continue;
-      pending.push({ shot, uploads, allowReference: shotNeedsCharacterReference(shot) });
-    }
-  } else {
-    // ── 有角色标签：每个角色用自己的参考 ────────────────────────────────────
-    const characters = resolveCharacters(db, conversationId, all);
-    const groups = new Map<string, StoryboardShot[]>();
-    for (const shot of selected) {
-      if (shot.kind !== "image") continue;
-      const name = shot.character.trim();
-      if (!name) continue;
-      groups.set(name, [...(groups.get(name) ?? []), shot]);
-    }
-
-    // 每个角色单独建基准。角色之间串行，避免同时挂 3 个 3 分钟的等待；
-    // 一角色通常只需要一次基准生成，之后整批可以并行。
-    for (const [name, group] of groups) {
-      const ordered = [...group].sort((left, right) => left.index - right.index);
-      const character = characters.find((item) => item.name === name);
-      let reference = character?.row ?? null;
-      let uploads = await uploadsFor(reference);
-      if (reference && !uploads.length) {
-        note = `角色「${name}」的参考图读取失败，这一组不使用参考图。`;
-        reference = null;
-      }
-
-      if (!reference && ordered.length >= 2) {
-        reference = (await generateBase(ordered[0]!, `角色「${name}」的基准镜头`)).asset;
-        uploads = await uploadsFor(reference);
-        if (reference && !uploads.length) {
-          note = `角色「${name}」的基准图读取失败，这一组不使用参考图。`;
-          reference = null;
-        }
-      }
-      if (reference) characterReferences.push({ character: name, assetId: reference.id });
-
-      for (const shot of ordered) {
-        if (baseShotIds.has(shot.id)) continue;
-        pending.push({ shot, uploads, allowReference: Boolean(reference) });
-      }
-    }
-
-    // 空镜 / 道具 / 字幕：不带参考
-    for (const shot of selected) {
-      if (shot.kind !== "image" || shot.character.trim()) continue;
-      pending.push({ shot, uploads: [], allowReference: false });
-    }
+    await Promise.all(selected
+      .filter((shot) => shot.id !== baseShotId)
+      .map(async (shot) => {
+        const prefix = uploads.length && shotNeedsCharacterReference(shot) ? STORYBOARD_CHARACTER_PREFIX : "";
+        const outcome = await submitShot(shot, prefix ? uploads : [], prefix);
+        if (!outcome.ok) failures.push({ shotId: shot.id, index: shot.index, error: outcome.error });
+      }));
   }
 
-  // 视频镜头不使用角色参考（尾帧串镜在后续计划里）
-  for (const shot of selected) {
-    if (shot.kind !== "video" || baseShotIds.has(shot.id)) continue;
-    pending.push({ shot, uploads: [], allowReference: false });
-  }
-
-  await Promise.all(pending.map(async ({ shot, uploads, allowReference }) => {
-    const outcome = await submitShot(shot, uploads, allowReference);
-    if (!outcome.ok) failures.push({ shotId: shot.id, index: shot.index, error: outcome.error });
-  }));
-
-  // 失败也照常返回最新视图：成功的镜头已经在跑了，不能让一次失败把整批回滚
   return {
     submitted: selected.length - failures.length,
     failures: failures.sort((left, right) => left.index - right.index),
     shots: db.listStoryboardShots(conversationId),
     referenceAssetId,
     characterReferences,
+    sceneReferences,
     ...(note ? { note } : {}),
   };
 }
