@@ -130,6 +130,7 @@ export function AssetStrip({
         role="menu"
         aria-label="画布图片操作"
         style={{ left: menu.x, top: menu.y }}
+        onContextMenu={(event) => event.preventDefault()}
       >
         <div className="canvas-bar-menu-title">画布第 {menu.index + 1} 张</div>
         <button type="button" role="menuitem" disabled={menu.index === 0}

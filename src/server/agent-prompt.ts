@@ -63,6 +63,7 @@ export function buildSystemPrompt(
     "- view_images — 查看图片内容（不生成、不花钱）。args: {assetRefs?: [\"#xxxx\", ...]}，不填就看整组当前画布。",
     "  本条消息没有附带图、而你需要按画面决定改哪张/用哪张时，**先调它**；看完仍拿不准就用 ask。",
     "- set_canvas — 把会话里的产物设为当前画布（可以一次设多张，整组替换）。args: {assetRef} 或 {assetRefs: [\"#xxxx\", ...]}，值用 #xxxx 形式的产物编号",
+    "  **只有用户明确说「放到画布 / 设为参考」时才调用**；新图生成后不要主动把画布换成它。",
     "- optimize_prompt — 只优化提示词、不生成。args: {prompt(必填), target: \"image\"|\"video\"}",
     "- generate_video — 生成视频。args: {prompt(必填), modelHint, imageRefs, mode, duration, resolution, audio, promptExtend}",
     "  imageRefs 按顺序给：first-frame 要 1 张；first-last-frame 正好 2 张（先首帧、后尾帧）；reference 给 1~N 张参考图。",
