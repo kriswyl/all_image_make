@@ -132,7 +132,7 @@ describe("脚本文档与分镜表", () => {
 
     const outcome = await runAgentTool("create_storyboard", {
       shots: [
-        { sourceText: "雨夜，苏晚回头。", prompt: "雨夜霓虹灯下，年轻女人撑伞回头，电影感中景", kind: "image", aspectRatio: "16:9" },
+        { sourceText: "雨夜，苏晚回头。", prompt: "雨夜霓虹灯下，年轻女人撑伞回头，电影感中景", character: "苏晚", kind: "image", aspectRatio: "16:9" },
         { sourceText: "她走进巷子。", prompt: "短", kind: "video" },
       ],
     }, ctx);
@@ -149,7 +149,9 @@ describe("脚本文档与分镜表", () => {
     expect(shots[0]!.kind).toBe("image");
     expect(shots[0]!.aspectRatio).toBe("16:9");
     expect(shots[0]!.status).toBe("planned");
+    expect(shots[0]!.character).toBe("苏晚");
     expect(shots[1]!.kind).toBe("video");
+    expect(context.db.listStoryboardCharacters(conversationId).map((character) => character.name)).toEqual(["苏晚"]);
   });
 
   it("分镜可编辑，非法画幅会被拒绝", async () => {
@@ -367,6 +369,105 @@ describe("脚本文档与分镜表", () => {
     expect(editBodies).toHaveLength(1);
     expect(editBodies[0]).toContain("同一个男人转身");
     expect(editBodies[0]).not.toContain("空无一人的冷白走廊");
+  });
+
+  it("按角色分别带参考：每个角色先生成自己的基准镜头", async () => {
+    const hits: Array<{ url: string; body: Buffer }> = [];
+    const mock = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        hits.push({ url: req.url ?? "", body: Buffer.concat(chunks) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const { app, context, conversationId } = await bootConversation("storyboard-characters-", base);
+    await context.db.saveChannel({
+      name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    });
+    const shots = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "林昭走进来。", prompt: "林昭走进冷白实验室，中景", character: "林昭", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "林昭抬头。", prompt: "林昭抬头看向低温舱，近景", character: "林昭", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "少女睁眼。", prompt: "舱内少女睁开眼睛，特写", character: "少女", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "少女拍门。", prompt: "少女双手拍打舱门，惊恐", character: "少女", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "走廊空无一人。", prompt: "空无一人的走廊，长透视", character: "", kind: "image", aspectRatio: "16:9" },
+    ]);
+
+    const response = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: shots.map((shot) => shot.id) })
+      .expect(202);
+    expect(response.body.data.submitted).toBe(5);
+    expect(response.body.data.characterReferences).toHaveLength(2);
+    expect(response.body.data.referenceAssetId).toBeNull();
+    for (const shot of shots) await waitShotDone(app, conversationId, shot.id);
+
+    const view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      characters: Array<{ id: string; name: string; mode: string; asset: { id: string } | null; shotCount: number }>;
+      shots: Array<{ id: string; character: string; asset: { id: string } | null }>;
+    };
+    expect(view.characters.map((character) => character.name)).toEqual(["林昭", "少女"]);
+    expect(view.characters.every((character) => character.shotCount === 2)).toBe(true);
+    expect(view.characters.every((character) => character.asset)).toBe(true);
+
+    const edits = hits.filter((hit) => hit.url.includes("/images/edits")).map((hit) => hit.body.toString("utf8"));
+    expect(edits).toHaveLength(2);
+    expect(edits.some((body) => body.includes("林昭抬头") && !body.includes("少女双手拍打"))).toBe(true);
+    expect(edits.some((body) => body.includes("少女双手拍打") && !body.includes("林昭抬头"))).toBe(true);
+    // 空镜走普通文生图，不带参考
+    const landscape = hits.find((hit) => hit.body.toString("utf8").includes("空无一人的走廊"));
+    expect(landscape?.url.includes("/images/edits")).toBe(false);
+
+    // 手动给「林昭」换一张参考图：下一次只重跑一镜，也应当用它
+    const lin = view.characters.find((character) => character.name === "林昭")!;
+    const landscapeAsset = view.shots.find((shot) => shot.character === "")!.asset!;
+    const patched = (await request(app).patch(`/api/conversations/${conversationId}/storyboard/characters/${lin.id}`)
+      .send({ assetId: landscapeAsset.id })
+      .expect(200)).body.data as { characters: Array<{ name: string; mode: string; asset: { id: string } | null }> };
+    expect(patched.characters.find((character) => character.name === "林昭")!.mode).toBe("manual");
+    expect(patched.characters.find((character) => character.name === "林昭")!.asset!.id).toBe(landscapeAsset.id);
+  });
+
+  it("给已有分镜补角色标签不会重新拆分，也不动生成结果", async () => {
+    const { context, conversationId } = await bootConversation("storyboard-tag-");
+    const conversation = context.db.getConversation(conversationId)!;
+    const ctx: ToolContext = {
+      db: context.db, runner: context.runner, sessionKeys: context.sessionKeys, conversation,
+      aliases: buildCapabilityAliases(context.db.listChannels()),
+      defaultAliases: {}, verbatimPrompt: null, turnAttachmentIds: [], emit: () => {},
+    };
+    const [first, second, third] = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "林昭进来。", prompt: "林昭走进实验室", kind: "image", aspectRatio: "" },
+      { sourceText: "林昭抬头。", prompt: "林昭抬头看舱体", kind: "image", aspectRatio: "" },
+      { sourceText: "空镜。", prompt: "低温舱特写，无人物", kind: "image", aspectRatio: "" },
+    ]);
+    context.db.updateStoryboardShot(second!.id, { taskId: "keep-task-id" });
+
+    const outcome = await runAgentTool("tag_storyboard_characters", {
+      assignments: [
+        { index: 1, character: "林昭" },
+        { index: 2, character: "林昭" },
+        { index: 3, character: "" },
+      ],
+    }, ctx);
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.data?.taggedCount).toBe(3);
+
+    const saved = context.db.listStoryboardShots(conversationId);
+    expect(saved.map((shot) => shot.character)).toEqual(["林昭", "林昭", ""]);
+    // 已有的 task_id 原样保留：补标签不是重拆
+    expect(saved[1]!.taskId).toBe("keep-task-id");
+    expect(context.db.listStoryboardCharacters(conversationId).map((character) => character.name)).toEqual(["林昭"]);
+    void first;
+    void third;
   });
 
   it("缺画面描述的镜头不提交：错误里带镜号", async () => {

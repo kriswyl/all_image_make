@@ -367,7 +367,7 @@ export function ChatView({
             return { ...current, messages: upsert(current.messages, event.message) };
           });
           // 刚拆完镜就把面板打开：用户下一步一定是看描述、点生成
-          if (event.message.toolName === "create_storyboard" && event.message.status === "ok") {
+          if ((event.message.toolName === "create_storyboard" || event.message.toolName === "tag_storyboard_characters") && event.message.status === "ok") {
             setStoryboardOpen(true);
           }
           break;
@@ -1008,7 +1008,7 @@ export function ChatView({
                   // 消息数变化之外，拆分镜工具落定那一刻也要刷新：
                   // 工具行先以 pending 落库、执行完再改成 ok，中间消息数不变
                   view.messages.length
-                  + view.messages.filter((message) => message.toolName === "create_storyboard" && message.status === "ok").length
+                  + view.messages.filter((message) => (message.toolName === "create_storyboard" || message.toolName === "tag_storyboard_characters") && message.status === "ok").length
                 }
                 canvasIds={canvasImages.map((asset) => asset.id)}
                 images={sessionImages}
@@ -1023,6 +1023,10 @@ export function ChatView({
                   writeCanvas([...canvasImages.map((asset) => asset.id), assetId]);
                   toast("ok", "已加入画布");
                 }}
+                onTagCharacters={() => {
+                  void send("请根据当前分镜表，为每一镜标注出场角色：同一个人全片用同一个名字，空镜、道具、字幕留空。用 tag_storyboard_characters 工具更新现有分镜，不要重新拆分，也不要重新生成。");
+                }}
+                tagCharactersDisabled={running}
               />
             ) : null}
 

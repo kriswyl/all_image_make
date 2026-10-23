@@ -36,7 +36,7 @@ export function buildSystemPrompt(
   const storyboardLines = storyboard.slice(0, MAX_STORYBOARD_SHOTS).map((shot) => {
     const status = shot.status === "planned" ? "未生成" : shot.status === "succeeded" ? "已生成" : shot.status === "failed" ? "失败" : "生成中";
     const prompt = shot.prompt.replace(/\s+/g, " ").slice(0, 80);
-    return `- 第 ${shot.index} 镜｜${storyboardKindLabel(shot.kind)}｜${status}｜${prompt || "（没有画面描述）"}`;
+    return `- 第 ${shot.index} 镜｜${storyboardKindLabel(shot.kind)}｜${status}｜角色：${shot.character || "无"}｜${prompt || "（没有画面描述）"}`;
   });
   return [
     "你是「语布」里的创作助手。用户用自然语言说想要什么图片、视频或音乐，你负责把它变成可执行的生成任务。",
@@ -81,11 +81,16 @@ export function buildSystemPrompt(
     "  双人对话给 secondVoice，正文用「A：…」「B：…」标注；最多两个人。",
     "  这是朗读，不是写歌：用户要歌词、旋律、翻唱时用 generate_music，不要用 generate_speech。",
     "- create_storyboard — 把脚本/故事拆成会话内分镜表。**只规划，不生成、不花钱**。",
-    "  args: {shots: [{sourceText, prompt(必填), kind: \"image\"|\"video\", aspectRatio}]}",
+    "  args: {shots: [{sourceText, prompt(必填), character, kind: \"image\"|\"video\", aspectRatio}]}",
     "  每个 prompt 必须是**自足的画面描述**（人物、场景、构图、光线、风格），不能写「同上」「接着上一镜」。",
     "  sourceText 保留剧本原文，用来核对有没有漏段；kind 默认 image，用户明确要视频镜头才填 video；",
     "  aspectRatio 只在用户或剧本明确要求时填（16:9 / 9:16 / 1:1 / 4:3 / 3:4）。",
+    "  **character 是这一镜的出场角色名**：同一个人必须用同一个名字（例如全片都写「林昭」），",
+    "  空镜、道具特写、片尾字幕留空。角色名是后面绑定角色参考图的依据，别写成「男人」「她」这种泛称。",
     "  镜头按剧本顺序排，最多 " + MAX_STORYBOARD_SHOTS + " 镜；拆完让用户在分镜面板确认后再生成。",
+    "- tag_storyboard_characters — 给**已有**分镜补角色标签，不重新拆分、不丢已生成结果。",
+    "  args: {assignments: [{index(镜号), character}]}；空串表示这一镜没有人物。",
+    "  用户说「标注一下角色」「按人物分个组」时用它，不要用 create_storyboard 重建。",
     "- ask — 需要用户做选择或补充信息时提问。args: {question(必填), options}",
     "- reply — 只是回话，不生成任何东西。args: {text(必填)}",
     "",
@@ -139,6 +144,8 @@ export function buildSystemPrompt(
     "14. 分镜表里的镜头由用户在面板上点「生成」触发，**不要为了「开始生成」逐个调用 generate_image**。",
     "    用户说「第 7 镜重来」时，改描述请让他在面板里改；只有他明确要你直接画一张时，才用 generate_image（那张不会写回分镜表）。",
     "    「把第 7 镜的描述改一下」可以直接用 reply 给出改写后的描述，让用户复制到面板。",
+    "15. 用户要求「标注角色 / 按人物分组」时，用 tag_storyboard_characters 给现有分镜补标签：",
+    "    同一个人全片用同一个名字，空镜/道具/字幕写空串。**不要用 create_storyboard 重建**，那会丢掉已经生成的结果。",
     "",
     "## 可用能力（modelHint 只能填这里的 alias）",
     manifest,

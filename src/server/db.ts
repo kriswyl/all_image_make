@@ -230,6 +230,8 @@ export class AppDatabase {
         shot_index       INTEGER NOT NULL,
         source_text      TEXT NOT NULL DEFAULT '',
         prompt           TEXT NOT NULL DEFAULT '',
+        -- 出场角色名；空串 = 空镜 / 道具 / 字幕，不带角色参考
+        character_name   TEXT NOT NULL DEFAULT '',
         kind             TEXT NOT NULL DEFAULT 'image',
         aspect_ratio     TEXT NOT NULL DEFAULT '',
         task_id          TEXT,
@@ -238,6 +240,18 @@ export class AppDatabase {
       );
       CREATE INDEX IF NOT EXISTS conversation_shots_conv_idx
         ON conversation_shots(conversation_id, shot_index);
+      -- 分镜里的角色和各自绑定的参考图。名字由助手标注或用户手动输入
+      CREATE TABLE IF NOT EXISTS conversation_characters (
+        id               TEXT PRIMARY KEY,
+        conversation_id  TEXT NOT NULL,
+        name             TEXT NOT NULL,
+        asset_id         TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        UNIQUE(conversation_id, name)
+      );
+      CREATE INDEX IF NOT EXISTS conversation_characters_conv_idx
+        ON conversation_characters(conversation_id, name);
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
@@ -319,6 +333,10 @@ export class AppDatabase {
     // 「原话直发」：有时候用户就是要自己那句话原样发出去，不许大脑润色（需求.md 问题 1）
     if (!conversationColumns.some((col) => col.name === "verbatim_prompt")) {
       this.db.exec("ALTER TABLE conversations ADD COLUMN verbatim_prompt INTEGER NOT NULL DEFAULT 0");
+    }
+    const shotColumns = this.db.prepare("PRAGMA table_info(conversation_shots)").all() as Array<{ name: string }>;
+    if (!shotColumns.some((col) => col.name === "character_name")) {
+      this.db.exec("ALTER TABLE conversation_shots ADD COLUMN character_name TEXT NOT NULL DEFAULT ''");
     }
     // 分镜角色参考：老会话默认走 auto（第一个已完成的图片镜头）
     if (!conversationColumns.some((col) => col.name === "storyboard_reference_asset_id")) {
@@ -782,23 +800,64 @@ export class AppDatabase {
    */
   replaceStoryboard(
     conversationId: string,
-    shots: Array<{ sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string }>,
+    shots: Array<{ sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string; character?: string }>,
   ): StoryboardShot[] {
     const at = now();
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
     const insert = this.db.prepare(`
       INSERT INTO conversation_shots
-      (id, conversation_id, shot_index, source_text, prompt, kind, aspect_ratio, task_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      (id, conversation_id, shot_index, source_text, prompt, character_name, kind, aspect_ratio, task_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `);
     for (const [position, shot] of shots.entries()) {
       insert.run(
         crypto.randomUUID(), conversationId, position + 1,
-        shot.sourceText, shot.prompt, shot.kind, shot.aspectRatio, at, at,
+        shot.sourceText, shot.prompt, shot.character ?? "", shot.kind, shot.aspectRatio, at, at,
       );
     }
+    this.upsertStoryboardCharacters(conversationId, shots.map((shot) => shot.character ?? ""));
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
     return this.listStoryboardShots(conversationId);
+  }
+
+  /** 把镜头里出现的角色名补进 characters 表；已有的名字不动（保留绑定好的参考图） */
+  upsertStoryboardCharacters(conversationId: string, names: string[]) {
+    const unique = [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+    if (!unique.length) return;
+    const at = now();
+    const insert = this.db.prepare(`
+      INSERT INTO conversation_characters (id, conversation_id, name, asset_id, created_at, updated_at)
+      VALUES (?, ?, ?, NULL, ?, ?)
+      ON CONFLICT(conversation_id, name) DO NOTHING
+    `);
+    for (const name of unique) insert.run(crypto.randomUUID(), conversationId, name, at, at);
+  }
+
+  listStoryboardCharacters(conversationId: string): Array<{
+    id: string; name: string; assetId: string | null; createdAt: string; updatedAt: string;
+  }> {
+    const rows = this.db.prepare(
+      "SELECT * FROM conversation_characters WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+    ).all(conversationId) as DbRow[];
+    return rows.map((row) => ({
+      id: String(row.id), name: String(row.name),
+      assetId: row.asset_id == null ? null : String(row.asset_id),
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    }));
+  }
+
+  getStoryboardCharacter(id: string): { id: string; conversationId: string; name: string; assetId: string | null } | null {
+    const row = this.db.prepare("SELECT * FROM conversation_characters WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id), conversationId: String(row.conversation_id), name: String(row.name),
+      assetId: row.asset_id == null ? null : String(row.asset_id),
+    };
+  }
+
+  setStoryboardCharacterAsset(characterId: string, assetId: string | null) {
+    this.db.prepare("UPDATE conversation_characters SET asset_id = ?, updated_at = ? WHERE id = ?")
+      .run(assetId, now(), characterId);
   }
 
   /**
@@ -826,6 +885,7 @@ export class AppDatabase {
         id: String(row.id), conversationId: String(row.conversation_id),
         index: Number(row.shot_index),
         sourceText: String(row.source_text ?? ""), prompt: String(row.prompt ?? ""),
+        character: String(row.character_name ?? ""),
         kind: String(row.kind) === "video" ? "video" as const : "image" as const,
         aspectRatio: String(row.aspect_ratio ?? ""),
         taskId, status,
@@ -845,12 +905,13 @@ export class AppDatabase {
 
   updateStoryboardShot(
     id: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "kind" | "aspectRatio" | "taskId">>,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "kind" | "aspectRatio" | "taskId">>,
   ): StoryboardShot | null {
     const fields: string[] = [];
     const values: Array<string | null> = [];
     const mapping: Record<string, string> = {
-      prompt: "prompt", sourceText: "source_text", kind: "kind", aspectRatio: "aspect_ratio", taskId: "task_id",
+      prompt: "prompt", sourceText: "source_text", character: "character_name",
+      kind: "kind", aspectRatio: "aspect_ratio", taskId: "task_id",
     };
     for (const [key, column] of Object.entries(mapping)) {
       if (!(key in patch)) continue;
@@ -968,6 +1029,7 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };

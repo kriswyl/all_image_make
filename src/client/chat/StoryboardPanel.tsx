@@ -26,6 +26,8 @@ export function StoryboardPanel({
   onClose,
   onToast,
   onAddToCanvas,
+  onTagCharacters,
+  tagCharactersDisabled = false,
 }: {
   conversationId: string;
   /** 消息数变化时重新拉一次：大脑刚拆完镜，面板要立刻出现 */
@@ -36,6 +38,9 @@ export function StoryboardPanel({
   onClose: () => void;
   onToast: (kind: ToastKind, text: string) => void;
   onAddToCanvas: (assetId: string) => void;
+  /** 让助手给已有分镜补角色标签（不重新拆分） */
+  onTagCharacters: () => void;
+  tagCharactersDisabled?: boolean;
 }) {
   const [data, setData] = useState<StoryboardView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -47,6 +52,7 @@ export function StoryboardPanel({
   const [preview, setPreview] = useState<Asset | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [characterDrafts, setCharacterDrafts] = useState<Record<string, string>>({});
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   // 切换会话时旧请求可能后到；只让最后一次发出的请求回写
   const loadSeq = useRef(0);
@@ -66,6 +72,11 @@ export function StoryboardPanel({
         for (const shot of next.shots) merged[shot.id] = current[shot.id] ?? shot.prompt;
         return merged;
       });
+      setCharacterDrafts((current) => {
+        const merged: Record<string, string> = {};
+        for (const shot of next.shots) merged[shot.id] = current[shot.id] ?? shot.character;
+        return merged;
+      });
       // 已经在跑的镜头不该还留在勾选里；已完成的可以留——用户可能是勾起来批量重跑
       setSelected((current) => new Set([...current].filter((id) => {
         const shot = next.shots.find((item) => item.id === id);
@@ -81,6 +92,7 @@ export function StoryboardPanel({
   useEffect(() => {
     setData(null);
     setDrafts({});
+    setCharacterDrafts({});
     setSelected(new Set());
     void load(false);
     // conversationId 变化时必须重拉；load 是每次渲染新建的函数，故意不进依赖
@@ -117,6 +129,7 @@ export function StoryboardPanel({
   const maxBatch = data?.maxBatch ?? 8;
   const canGenerateAny = data?.canGenerateImage || data?.canGenerateVideo;
   const reference = data?.reference;
+  const characters = data?.characters ?? [];
   const referenceValue = reference?.mode === "manual" && reference.asset
     ? `asset:${reference.asset.id}`
     : reference?.mode ?? "auto";
@@ -142,6 +155,44 @@ export function StoryboardPanel({
     } finally {
       setReferenceBusy(false);
     }
+  }
+
+  async function changeCharacterReference(characterId: string, value: string) {
+    if (referenceBusy) return;
+    setReferenceBusy(true);
+    try {
+      const next = await api.updateStoryboardCharacter(
+        conversationId,
+        characterId,
+        value.startsWith("asset:") ? value.slice(6) : null,
+      );
+      setData(next);
+      onToast("ok", "角色参考已更新");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "设置角色参考失败");
+    } finally {
+      setReferenceBusy(false);
+    }
+  }
+
+  function changeCharacter(shot: StoryboardShot, value: string) {
+    setCharacterDrafts((current) => ({ ...current, [shot.id]: value }));
+    const key = `character:${shot.id}`;
+    const timer = saveTimers.current.get(key);
+    if (timer) clearTimeout(timer);
+    saveTimers.current.set(key, setTimeout(() => {
+      saveTimers.current.delete(key);
+      void saveShot(shot.id, { character: value.trim() });
+    }, 700));
+  }
+
+  function flushCharacter(shot: StoryboardShot) {
+    const key = `character:${shot.id}`;
+    const timer = saveTimers.current.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    saveTimers.current.delete(key);
+    void saveShot(shot.id, { character: (characterDrafts[shot.id] ?? shot.character).trim() });
   }
 
   function toggle(id: string) {
@@ -177,7 +228,7 @@ export function StoryboardPanel({
     }, 700));
   }
 
-  async function saveShot(shotId: string, patch: Partial<Pick<StoryboardShot, "prompt" | "kind" | "aspectRatio">>): Promise<boolean> {
+  async function saveShot(shotId: string, patch: Partial<Pick<StoryboardShot, "prompt" | "character" | "kind" | "aspectRatio">>): Promise<boolean> {
     const pendingTimer = saveTimers.current.get(shotId);
     if (pendingTimer) {
       clearTimeout(pendingTimer);
@@ -256,10 +307,13 @@ export function StoryboardPanel({
   const confirmImages = confirmShots.filter((shot) => shot.kind === "image").length;
   const confirmVideos = confirmShots.length - confirmImages;
   const firstImageShot = confirmShots.filter((shot) => shot.kind === "image").sort((left, right) => left.index - right.index)[0];
-  const willAutoBase = reference?.mode === "auto" && !reference.asset && confirmImages >= 2;
+  const usingCharacters = characters.length > 0;
+  const selectedCharacters = [...new Set(confirmShots.map((shot) => shot.character.trim()).filter(Boolean))];
+  const charactersWithoutRef = selectedCharacters.filter((name) => !characters.find((character) => character.name === name)?.asset);
+  const willAutoBase = !usingCharacters && reference?.mode === "auto" && !reference.asset && confirmImages >= 2;
   const rerunCount = confirmShots.filter((shot) => shot.status === "succeeded").length;
   const referenceShot = reference?.shotIndex ? shots.find((shot) => shot.index === reference.shotIndex) : undefined;
-  const referenceLooksLikeScene = Boolean(referenceShot && !shotNeedsCharacterReference(referenceShot));
+  const referenceLooksLikeScene = Boolean(!usingCharacters && referenceShot && !shotNeedsCharacterReference(referenceShot));
 
   return (
     <div className="storyboard-panel">
@@ -271,31 +325,44 @@ export function StoryboardPanel({
           {loading ? <LoaderCircle size={13} className="spin" /> : null}
         </div>
 
-        <label
-          className="storyboard-reference"
-          title="多镜之间保持同一个人物。自动 = 优先用有人物、已经有结果的图片镜头；也可以指定任意一张本会话的图。多人物剧本请按人物分批：先选该人物的参考图，再只勾选他的镜头重跑，不要把一个人的参考套到所有人物镜头上。"
-        >
-          {reference?.asset
-            ? <img src={api.assetUrl(reference.asset.thumbUrl ?? reference.asset.url)} alt="" />
-            : <UserRound size={13} />}
-          <select
-            value={referenceValue}
-            disabled={referenceBusy || !shots.length}
-            onChange={(event) => void changeReference(event.target.value)}
+        {!characters.length ? (
+          <label
+            className="storyboard-reference"
+            title="多镜之间保持同一个人物。自动 = 优先用有人物、已经有结果的图片镜头；也可以指定任意一张本会话的图。多人物剧本建议让助手先标注角色，再给每个角色绑参考图。"
           >
-            <option value="auto">角色参考：自动</option>
-            <option value="off">角色参考：不使用</option>
-            {images.map((entry) => (
-              <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
-            ))}
-            {reference?.mode === "manual" && reference.asset && !images.some((entry) => entry.asset.id === reference.asset!.id) ? (
-              <option value={`asset:${reference.asset.id}`}>当前指定的参考图</option>
-            ) : null}
-          </select>
-          {referenceBusy ? <LoaderCircle size={12} className="spin" /> : null}
-        </label>
+            {reference?.asset
+              ? <img src={api.assetUrl(reference.asset.thumbUrl ?? reference.asset.url)} alt="" />
+              : <UserRound size={13} />}
+            <select
+              value={referenceValue}
+              disabled={referenceBusy || !shots.length}
+              onChange={(event) => void changeReference(event.target.value)}
+            >
+              <option value="auto">角色参考：自动</option>
+              <option value="off">角色参考：不使用</option>
+              {images.map((entry) => (
+                <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
+              ))}
+              {reference?.mode === "manual" && reference.asset && !images.some((entry) => entry.asset.id === reference.asset!.id) ? (
+                <option value={`asset:${reference.asset.id}`}>当前指定的参考图</option>
+              ) : null}
+            </select>
+            {referenceBusy ? <LoaderCircle size={12} className="spin" /> : null}
+          </label>
+        ) : null}
 
         <div className="storyboard-head-actions">
+          {shots.length ? (
+            <button
+              type="button"
+              className="link-btn"
+              disabled={tagCharactersDisabled}
+              onClick={onTagCharacters}
+              title="让助手根据分镜表补角色标签；不会重新拆分，也不会动已经生成的图"
+            >
+              {characters.length ? "重新标注" : "标注角色"}
+            </button>
+          ) : null}
           <button type="button" className="link-btn" onClick={selectReady} disabled={!selectable.length}>
             选中可生成
           </button>
@@ -320,6 +387,46 @@ export function StoryboardPanel({
           </button>
         </div>
       </div>
+
+      {characters.length ? (
+        <div className="storyboard-characters">
+          {characters.map((character) => {
+            const sourceShot = character.assetId ? shots.find((shot) => shot.assetId === character.assetId) : undefined;
+            const mismatch = Boolean(sourceShot?.character && sourceShot.character !== character.name);
+            return (
+            <label
+              key={character.id}
+              className={`storyboard-character ${character.asset ? "has-ref" : ""} ${mismatch ? "is-mismatch" : ""}`}
+              title={mismatch
+                ? `这张参考来自第 ${sourceShot!.index} 镜（角色：${sourceShot!.character}），和「${character.name}」不是同一个角色；确认是有意复用再保留`
+                : character.mode === "auto"
+                  ? "自动：用这个角色第一个已完成的镜头当参考"
+                  : character.mode === "manual" ? "已手动绑定参考图" : "还没有参考图：这一角色会先生成一个基准镜头"}
+            >
+              {character.asset
+                ? <img src={api.assetUrl(character.asset.thumbUrl ?? character.asset.url)} alt="" />
+                : <UserRound size={13} />}
+              <span className="storyboard-character-name">{character.name}</span>
+              <small>{character.shotCount} 镜</small>
+              <select
+                value={character.assetId ?? "auto"}
+                disabled={referenceBusy}
+                onChange={(event) => void changeCharacterReference(character.id, event.target.value)}
+              >
+                <option value="auto">自动参考</option>
+                {images.map((entry) => (
+                  <option key={entry.asset.id} value={`asset:${entry.asset.id}`}>{imageLabel(entry)}</option>
+                ))}
+                {character.assetId && !images.some((entry) => entry.asset.id === character.assetId) ? (
+                  <option value={`asset:${character.assetId}`}>当前参考</option>
+                ) : null}
+              </select>
+            </label>
+            );
+          })}
+          <span className="storyboard-character-hint">每个角色只带自己的参考图</span>
+        </div>
+      ) : null}
 
       {!canGenerateAny && shots.length ? (
         <div className="storyboard-note">还没有可用的生图 / 生视频渠道，请先到「模型配置」里添加。</div>
@@ -369,6 +476,18 @@ export function StoryboardPanel({
                         <option key={ratio || "auto"} value={ratio}>{ratio || "默认画幅"}</option>
                       ))}
                     </select>
+                  </label>
+                  <label className="storyboard-character-field" title="这一镜的出场角色；空镜 / 道具 / 字幕留空">
+                    <UserRound size={11} />
+                    <input
+                      list={`storyboard-characters-${conversationId}`}
+                      value={characterDrafts[shot.id] ?? shot.character}
+                      placeholder="空镜"
+                      maxLength={40}
+                      disabled={activeShot}
+                      onChange={(event) => changeCharacter(shot, event.target.value)}
+                      onBlur={() => flushCharacter(shot)}
+                    />
                   </label>
                   <span className={`storyboard-status is-${shot.status}`} title={shot.errorMessage ?? undefined}>
                     {statusLabel(shot)}
@@ -425,6 +544,10 @@ export function StoryboardPanel({
         })}
       </div>
 
+      <datalist id={`storyboard-characters-${conversationId}`}>
+        {characters.map((character) => <option key={character.id} value={character.name} />)}
+      </datalist>
+
       {!shots.length && !loading ? (
         <div className="storyboard-empty">
           <ChevronDown size={16} />
@@ -455,17 +578,31 @@ export function StoryboardPanel({
                   </div>
                 ))}
               </div>
-              <p className={`storyboard-reference-note ${reference?.mode === "off" ? "is-warning" : ""}`}>
-                {reference?.mode === "off"
-                  ? "已关闭角色参考：多个镜头里的人物可能对不上。"
-                  : reference?.asset
-                    ? `本次会以${reference.shotIndex ? `第 ${reference.shotIndex} 镜` : "指定的图片"}作为角色 / 画风参考。`
-                    : willAutoBase
-                      ? `还没有角色基准：会先生成第 ${firstImageShot?.index ?? 1} 镜，等它完成后自动提交其余镜头（需要多等一次生成，最长约 3 分钟）。`
-                      : confirmImages > 1
-                        ? "还没有可用的角色基准，本批图片会各自生成；先从这一批里验收一张，下一次生成就会自动以它为参考。"
-                        : "本批只有 1 个图片镜头，暂不需要角色参考；它完成后会自动成为后续镜头的参考。"}
-              </p>
+              {usingCharacters ? (
+                <p className={`storyboard-reference-note ${charactersWithoutRef.length ? "is-warning" : ""}`}>
+                  {selectedCharacters.length
+                    ? `按角色带参考：${selectedCharacters.map((name) => {
+                      const character = characters.find((item) => item.name === name);
+                      return `${name}（${character?.mode === "manual" ? "已绑定" : character?.mode === "auto" ? "自动参考" : "待生成基准"}）`;
+                    }).join("、")}。`
+                    : "这一批镜头没有标注角色，不会带角色参考图。"}
+                  {charactersWithoutRef.length
+                    ? ` 其中 ${charactersWithoutRef.join("、")} 还没有参考图：会先生成一个基准镜头，再生成其余镜头（每个角色最多多等一次，约 3 分钟）。`
+                    : ""}
+                </p>
+              ) : (
+                <p className={`storyboard-reference-note ${reference?.mode === "off" ? "is-warning" : ""}`}>
+                  {reference?.mode === "off"
+                    ? "已关闭角色参考：多个镜头里的人物可能对不上。"
+                    : reference?.asset
+                      ? `本次会以${reference.shotIndex ? `第 ${reference.shotIndex} 镜` : "指定的图片"}作为角色 / 画风参考。`
+                      : willAutoBase
+                        ? `还没有角色基准：会先生成第 ${firstImageShot?.index ?? 1} 镜，等它完成后自动提交其余镜头（需要多等一次生成，最长约 3 分钟）。`
+                        : confirmImages > 1
+                          ? "还没有可用的角色基准，本批图片会各自生成；先从这一批里验收一张，下一次生成就会自动以它为参考。"
+                          : "本批只有 1 个图片镜头，暂不需要角色参考；它完成后会自动成为后续镜头的参考。"}
+                </p>
+              )}
               {referenceLooksLikeScene ? (
                 <p className="storyboard-reference-note is-warning">
                   当前角色参考是第 {reference!.shotIndex} 镜，看起来是空镜 / 环境，不是人物镜头；用它可能起不到保持人物一致的作用。建议改选一张有人物的图。
@@ -484,7 +621,7 @@ export function StoryboardPanel({
               <button type="button" className="secondary-button" onClick={() => setConfirming(null)} disabled={submitting}>取消</button>
               <button type="button" className="primary-button" onClick={() => void submitGenerate(confirming)} disabled={submitting}>
                 {submitting ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
-                {submitting ? (willAutoBase ? "先生成角色基准…" : "提交中…") : `确认提交 ${confirmShots.length} 镜`}
+                {submitting ? (willAutoBase || charactersWithoutRef.length ? "先生成角色基准…" : "提交中…") : `确认提交 ${confirmShots.length} 镜`}
               </button>
             </div>
           </div>

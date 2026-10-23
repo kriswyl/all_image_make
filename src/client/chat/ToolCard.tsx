@@ -27,6 +27,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_music: Music,
   generate_speech: Mic,
   create_storyboard: Clapperboard,
+  tag_storyboard_characters: Clapperboard,
   ask: Sparkles,
   reply: Sparkles,
 };

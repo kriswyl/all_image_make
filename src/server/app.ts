@@ -167,8 +167,15 @@ const storyboardSettingsSchema = z.object({
 const storyboardShotPatchSchema = z.object({
   prompt: z.string().trim().max(20000).optional(),
   sourceText: z.string().trim().max(20000).optional(),
+  /** 出场角色名；空串表示空镜 / 道具 / 字幕 */
+  character: z.string().trim().max(40).optional(),
   kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
   aspectRatio: z.string().trim().max(10).optional(),
+});
+
+const storyboardCharacterPatchSchema = z.object({
+  /** null = 自动用该角色第一个已完成的镜头 */
+  assetId: z.string().uuid().nullable(),
 });
 
 const storyboardGenerateSchema = z.object({
@@ -853,9 +860,32 @@ export function createApp(options: { dataDir?: string } = {}) {
     db.updateStoryboardShot(shotId, {
       ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
       ...(input.sourceText !== undefined ? { sourceText: input.sourceText } : {}),
+      ...(input.character !== undefined ? { character: input.character } : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),
       ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
     });
+    // 用户手填的新角色名也要进 characters 表，否则没法给它绑参考图
+    if (input.character) db.upsertStoryboardCharacters(id, [input.character]);
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  /** 给一个角色绑定参考图；传 null 回到「自动用该角色第一个已完成镜头」 */
+  app.patch("/api/conversations/:id/storyboard/characters/:characterId", (req, res) => {
+    const id = routeParam(req.params.id);
+    const character = db.getStoryboardCharacter(routeParam(req.params.characterId));
+    if (!character || character.conversationId !== id) {
+      return res.status(404).json(fail("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话"));
+    }
+    const input = storyboardCharacterPatchSchema.parse(req.body ?? {});
+    if (input.assetId) {
+      const asset = db.getAsset(input.assetId);
+      if (!asset || !asset.mimeType.startsWith("image/")) {
+        return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "角色参考必须是图片"));
+      }
+      const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === input.assetId);
+      if (!belongs) return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话"));
+    }
+    db.setStoryboardCharacterAsset(character.id, input.assetId);
     res.json(ok(buildStoryboardView(db, id)));
   });
 

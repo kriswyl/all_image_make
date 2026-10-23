@@ -35,6 +35,8 @@ export interface StoryboardShot {
   sourceText: string;
   /** 真正发给渠道的画面描述 */
   prompt: string;
+  /** 这一镜的出场角色名；空串 = 空镜 / 道具 / 字幕，不带角色参考 */
+  character: string;
   kind: StoryboardShotKind;
   aspectRatio: string;
   taskId: string | null;
@@ -57,13 +59,28 @@ export interface StoryboardReference {
   shotIndex: number | null;
 }
 
+/** 一个角色在分镜里的出场统计和参考图 */
+export interface StoryboardCharacter {
+  id: string;
+  name: string;
+  /** 用户手动绑定的参考图；null = 自动用该角色第一个已完成的镜头 */
+  assetId: string | null;
+  /** 解析后的参考图（手动优先，其次该角色第一个已完成镜头） */
+  asset: Asset | null;
+  mode: "manual" | "auto" | "none";
+  shotCount: number;
+}
+
 export interface StoryboardView {
   shots: StoryboardShot[];
   /** 当前渠道里有没有可用的生图 / 生视频模型，前端据此禁用按钮 */
   canGenerateImage: boolean;
   canGenerateVideo: boolean;
   maxBatch: number;
+  /** 老分镜（没有角色标签）才用的全局参考 */
   reference: StoryboardReference;
+  /** 按角色拆分的参考图；有角色标签时生成逻辑优先用这一份 */
+  characters: StoryboardCharacter[];
 }
 
 /**

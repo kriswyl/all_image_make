@@ -134,8 +134,19 @@ export const createStoryboardSchema = z.object({
     /** 剧本原文。模型拆镜时保留，用来核对有没有漏段 */
     sourceText: z.string().trim().max(20000).optional(),
     prompt: nonEmpty(20000),
+    /** 出场角色名；同一个人必须用同一个名字，空镜留空 */
+    character: z.string().trim().max(40).optional(),
     kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
     aspectRatio: z.string().trim().max(10).optional(),
+  })).min(1).max(MAX_STORYBOARD_SHOTS),
+});
+
+export const tagStoryboardCharactersSchema = z.object({
+  assignments: z.array(z.object({
+    /** 镜号，从 1 开始 */
+    index: z.coerce.number().int().min(1),
+    /** 角色名；空串表示这一镜是空镜 / 道具 / 字幕 */
+    character: z.string().trim().max(40),
   })).min(1).max(MAX_STORYBOARD_SHOTS),
 });
 
@@ -158,6 +169,7 @@ export const TOOL_SCHEMAS = {
   generate_music: generateMusicSchema,
   generate_speech: generateSpeechSchema,
   create_storyboard: createStoryboardSchema,
+  tag_storyboard_characters: tagStoryboardCharactersSchema,
   ask: askSchema,
   reply: replySchema,
 } as const;
@@ -1171,6 +1183,7 @@ async function createStoryboard(
   const shots = args.shots.map((shot) => ({
     sourceText: shot.sourceText ?? "",
     prompt: shot.prompt,
+    character: shot.character?.trim() ?? "",
     kind: shot.kind ?? "image" as const,
     aspectRatio: normalizeStoryboardAspect(shot.aspectRatio),
   }));
@@ -1191,6 +1204,41 @@ async function createStoryboard(
       storyboardVideoCount: videoCount,
       storyboardIncomplete: incomplete.map((shot) => shot.index),
     },
+  });
+}
+
+/**
+ * 给已有分镜补角色标签。
+ *
+ * 单独开一个工具而不是让模型重新 `create_storyboard`：重拆会整表替换，
+ * 已经生成好的镜头和 task_id 全丢，用户为那几张图付的钱就白花了。
+ * 这里只改 `character_name`，生成结果和镜号原样保留。
+ */
+async function tagStoryboardCharacters(
+  ctx: ToolContext,
+  args: z.infer<typeof tagStoryboardCharactersSchema>,
+): Promise<ToolOutcome> {
+  const shots = ctx.db.listStoryboardShots(ctx.conversation.id);
+  if (!shots.length) return failResult("当前会话还没有分镜表，先拆镜再标注角色", "STORYBOARD_EMPTY");
+  const byIndex = new Map(shots.map((shot) => [shot.index, shot]));
+  const unknown: number[] = [];
+  let updated = 0;
+  for (const assignment of args.assignments) {
+    const shot = byIndex.get(assignment.index);
+    if (!shot) { unknown.push(assignment.index); continue; }
+    ctx.db.updateStoryboardShot(shot.id, { character: assignment.character.trim() });
+    updated += 1;
+  }
+  ctx.db.upsertStoryboardCharacters(ctx.conversation.id, args.assignments.map((item) => item.character));
+  const names = [...new Set(args.assignments.map((item) => item.character.trim()).filter(Boolean))];
+  const summary = [
+    `已给 ${updated} 镜标注角色`,
+    names.length ? `（角色：${names.join("、")}）` : "",
+    unknown.length ? `；第 ${unknown.join("、")} 镜不存在，已跳过` : "",
+    "。已经生成的结果没有被改动。",
+  ].join("");
+  return okResult(summary, {
+    data: { taggedCount: updated, characters: names },
   });
 }
 
@@ -1223,6 +1271,7 @@ export async function runAgentTool(
     case "generate_music": return generateMusic(ctx, parsed.data as GenerateMusicArgs);
     case "generate_speech": return generateSpeech(ctx, parsed.data as GenerateSpeechArgs);
     case "create_storyboard": return createStoryboard(ctx, parsed.data as z.infer<typeof createStoryboardSchema>);
+    case "tag_storyboard_characters": return tagStoryboardCharacters(ctx, parsed.data as z.infer<typeof tagStoryboardCharactersSchema>);
     // ask / reply 由 Agent 循环直接处理（它们只需要生成一段文本，没有副作用）
     case "ask": return okResult((parsed.data as AskArgs).question);
     case "reply": return okResult((parsed.data as ReplyArgs).text);

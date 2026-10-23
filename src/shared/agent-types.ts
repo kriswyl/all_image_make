@@ -42,6 +42,7 @@ export const AGENT_TOOL_NAMES = [
   "generate_music",
   "generate_speech",
   "create_storyboard",
+  "tag_storyboard_characters",
   "ask",
   "reply",
 ] as const;
@@ -62,6 +63,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_music: "生成音乐",
   generate_speech: "生成配音",
   create_storyboard: "拆分镜",
+  tag_storyboard_characters: "标注角色",
   ask: "提问",
   reply: "回复",
 };

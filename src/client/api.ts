@@ -219,16 +219,22 @@ export const api = {
   updateStoryboardShot: (
     id: string,
     shotId: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "kind" | "aspectRatio">>,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "kind" | "aspectRatio">>,
   ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   }),
+  updateStoryboardCharacter: (id: string, characterId: string, assetId: string | null) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard/characters/${characterId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ assetId }),
+    }),
   generateStoryboardShots: (id: string, shotIds: string[]) => request<{
     submitted: number;
     failures: Array<{ shotId: string; index: number; error: string }>;
     shots: StoryboardShot[];
     referenceAssetId: string | null;
+    characterReferences: Array<{ character: string; assetId: string }>;
     note?: string;
   }>(`/api/conversations/${id}/storyboard/generate`, {
     method: "POST",

@@ -2490,3 +2490,77 @@ html.tauri-window.is-maximized .app-shell {
 @media (max-width: 900px) {
   .storyboard-reference select { max-width: 110px; }
 }
+
+/* 角色参考卡：一个角色一枚胶囊，缩略图 + 名字 + 自有的参考图下拉 */
+.storyboard-characters {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+.storyboard-character {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 2px 6px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+}
+.storyboard-character.has-ref { border-color: var(--line-strong); }
+.storyboard-character > img {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.storyboard-character > svg { flex: 0 0 auto; }
+.storyboard-character-name {
+  max-width: 84px;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.storyboard-character > small { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.storyboard-character select {
+  width: auto;
+  max-width: 116px;
+  height: 22px;
+  min-height: 0;
+  padding: 0 2px;
+  font-size: 10.5px;
+  background: transparent;
+  border-color: transparent;
+}
+.storyboard-character select:hover:not(:focus), .storyboard-character select:focus {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  box-shadow: none;
+}
+.storyboard-character-hint { align-self: center; color: var(--muted-soft); font-size: 10.5px; }
+.storyboard-character-field { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); }
+.storyboard-character-field input {
+  width: 76px;
+  height: 22px;
+  min-height: 0;
+  padding: 0 5px;
+  font-size: 10.5px;
+  background: transparent;
+  border-color: transparent;
+}
+.storyboard-character-field input:hover:not(:focus), .storyboard-character-field input:focus {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  box-shadow: none;
+}
+.storyboard-character.is-mismatch { border-color: var(--warning); background: var(--warning-soft, #fff7e6); }
