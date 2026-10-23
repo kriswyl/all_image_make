@@ -32,6 +32,9 @@ import { auditParameters, isParameterRejection, planParameterSalvage } from "./d
 import { callBrain, type BrainMessage } from "./brain.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
+import {
+  MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS, normalizeStoryboardAspect, storyboardShotMissing,
+} from "../shared/storyboard.js";
 import type { KeyStore } from "./key-store.js";
 
 /** §16：`extraReferences` 上限和现有 MAX_REFERENCE_IMAGES 对齐 */
@@ -126,6 +129,16 @@ export const generateSpeechSchema = z.object({
   modelHint: z.string().trim().max(80).optional(),
 });
 
+export const createStoryboardSchema = z.object({
+  shots: z.array(z.object({
+    /** 剧本原文。模型拆镜时保留，用来核对有没有漏段 */
+    sourceText: z.string().trim().max(20000).optional(),
+    prompt: nonEmpty(20000),
+    kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
+    aspectRatio: z.string().trim().max(10).optional(),
+  })).min(1).max(MAX_STORYBOARD_SHOTS),
+});
+
 export const askSchema = z.object({
   question: nonEmpty(2000),
   options: z.array(z.string().trim().min(1).max(120)).max(8).optional(),
@@ -144,6 +157,7 @@ export const TOOL_SCHEMAS = {
   generate_video: generateVideoSchema,
   generate_music: generateMusicSchema,
   generate_speech: generateSpeechSchema,
+  create_storyboard: createStoryboardSchema,
   ask: askSchema,
   reply: replySchema,
 } as const;
@@ -210,7 +224,9 @@ export function resolveAssetRef(
   if (!entries.length) return null;
   const normalized = ref.trim().toLowerCase().replace(/^#/, "");
   if (!normalized || ["last", "current", "最新", "当前"].includes(normalized)) {
-    const last = entries[entries.length - 1];
+    // 分镜产物是追加在消息产物后面的，不能直接拿数组最后一项当「最新」；
+    // 按产物自己的创建时间取，才不依赖两类记录的拼接顺序
+    const last = entries.reduce((newest, entry) => entry.asset.createdAt >= newest.asset.createdAt ? entry : newest);
     return { asset: last.asset, round: last.round };
   }
   const exact = entries.find((entry) => entry.asset.id.toLowerCase() === normalized);
@@ -575,7 +591,7 @@ export function repairTruncatedObject(text: string): string | null {
 
 export { parseLooseJson, sliceFirstObject };
 /** 各视频适配器的默认参数。和视频工作台的面板默认值保持一致，用户不必重新学 */
-const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; audio: boolean }> = {
+export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; audio: boolean }> = {
   "wan-video": { duration: 5, resolution: "720P", audio: true },
   "seedance-video": { duration: 5, resolution: "720p", audio: false },
   "grok-video": { duration: 8, resolution: "720p", audio: false },
@@ -1141,6 +1157,43 @@ function setCanvas(ctx: ToolContext, args: SetCanvasArgs): ToolOutcome {
   });
 }
 
+/**
+ * 拆分镜：只落库，不提交任何生成任务。
+ *
+ * 刻意不做「拆完顺手画第一张」：一屏 20 个镜头里只要有 3 个描述偏了，
+ * 用户就要为 3 张错图付钱。先让他看清整张表，再在面板上逐镜确认。
+ */
+async function createStoryboard(
+  ctx: ToolContext,
+  args: z.infer<typeof createStoryboardSchema>,
+): Promise<ToolOutcome> {
+  const previous = ctx.db.listStoryboardShots(ctx.conversation.id);
+  const shots = args.shots.map((shot) => ({
+    sourceText: shot.sourceText ?? "",
+    prompt: shot.prompt,
+    kind: shot.kind ?? "image" as const,
+    aspectRatio: normalizeStoryboardAspect(shot.aspectRatio),
+  }));
+  const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots);
+  const incomplete = saved.filter((shot) => storyboardShotMissing(shot));
+  const videoCount = saved.filter((shot) => shot.kind === "video").length;
+  const summary = [
+    `已拆成 ${saved.length} 个镜头`,
+    videoCount ? `（其中 ${videoCount} 个视频镜头）` : "",
+    "，还没有提交生成。",
+    incomplete.length ? `有 ${incomplete.length} 个镜头的画面描述太短（第 ${incomplete.map((shot) => shot.index).join("、")} 镜），请先补全。` : "",
+    previous.length ? "旧的镜头表已替换，之前生成的结果仍在生成历史里。" : "",
+    "请用户在下方分镜面板里确认描述和画幅，再点生成。",
+  ].join("");
+  return okResult(summary, {
+    data: {
+      storyboardCount: saved.length,
+      storyboardVideoCount: videoCount,
+      storyboardIncomplete: incomplete.map((shot) => shot.index),
+    },
+  });
+}
+
 /** 工具统一入口：先校验参数，再分发。参数不合法的错误会回灌给大脑让它重试 */
 export async function runAgentTool(
   name: keyof typeof TOOL_SCHEMAS,
@@ -1169,6 +1222,7 @@ export async function runAgentTool(
     case "generate_video": return generateVideo(ctx, parsed.data as GenerateVideoArgs);
     case "generate_music": return generateMusic(ctx, parsed.data as GenerateMusicArgs);
     case "generate_speech": return generateSpeech(ctx, parsed.data as GenerateSpeechArgs);
+    case "create_storyboard": return createStoryboard(ctx, parsed.data as z.infer<typeof createStoryboardSchema>);
     // ask / reply 由 Agent 循环直接处理（它们只需要生成一段文本，没有副作用）
     case "ask": return okResult((parsed.data as AskArgs).question);
     case "reply": return okResult((parsed.data as ReplyArgs).text);

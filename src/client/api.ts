@@ -2,6 +2,7 @@ import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearSco
 import type {
   AgentStreamEvent, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
+import type { StoryboardShot, StoryboardView } from "../shared/storyboard";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -191,6 +192,30 @@ export const api = {
     for (const file of files) form.append("images", file, file.name);
     return request<ConversationView>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
   },
+  /** 脚本文档：内容本来就已经在内存里，直接走 JSON，不必再编一次 multipart */
+  uploadConversationDocuments: (id: string, documents: Array<{ name: string; content: string }>) =>
+    request<ConversationView>(`/api/conversations/${id}/documents`, {
+      method: "POST",
+      body: JSON.stringify({ documents }),
+    }),
+  storyboard: (id: string) => request<StoryboardView>(`/api/conversations/${id}/storyboard`),
+  updateStoryboardShot: (
+    id: string,
+    shotId: string,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "kind" | "aspectRatio">>,
+  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  }),
+  generateStoryboardShots: (id: string, shotIds: string[]) => request<{
+    submitted: number;
+    failures: Array<{ shotId: string; index: number; error: string }>;
+    shots: StoryboardShot[];
+  }>(`/api/conversations/${id}/storyboard/generate`, {
+    method: "POST",
+    body: JSON.stringify({ shotIds }),
+  }),
+  clearStoryboard: (id: string) => request<{ removed: number } & StoryboardView>(`/api/conversations/${id}/storyboard`, { method: "DELETE" }),
   /**
    * §13.5 视频确认卡片 / 会话额度提醒的两个出口。
    *

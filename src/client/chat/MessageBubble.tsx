@@ -1,7 +1,7 @@
 /**
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
-import { AlertCircle, Info } from "lucide-react";
+import { AlertCircle, FileText, Info } from "lucide-react";
 import { assetRef, type ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
 
@@ -40,6 +40,17 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
                   }}
                 />
               </button>
+            ))}
+          </div>
+        ) : null}
+        {message.documents.length ? (
+          <div className="chat-bubble-documents">
+            {message.documents.map((document) => (
+              <span key={document.id} className="chat-document-chip" title="脚本文档，全文已交给助手">
+                <FileText size={13} />
+                <span>{document.name}</span>
+                <small>{document.charCount.toLocaleString()} 字</small>
+              </span>
             ))}
           </div>
         ) : null}

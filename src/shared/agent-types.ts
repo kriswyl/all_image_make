@@ -41,6 +41,7 @@ export const AGENT_TOOL_NAMES = [
   "generate_video",
   "generate_music",
   "generate_speech",
+  "create_storyboard",
   "ask",
   "reply",
 ] as const;
@@ -60,9 +61,17 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_video: "生成视频",
   generate_music: "生成音乐",
   generate_speech: "生成配音",
+  create_storyboard: "拆分镜",
   ask: "提问",
   reply: "回复",
 };
+
+/** 脚本文档引用：消息气泡上显示成一个文件条，不把全文塞进聊天记录 */
+export interface ChatDocumentRef {
+  id: string;
+  name: string;
+  charCount: number;
+}
 
 /** 一次并行调用里的一个调用（需求.md 问题 2） */
 export interface PlannedCall {
@@ -429,6 +438,8 @@ export interface ChatMessage {
    * 两者不重叠。
    */
   assetRefs: string[];
+  /** 这条消息附带的脚本文档。全文只在当轮喂给大脑，回放时只留名字和字数 */
+  documents: ChatDocumentRef[];
   status: MessageStatus;
   errorMessage: string | null;
   createdAt: string;
@@ -509,6 +520,8 @@ export interface ConversationView extends Conversation {
    * 视频不在里面找的话，点视频结果就只剩一个裂图（需求.md 问题 3 的现场）。
    */
   mediaAssets: CanvasAsset[];
+  /** 分镜表里的镜头数；会话头用它显示「分镜 N」，0 表示还没拆过 */
+  storyboardCount: number;
 }
 
 /** 产物引用：`#a3f1` 是 id 的前 4 位，也是展示给大脑和用户的编号 */
@@ -523,7 +536,7 @@ export interface CanvasAsset {
    * 两者的可预期行为不一样——上传的图没有提示词、也没花钱——所以「本会话的图」
    * 里要能一眼看出来源，不能长得一模一样。
    */
-  source: "generate" | "upload";
+  source: "generate" | "upload" | "storyboard";
 }
 
 /** 简短的产物编号，展示和大脑引用都用它 */

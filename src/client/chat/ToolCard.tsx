@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Mic, Music, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Mic, Music, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -26,6 +26,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_video: Film,
   generate_music: Music,
   generate_speech: Mic,
+  create_storyboard: Clapperboard,
   ask: Sparkles,
   reply: Sparkles,
 };
@@ -52,6 +53,12 @@ function resultDetail(tool: AgentToolName, result: ToolResult | null) {
     if (data.musicInstrumental === true) rows.push(["纯音乐", "是"]);
   }
   if (typeof data.round === "number") rows.push(["轮次", `第 ${data.round} 轮`]);
+  if (tool === "create_storyboard" && typeof data.storyboardCount === "number") {
+    rows.push(["镜头数", `${data.storyboardCount} 个`]);
+    if (typeof data.storyboardVideoCount === "number" && data.storyboardVideoCount > 0) {
+      rows.push(["视频镜头", `${data.storyboardVideoCount} 个`]);
+    }
+  }
   // set_canvas 一次设了多张时把整组列出来：ToolResult.assetId 只装得下主图，
   // 卡片上不写，用户就只能看见「切到 #a3f1」，看不到另外两张也被设进去了
   const canvasIds = readCanvasAssetIds(data);

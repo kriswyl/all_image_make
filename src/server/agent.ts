@@ -201,6 +201,7 @@ export class AgentService {
       // 但「能点开看的」要连视频一起给——否则前端找不到视频的 mimeType，
       // 灯箱照旧当图片渲染，用户看到的就是一个裂图（需求.md 问题 3）
       mediaAssets: entries.map(toCanvasAsset),
+      storyboardCount: this.db.countStoryboardShots(conversationId),
     };
   }
 

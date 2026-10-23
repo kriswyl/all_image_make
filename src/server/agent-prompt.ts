@@ -1,5 +1,6 @@
 import { MAX_SESSION_TASKS } from "./agent-constants.js";
 import { assetRef, type Conversation } from "../shared/agent-types.js";
+import { MAX_STORYBOARD_SHOTS, storyboardKindLabel, type StoryboardShot } from "../shared/storyboard.js";
 
 /**
  * §7 系统提示词。
@@ -16,6 +17,10 @@ export function buildSystemPrompt(
   hasTurnAttachments = false,
   /** 本会话里带 Suno ID 的歌曲，翻唱/混音用 */
   songs: Array<{ id: string; title?: string | null; tags?: string | null }> = [],
+  /** 当前分镜表；用户在对话里说「第 7 镜」指的就是这里的编号 */
+  storyboard: StoryboardShot[] = [],
+  /** 本会话上传过的脚本文档（全文只在当轮上下文里） */
+  documents: Array<{ fileName: string; charCount: number }> = [],
 ): string {
   const canvasLine = canvasImages.length
     ? canvasImages.map((item, index) => (index === 0 ? `${assetRef(item.id)}（画布第 1 张）` : assetRef(item.id))).join("、")
@@ -23,6 +28,16 @@ export function buildSystemPrompt(
   const songLine = songs.length
     ? songs.map((song) => `${assetRef(song.id)}《${song.title || "未命名"}》${song.tags ? `（${song.tags.slice(0, 60)}）` : ""}`).join("、")
     : "没有（翻唱/混音前要先有一首带 Suno ID 的歌）";
+  const documentLine = documents.length
+    ? documents.map((document) => `《${document.fileName}》${document.charCount.toLocaleString()} 字`).join("、")
+    : "没有";
+  // 只给镜号、类型、状态和画面描述。原文在 sourceText 里，太长就不塞——
+  // 用户说「第 7 镜」时，大脑需要的是一张能对号入座的清单，不是再读一遍剧本
+  const storyboardLines = storyboard.slice(0, MAX_STORYBOARD_SHOTS).map((shot) => {
+    const status = shot.status === "planned" ? "未生成" : shot.status === "succeeded" ? "已生成" : shot.status === "failed" ? "失败" : "生成中";
+    const prompt = shot.prompt.replace(/\s+/g, " ").slice(0, 80);
+    return `- 第 ${shot.index} 镜｜${storyboardKindLabel(shot.kind)}｜${status}｜${prompt || "（没有画面描述）"}`;
+  });
   return [
     "你是「语布」里的创作助手。用户用自然语言说想要什么图片、视频或音乐，你负责把它变成可执行的生成任务。",
     "",
@@ -65,6 +80,12 @@ export function buildSystemPrompt(
     "  voice 用预置音色名（Kore、Puck、Zephyr 等，大小写不敏感）；style 用一句话描述语气，例如「温柔、放慢」。",
     "  双人对话给 secondVoice，正文用「A：…」「B：…」标注；最多两个人。",
     "  这是朗读，不是写歌：用户要歌词、旋律、翻唱时用 generate_music，不要用 generate_speech。",
+    "- create_storyboard — 把脚本/故事拆成会话内分镜表。**只规划，不生成、不花钱**。",
+    "  args: {shots: [{sourceText, prompt(必填), kind: \"image\"|\"video\", aspectRatio}]}",
+    "  每个 prompt 必须是**自足的画面描述**（人物、场景、构图、光线、风格），不能写「同上」「接着上一镜」。",
+    "  sourceText 保留剧本原文，用来核对有没有漏段；kind 默认 image，用户明确要视频镜头才填 video；",
+    "  aspectRatio 只在用户或剧本明确要求时填（16:9 / 9:16 / 1:1 / 4:3 / 3:4）。",
+    "  镜头按剧本顺序排，最多 " + MAX_STORYBOARD_SHOTS + " 镜；拆完让用户在分镜面板确认后再生成。",
     "- ask — 需要用户做选择或补充信息时提问。args: {question(必填), options}",
     "- reply — 只是回话，不生成任何东西。args: {text(必填)}",
     "",
@@ -112,13 +133,27 @@ export function buildSystemPrompt(
     "    一次固定出 2 首，按次计费；拿不准风格或模式就先 ask，别让用户为不是他要的歌付钱。",
     "12. 用户要「读一下 / 配音 / 旁白 / 口播 / 有声书」时用 generate_speech，把原文放进 text，不要自己改写。",
     "    用户没指定音色就留空（默认 Kore）；风格只写语气/语速，不要写进正文。",
+    "13. 用户上传脚本/小说，或说「拆成分镜」「按段落生成」「做成短剧/绘本」时，**先调用 create_storyboard**，",
+    "    不要直接调 generate_image 开画。拆完用 reply 说清楚拆了几镜、有哪些镜头缺描述，请用户在面板里确认。",
+    "    用户只是贴了一段文字但没说拆镜，就不要主动拆；先问清他想要一张图还是一组分镜。",
+    "14. 分镜表里的镜头由用户在面板上点「生成」触发，**不要为了「开始生成」逐个调用 generate_image**。",
+    "    用户说「第 7 镜重来」时，改描述请让他在面板里改；只有他明确要你直接画一张时，才用 generate_image（那张不会写回分镜表）。",
+    "    「把第 7 镜的描述改一下」可以直接用 reply 给出改写后的描述，让用户复制到面板。",
     "",
     "## 可用能力（modelHint 只能填这里的 alias）",
     manifest,
     "",
+    ...(storyboardLines.length
+      ? [
+        "## 当前分镜（用户说「第 N 镜」指这里的编号）",
+        ...storyboardLines,
+        "",
+      ]
+      : []),
     "## 当前状态",
     `- 当前画布（参与下一步的图；第 1 张只是排序，不是默认目标）：${canvasImages.length ? canvasLine : "没有图（edit_image 需要先有图）"}`,
     `- 本条消息附带图片：${hasTurnAttachments ? "有（见下面的图片消息，优先用它们）" : "没有"}`,
+    `- 本会话的脚本文档（全文只在刚上传那一轮可见）：${documentLine}`,
     `- 本会话的歌曲（翻唱/混音可引用）：${songLine}`,
     ...(!hasTurnAttachments && canvasImages.length > 1
       ? ["- 你这一轮还没有看到画布图片的内容：用户按画面指图时，先 view_images，再决定 imageRefs。"]

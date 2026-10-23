@@ -12,7 +12,7 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Eye, EyeOff, Film, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Clapperboard, Eye, EyeOff, Film, Layers, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -28,13 +28,15 @@ import {
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
 import { AssetStrip } from "./chat/AssetStrip";
-import { Composer } from "./chat/Composer";
+import { Composer, isScriptDocument } from "./chat/Composer";
+import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
 import { ModelPanel } from "./chat/ModelPanel";
 import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
+import { StoryboardPanel } from "./chat/StoryboardPanel";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
 
@@ -113,6 +115,7 @@ export function ChatView({
   const [preview, setPreview] = useState<string | null>(null);
   /** 画布条默认收起：平时只靠对话，需要挑图时从会话头那个开关展开 */
   const [canvasOpen, setCanvasOpen] = useState(false);
+  const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
@@ -363,6 +366,10 @@ export function ChatView({
             if (event.message.role === "assistant") { setReasoning(""); setDraft(""); }
             return { ...current, messages: upsert(current.messages, event.message) };
           });
+          // 刚拆完镜就把面板打开：用户下一步一定是看描述、点生成
+          if (event.message.toolName === "create_storyboard" && event.message.status === "ok") {
+            setStoryboardOpen(true);
+          }
           break;
         case "progress":
           setProgress((current) => ({ ...current, [event.taskId]: { status: event.status, progress: event.progress } }));
@@ -571,6 +578,48 @@ export function ChatView({
   }
 
   /**
+   * 把脚本文档读成文本再上传。
+   *
+   * 读文件是异步的，所以这里单独占一个 `uploading` 窗口：发送按钮转圈，
+   * 用户在读完之前不能再塞附件。任何一篇读失败都不发那句话——
+   * 否则助手会以为「拆一下」指的是上一篇文档。
+   */
+  async function uploadDocuments(files: File[]): Promise<boolean> {
+    if (!activeId || !files.length) return false;
+    setUploading(true);
+    try {
+      const documents: Array<{ name: string; content: string }> = [];
+      let total = 0;
+      for (const file of files) {
+        const content = (await file.text()).replace(/^﻿/, "").replace(/\0/g, "");
+        if (!content.trim()) {
+          toast("error", `${file.name} 是空的`);
+          return false;
+        }
+        if (content.length > MAX_SCRIPT_CHARS) {
+          toast("error", `${file.name} 超过 ${MAX_SCRIPT_CHARS.toLocaleString()} 字，请拆分后再传`);
+          return false;
+        }
+        total += content.length;
+        if (total > MAX_SCRIPT_TOTAL_CHARS) {
+          toast("error", `脚本文档合计最多 ${MAX_SCRIPT_TOTAL_CHARS.toLocaleString()} 字，请拆分后再传`);
+          return false;
+        }
+        documents.push({ name: file.name, content });
+      }
+      setView(await api.uploadConversationDocuments(activeId, documents));
+      await reloadList();
+      toast("ok", documents.length > 1 ? `已上传 ${documents.length} 个脚本文档` : `已上传《${documents[0]!.name}》`);
+      return true;
+    } catch (error) {
+      toastError(error);
+      return false;
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  /**
    * 立刻落画布（不走 250ms 防抖）。
    *
    * 平时连点是靠防抖合并的，但发送这一下必须**落定之后**才发消息：
@@ -596,7 +645,11 @@ export function ChatView({
    * 拖进来的既有产物不用上传，并进画布就行。
    */
   async function sendWithFiles(text: string, files: File[], assetIds: string[]) {
-    if (files.length && !(await uploadImages(files))) return;
+    // 图和文档分开传；文档放在最后，这样「文档消息 + 这句话」在库里是紧挨着的
+    const images = files.filter((file) => !isScriptDocument(file));
+    const documents = files.filter(isScriptDocument);
+    if (images.length && !(await uploadImages(images))) return;
+    if (documents.length && !(await uploadDocuments(documents))) return;
     if (assetIds.length && view) {
       // 并进画布而不是替换：用户拖第二张进来通常是想「这两张一起改」
       const merged = [...new Set([...view.canvasAssetIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
@@ -835,6 +888,16 @@ export function ChatView({
               <div className="chat-header-controls">
                 <button
                   type="button"
+                  className={`chat-control chat-toggle ${storyboardOpen ? "is-on" : ""}`}
+                  title={view.storyboardCount ? "展开分镜表：逐镜改描述、确认后生成" : "还没有分镜：上传剧本后让助手「拆成分镜」"}
+                  onClick={() => setStoryboardOpen((open) => !open)}
+                >
+                  <Clapperboard size={13} />
+                  分镜{view.storyboardCount ? ` ${view.storyboardCount}` : ""}
+                </button>
+
+                <button
+                  type="button"
                   className={`chat-control chat-toggle ${canvasOpen ? "is-on" : ""}`}
                   title={canvasOpen ? "收起画布条" : "展开画布条：挑哪几张一起改图、哪张当视频首帧"}
                   onClick={() => setCanvasOpen((open) => !open)}
@@ -938,6 +1001,30 @@ export function ChatView({
               完成同一件事）。开关放在会话头，徽标上带着张数，需要挑图时点一下就有。
               没有图的时候整条不出现：一条「还没有图」的空条只会占地方。
             */}
+            {storyboardOpen ? (
+              <StoryboardPanel
+                conversationId={view.id}
+                refreshKey={
+                  // 消息数变化之外，拆分镜工具落定那一刻也要刷新：
+                  // 工具行先以 pending 落库、执行完再改成 ok，中间消息数不变
+                  view.messages.length
+                  + view.messages.filter((message) => message.toolName === "create_storyboard" && message.status === "ok").length
+                }
+                canvasIds={canvasImages.map((asset) => asset.id)}
+                onClose={() => setStoryboardOpen(false)}
+                onToast={toast}
+                onAddToCanvas={(assetId) => {
+                  if (canvasImages.some((asset) => asset.id === assetId)) return;
+                  if (canvasImages.length >= MAX_CANVAS_IMAGES) {
+                    toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，先移出一张再加`);
+                    return;
+                  }
+                  writeCanvas([...canvasImages.map((asset) => asset.id), assetId]);
+                  toast("ok", "已加入画布");
+                }}
+              />
+            ) : null}
+
             {canvasOpen && sessionImages.length ? (
               <div className="chat-canvas">
                 {/* 每张图只出现一次：点一下给它打上"在画布里"的序号，① 是第 1 张。

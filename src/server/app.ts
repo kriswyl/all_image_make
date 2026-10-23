@@ -23,6 +23,11 @@ import {
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
 import { midjourneyModelForCustomId } from "../shared/midjourney.js";
+import {
+  MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS, STORYBOARD_SHOT_KINDS,
+  normalizeStoryboardAspect,
+} from "../shared/storyboard.js";
+import { buildStoryboardView, generateStoryboardShots } from "./storyboard.js";
 
 const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
@@ -143,6 +148,28 @@ const confirmSchema = z.object({
 const midjourneyActionSchema = z.object({
   customId: z.string().trim().min(1).max(500),
   label: z.string().trim().max(40).optional(),
+});
+
+/** 脚本文档：全文走 JSON；字数上限在路由里按总量再核一次 */
+const conversationDocumentSchema = z.object({
+  documents: z.array(z.object({
+    name: z.string().trim().min(1).max(200),
+    // 字数上限在路由里检查，好给出「超过 N 字，请拆分」这种能直接照做的错误
+    content: z.string().min(1),
+  })).min(1).max(3),
+});
+
+const storyboardShotPatchSchema = z.object({
+  prompt: z.string().trim().max(20000).optional(),
+  sourceText: z.string().trim().max(20000).optional(),
+  kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
+  aspectRatio: z.string().trim().max(10).optional(),
+});
+
+const storyboardGenerateSchema = z.object({
+  // 上限由 service 检查：Zod 先拦掉的话，前端只能拿到一条通用的参数错误，
+  // 分不清是「没选镜头」还是「一次选了太多」
+  shotIds: z.array(z.string().uuid()).min(1),
 });
 
 const generationSchema = z.object({
@@ -727,6 +754,98 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (uploaded.length) db.updateConversation(id, { canvasAssetIds: uploaded });
     res.status(201).json(ok(agent.buildView(id)));
   }));
+
+  /**
+   * 往会话里传脚本文档（.txt / .md）。
+   *
+   * 和上传图片同一套「先落库、再挂一条 user 消息」：那条消息只写文件名和字数，
+   * 全文存进 conversation_documents——聊天记录里塞几万字，用户和大脑都会被淹。
+   * 全文只在**紧接着的那一轮**作为素材喂给大脑，之后靠分镜表的 source_text 回溯。
+   */
+  app.post("/api/conversations/:id/documents", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    const input = conversationDocumentSchema.parse(req.body ?? {});
+    const total = input.documents.reduce((sum, doc) => sum + doc.content.length, 0);
+    if (total > MAX_SCRIPT_TOTAL_CHARS) {
+      throw new AppError("SCRIPT_TOO_LONG", `脚本文档合计最多 ${MAX_SCRIPT_TOTAL_CHARS.toLocaleString()} 字，请拆分后再传`, 400);
+    }
+
+    const refs = input.documents.map((doc) => {
+      // BOM 和 NUL 对文本没有意义，却会悄悄占字数、让模型看到乱码
+      const content = doc.content.replace(/^﻿/, "").replace(/\0/g, "");
+      if (!content.trim()) throw new AppError("SCRIPT_EMPTY", "脚本文档是空的", 400);
+      if (content.length > MAX_SCRIPT_CHARS) {
+        throw new AppError("SCRIPT_TOO_LONG", `《${displayFileName(doc.name)}》超过 ${MAX_SCRIPT_CHARS.toLocaleString()} 字，请拆分后再传`, 400);
+      }
+      const name = displayFileName(doc.name);
+      const stored = db.addConversationDocument(id, name, content);
+      return { id: stored.id, name: stored.fileName, charCount: stored.charCount };
+    });
+
+    const names = refs.map((ref) => `《${ref.name}》`).join("");
+    db.appendMessage({
+      conversationId: id, role: "user",
+      content: `上传了脚本文档 ${names}（共 ${refs.reduce((sum, ref) => sum + ref.charCount, 0).toLocaleString()} 字）`,
+      documents: refs,
+    });
+    res.status(201).json(ok(agent.buildView(id)));
+  }));
+
+  /** 会话内分镜表。前端在面板打开/有任务在跑时轮询它 */
+  app.get("/api/conversations/:id/storyboard", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  /** 改一镜的画面描述 / 画幅 / 类型。只影响下一次生成，不回滚已经提交的任务 */
+  app.patch("/api/conversations/:id/storyboard/shots/:shotId", (req, res) => {
+    const id = routeParam(req.params.id);
+    const shotId = routeParam(req.params.shotId);
+    const shot = db.getStoryboardShot(shotId);
+    if (!shot || shot.conversationId !== id) {
+      return res.status(404).json(fail("STORYBOARD_SHOT_NOT_FOUND", "镜头不存在或不属于这个会话"));
+    }
+    const input = storyboardShotPatchSchema.parse(req.body ?? {});
+    if (input.prompt !== undefined && !input.prompt.trim()) {
+      return res.status(400).json(fail("STORYBOARD_SHOT_INCOMPLETE", "画面描述不能为空"));
+    }
+    if (input.aspectRatio !== undefined && input.aspectRatio !== "" && normalizeStoryboardAspect(input.aspectRatio) !== input.aspectRatio) {
+      return res.status(400).json(fail("STORYBOARD_ASPECT_INVALID", "不支持的画幅"));
+    }
+    db.updateStoryboardShot(shotId, {
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+      ...(input.sourceText !== undefined ? { sourceText: input.sourceText } : {}),
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
+    });
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  /**
+   * 生成选中的镜头。
+   *
+   * 这条路**不经过大脑**：用户已经在面板上确认过数量、缺信息和计费提示，
+   * 再让大脑重规划一遍只会多花一次调用，还可能把用户改过的提示词又改回去。
+   */
+  app.post("/api/conversations/:id/storyboard/generate", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    const input = storyboardGenerateSchema.parse(req.body ?? {});
+    const result = await generateStoryboardShots({
+      db, runner, conversationId: id, shotIds: input.shotIds,
+    });
+    res.status(202).json(ok(result));
+  }));
+
+  /** 清空分镜（重新拆之前用；已生成的产物留在生成历史里） */
+  app.delete("/api/conversations/:id/storyboard", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const removed = db.deleteStoryboard(id);
+    res.json(ok({ removed, ...buildStoryboardView(db, id) }));
+  });
 
   /**
    * SSE 事件流（§14）。

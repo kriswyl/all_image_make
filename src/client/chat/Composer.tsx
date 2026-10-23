@@ -13,23 +13,42 @@
  * 槽位由 ChatView 传进来：会话的大脑模型、视频确认策略这些开关属于会话，
  * 摆在这一行才符合「输入框下面挂着的都是我这次要用的设定」这个直觉。
  */
-import { ArrowUp, CornerDownLeft, LoaderCircle, Plus, Square, X } from "lucide-react";
+import { ArrowUp, CornerDownLeft, FileText, LoaderCircle, Plus, Square, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
+import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
 import { api } from "../api";
 import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 
 /**
- * 待发附件。两种来源：
- * - `file`：从资源管理器拖/选进来的本地文件，发送时才真的上传
+ * 待发附件。三种来源：
+ * - 图片 `file`：从资源管理器拖/选进来的本地图片，发送时才真的上传
+ * - 文档 `file`：`.txt` / `.md` 剧本，发送时读成文本再上传
  * - `assetId`：会话里**已经生成**的图，被拖进来当参考——不用上传，发送时并进画布
  */
-type PendingImage = { url: string; name: string; file?: File; assetId?: string };
+type PendingAttachment = {
+  url: string;
+  name: string;
+  file?: File;
+  assetId?: string;
+  kind: "image" | "document";
+};
 
 /** 和输入框同宽的图片白名单，和服务端那道真正的把关（看字节头）不是一回事 */
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp)$/i;
+/** 剧本只收纯文本格式：docx/pdf 的解析质量不稳定，首版不做 */
+const DOCUMENT_EXTENSIONS = /\.(txt|md|markdown)$/i;
+const MAX_DOCUMENTS_PER_MESSAGE = 3;
+
+export function isScriptDocument(file: File): boolean {
+  return DOCUMENT_EXTENSIONS.test(file.name);
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name);
+}
 
 export function Composer({
   running,
@@ -61,7 +80,7 @@ export function Composer({
   onInterrupt: () => void;
 }) {
   const [text, setText] = useState("");
-  const [pending, setPending] = useState<PendingImage[]>([]);
+  const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [reject, setReject] = useState<string | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -74,31 +93,41 @@ export function Composer({
   useEffect(() => () => { pendingRef.current.forEach((item) => URL.revokeObjectURL(item.url)); }, []);
 
   function addFiles(files: File[], assetIds: string[] = []) {
-    const images = files.filter((file) => file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name));
+    const images = files.filter(isImageFile);
+    const documents = files.filter(isScriptDocument);
     // 页内拖过来的产物不用再过格式和大小那两关：它本来就已经在会话里了
     const fromCanvas = assetIds.filter((id) => !pending.some((item) => item.assetId === id));
-    if (!images.length && !fromCanvas.length) {
-      // 拖了文件但没一张是图，才提示；拖的是别的东西就当没发生
-      if (files.length) setReject("只支持 PNG、JPEG 或 WebP 图片");
+    if (!images.length && !documents.length && !fromCanvas.length) {
+      // 拖了文件但没一张能收，才提示；拖的是别的东西就当没发生
+      if (files.length) setReject("只支持 PNG、JPEG、WebP 图片，或 .txt / .md 脚本文档");
       return;
     }
-    if (pending.length + images.length + fromCanvas.length > MAX_REFERENCE_IMAGES) {
-      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张`);
+    const currentImages = pending.filter((item) => item.kind === "image").length;
+    const currentDocuments = pending.filter((item) => item.kind === "document").length;
+    if (currentImages + images.length + fromCanvas.length > MAX_REFERENCE_IMAGES) {
+      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
     }
-    const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
-    if (oversized) { setReject(`${oversized.name} 超过 10 MB`); return; }
+    if (currentDocuments + documents.length > MAX_DOCUMENTS_PER_MESSAGE) {
+      setReject(`一次最多 ${MAX_DOCUMENTS_PER_MESSAGE} 个脚本文档`);
+      return;
+    }
+    const oversizedImage = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
+    if (oversizedImage) { setReject(`${oversizedImage.name} 超过 10 MB`); return; }
+    const oversizedDocument = documents.find((file) => file.size > MAX_SCRIPT_FILE_BYTES);
+    if (oversizedDocument) { setReject(`${oversizedDocument.name} 超过 2 MB，请先拆分`); return; }
     setReject(null);
     setPending((current) => [
       ...current,
-      ...images.map((file) => ({ file, name: file.name, url: URL.createObjectURL(file) })),
-      ...fromCanvas.map((assetId) => ({ assetId, name: assetId, url: api.assetUrl(`/api/assets/${assetId}/thumb`) })),
+      ...images.map((file) => ({ file, name: file.name, url: URL.createObjectURL(file), kind: "image" as const })),
+      ...documents.map((file) => ({ file, name: file.name, url: "", kind: "document" as const })),
+      ...fromCanvas.map((assetId) => ({ assetId, name: assetId, url: api.assetUrl(`/api/assets/${assetId}/thumb`), kind: "image" as const })),
     ]);
   }
 
-  function removePending(item: PendingImage) {
-    // 只有本地文件才有 blob 地址要回收；产物那张指向的是服务端缩略图
-    if (item.file) URL.revokeObjectURL(item.url);
+  function removePending(item: PendingAttachment) {
+    // 只有本地图片才有 blob 地址要回收；文档和产物都没有 blob
+    if (item.file && item.url) URL.revokeObjectURL(item.url);
     setPending((current) => current.filter((entry) => entry !== item));
   }
 
@@ -116,7 +145,7 @@ export function Composer({
     setPending([]);
     setReject(null);
     // 交出去之后由 ChatView 负责上传/并入画布，blob 地址在这里就没用了
-    pending.forEach((item) => { if (item.file) URL.revokeObjectURL(item.url); });
+    pending.forEach((item) => { if (item.file && item.url) URL.revokeObjectURL(item.url); });
     onSend(value, files, assetIds);
     // 高度被撑开过的话收回去，否则下一条消息的输入框还是大的
     if (areaRef.current) areaRef.current.style.height = "auto";
@@ -128,12 +157,23 @@ export function Composer({
         {pending.length ? (
           <div className="composer-attachments">
             {pending.map((item) => (
-              <div key={item.url} className="composer-attachment" title={item.file ? item.name : `${item.name} · 已在会话里`}>
-                <img src={item.url} alt={item.name} />
+              <div
+                key={item.kind === "document" ? `doc:${item.name}:${item.file?.size}` : item.url || item.name}
+                className={`composer-attachment ${item.kind === "document" ? "is-document" : ""}`}
+                title={item.kind === "document"
+                  ? `${item.name} · 发送时读取全文，只在当轮交给助手`
+                  : item.file ? item.name : `${item.name} · 已在会话里`}
+              >
+                {item.kind === "document" ? (
+                  <span className="composer-attachment-file">
+                    <FileText size={16} />
+                    <span>{item.name}</span>
+                  </span>
+                ) : <img src={item.url} alt={item.name} />}
                 <button
                   type="button"
                   className="composer-attachment-remove"
-                  title="移除这张"
+                  title={item.kind === "document" ? "移除这个文档" : "移除这张"}
                   aria-label={`移除 ${item.name}`}
                   onClick={() => removePending(item)}
                 >
@@ -172,7 +212,7 @@ export function Composer({
           <button
             type="button"
             className={`composer-attach ${pending.length ? "is-on" : ""}`}
-            title="传一张图进来（也可以直接把图拖进来或 Ctrl+V 粘贴）"
+            title="传图片或脚本文档（.txt / .md；也可以直接拖进来）"
             disabled={blocked}
             onClick={() => fileRef.current?.click()}
           >
@@ -183,7 +223,7 @@ export function Composer({
             ref={fileRef}
             className="file-input"
             type="file"
-            accept="image/png,image/jpeg,image/webp"
+            accept="image/png,image/jpeg,image/webp,.txt,.md,.markdown,text/plain,text/markdown"
             multiple
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
@@ -220,9 +260,12 @@ export function Composer({
       <div className="composer-hint">
         <CornerDownLeft size={11} />
         <span>回车发送 · Shift + 回车换行</span>
-        {/* 两种来源要说清各自会发生什么：本地文件是「发送时上传」，拖进来的产物是「引用它」 */}
-        {pending.some((item) => item.file) ? (
-          <span className="composer-hint-pending">{pending.filter((item) => item.file).length} 张本地图将在发送时上传</span>
+        {/* 三种来源要说清各自会发生什么：本地图/文档是「发送时上传」，拖进来的产物是「引用它」 */}
+        {pending.some((item) => item.file && item.kind === "image") ? (
+          <span className="composer-hint-pending">{pending.filter((item) => item.file && item.kind === "image").length} 张本地图将在发送时上传</span>
+        ) : null}
+        {pending.some((item) => item.kind === "document") ? (
+          <span className="composer-hint-pending">{pending.filter((item) => item.kind === "document").length} 个脚本文档将在发送时读取</span>
         ) : null}
         {pending.some((item) => item.assetId) ? (
           <span className="composer-hint-pending">{pending.filter((item) => item.assetId).length} 张引用自本会话，会一起进画布</span>

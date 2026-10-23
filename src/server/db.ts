@@ -7,9 +7,10 @@ import { taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
 import type {
-  AgentPlan, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
+  AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
+import type { StoryboardShot, StoryboardShotKind, StoryboardShotStatus } from "../shared/storyboard.js";
 
 export interface DbChannel {
   id: string;
@@ -25,6 +26,18 @@ export interface DbChannel {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 会话产物的来源：正常生成、用户上传，或分镜面板直接提交 */
+export type ConversationAssetSource = TaskOrigin | "storyboard";
+
+export interface StoredDocument {
+  id: string;
+  conversationId: string;
+  fileName: string;
+  content: string;
+  charCount: number;
+  createdAt: string;
 }
 
 type DbRow = Record<string, string | number | null>;
@@ -189,10 +202,39 @@ export class AppDatabase {
         confirm_json     TEXT,
         task_id          TEXT,
         asset_id         TEXT,
+        -- 这条消息附带的脚本文档（[{id,name,charCount}]）；全文存在 conversation_documents 里
+        documents_json   TEXT,
         status           TEXT NOT NULL DEFAULT 'ok',
         error_message    TEXT,
         created_at       TEXT NOT NULL
       );
+      -- 用户上传的脚本文档。全文只在这一轮喂给大脑，后续靠分镜表的 source_text 回溯
+      CREATE TABLE IF NOT EXISTS conversation_documents (
+        id               TEXT PRIMARY KEY,
+        conversation_id  TEXT NOT NULL,
+        file_name        TEXT NOT NULL,
+        content          TEXT NOT NULL,
+        char_count       INTEGER NOT NULL,
+        created_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS conversation_documents_conv_idx
+        ON conversation_documents(conversation_id, created_at);
+      -- 会话内分镜表：一个会话一张，镜号从 1 开始。
+      -- task_id 只指向**最近一次**生成；重跑会覆盖它，旧产物仍在生成历史里
+      CREATE TABLE IF NOT EXISTS conversation_shots (
+        id               TEXT PRIMARY KEY,
+        conversation_id  TEXT NOT NULL,
+        shot_index       INTEGER NOT NULL,
+        source_text      TEXT NOT NULL DEFAULT '',
+        prompt           TEXT NOT NULL DEFAULT '',
+        kind             TEXT NOT NULL DEFAULT 'image',
+        aspect_ratio     TEXT NOT NULL DEFAULT '',
+        task_id          TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS conversation_shots_conv_idx
+        ON conversation_shots(conversation_id, shot_index);
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
@@ -251,6 +293,10 @@ export class AppDatabase {
     // asset_id 是个单列，装不下，所以单开一个 JSON 数组；老行读出来就是空数组。
     if (!messageColumns.some((col) => col.name === "asset_refs")) {
       this.db.exec("ALTER TABLE messages ADD COLUMN asset_refs TEXT");
+    }
+    // 脚本文档：气泡上只显示文件条，全文在 conversation_documents 里
+    if (!messageColumns.some((col) => col.name === "documents_json")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN documents_json TEXT");
     }
     // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
     // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
@@ -686,6 +732,145 @@ export class AppDatabase {
     return text || null;
   }
 
+  // ── 脚本文档与分镜表 ──────────────────────────────────────────────────────
+
+  addConversationDocument(conversationId: string, fileName: string, content: string): StoredDocument {
+    const id = crypto.randomUUID();
+    const at = now();
+    this.db.prepare(`
+      INSERT INTO conversation_documents (id, conversation_id, file_name, content, char_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, conversationId, fileName, content, content.length, at);
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return { id, conversationId, fileName, content, charCount: content.length, createdAt: at };
+  }
+
+  listConversationDocuments(conversationId: string): StoredDocument[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM conversation_documents WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+    ).all(conversationId) as DbRow[];
+    return rows.map((row) => ({
+      id: String(row.id), conversationId: String(row.conversation_id), fileName: String(row.file_name),
+      content: String(row.content), charCount: Number(row.char_count), createdAt: String(row.created_at),
+    }));
+  }
+
+  getConversationDocument(id: string): StoredDocument | null {
+    const row = this.db.prepare("SELECT * FROM conversation_documents WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id), conversationId: String(row.conversation_id), fileName: String(row.file_name),
+      content: String(row.content), charCount: Number(row.char_count), createdAt: String(row.created_at),
+    };
+  }
+
+  /**
+   * 整表替换一个会话的分镜。
+   *
+   * 重新拆镜是「用户拿了一份新脚本」或「上一版拆得不对」——保留旧镜号只会让
+   * 「第 7 镜」指到两张不同的画面上。已经生成的产物仍在生成历史里，不会丢。
+   */
+  replaceStoryboard(
+    conversationId: string,
+    shots: Array<{ sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string }>,
+  ): StoryboardShot[] {
+    const at = now();
+    this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
+    const insert = this.db.prepare(`
+      INSERT INTO conversation_shots
+      (id, conversation_id, shot_index, source_text, prompt, kind, aspect_ratio, task_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    `);
+    for (const [position, shot] of shots.entries()) {
+      insert.run(
+        crypto.randomUUID(), conversationId, position + 1,
+        shot.sourceText, shot.prompt, shot.kind, shot.aspectRatio, at, at,
+      );
+    }
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return this.listStoryboardShots(conversationId);
+  }
+
+  /**
+   * 分镜表视图：任务状态是**现在**从 tasks 表读出来的，不在分镜行里再存一份。
+   *
+   * 存一份就得处理「任务重启恢复」「后台轮询完成」「删除历史」三条写路径，
+   * 而那三条都已经在维护 tasks 了；分镜只需要记住「最近一次挂在哪个 task 上」。
+   */
+  listStoryboardShots(conversationId: string): StoryboardShot[] {
+    const rows = this.db.prepare(`
+      SELECT s.*, t.status AS task_status, t.error_message AS task_error,
+             (SELECT a.id FROM assets a WHERE a.task_id = s.task_id ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1) AS result_asset_id
+      FROM conversation_shots s
+      LEFT JOIN tasks t ON t.id = s.task_id
+      WHERE s.conversation_id = ?
+      ORDER BY s.shot_index ASC
+    `).all(conversationId) as DbRow[];
+    return rows.map((row) => {
+      const taskId = row.task_id == null ? null : String(row.task_id);
+      const taskStatus = row.task_status == null ? null : String(row.task_status) as TaskStatus;
+      const status = taskId && taskStatus ? taskStatus as StoryboardShotStatus : "planned";
+      const assetId = row.result_asset_id == null ? null : String(row.result_asset_id);
+      const assetRow = assetId ? this.getAsset(assetId) : null;
+      return {
+        id: String(row.id), conversationId: String(row.conversation_id),
+        index: Number(row.shot_index),
+        sourceText: String(row.source_text ?? ""), prompt: String(row.prompt ?? ""),
+        kind: String(row.kind) === "video" ? "video" as const : "image" as const,
+        aspectRatio: String(row.aspect_ratio ?? ""),
+        taskId, status,
+        assetId: assetRow ? String(assetRow.id) : null,
+        asset: assetRow ? this.assetView(assetRow) : null,
+        errorMessage: row.task_error == null ? null : String(row.task_error),
+        createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+      };
+    });
+  }
+
+  getStoryboardShot(id: string): StoryboardShot | null {
+    const row = this.db.prepare("SELECT conversation_id FROM conversation_shots WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return this.listStoryboardShots(String(row.conversation_id)).find((shot) => shot.id === id) ?? null;
+  }
+
+  updateStoryboardShot(
+    id: string,
+    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "kind" | "aspectRatio" | "taskId">>,
+  ): StoryboardShot | null {
+    const fields: string[] = [];
+    const values: Array<string | null> = [];
+    const mapping: Record<string, string> = {
+      prompt: "prompt", sourceText: "source_text", kind: "kind", aspectRatio: "aspect_ratio", taskId: "task_id",
+    };
+    for (const [key, column] of Object.entries(mapping)) {
+      if (!(key in patch)) continue;
+      fields.push(`${column} = ?`);
+      values.push(((patch as Record<string, unknown>)[key] ?? null) as string | null);
+    }
+    if (!fields.length) return this.getStoryboardShot(id);
+    fields.push("updated_at = ?");
+    values.push(now(), id);
+    this.db.prepare(`UPDATE conversation_shots SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return this.getStoryboardShot(id);
+  }
+
+  hasStoryboard(conversationId: string): boolean {
+    const row = this.db.prepare("SELECT 1 AS found FROM conversation_shots WHERE conversation_id = ? LIMIT 1")
+      .get(conversationId) as DbRow | undefined;
+    return Boolean(row);
+  }
+
+  countStoryboardShots(conversationId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM conversation_shots WHERE conversation_id = ?")
+      .get(conversationId) as DbRow | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  deleteStoryboard(conversationId: string): number {
+    const result = this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
+    return Number(result.changes ?? 0);
+  }
+
   /** 只改传进来的字段；`canvasAssetIds: []` 是「清空画布」，和「没传」是两回事 */
   updateConversation(id: string, patch: ConversationPatch): Conversation | null {
     const fields: string[] = [];
@@ -756,6 +941,8 @@ export class AppDatabase {
     const assets: StoredFileRef[] = [];
     for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
     this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };
@@ -817,6 +1004,8 @@ export class AppDatabase {
     confirm?: ConfirmPreview | null; taskId?: string | null; assetId?: string | null;
     /** 这条消息引用的一组产物（用户从输入框拖进来的那些图） */
     assetRefs?: string[] | null;
+    /** 这条消息附带的脚本文档（只存引用，全文在 conversation_documents） */
+    documents?: ChatDocumentRef[] | null;
     status?: MessageStatus; errorMessage?: string | null;
   }): ChatMessage {
     const row = this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE conversation_id = ?")
@@ -826,8 +1015,8 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO messages
       (id, conversation_id, seq, role, content, plan_json, tool_name, tool_args_json,
-       tool_result_json, confirm_json, task_id, asset_id, asset_refs, status, error_message, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       tool_result_json, confirm_json, task_id, asset_id, asset_refs, documents_json, status, error_message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.conversationId, seq, input.role,
       input.content ?? null,
@@ -838,6 +1027,7 @@ export class AppDatabase {
       input.confirm ? JSON.stringify(input.confirm) : null,
       input.taskId ?? null, input.assetId ?? null,
       input.assetRefs?.length ? JSON.stringify(input.assetRefs) : null,
+      input.documents?.length ? JSON.stringify(input.documents) : null,
       input.status ?? "ok", input.errorMessage ?? null, now(),
     );
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now(), input.conversationId);
@@ -891,8 +1081,26 @@ export class AppDatabase {
     return row ? this.conversationFromRow(row) : null;
   }
 
+  /**
+   * 分镜生成出来的产物。
+   *
+   * 它们没有经过 Agent 的消息落库（分镜面板直接提交 runner），所以不在
+   * `messages.asset_id` 那条线索上。但用户点「加画布」之后，画布要能找到它们——
+   * 必须把这条来路补进 `buildView` 的素材集合。
+   */
+  listStoryboardAssets(conversationId: string): Array<{ asset: AssetRow; index: number; prompt: string }> {
+    const rows = this.db.prepare(`
+      SELECT assets.*, s.shot_index AS shot_index, s.prompt AS shot_prompt
+      FROM conversation_shots s
+      JOIN assets ON assets.task_id = s.task_id
+      WHERE s.conversation_id = ?
+      ORDER BY s.shot_index ASC, assets.created_at ASC
+    `).all(conversationId) as DbRow[];
+    return rows.map((row) => ({ asset: this.assetFromRow(row), index: Number(row.shot_index), prompt: String(row.shot_prompt ?? "") }));
+  }
+
   /** 会话里产出过图片的产物，按顺序排列，供「设为当前」回溯（§10.1 规则 3） */
-  listConversationAssets(conversationId: string): Array<{ asset: AssetRow; round: number; prompt: string; source: TaskOrigin }> {
+  listConversationAssets(conversationId: string): Array<{ asset: AssetRow; round: number; prompt: string; source: ConversationAssetSource }> {
     const rows = this.db.prepare(`
       SELECT assets.*, messages.seq AS message_seq, messages.content AS message_content,
              COALESCE(tasks.origin, 'generate') AS asset_origin
@@ -915,7 +1123,7 @@ export class AppDatabase {
     const seen = new Set<string>();
     let round = 0;
     let lastSeq: number | null = null;
-    const entries: Array<{ asset: AssetRow; round: number; prompt: string; source: TaskOrigin }> = [];
+    const entries: Array<{ asset: AssetRow; round: number; prompt: string; source: ConversationAssetSource }> = [];
     for (const row of rows) {
       const id = String(row.id);
       if (seen.has(id)) continue;
@@ -927,6 +1135,16 @@ export class AppDatabase {
         // 生成的和上传的可预期行为不一样（上传的没有提示词），前端据此加个来源标记
         source: (row.asset_origin == null ? "generate" : String(row.asset_origin)) as TaskOrigin,
       });
+    }
+    /*
+     * 分镜产物没有消息行，但必须并进同一份「会话产物」：
+     * resolveAssetRef / view_images / 拖进输入框都只认这一份，
+     * 漏掉它们的话，用户就没法说「把第 7 镜那张做成视频」。
+     */
+    for (const entry of this.listStoryboardAssets(conversationId)) {
+      if (seen.has(entry.asset.id)) continue;
+      seen.add(entry.asset.id);
+      entries.push({ asset: entry.asset, round: entry.index, prompt: entry.prompt, source: "storyboard" });
     }
     return entries;
   }
@@ -960,6 +1178,7 @@ export class AppDatabase {
       taskId: row.task_id == null ? null : String(row.task_id),
       assetId: row.asset_id == null ? null : String(row.asset_id),
       assetRefs: parseJson<string[]>(row.asset_refs, []),
+      documents: parseJson<ChatDocumentRef[]>(row.documents_json, []),
       status: String(row.status) as MessageStatus,
       errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at),

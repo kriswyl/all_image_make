@@ -13,7 +13,7 @@ import { buildCapabilityAliases, buildCapabilityManifest, markVisionUnsupported 
 import { assetThumbDataUri } from "./vision.js";
 import { MAX_VISION_IMAGES } from "./agent-constants.js";
 import { buildSystemPrompt } from "./agent-prompt.js";
-import { toBrainMessage, type BuiltContext } from "./agent-context.js";
+import { collectTurnDocuments, renderDocumentContext, toBrainMessage, type BuiltContext } from "./agent-context.js";
 import { isFatalBrainError, isVisionError } from "./agent-brain-errors.js";
 import { isVisionBlocked } from "./agent-vision.js";
 import { assetRef, type AgentStreamEvent, type Conversation } from "../shared/agent-types.js";
@@ -114,10 +114,24 @@ export class BrainRunner {
       .filter((asset) => asset.mimeType.startsWith("audio/") && Boolean(asset.remoteClipId))
       .map((asset) => ({ id: asset.id, title: asset.title, tags: asset.tags }));
 
+    const history = db.listMessages(conversation.id);
     const messages: BrainMessage[] = [
-      { role: "system", content: buildSystemPrompt(manifest, conversation, canvasImages, hasTurnAttachments, songs) },
+      {
+        role: "system",
+        content: buildSystemPrompt(
+          manifest, conversation, canvasImages, hasTurnAttachments, songs,
+          db.listStoryboardShots(conversation.id), db.listConversationDocuments(conversation.id),
+        ),
+      },
     ];
-    for (const item of db.listMessages(conversation.id)) {
+    // 脚本文档只在「这一轮刚传进来」时灌全文；插在文档提示和用户指令之间
+    const documentContext = renderDocumentContext(collectTurnDocuments(db, conversation.id));
+    let lastUserIndex = -1;
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      if (history[index]!.role === "user") { lastUserIndex = index; break; }
+    }
+    for (const [index, item] of history.entries()) {
+      if (index === lastUserIndex && documentContext) messages.push({ role: "user", content: documentContext });
       const converted = toBrainMessage(item);
       if (converted) messages.push(converted);
     }
