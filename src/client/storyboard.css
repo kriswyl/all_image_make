@@ -361,9 +361,9 @@ button.storyboard-progress-pill:hover {
 }
 .setting-card-prompt {
   width: 100%;
-  min-height: 48px;
-  max-height: 96px;
-  padding: 6px 8px;
+  min-height: 96px;
+  max-height: 168px;
+  padding: 7px 9px;
   color: var(--ink-soft);
   background: var(--surface-soft);
   border: 1px solid transparent;
@@ -379,17 +379,19 @@ button.storyboard-progress-pill:hover {
   box-shadow: 0 0 0 3px rgba(0, 0, 0, .05);
 }
 
-.setting-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.setting-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .setting-card-actions .secondary-button.compact,
-.setting-card-actions .primary-button.compact {
+.setting-card-actions .primary-button.compact,
+.setting-card-actions .image-picker-trigger {
   display: inline-flex;
   min-height: 29px;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 0 9px;
+  padding: 0 8px;
   border-radius: var(--radius-xs);
   font-size: 10.5px;
+  white-space: nowrap;
 }
 .setting-card-actions .primary-button.compact { width: 100%; }
 

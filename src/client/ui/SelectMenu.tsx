@@ -398,7 +398,6 @@ export function ImagePickerMenu({
       >
         <Images size={12} />
         {label}
-        {options.length ? <span className="image-picker-count">{options.length}</span> : null}
         <ChevronDown size={11} className="select-menu-chevron" />
       </button>
 

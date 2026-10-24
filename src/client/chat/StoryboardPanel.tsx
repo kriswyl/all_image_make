@@ -548,7 +548,7 @@ export function StoryboardPanel({
           </div>
           <textarea
             className="setting-card-prompt"
-            rows={2}
+            rows={3}
             maxLength={2000}
             value={settingPromptDrafts[item.id] ?? item.prompt}
             placeholder={kind === "character" ? "外貌、年龄、发型、服装…" : "空间、陈设、光线、色调…"}
