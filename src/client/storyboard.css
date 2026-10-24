@@ -488,7 +488,7 @@ button.storyboard-progress-pill:hover {
 .shot-card.is-done .shot-index { color: #fff; background: var(--accent); border-color: transparent; }
 .shot-card.is-selected .shot-index { border-color: var(--ink); }
 
-.shot-main { min-width: 0; }
+.shot-main { display: flex; min-width: 0; flex-direction: column; }
 .shot-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 7px; }
 .shot-kind, .shot-aspect { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10.5px; }
 
@@ -571,9 +571,10 @@ button.storyboard-progress-pill:hover {
 }
 .shot-prompt {
   width: 100%;
-  min-height: 52px;
-  max-height: 120px;
-  padding: 8px 10px;
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: 260px;
+  padding: 9px 11px;
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);

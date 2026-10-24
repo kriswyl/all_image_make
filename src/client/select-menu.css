@@ -115,9 +115,10 @@
   position: fixed;
   z-index: 200;
   display: flex;
-  max-height: 400px;
+  max-height: min(400px, calc(100vh - 24px));
   flex-direction: column;
   padding: 8px;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
@@ -137,11 +138,15 @@
 .image-picker-head span { color: var(--muted); font-size: 10px; }
 .image-picker-grid {
   display: grid;
+  flex: 1 1 auto;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+  min-height: 0;
   margin-top: 8px;
   padding: 2px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 .image-picker-option {
   display: flex;
