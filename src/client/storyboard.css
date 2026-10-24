@@ -482,7 +482,10 @@ button.storyboard-progress-pill:hover {
 .storyboard-shots-title span { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .storyboard-shots-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .storyboard-shots-actions .link-btn {
+  display: inline-flex;
   min-height: 28px;
+  align-items: center;
+  gap: 4px;
   padding: 0 8px;
   color: var(--muted);
   border-radius: var(--radius-xs);

@@ -260,6 +260,11 @@ export const api = {
     request<StoryboardView>(`/api/conversations/${id}/storyboard/${kind === "character" ? "characters" : "scenes"}/${settingId}`, {
       method: "DELETE",
     }),
+  addStoryboardShot: (id: string, input: Partial<Pick<StoryboardShot, "prompt" | "character" | "scene" | "aspectRatio">> = {}) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard/shots`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   deleteStoryboardShot: (id: string, shotId: string) =>
     request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, { method: "DELETE" }),
   generateStoryboardSettings: (id: string, characterIds: string[], sceneIds: string[], alias?: string) =>

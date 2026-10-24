@@ -17,8 +17,8 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../api";
 import {
   isStoryboardShotActive, storyboardShotMissing,
-  STORYBOARD_ASPECT_RATIOS, type StoryboardCharacter, type StoryboardScene, type StoryboardShot,
-  type StoryboardView,
+  MAX_STORYBOARD_SHOTS, STORYBOARD_ASPECT_RATIOS,
+  type StoryboardCharacter, type StoryboardScene, type StoryboardShot, type StoryboardView,
 } from "../../shared/storyboard";
 import type { CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
@@ -119,6 +119,7 @@ export function StoryboardPanel({
   const [adding, setAdding] = useState<SettingKind | null>(null);
   const [addName, setAddName] = useState("");
   const [addBusy, setAddBusy] = useState(false);
+  const [addingShot, setAddingShot] = useState(false);
   /** 删除确认：角色 / 场景 / 单镜共用一个对话框 */
   const [deleteTarget, setDeleteTarget] = useState<{
     kind: "shot" | SettingKind; id: string; label: string;
@@ -479,6 +480,35 @@ export function StoryboardPanel({
       onToast("error", error instanceof Error ? error.message : "添加失败");
     } finally {
       setAddBusy(false);
+    }
+  }
+
+  async function addShot() {
+    if (addingShot) return;
+    if (shots.length >= MAX_STORYBOARD_SHOTS) {
+      onToast("error", `一个会话最多 ${MAX_STORYBOARD_SHOTS} 个镜头`);
+      return;
+    }
+    setAddingShot(true);
+    try {
+      const next = await api.addStoryboardShot(conversationId);
+      setData(next);
+      const shot = next.shots[next.shots.length - 1];
+      if (!shot) return;
+      // 新镜头是空的：把它的草稿补上，并滚到可见处、直接开始写画面描述
+      setPromptDrafts((current) => ({ ...current, [shot.id]: shot.prompt }));
+      setCharacterDrafts((current) => ({ ...current, [shot.id]: shot.character }));
+      setSceneDrafts((current) => ({ ...current, [shot.id]: shot.scene }));
+      window.setTimeout(() => {
+        const card = document.querySelector<HTMLElement>(`[data-shot-id="${shot.id}"]`);
+        card?.scrollIntoView({ block: "center", behavior: "smooth" });
+        card?.querySelector<HTMLTextAreaElement>(".shot-prompt")?.focus();
+      }, 80);
+      onToast("ok", `已添加第 ${shot.index} 镜，填好画面描述就可以生成`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "添加镜头失败");
+    } finally {
+      setAddingShot(false);
     }
   }
 
@@ -906,6 +936,16 @@ export function StoryboardPanel({
                 <span>{shots.length} 镜 · 已完成 {shotDone}</span>
               </div>
               <div className="storyboard-shots-actions">
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => void addShot()}
+                  disabled={addingShot || shots.length >= MAX_STORYBOARD_SHOTS}
+                  title={shots.length >= MAX_STORYBOARD_SHOTS ? `一个会话最多 ${MAX_STORYBOARD_SHOTS} 个镜头` : "在末尾添加一镜"}
+                >
+                  {addingShot ? <LoaderCircle size={11} className="spin" /> : <Plus size={11} />}
+                  {addingShot ? "添加中…" : "添加镜头"}
+                </button>
                 <button type="button" className="link-btn" onClick={selectReady} disabled={!selectable.length}>选中可生成</button>
                 {rerunnable.length ? (
                   <button type="button" className="link-btn" onClick={selectRerun}>选中已完成</button>
@@ -933,7 +973,7 @@ export function StoryboardPanel({
                 const succeeded = shot.status === "succeeded";
                 const checked = selected.has(shot.id);
                 return (
-                  <div key={shot.id} className={`shot-card ${checked ? "is-selected" : ""} ${succeeded ? "is-done" : ""}`}>
+                  <div key={shot.id} data-shot-id={shot.id} className={`shot-card ${checked ? "is-selected" : ""} ${succeeded ? "is-done" : ""}`}>
                     <div className="shot-pick">
                       <input type="checkbox" checked={checked}
                         disabled={Boolean(missing) || activeShot || missingSettings.length > 0}

@@ -24,7 +24,7 @@ import {
 import { isChatAdapter } from "../shared/types.js";
 import { midjourneyModelForCustomId } from "../shared/midjourney.js";
 import {
-  MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS, STORYBOARD_SHOT_KINDS,
+  MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS, MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS,
   normalizeStoryboardAspect,
 } from "../shared/storyboard.js";
 import { buildStoryboardView, generateStoryboardSettings, generateStoryboardShots } from "./storyboard.js";
@@ -165,6 +165,14 @@ const conversationDocumentSchema = z.object({
 const storyboardSettingsSchema = z.object({
   referenceMode: z.enum(["auto", "manual", "off"]).optional(),
   referenceAssetId: z.string().uuid().nullable().optional(),
+});
+
+/** 手动添加一镜：只带可选的初始值，默认是空描述、沿用上一镜画幅 */
+const storyboardShotAddSchema = z.object({
+  prompt: z.string().trim().max(20000).optional(),
+  character: z.string().trim().max(120).optional(),
+  scene: z.string().trim().max(80).optional(),
+  aspectRatio: z.string().trim().max(10).optional(),
 });
 
 const storyboardShotPatchSchema = z.object({
@@ -896,6 +904,27 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (input.character) db.upsertStoryboardCharacters(id, [input.character]);
     if (input.scene) db.upsertStoryboardScenes(id, [input.scene]);
     res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  /** 在末尾添加一镜。空描述也能先建，填完再生成；上限和脚本拆分一致 */
+  app.post("/api/conversations/:id/storyboard/shots", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    if (db.countStoryboardShots(id) >= MAX_STORYBOARD_SHOTS) {
+      return res.status(400).json(fail("STORYBOARD_TOO_MANY", `一个会话最多 ${MAX_STORYBOARD_SHOTS} 个镜头`));
+    }
+    const input = storyboardShotAddSchema.parse(req.body ?? {});
+    if (input.aspectRatio !== undefined && input.aspectRatio !== ""
+      && normalizeStoryboardAspect(input.aspectRatio) !== input.aspectRatio) {
+      return res.status(400).json(fail("STORYBOARD_ASPECT_INVALID", "不支持的画幅"));
+    }
+    db.addStoryboardShot(id, {
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+      ...(input.character !== undefined ? { character: input.character } : {}),
+      ...(input.scene !== undefined ? { scene: input.scene } : {}),
+      ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
+    });
+    res.status(201).json(ok(buildStoryboardView(db, id)));
   });
 
   /** 删除一镜；后面的镜头自动前移，保持镜号连续 */

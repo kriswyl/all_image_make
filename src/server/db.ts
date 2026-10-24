@@ -1145,6 +1145,36 @@ export class AppDatabase {
   }
 
   /**
+   * 在末尾追加一镜。
+   *
+   * 默认沿用最后一镜的画幅，避免新镜头和其他镜头一个横一个竖；描述留空，
+   * 由用户在面板里填——这里不替用户编画面，也不提交任何任务。
+   */
+  addStoryboardShot(conversationId: string, input: {
+    prompt?: string; character?: string; scene?: string; aspectRatio?: string;
+  } = {}): StoryboardShot {
+    const last = this.db.prepare(
+      "SELECT shot_index, aspect_ratio FROM conversation_shots WHERE conversation_id = ? ORDER BY shot_index DESC LIMIT 1",
+    ).get(conversationId) as DbRow | undefined;
+    const index = Number(last?.shot_index ?? 0) + 1;
+    const aspectRatio = input.aspectRatio ?? (last?.aspect_ratio == null ? "" : String(last.aspect_ratio));
+    const id = crypto.randomUUID();
+    const at = now();
+    this.db.prepare(`
+      INSERT INTO conversation_shots
+      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio, task_id, created_at, updated_at)
+      VALUES (?, ?, ?, '', ?, ?, ?, 'image', ?, NULL, ?, ?)
+    `).run(
+      id, conversationId, index, input.prompt ?? "", input.character ?? "", input.scene ?? "",
+      aspectRatio, at, at,
+    );
+    if (input.character) this.upsertStoryboardCharacters(conversationId, [input.character]);
+    if (input.scene) this.upsertStoryboardScenes(conversationId, [input.scene]);
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return this.getStoryboardShot(id)!;
+  }
+
+  /**
    * 删除一镜，并把后面的镜号往前挪。
    *
    * 镜号是用户和大脑共同引用的坐标（「第 7 镜」），留着空洞会让「第 7 镜」

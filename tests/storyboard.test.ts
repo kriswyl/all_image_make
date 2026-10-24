@@ -222,6 +222,31 @@ describe("脚本文档与分镜表", () => {
     expect(view.shots[0]!.scene).toBe("");
   });
 
+  it("可以在末尾添加新镜头：沿用上一镜画幅，空描述先建但不提交", async () => {
+    const { app, context, conversationId } = await bootConversation("storyboard-add-shot-");
+    context.db.replaceStoryboard(conversationId, [
+      { sourceText: "镜头一", prompt: "雨夜街道，一个男人撑伞走过", kind: "image", aspectRatio: "16:9" },
+      { sourceText: "镜头二", prompt: "他走进巷子，回头看了一眼", kind: "image", aspectRatio: "16:9" },
+    ]);
+
+    let view = (await request(app).post(`/api/conversations/${conversationId}/storyboard/shots`)
+      .send({}).expect(201)).body.data as {
+        shots: Array<{ id: string; index: number; prompt: string; aspectRatio: string; status: string }>;
+      };
+    expect(view.shots).toHaveLength(3);
+    expect(view.shots[2]).toMatchObject({ index: 3, prompt: "", aspectRatio: "16:9", status: "planned" });
+
+    // 空描述镜头可以存在，但不允许提交生成
+    const blocked = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [view.shots[2]!.id] }).expect(400);
+    expect(blocked.body.error.message).toContain("第 3 镜");
+
+    // 也可以一次带上描述和画幅
+    view = (await request(app).post(`/api/conversations/${conversationId}/storyboard/shots`)
+      .send({ prompt: "清晨的巷口，雾气还没散", aspectRatio: "9:16" }).expect(201)).body.data as typeof view;
+    expect(view.shots[3]).toMatchObject({ index: 4, prompt: "清晨的巷口，雾气还没散", aspectRatio: "9:16" });
+  });
+
   it("生成选中的镜头：真的提交任务、状态从 tasks 读、最多 8 镜", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const mock = http.createServer((req, res) => {
