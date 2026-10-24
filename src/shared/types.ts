@@ -429,14 +429,29 @@ export interface BootstrapData {
   };
 }
 
+/**
+ * 可以在模型面板里设默认的四类。
+ *
+ * 音乐和语音在任务表里同属 `audio`（都要落一个音频产物），但它们是两种完全
+ * 不同的模型：Suno 写歌、Gemini TTS 朗读。默认值必须分开存，否则设了音乐
+ * 默认之后，语音的「默认」会指向一个不能朗读的模型。
+ */
+export type DefaultModelGroup = "image" | "video" | "music" | "speech";
+
 export interface Settings {
   assetsDir: string;
   defaultAssetsDir: string;
   /** gemini 渠道缺省补的尺寸（需求.md 问题 1）；1K / 2K / 4K */
   geminiImageSize: ImageSizeValue;
-  /** 默认生图 / 生视频模型（需求.md 问题 5），存 alias，空串表示没设 */
+  /** 默认生图 / 生视频 / 音乐 / 语音模型，存 alias，空串表示没设 */
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  defaultMusicAlias: string;
+  defaultSpeechAlias: string;
+  /**
+   * @deprecated 旧版只有一个音频默认值，音乐和语音共用。新代码请用
+   * `defaultMusicAlias` / `defaultSpeechAlias`；这里只为兼容老配置保留。
+   */
   defaultAudioAlias: string;
 }
 

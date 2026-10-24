@@ -88,7 +88,7 @@ export function buildConfirmPreview(
   reason: ConfirmPreview["reason"],
   selection: VideoSelection | undefined,
   consistency: "character" | "style" | undefined,
-  defaultAliases: { image?: string; video?: string; audio?: string },
+  defaultAliases: { image?: string; video?: string; music?: string; speech?: string },
 ): ConfirmPreview {
   const aliases = buildCapabilityAliases(db.listChannels());
   const first = calls[0]!;
@@ -97,7 +97,11 @@ export function buildConfirmPreview(
   const isVideo = first.tool === "generate_video";
   const isMusic = first.tool === "generate_music";
   const kind = isVideo ? "video" : isMusic ? "audio" : "image";
-  const aliasResolution = resolveAlias(aliases, asString(args.modelHint), kind, defaultAliases[kind]);
+  // 音乐虽然和语音同属 audio 任务，默认值要取音乐那一份
+  const defaultAlias = isVideo
+    ? defaultAliases.video
+    : isMusic ? defaultAliases.music : defaultAliases.image;
+  const aliasResolution = resolveAlias(aliases, asString(args.modelHint), kind, defaultAlias);
   const channel = aliasResolution ? db.getChannel(aliasResolution.channelId) : null;
   const canvasImages = db.canvasImages(conversation);
   // 视频卡片按**真正选中的那几张**渲染

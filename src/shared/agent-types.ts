@@ -620,5 +620,8 @@ export interface AgentSettings {
    */
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  /** 音乐（Suno）和语音（TTS）分开存；`defaultAudioAlias` 是旧版的合并值 */
+  defaultMusicAlias: string;
+  defaultSpeechAlias: string;
   defaultAudioAlias: string;
 }

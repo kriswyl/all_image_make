@@ -844,11 +844,18 @@ export class AgentService {
    * 存 alias 的代价是渠道被停用后它会失效，但那是正常情况而不是错误——
    * `resolveAlias` 会如实退回并标记出来，不假装一切正常。
    */
-  private defaultAliases(): { image?: string; video?: string; audio?: string } {
+  private defaultAliases(): { image?: string; video?: string; music?: string; speech?: string } {
+    // 旧版三个音频共用一个默认值；新键没设时把它同时交给音乐和语音，
+    // 工具自己会按适配器筛掉不匹配的那个（写歌只认 suno，朗读只认 tts）。
+    const legacyAudio = this.db.getSetting("agentDefaultAudioAlias") ?? "";
+    // 用 ?? 而不是 ||：用户把新键显式清成空串时，不该再把旧值捡回来
+    const music = this.db.getSetting("agentDefaultMusicAlias") ?? legacyAudio;
+    const speech = this.db.getSetting("agentDefaultSpeechAlias") ?? legacyAudio;
     return {
       ...(this.db.getSetting("agentDefaultImageAlias") ? { image: this.db.getSetting("agentDefaultImageAlias")! } : {}),
       ...(this.db.getSetting("agentDefaultVideoAlias") ? { video: this.db.getSetting("agentDefaultVideoAlias")! } : {}),
-      ...(this.db.getSetting("agentDefaultAudioAlias") ? { audio: this.db.getSetting("agentDefaultAudioAlias")! } : {}),
+      ...(music ? { music } : {}),
+      ...(speech ? { speech } : {}),
     };
   }
 

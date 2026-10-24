@@ -184,3 +184,45 @@ describe("默认生图模型（需求.md 问题 5）", () => {
     expect(note).toContain("已经不可用");
   });
 });
+
+describe("音乐 / 语音默认模型分开存", () => {
+  it("改音乐默认不会覆盖语音默认", async () => {
+    const booted = await boot("http://127.0.0.1:9", "audio-defaults-");
+
+    const first = (await request(booted.app).patch("/api/settings")
+      .send({ agentDefaultMusicAlias: "suno", agentDefaultSpeechAlias: "tts-1" }).expect(200)).body.data;
+    expect(first.defaultMusicAlias).toBe("suno");
+    expect(first.defaultSpeechAlias).toBe("tts-1");
+
+    const second = (await request(booted.app).patch("/api/settings")
+      .send({ agentDefaultMusicAlias: "suno-2" }).expect(200)).body.data;
+    expect(second.defaultMusicAlias).toBe("suno-2");
+    // 语音那条不能被带着改掉
+    expect(second.defaultSpeechAlias).toBe("tts-1");
+    // 旧版合并字段不应该被悄悄写入
+    expect(second.defaultAudioAlias).toBe("");
+  });
+
+  it("旧版共用的音频默认值按适配器归到音乐或语音", async () => {
+    const booted = await boot("http://127.0.0.1:9", "audio-legacy-default-");
+    await booted.addChannel({
+      name: "Suno", baseUrl: "http://127.0.0.1:9", adapterType: "suno-music",
+      authType: "none", authHeaderName: "", secretEnv: "",
+      endpoint: "/api/queue/makeAiMusic", models: ["suno_damobi_music"],
+      allowPrivateNetwork: true, enabled: true,
+    });
+
+    // 前端要靠 adapterType 把音乐和语音分开，接口必须带出来
+    const audioAlias = (await request(booted.app).get("/api/agent/capabilities").expect(200))
+      .body.data.aliases.find((item: { alias: string }) => item.alias === "suno");
+    expect(audioAlias.adapterType).toBe("suno-music");
+
+    await request(booted.app).patch("/api/settings")
+      .send({ agentDefaultAudioAlias: "suno" }).expect(200);
+
+    const settings = (await request(booted.app).get("/api/settings").expect(200)).body.data;
+    expect(settings.defaultMusicAlias).toBe("suno");
+    // Suno 的默认值不能跑到语音去
+    expect(settings.defaultSpeechAlias).toBe("");
+  });
+});

@@ -94,6 +94,9 @@ const settingsSchema = z.object({
    */
   agentDefaultImageAlias: z.string().trim().max(80).optional(),
   agentDefaultVideoAlias: z.string().trim().max(80).optional(),
+  /** 音乐和语音分开设默认；旧的合并值仍接受，用于兼容老前端 */
+  agentDefaultMusicAlias: z.string().trim().max(80).optional(),
+  agentDefaultSpeechAlias: z.string().trim().max(80).optional(),
   agentDefaultAudioAlias: z.string().trim().max(80).optional(),
 });
 
@@ -387,6 +390,8 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (input.geminiImageSize !== undefined) db.setSetting("geminiImageSize", input.geminiImageSize);
     if (input.agentDefaultImageAlias !== undefined) db.setSetting("agentDefaultImageAlias", input.agentDefaultImageAlias);
     if (input.agentDefaultVideoAlias !== undefined) db.setSetting("agentDefaultVideoAlias", input.agentDefaultVideoAlias);
+    if (input.agentDefaultMusicAlias !== undefined) db.setSetting("agentDefaultMusicAlias", input.agentDefaultMusicAlias);
+    if (input.agentDefaultSpeechAlias !== undefined) db.setSetting("agentDefaultSpeechAlias", input.agentDefaultSpeechAlias);
     if (input.agentDefaultAudioAlias !== undefined) db.setSetting("agentDefaultAudioAlias", input.agentDefaultAudioAlias);
     res.json(ok({
       assetsDir,
@@ -600,6 +605,8 @@ export function createApp(options: { dataDir?: string } = {}) {
       aliases: buildCapabilityAliases(db.listChannels()).map((alias) => ({
         alias: alias.alias, kind: alias.kind, model: alias.model,
         channelName: alias.channelName, channelId: alias.channelId,
+        // 音乐和语音同属 audio，前端要靠适配器把两类分开
+        adapterType: alias.adapterType,
       })),
     }));
   });
@@ -1198,12 +1205,26 @@ function readGeminiImageSize(db: AppDatabase): ImageSizeValue {
   return normalizeImageSize(db.getSetting("geminiImageSize")) ?? DEFAULT_IMAGE_SIZE;
 }
 
+/**
+ * 旧版只有一个 `agentDefaultAudioAlias`，音乐和语音共用一个值。
+ * 新装或已迁移的配置读到空的新键时，把旧值按实际适配器归到对应的一类，
+ * 避免升级后用户的默认模型「看起来丢了」。
+ */
+function legacyAudioDefault(db: AppDatabase, adapterType: "suno-music" | "gemini-tts") {
+  const legacy = db.getSetting("agentDefaultAudioAlias") ?? "";
+  if (!legacy) return "";
+  const entry = buildCapabilityAliases(db.listChannels()).find((alias) => alias.alias === legacy);
+  return entry?.adapterType === adapterType ? legacy : "";
+}
+
 /** 新建会话时的 Agent 默认值，存在 settings 表里，用户可在设置页改 */
 function readAgentDefaults(db: AppDatabase): {
   videoConfirmPolicy: VideoConfirmPolicy;
   visionEnabled: boolean;
   defaultImageAlias: string;
   defaultVideoAlias: string;
+  defaultMusicAlias: string;
+  defaultSpeechAlias: string;
   defaultAudioAlias: string;
 } {
   const policy = db.getSetting("agentVideoConfirmPolicy");
@@ -1215,6 +1236,9 @@ function readAgentDefaults(db: AppDatabase): {
     // 空串 = 没设，大脑不点名时退回类目第一个（问题 5）。alias 是否还有效不在这里判断
     defaultImageAlias: db.getSetting("agentDefaultImageAlias") ?? "",
     defaultVideoAlias: db.getSetting("agentDefaultVideoAlias") ?? "",
+    defaultMusicAlias: db.getSetting("agentDefaultMusicAlias") ?? legacyAudioDefault(db, "suno-music"),
+    defaultSpeechAlias: db.getSetting("agentDefaultSpeechAlias") ?? legacyAudioDefault(db, "gemini-tts"),
+    // 旧字段继续回传，老前端还能用；新前端不再读它
     defaultAudioAlias: db.getSetting("agentDefaultAudioAlias") ?? "",
   };
 }

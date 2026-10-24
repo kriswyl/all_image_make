@@ -208,7 +208,7 @@ export interface ToolContext {
    * 用户在设置里挑的默认生图 / 生视频模型（需求.md 问题 5），存的是 alias。
    * 大脑没点名（或点了个不存在的名字）时用它们，而不是碰运气取类目里第一个。
    */
-  defaultAliases: { image?: string; video?: string; audio?: string };
+  defaultAliases: { image?: string; video?: string; music?: string; speech?: string };
   /**
    * 「原话直发」时用户那句话的**原文**，没开就是 null。
    *
@@ -739,7 +739,7 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
 }
 
 async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise<ToolOutcome> {
-  let resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.audio);
+  let resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.music);
   if (!resolution) return failResult("还没有可用的音乐渠道，请先到「渠道配置」添加", "NO_MUSIC_CHANNEL");
   let channel = ctx.db.getChannel(resolution.channelId);
   // audio 类里现在同时有 Suno 和 TTS：默认音频模型若被设成配音，音乐工具退回第一个 Suno
@@ -877,7 +877,7 @@ async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promi
   if (requested && requested.adapterType !== "gemini-tts") {
     return failResult(`${hint} 是音乐渠道，不能朗读文本；配音请用语音渠道的 alias`, "SPEECH_CHANNEL_MISMATCH");
   }
-  const resolution = requested ?? ttsAliases.find((item) => item.alias === ctx.defaultAliases.audio) ?? ttsAliases[0]!;
+  const resolution = requested ?? ttsAliases.find((item) => item.alias === ctx.defaultAliases.speech) ?? ttsAliases[0]!;
   const channel = ctx.db.getChannel(resolution.channelId);
   if (!channel) return failResult("解析到的语音渠道不存在", "CHANNEL_NOT_FOUND");
 

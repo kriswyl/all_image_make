@@ -135,6 +135,9 @@ export const api = {
     geminiImageSize?: ImageSizeValue;
     agentDefaultImageAlias?: string;
     agentDefaultVideoAlias?: string;
+    agentDefaultMusicAlias?: string;
+    agentDefaultSpeechAlias?: string;
+    /** @deprecated 旧版合并的音频默认值，新代码用上面两个 */
     agentDefaultAudioAlias?: string;
   }) => request<Settings>("/api/settings", {
     method: "PATCH",
@@ -161,7 +164,15 @@ export const api = {
   /** §6 能力清单原文：和喂给大脑的是同一份，展示给用户看不会「说的和做的不一样」 */
   capabilities: () => request<{
     manifest: string;
-    aliases: Array<{ alias: string; kind: TaskKind; model: string; channelName: string; channelId: string }>;
+    aliases: Array<{
+      alias: string;
+      kind: TaskKind;
+      model: string;
+      channelName: string;
+      channelId: string;
+      /** 音乐（suno-music）和语音（gemini-tts）同属 audio，靠它区分 */
+      adapterType: string;
+    }>;
   }>("/api/agent/capabilities"),
   /** 工作台的提示词润色：调用对话模型，只返回改写后的文本 */
   optimizePrompt: (prompt: string, target: "image" | "video") => request<{

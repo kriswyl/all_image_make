@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, ListTree, Settings2 } from "lucide-react";
 import { ModelLogo } from "./ModelLogo";
-import type { Channel, TaskKind } from "../../shared/types";
+import type { Channel, DefaultModelGroup, TaskKind } from "../../shared/types";
 
 export type CapabilityRow = {
   alias: string;
@@ -9,13 +9,26 @@ export type CapabilityRow = {
   model: string;
   channelName: string;
   channelId: string;
+  /** 音乐（suno-music）和语音（gemini-tts）同属 audio，靠它区分 */
+  adapterType: string;
 };
 
-const KINDS: Array<{ kind: TaskKind; label: string }> = [
-  { kind: "image", label: "生图" },
-  { kind: "video", label: "生视频" },
-  { kind: "audio", label: "音频" },
+const GROUPS: Array<{ group: DefaultModelGroup; label: string }> = [
+  { group: "image", label: "生图" },
+  { group: "video", label: "生视频" },
+  { group: "music", label: "音乐" },
+  { group: "speech", label: "语音" },
 ];
+
+/**
+ * 任务表里音乐和语音都是 `audio`，但对用户来说是两种模型：
+ * Suno 写歌、TTS 朗读。这里按适配器把它们分到不同的标签页。
+ */
+function groupOf(cap: CapabilityRow): DefaultModelGroup {
+  if (cap.kind === "image") return "image";
+  if (cap.kind === "video") return "video";
+  return cap.adapterType === "gemini-tts" ? "speech" : "music";
+}
 
 /**
  * 对话页的模型面板：切换默认模型 + 看当前能调哪些模型。
@@ -33,21 +46,21 @@ export function ModelPanel({
   onConfigureChannel,
 }: {
   capabilities: CapabilityRow[];
-  defaults: Record<TaskKind, string>;
+  defaults: Record<DefaultModelGroup, string>;
   channels: Channel[];
   capsRef: React.RefObject<HTMLDetailsElement | null>;
-  onSetDefaultAlias: (kind: TaskKind, alias: string) => void;
+  onSetDefaultAlias: (group: DefaultModelGroup, alias: string) => void;
   onConfigureChannel?: (channel: Channel) => void;
 }) {
-  const [activeKind, setActiveKind] = useState<TaskKind>("image");
+  const [activeGroup, setActiveGroup] = useState<DefaultModelGroup>("image");
 
-  const aliasesOf = (kind: TaskKind) => capabilities.filter((cap) => cap.kind === kind);
+  const aliasesOf = (group: DefaultModelGroup) => capabilities.filter((cap) => groupOf(cap) === group);
   const effectiveAlias = (configured: string, aliases: CapabilityRow[]) =>
     aliases.some((cap) => cap.alias === configured) ? configured : aliases[0]?.alias ?? "";
 
-  const active = KINDS.find((item) => item.kind === activeKind) ?? KINDS[0];
-  const items = aliasesOf(activeKind);
-  const effective = effectiveAlias(defaults[activeKind], items);
+  const active = GROUPS.find((item) => item.group === activeGroup) ?? GROUPS[0];
+  const items = aliasesOf(activeGroup);
+  const effective = effectiveAlias(defaults[activeGroup], items);
   const defaultItem = items.find((cap) => cap.alias === effective);
 
   return (
@@ -59,16 +72,16 @@ export function ModelPanel({
       </summary>
       <div className="chat-caps-body">
         <div className="chat-caps-tabs" role="tablist" aria-label="模型类型">
-          {KINDS.map(({ kind, label }) => {
-            const count = aliasesOf(kind).length;
+          {GROUPS.map(({ group, label }) => {
+            const count = aliasesOf(group).length;
             return (
               <button
-                key={kind}
+                key={group}
                 type="button"
                 role="tab"
-                aria-selected={activeKind === kind}
-                className={activeKind === kind ? "is-active" : undefined}
-                onClick={() => setActiveKind(kind)}
+                aria-selected={activeGroup === group}
+                className={activeGroup === group ? "is-active" : undefined}
+                onClick={() => setActiveGroup(group)}
               >
                 {label}
                 <span className="chat-caps-tab-count">{count}</span>
@@ -100,11 +113,11 @@ export function ModelPanel({
                 aria-checked={isDefault}
                 tabIndex={0}
                 title={isDefault ? "当前默认模型" : `把 ${cap.model} 设为默认${active.label}模型`}
-                onClick={() => { if (!isDefault) onSetDefaultAlias(cap.kind, cap.alias); }}
+                onClick={() => { if (!isDefault) onSetDefaultAlias(activeGroup, cap.alias); }}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" && event.key !== " ") return;
                   event.preventDefault();
-                  if (!isDefault) onSetDefaultAlias(cap.kind, cap.alias);
+                  if (!isDefault) onSetDefaultAlias(activeGroup, cap.alias);
                 }}
               >
                 <span className="chat-caps-logo">

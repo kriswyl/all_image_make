@@ -394,8 +394,16 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
   border-radius: var(--radius-panel);
   border: 1px solid var(--line);
   box-shadow: 0 24px 60px rgba(0, 0, 0, .16);
+  transition: width var(--dur-2) var(--ease-out);
 }
 .chat-caps[open] .chat-caps-body { animation: ui-dialog-in var(--dur-2) var(--ease-out); }
+/* 只有一张卡的类目（音乐通常只有 Suno）不必撑满 820px，收窄到单列宽度 */
+.chat-caps-body:has(.chat-caps-card:only-child) {
+  width: min(430px, calc(100vw - 24px));
+}
+.chat-caps-body:has(.chat-caps-card:only-child) .chat-caps-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 /* 类型标签：分段控件，选中项浮到白底上 */
 .chat-caps-tabs {

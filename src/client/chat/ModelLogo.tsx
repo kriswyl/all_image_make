@@ -26,6 +26,7 @@ import openaiLogo from "@lobehub/icons-static-svg/icons/openai.svg?url";
 import qwenLogo from "@lobehub/icons-static-svg/icons/qwen-color.svg?url";
 import stabilityLogo from "@lobehub/icons-static-svg/icons/stability-color.svg?url";
 import stepfunLogo from "@lobehub/icons-static-svg/icons/stepfun-color.svg?url";
+import sunoLogo from "@lobehub/icons-static-svg/icons/suno.svg?url";
 
 /** 图片 / 视频 / 音乐 / 对话——同一个模型名在不同类目下可能不是一家（`sd-*` 视频里是 Seedance） */
 export type ModelKind = import("../../shared/types").ChannelKind;
@@ -65,6 +66,8 @@ const BRANDS: Brand[] = [
   { test: /flux/i, logo: fluxLogo, name: "Black Forest Labs FLUX" },
   { test: /midjourney|(^|[^a-z])mj([^a-z]|$)/i, logo: midjourneyLogo, name: "Midjourney" },
   { test: /stable-?diffusion|stability|sd-xl/i, logo: stabilityLogo, name: "Stability AI" },
+  // 音乐渠道：模型名通常是 `suno_damobi_music` / `suno_music`
+  { test: /suno/i, kind: "audio", logo: sunoLogo, name: "Suno" },
 ];
 
 /** 模型 ID → 厂商。认不出返回 null */

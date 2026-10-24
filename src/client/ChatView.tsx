@@ -20,7 +20,7 @@ import { ConversationSidebar } from "./chat/ConversationSidebar";
 import { clearCompletionBadge, notifyCompletion } from "./notifications";
 import { AssetLightbox } from "./chat/AssetLightbox";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
-import type { Asset, Channel, TaskKind } from "../shared/types";
+import type { Asset, Channel, DefaultModelGroup, TaskKind } from "../shared/types";
 import {
   assetRef, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent,
   type ChatMessage, type ConversationStatus, type ConversationSummary,
@@ -112,9 +112,13 @@ export function ChatView({
   const [reasoning, setReasoning] = useState("");
   const [draft, setDraft] = useState("");
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
-  const [capabilities, setCapabilities] = useState<Array<{ alias: string; kind: TaskKind; model: string; channelName: string; channelId: string }>>([]);
-  /** 默认生图 / 生视频模型（需求.md 问题 5），空串表示不指定、用类目里第一个 */
-  const [defaults, setDefaults] = useState({ image: "", video: "", audio: "" });
+  const [capabilities, setCapabilities] = useState<Array<{
+    alias: string; kind: TaskKind; model: string; channelName: string; channelId: string; adapterType: string;
+  }>>([]);
+  /** 默认生图 / 生视频 / 音乐 / 语音模型，空串表示不指定、用该类里第一个 */
+  const [defaults, setDefaults] = useState<Record<DefaultModelGroup, string>>({
+    image: "", video: "", music: "", speech: "",
+  });
   const [preview, setPreview] = useState<string | null>(null);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -304,7 +308,8 @@ export function ChatView({
       if (settings) setDefaults({
         image: settings.defaultImageAlias,
         video: settings.defaultVideoAlias,
-        audio: settings.defaultAudioAlias,
+        music: settings.defaultMusicAlias,
+        speech: settings.defaultSpeechAlias,
       });
       const remembered = localStorage.getItem(STORAGE_KEY);
       const pick = conversations.find((item) => item.id === remembered) ?? conversations[0];
@@ -816,32 +821,24 @@ export function ChatView({
   const previewIsVideo = previewAsset?.mimeType.startsWith("video/") ?? false;
   const previewIsAudio = previewAsset?.mimeType.startsWith("audio/") ?? false;
 
-  const imageAliases = capabilities.filter((cap) => cap.kind === "image");
-  const videoAliases = capabilities.filter((cap) => cap.kind === "video");
-  const audioAliases = capabilities.filter((cap) => cap.kind === "audio");
-  /**
-   * 「现在实际会用哪个」——优先级和 `resolveAlias` 保持一致：
-   * 你设的默认值还在能力表里就用它，否则就是类目里第一个。
-   * 列表里标出这一条，用户才不会对着「我设了 A 但它用了 B」发愣。
-   */
-  function effectiveAlias(configured: string, aliases: typeof capabilities) {
-    return aliases.some((cap) => cap.alias === configured) ? configured : aliases[0]?.alias ?? "";
-  }
-
-  async function setDefaultAlias(kind: TaskKind, alias: string) {
-    const label = kind === "image" ? "生图" : kind === "video" ? "生视频" : "音频";
+  async function setDefaultAlias(group: DefaultModelGroup, alias: string) {
+    const label: Record<DefaultModelGroup, string> = {
+      image: "生图", video: "生视频", music: "音乐", speech: "语音",
+    };
     try {
       const result = await api.updateSettings(
-        kind === "image" ? { agentDefaultImageAlias: alias }
-          : kind === "video" ? { agentDefaultVideoAlias: alias }
-            : { agentDefaultAudioAlias: alias },
+        group === "image" ? { agentDefaultImageAlias: alias }
+          : group === "video" ? { agentDefaultVideoAlias: alias }
+            : group === "music" ? { agentDefaultMusicAlias: alias }
+              : { agentDefaultSpeechAlias: alias },
       );
       setDefaults({
         image: result.defaultImageAlias,
         video: result.defaultVideoAlias,
-        audio: result.defaultAudioAlias,
+        music: result.defaultMusicAlias,
+        speech: result.defaultSpeechAlias,
       });
-      toast("ok", alias ? `默认${label}模型已设为 ${alias}` : `默认${label}模型已交回自动选择`);
+      toast("ok", alias ? `默认${label[group]}模型已设为 ${alias}` : `默认${label[group]}模型已交回自动选择`);
     } catch (error) {
       toastError(error);
     }
