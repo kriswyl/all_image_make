@@ -52,7 +52,12 @@ export function GlobalTooltip() {
     const element = tipRef.current;
     if (!tip || !element) return;
     const width = element.getBoundingClientRect().width;
-    const left = Math.max(8, Math.min(tip.center - width / 2, window.innerWidth - width - 8));
+    // 正常从 tip.center 取；热更新保留旧 state 时可能没有这个字段，就用当前悬停元素兜底
+    const target = current.current?.getBoundingClientRect();
+    const center = Number.isFinite(tip.center)
+      ? tip.center
+      : target ? target.left + target.width / 2 : window.innerWidth / 2;
+    const left = Math.max(8, Math.min(center - width / 2, window.innerWidth - width - 8));
     element.style.left = `${left}px`;
     element.style.visibility = "visible";
   }, [tip]);
