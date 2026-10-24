@@ -109,7 +109,7 @@ function charactersView(db: AppDatabase, conversationId: string, shots: Storyboa
       taskId: row.taskId, status: resolved.status, confirmed: resolved.confirmed,
       shotCount: shots.filter((shot) => shot.characters.includes(row.name)).length,
     };
-  }).filter((character) => character.shotCount > 0);
+  });
 }
 
 function scenesView(db: AppDatabase, conversationId: string, shots: StoryboardShot[]): StoryboardScene[] {
@@ -121,7 +121,7 @@ function scenesView(db: AppDatabase, conversationId: string, shots: StoryboardSh
       taskId: row.taskId, status: resolved.status, confirmed: resolved.confirmed,
       shotCount: shots.filter((shot) => shot.scene === row.name).length,
     };
-  }).filter((scene) => scene.shotCount > 0);
+  });
 }
 
 interface ResolvedReference {
@@ -207,6 +207,8 @@ export async function generateStoryboardSettings(input: {
   conversationId: string;
   characterIds: string[];
   sceneIds: string[];
+  /** 用户在面板里选中的生图模型 alias；不传就回到默认生图模型 */
+  alias?: string;
 }): Promise<StoryboardSettingsResult> {
   const { db, runner, conversationId } = input;
   const characterIds = [...new Set(input.characterIds)];
@@ -218,7 +220,7 @@ export async function generateStoryboardSettings(input: {
   }
 
   const aliases = buildCapabilityAliases(db.listChannels());
-  const resolution = resolveAlias(aliases, undefined, "image", db.getSetting("agentDefaultImageAlias") ?? undefined);
+  const resolution = resolveAlias(aliases, input.alias, "image", db.getSetting("agentDefaultImageAlias") ?? undefined);
   if (!resolution) throw new AppError("NO_IMAGE_CHANNEL", "还没有可用的生图渠道", 400);
   const channel = db.getChannel(resolution.channelId);
   if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "解析到的生图渠道不存在或未启用", 404);
@@ -291,6 +293,8 @@ export async function generateStoryboardShots(input: {
   runner: TaskRunner;
   conversationId: string;
   shotIds: string[];
+  /** 用户在面板里选中的生图模型 alias；不传就回到默认生图模型 */
+  alias?: string;
 }): Promise<StoryboardGenerateResult> {
   const { db, runner, conversationId } = input;
   const ids = [...new Set(input.shotIds)];
@@ -349,7 +353,7 @@ export async function generateStoryboardShots(input: {
     promptPrefix: string,
   ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
     try {
-      const resolution = resolveAlias(aliases, undefined, shot.kind, defaults[shot.kind]);
+      const resolution = resolveAlias(aliases, input.alias, shot.kind, defaults[shot.kind]);
       if (!resolution) return { ok: false, error: shot.kind === "video" ? "没有可用的视频渠道" : "没有可用的生图渠道" };
       const channel = db.getChannel(resolution.channelId);
       if (!channel || !channel.enabled) return { ok: false, error: "解析到的渠道不存在或未启用" };

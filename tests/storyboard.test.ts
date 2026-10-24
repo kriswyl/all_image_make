@@ -180,6 +180,48 @@ describe("脚本文档与分镜表", () => {
       .expect(400);
   });
 
+  it("可以手动添加 / 删除角色和场景，删除单镜后镜号保持连续", async () => {
+    const { app, context, conversationId } = await bootConversation("storyboard-manage-");
+    const shots = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "镜头一", prompt: "苏晚在客厅里回头", character: "苏晚", scene: "客厅", kind: "image", aspectRatio: "" },
+      { sourceText: "镜头二", prompt: "苏晚和老陈在客厅争执", character: "苏晚、老陈", scene: "客厅", kind: "image", aspectRatio: "" },
+      { sourceText: "镜头三", prompt: "小雨背着书包出门", character: "小雨", kind: "image", aspectRatio: "" },
+    ]);
+
+    // 手动添加一个镜头里还没出现过的角色 / 场景：shotCount 为 0 也要留在列表里
+    let view = (await request(app).post(`/api/conversations/${conversationId}/storyboard/characters`)
+      .send({ name: "林慧", prompt: "苏晚的姐姐，短发" }).expect(201)).body.data as {
+        characters: Array<{ id: string; name: string; prompt: string; shotCount: number }>;
+        scenes: Array<{ id: string; name: string; shotCount: number }>;
+        shots: Array<{ id: string; index: number; character: string; scene: string }>;
+      };
+    expect(view.characters.find((item) => item.name === "林慧")).toMatchObject({ prompt: "苏晚的姐姐，短发", shotCount: 0 });
+
+    view = (await request(app).post(`/api/conversations/${conversationId}/storyboard/scenes`)
+      .send({ name: "车内" }).expect(201)).body.data as typeof view;
+    expect(view.scenes.find((item) => item.name === "车内")).toMatchObject({ shotCount: 0 });
+
+    // 删除第 2 镜：第 3 镜前移成第 2 镜
+    view = (await request(app).delete(`/api/conversations/${conversationId}/storyboard/shots/${shots[1]!.id}`)
+      .expect(200)).body.data as typeof view;
+    expect(view.shots.map((shot) => shot.index)).toEqual([1, 2]);
+    expect(view.shots.map((shot) => shot.character)).toEqual(["苏晚", "小雨"]);
+
+    // 删除角色「苏晚」：镜头里的角色标签一起清掉，不能留下没法生成的空引用
+    const su = view.characters.find((item) => item.name === "苏晚")!;
+    view = (await request(app).delete(`/api/conversations/${conversationId}/storyboard/characters/${su.id}`)
+      .expect(200)).body.data as typeof view;
+    expect(view.characters.some((item) => item.name === "苏晚")).toBe(false);
+    expect(view.shots[0]!.character).toBe("");
+
+    // 删除场景「客厅」：引用它的镜头清空场景标签
+    const livingRoom = view.scenes.find((item) => item.name === "客厅")!;
+    view = (await request(app).delete(`/api/conversations/${conversationId}/storyboard/scenes/${livingRoom.id}`)
+      .expect(200)).body.data as typeof view;
+    expect(view.scenes.some((item) => item.name === "客厅")).toBe(false);
+    expect(view.shots[0]!.scene).toBe("");
+  });
+
   it("生成选中的镜头：真的提交任务、状态从 tasks 读、最多 8 镜", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const mock = http.createServer((req, res) => {
@@ -247,6 +289,48 @@ describe("脚本文档与分镜表", () => {
       .send({ shotIds: ids })
       .expect(400);
     expect(tooMany.body.error.code).toBe("STORYBOARD_BATCH_TOO_LARGE");
+  });
+
+  it("分镜生成可以指定模型：请求按选中的 alias 走，而不是永远用默认模型", async () => {
+    const models: string[] = [];
+    const mock = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        if (req.url === "/v1/images/generations") {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string };
+          models.push(String(body.model));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const { app, context, conversationId } = await bootConversation("storyboard-model-", base);
+    for (const model of ["mock-image", "mock-image-2"]) {
+      await context.db.saveChannel({
+        name: model, baseUrl: base, adapterType: "openai-images", authType: "none",
+        authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+        models: [model], allowPrivateNetwork: true, enabled: true,
+      });
+    }
+    const [shot] = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "镜头一", prompt: "雨夜街道，一个男人撑伞走过", kind: "image", aspectRatio: "" },
+    ]);
+
+    const alias = buildCapabilityAliases(context.db.listChannels()).find((item) => item.model === "mock-image-2")!.alias;
+    await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [shot!.id], alias })
+      .expect(202);
+    await waitShotDone(app, conversationId, shot!.id);
+    expect(models).toEqual(["mock-image-2"]);
   });
 
   it("分镜暂时只生成图片：历史 video 镜头也走生图渠道", async () => {

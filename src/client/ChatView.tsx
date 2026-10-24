@@ -1056,6 +1056,8 @@ export function ChatView({
                 }
                 canvasIds={canvasImages.map((asset) => asset.id)}
                 images={sessionImages}
+                capabilities={capabilities}
+                defaultImageAlias={defaults.image}
                 onClose={() => setStoryboardOpen(false)}
                 onToast={toast}
                 onAddToCanvas={(assetId) => {

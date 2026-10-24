@@ -10,7 +10,7 @@
  */
 import {
   CheckCircle2, Clapperboard, Download, Image as ImageIcon, Layers, LoaderCircle, Maximize2,
-  Mountain, PanelLeftClose, PanelLeftOpen, RefreshCw, Sparkles, Upload, UserRound, X,
+  Mountain, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Sparkles, Trash2, Upload, UserRound, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
@@ -23,6 +23,8 @@ import {
 import type { CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { AssetLightbox } from "./AssetLightbox";
+import { ModelLogo } from "./ModelLogo";
+import type { CapabilityRow } from "./ModelPanel";
 import { ImagePickerMenu, SelectMenu, SuggestInput } from "../ui/SelectMenu";
 
 type ToastKind = "ok" | "error";
@@ -33,6 +35,8 @@ const ACTIVE_SETTING_STATUS = new Set(["queued", "validating", "submitting", "ru
 /** 设定栏的宽度 / 收起状态跟着用户走，下一次打开还是他习惯的样子 */
 const SETTINGS_WIDTH_KEY = "yida.storyboard.settingsWidth";
 const SETTINGS_COLLAPSED_KEY = "yida.storyboard.settingsCollapsed";
+/** 分镜 / 设定图用哪个生图模型，跟着用户最后一次选择走 */
+const IMAGE_ALIAS_KEY = "yida.storyboard.imageAlias";
 const SETTINGS_WIDTH_DEFAULT = 360;
 const SETTINGS_WIDTH_MIN = 280;
 const SETTINGS_WIDTH_MAX = 520;
@@ -79,6 +83,8 @@ export function StoryboardPanel({
   onAddToCanvas,
   onTagCharacters,
   tagCharactersDisabled = false,
+  capabilities,
+  defaultImageAlias = "",
 }: {
   conversationId: string;
   refreshKey: number;
@@ -89,6 +95,10 @@ export function StoryboardPanel({
   onAddToCanvas: (assetId: string) => void;
   onTagCharacters: () => void;
   tagCharactersDisabled?: boolean;
+  /** 当前可用的生图能力；设置图和分镜图都用这里选中的模型 */
+  capabilities: CapabilityRow[];
+  /** 用户没在分镜里单独选过时，跟随对话页的默认生图模型 */
+  defaultImageAlias?: string;
 }) {
   const [data, setData] = useState<StoryboardView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -105,6 +115,19 @@ export function StoryboardPanel({
   const [settingBusy, setSettingBusy] = useState<string | null>(null);
   const [uploadTarget, setUploadTarget] = useState<{ kind: SettingKind; id: string } | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  /** 手动添加角色 / 场景 */
+  const [adding, setAdding] = useState<SettingKind | null>(null);
+  const [addName, setAddName] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+  /** 删除确认：角色 / 场景 / 单镜共用一个对话框 */
+  const [deleteTarget, setDeleteTarget] = useState<{
+    kind: "shot" | SettingKind; id: string; label: string;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  /** 选中的生图模型；不在列表里时自动回落到对话默认 / 第一个可用模型 */
+  const [preferredImageAlias, setPreferredImageAlias] = useState(() => {
+    try { return localStorage.getItem(IMAGE_ALIAS_KEY) ?? ""; } catch { return ""; }
+  });
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const loadSeq = useRef(0);
   /** 设定栏可收窄 / 收起：确认完设定后把宽度还给分镜表 */
@@ -120,6 +143,16 @@ export function StoryboardPanel({
   const scenes = data?.scenes ?? [];
   const active = shots.some((shot) => isStoryboardShotActive(shot.status))
     || [...characters, ...scenes].some((item) => ACTIVE_SETTING_STATUS.has(item.status));
+
+  const imageModels = useMemo(
+    () => capabilities.filter((cap) => cap.kind === "image"),
+    [capabilities],
+  );
+  // 上次选的模型可能已经删了 / 停用了；按「上次选择 → 对话默认 → 第一个可用」回落
+  const imageAlias = imageModels.some((cap) => cap.alias === preferredImageAlias)
+    ? preferredImageAlias
+    : imageModels.find((cap) => cap.alias === defaultImageAlias)?.alias ?? imageModels[0]?.alias ?? "";
+  const imageModel = imageModels.find((cap) => cap.alias === imageAlias);
 
   async function load(quiet = true) {
     const seq = ++loadSeq.current;
@@ -398,7 +431,7 @@ export function StoryboardPanel({
     if (!total) return;
     setSettingBusy("all");
     try {
-      const result = await api.generateStoryboardSettings(conversationId, characterIds, sceneIds);
+      const result = await api.generateStoryboardSettings(conversationId, characterIds, sceneIds, imageAlias || undefined);
       setData(result.view);
       if (result.failures.length) onToast("error", result.failures.map((item) => `${item.name}：${item.error}`).join("；"));
       else onToast("ok", `已提交 ${result.submitted} 张设定图，完成后会显示在左侧`);
@@ -420,6 +453,63 @@ export function StoryboardPanel({
     const charactersToGenerate = missingCharacters.slice(0, maxBatch).map((item) => item.id);
     const scenesToGenerate = missingScenes.slice(0, Math.max(0, maxBatch - charactersToGenerate.length)).map((item) => item.id);
     void generateSettings(charactersToGenerate, scenesToGenerate);
+  }
+
+  function chooseImageAlias(alias: string) {
+    setPreferredImageAlias(alias);
+    try { localStorage.setItem(IMAGE_ALIAS_KEY, alias); } catch { /* 存储被禁用时只在本次生效 */ }
+  }
+
+  function startAdd(kind: SettingKind) {
+    setAdding(kind);
+    setAddName("");
+  }
+
+  async function addSetting(kind: SettingKind) {
+    const name = addName.trim();
+    if (!name || addBusy) return;
+    setAddBusy(true);
+    try {
+      const next = await api.addStoryboardSetting(conversationId, kind, name);
+      setData(next);
+      setAdding(null);
+      setAddName("");
+      onToast("ok", `已添加${kind === "character" ? "角色" : "场景"}「${name}」，可以补描述并生成设定图`);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "添加失败");
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      const next = deleteTarget.kind === "shot"
+        ? await api.deleteStoryboardShot(conversationId, deleteTarget.id)
+        : await api.deleteStoryboardSetting(conversationId, deleteTarget.kind, deleteTarget.id);
+      setData(next);
+      if (deleteTarget.kind === "shot") {
+        setSelected((current) => {
+          if (!current.has(deleteTarget.id)) return current;
+          const copy = new Set(current);
+          copy.delete(deleteTarget.id);
+          return copy;
+        });
+      } else {
+        // 删角色 / 场景会改写镜头的标签，草稿和勾选都要以服务端的新表为准
+        setCharacterDrafts(Object.fromEntries(next.shots.map((shot) => [shot.id, shot.character])));
+        setSceneDrafts(Object.fromEntries(next.shots.map((shot) => [shot.id, shot.scene])));
+        setSelected(new Set());
+      }
+      onToast("ok", `已删除${deleteTarget.kind === "shot" ? "这一镜" : deleteTarget.kind === "character" ? "角色" : "场景"}「${deleteTarget.label}」`);
+      setDeleteTarget(null);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   }
 
   async function confirmSetting(kind: SettingKind, item: SettingItem) {
@@ -479,7 +569,7 @@ export function StoryboardPanel({
       if (saved.some((ok) => !ok)) return;
       await load();
 
-      const result = await api.generateStoryboardShots(conversationId, ids);
+      const result = await api.generateStoryboardShots(conversationId, ids, imageAlias || undefined);
       setData((current) => current ? { ...current, shots: result.shots } : current);
       setSelected(new Set());
       setConfirming(null);
@@ -545,6 +635,16 @@ export function StoryboardPanel({
           <div className="setting-card-title">
             <strong>{item.name}</strong>
             <small>{item.shotCount} 镜</small>
+            <button
+              type="button"
+              className="setting-card-delete"
+              title={`删除${kind === "character" ? "角色" : "场景"}「${item.name}」`}
+              aria-label={`删除${kind === "character" ? "角色" : "场景"}「${item.name}」`}
+              disabled={anyBusy || isActive}
+              onClick={() => setDeleteTarget({ kind, id: item.id, label: item.name })}
+            >
+              <Trash2 size={12} />
+            </button>
           </div>
           <textarea
             className="setting-card-prompt"
@@ -624,6 +724,19 @@ export function StoryboardPanel({
                 <UserRound size={13} />{characters.length || scenes.length ? "重新标注" : "标注角色/场景"}
               </button>
             ) : null}
+            {imageModels.length ? (
+              <SelectMenu
+                className="storyboard-model-select"
+                ariaLabel="分镜和设定图使用的生图模型"
+                title="分镜和设定图使用的生图模型"
+                value={imageAlias}
+                minWidth={190}
+                disabled={Boolean(settingBusy) || submitting}
+                leading={<ModelLogo model={imageModel?.model ?? ""} kind="image" size={13} />}
+                options={imageModels.map((cap) => ({ value: cap.alias, label: cap.model }))}
+                onChange={chooseImageAlias}
+              />
+            ) : null}
             <button type="button" className="secondary-button compact" disabled={Boolean(settingBusy)}
               onClick={generateMissingSettings}>
               <Sparkles size={13} />生成缺失设定图
@@ -677,31 +790,75 @@ export function StoryboardPanel({
                   <section className="setting-section" id="storyboard-settings-characters">
                     <div className="setting-section-head">
                       <div><UserRound size={14} /><h3>角色设定</h3><span>{characters.length}</span></div>
-                      {characters.length ? (
-                        <button type="button" className="link-btn"
-                          onClick={() => void generateSettings(characters.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch), [])}>
-                          生成全部
+                      <div className="setting-section-actions">
+                        <button type="button" className="link-btn" onClick={() => startAdd("character")}>
+                          <Plus size={11} />添加
                         </button>
-                      ) : null}
+                        {characters.length ? (
+                          <button type="button" className="link-btn"
+                            onClick={() => void generateSettings(characters.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch), [])}>
+                            生成全部
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
+                    {adding === "character" ? (
+                      <form className="setting-add-form" onSubmit={(event) => { event.preventDefault(); void addSetting("character"); }}>
+                        <input
+                          autoFocus
+                          value={addName}
+                          maxLength={120}
+                          placeholder="角色名，如：小雨"
+                          disabled={addBusy}
+                          onChange={(event) => setAddName(event.target.value)}
+                          onKeyDown={(event) => { if (event.key === "Escape") setAdding(null); }}
+                        />
+                        <button type="submit" className="primary-button compact" disabled={!addName.trim() || addBusy}>
+                          {addBusy ? <LoaderCircle size={12} className="spin" /> : "添加"}
+                        </button>
+                        <button type="button" className="link-btn" onClick={() => setAdding(null)}>取消</button>
+                      </form>
+                    ) : null}
                     {characters.length
                       ? characters.map((item) => renderSettingCard("character", item))
-                      : <div className="setting-empty">还没有角色标签。点右上角「标注角色/场景」，或直接在镜头里填角色名。</div>}
+                      : <div className="setting-empty">还没有角色标签。点「添加」手动建一个，或让助手标注角色。</div>}
                   </section>
 
                   <section className="setting-section" id="storyboard-settings-scenes">
                     <div className="setting-section-head">
                       <div><Mountain size={14} /><h3>场景设定</h3><span>{scenes.length}</span></div>
-                      {scenes.length ? (
-                        <button type="button" className="link-btn"
-                          onClick={() => void generateSettings([], scenes.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch))}>
-                          生成全部
+                      <div className="setting-section-actions">
+                        <button type="button" className="link-btn" onClick={() => startAdd("scene")}>
+                          <Plus size={11} />添加
                         </button>
-                      ) : null}
+                        {scenes.length ? (
+                          <button type="button" className="link-btn"
+                            onClick={() => void generateSettings([], scenes.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch))}>
+                            生成全部
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
+                    {adding === "scene" ? (
+                      <form className="setting-add-form" onSubmit={(event) => { event.preventDefault(); void addSetting("scene"); }}>
+                        <input
+                          autoFocus
+                          value={addName}
+                          maxLength={80}
+                          placeholder="场景名，如：客厅"
+                          disabled={addBusy}
+                          onChange={(event) => setAddName(event.target.value)}
+                          onKeyDown={(event) => { if (event.key === "Escape") setAdding(null); }}
+                        />
+                        <button type="submit" className="primary-button compact" disabled={!addName.trim() || addBusy}>
+                          {addBusy ? <LoaderCircle size={12} className="spin" /> : "添加"}
+                        </button>
+                        <button type="button" className="link-btn" onClick={() => setAdding(null)}>取消</button>
+                      </form>
+                    ) : null}
                     {scenes.length
                       ? scenes.map((item) => renderSettingCard("scene", item))
-                      : <div className="setting-empty">还没有场景标签。标注后可以给每个地点生成一张空镜设定图。</div>}
+                      : <div className="setting-empty">还没有场景标签。点「添加」手动建一个，或让助手标注场景。</div>}
                   </section>
                 </div>
               </>
@@ -883,6 +1040,16 @@ export function StoryboardPanel({
                             </button>
                           </>
                         ) : null}
+                        <button
+                          type="button"
+                          className="shot-delete"
+                          title={`删除第 ${shot.index} 镜`}
+                          aria-label={`删除第 ${shot.index} 镜`}
+                          disabled={activeShot || submitting}
+                          onClick={() => setDeleteTarget({ kind: "shot", id: shot.id, label: `第 ${shot.index} 镜` })}
+                        >
+                          <Trash2 size={12} />
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -925,6 +1092,11 @@ export function StoryboardPanel({
                 {confirmImages ? `：图片 ${confirmImages} 个` : ""}
                 {confirmVideos ? `${confirmImages ? "，" : "："}视频 ${confirmVideos} 个` : ""}。
               </p>
+              <div className="storyboard-confirm-model">
+                <span>生图模型</span>
+                <strong>{imageModel?.model ?? "默认生图模型"}</strong>
+                {imageModel ? <small>{imageModel.channelName}</small> : null}
+              </div>
               <div className="storyboard-ref-summary">
                 {confirmCharacterNames.length ? (
                   <div><strong>角色参考</strong>{confirmCharacterNames.map((name) => {
@@ -964,6 +1136,35 @@ export function StoryboardPanel({
                 onClick={() => void submitGenerate(confirming)}>
                 {submitting ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
                 {submitting ? "提交中…" : `确认提交 ${confirmShots.length} 镜`}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="modal-backdrop storyboard-confirm-backdrop" role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteTarget(null); }}>
+          <div className="modal storyboard-confirm" role="dialog" aria-modal="true" aria-label="确认删除">
+            <div className="modal-header">
+              <div><Trash2 size={18} /><h2>删除{deleteTarget.kind === "shot" ? "分镜" : deleteTarget.kind === "character" ? "角色" : "场景"}</h2></div>
+              <button type="button" className="icon-button" onClick={() => setDeleteTarget(null)} disabled={deleting}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <p className="modal-lead">确定删除「<strong>{deleteTarget.label}</strong>」？</p>
+              <p className="storyboard-reference-note">
+                {deleteTarget.kind === "shot"
+                  ? "删除后后面的镜头会自动前移，镜号保持连续；已生成的结果仍留在素材库和生成历史里。"
+                  : deleteTarget.kind === "character"
+                    ? "镜头里引用这个角色的标签会一起清空；已生成的设定图仍留在素材库，需要时可以重新添加。"
+                    : "引用这个场景的镜头会清空场景标签；已生成的设定图仍留在素材库，需要时可以重新添加。"}
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary-button" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button>
+              <button type="button" className="primary-button danger" disabled={deleting} onClick={() => void confirmDelete()}>
+                {deleting ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />}
+                {deleting ? "删除中…" : "确认删除"}
               </button>
             </div>
           </div>

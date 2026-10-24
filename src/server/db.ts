@@ -11,7 +11,8 @@ import type {
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import {
-  parseCharacterNames, type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus,
+  joinCharacterNames, parseCharacterNames,
+  type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus,
 } from "../shared/storyboard.js";
 
 export interface DbChannel {
@@ -419,6 +420,15 @@ export class AppDatabase {
     for (const [conversationId, names] of byConversation) {
       this.upsertStoryboardCharacters(conversationId, names);
     }
+    // 拆开之后旧的「林小满、老陈」组合卡就没用了；现在设定栏会显示 0 镜的角色，
+    // 不删掉会让用户看到两张永远没有镜头的重复卡。只清没绑图的，避免误删用户资产。
+    this.db.prepare(`
+      DELETE FROM conversation_characters
+      WHERE asset_id IS NULL AND task_id IS NULL
+        AND (instr(name, '、') > 0 OR instr(name, '，') > 0 OR instr(name, ',') > 0
+          OR instr(name, '/') > 0 OR instr(name, '／') > 0
+          OR instr(name, '+') > 0 OR instr(name, '&') > 0)
+    `).run();
   }
 
   /** 读取用户配置的产物目录；配置缺失或不可用时退回数据目录下的 assets/ */
@@ -1132,6 +1142,76 @@ export class AppDatabase {
   deleteStoryboard(conversationId: string): number {
     const result = this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
     return Number(result.changes ?? 0);
+  }
+
+  /**
+   * 删除一镜，并把后面的镜号往前挪。
+   *
+   * 镜号是用户和大脑共同引用的坐标（「第 7 镜」），留着空洞会让「第 7 镜」
+   * 指向一个已经不存在的位置；这里直接重排成连续的 1..N。
+   */
+  deleteStoryboardShot(shotId: string): { conversationId: string; index: number } | null {
+    const row = this.db.prepare(
+      "SELECT conversation_id, shot_index FROM conversation_shots WHERE id = ?",
+    ).get(shotId) as DbRow | undefined;
+    if (!row) return null;
+    const conversationId = String(row.conversation_id);
+    const index = Number(row.shot_index);
+    const at = now();
+    this.db.prepare("DELETE FROM conversation_shots WHERE id = ?").run(shotId);
+    this.db.prepare(
+      "UPDATE conversation_shots SET shot_index = shot_index - 1 WHERE conversation_id = ? AND shot_index > ?",
+    ).run(conversationId, index);
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return { conversationId, index };
+  }
+
+  /**
+   * 删除角色设定，并把它从所有镜头的角色标签里摘掉。
+   *
+   * 只删设定卡、不清理镜头的后果很具体：镜头仍然写着「小雨」，但左侧已经没有
+   * 小雨的卡，生成时会被判成「角色还没有设定图」，整批卡住。
+   */
+  deleteStoryboardCharacter(characterId: string): { conversationId: string; name: string } | null {
+    const row = this.db.prepare(
+      "SELECT conversation_id, name FROM conversation_characters WHERE id = ?",
+    ).get(characterId) as DbRow | undefined;
+    if (!row) return null;
+    const conversationId = String(row.conversation_id);
+    const name = String(row.name);
+    const at = now();
+    this.db.prepare("DELETE FROM conversation_characters WHERE id = ?").run(characterId);
+
+    const shots = this.db.prepare(
+      "SELECT id, character_name FROM conversation_shots WHERE conversation_id = ?",
+    ).all(conversationId) as DbRow[];
+    const update = this.db.prepare(
+      "UPDATE conversation_shots SET character_name = ?, updated_at = ? WHERE id = ?",
+    );
+    for (const shot of shots) {
+      const names = parseCharacterNames(String(shot.character_name ?? ""));
+      if (!names.includes(name)) continue;
+      update.run(joinCharacterNames(names.filter((item) => item !== name)), at, String(shot.id));
+    }
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return { conversationId, name };
+  }
+
+  /** 删除场景设定；引用这个场景的镜头清空 scene_name（空镜仍然可以生成） */
+  deleteStoryboardScene(sceneId: string): { conversationId: string; name: string } | null {
+    const row = this.db.prepare(
+      "SELECT conversation_id, name FROM conversation_scenes WHERE id = ?",
+    ).get(sceneId) as DbRow | undefined;
+    if (!row) return null;
+    const conversationId = String(row.conversation_id);
+    const name = String(row.name);
+    const at = now();
+    this.db.prepare("DELETE FROM conversation_scenes WHERE id = ?").run(sceneId);
+    this.db.prepare(
+      "UPDATE conversation_shots SET scene_name = '', updated_at = ? WHERE conversation_id = ? AND scene_name = ?",
+    ).run(at, conversationId, name);
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return { conversationId, name };
   }
 
   /** 只改传进来的字段；`canvasAssetIds: []` 是「清空画布」，和「没传」是两回事 */

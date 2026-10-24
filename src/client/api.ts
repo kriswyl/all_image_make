@@ -251,14 +251,25 @@ export const api = {
     method: "PATCH",
     body: JSON.stringify(patch),
   }),
-  generateStoryboardSettings: (id: string, characterIds: string[], sceneIds: string[]) =>
+  addStoryboardSetting: (id: string, kind: "character" | "scene", name: string, prompt?: string) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard/${kind === "character" ? "characters" : "scenes"}`, {
+      method: "POST",
+      body: JSON.stringify({ name, ...(prompt ? { prompt } : {}) }),
+    }),
+  deleteStoryboardSetting: (id: string, kind: "character" | "scene", settingId: string) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard/${kind === "character" ? "characters" : "scenes"}/${settingId}`, {
+      method: "DELETE",
+    }),
+  deleteStoryboardShot: (id: string, shotId: string) =>
+    request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, { method: "DELETE" }),
+  generateStoryboardSettings: (id: string, characterIds: string[], sceneIds: string[], alias?: string) =>
     request<{
       submitted: number;
       failures: Array<{ id: string; name: string; kind: "character" | "scene"; error: string }>;
       view: StoryboardView;
     }>(`/api/conversations/${id}/storyboard/settings/generate`, {
       method: "POST",
-      body: JSON.stringify({ characterIds, sceneIds }),
+      body: JSON.stringify({ characterIds, sceneIds, ...(alias ? { alias } : {}) }),
     }),
   uploadStoryboardSetting: (id: string, kind: "character" | "scene", settingId: string, file: File) => {
     const form = new FormData();
@@ -268,7 +279,7 @@ export const api = {
       body: form,
     });
   },
-  generateStoryboardShots: (id: string, shotIds: string[]) => request<{
+  generateStoryboardShots: (id: string, shotIds: string[], alias?: string) => request<{
     submitted: number;
     failures: Array<{ shotId: string; index: number; error: string }>;
     shots: StoryboardShot[];
@@ -278,7 +289,7 @@ export const api = {
     note?: string;
   }>(`/api/conversations/${id}/storyboard/generate`, {
     method: "POST",
-    body: JSON.stringify({ shotIds }),
+    body: JSON.stringify({ shotIds, ...(alias ? { alias } : {}) }),
   }),
   clearStoryboard: (id: string) => request<{ removed: number } & StoryboardView>(`/api/conversations/${id}/storyboard`, { method: "DELETE" }),
   /**

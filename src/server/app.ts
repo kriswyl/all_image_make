@@ -185,15 +185,25 @@ const storyboardSettingPatchSchema = z.object({
   confirmed: z.boolean().optional(),
 });
 
+/** 手动添加角色 / 场景：名字必填，描述可以先空着，之后再在卡片里补 */
+const storyboardSettingAddSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  prompt: z.string().trim().max(2000).optional(),
+});
+
 const storyboardSettingsGenerateSchema = z.object({
   characterIds: z.array(z.string().uuid()).max(8).default([]),
   sceneIds: z.array(z.string().uuid()).max(8).default([]),
+  /** 用户选中的生图模型 alias；缺省用默认生图模型 */
+  alias: z.string().trim().max(80).optional(),
 });
 
 const storyboardGenerateSchema = z.object({
   // 上限由 service 检查：Zod 先拦掉的话，前端只能拿到一条通用的参数错误，
   // 分不清是「没选镜头」还是「一次选了太多」
   shotIds: z.array(z.string().uuid()).min(1),
+  /** 用户选中的生图模型 alias；缺省用默认生图模型 */
+  alias: z.string().trim().max(80).optional(),
 });
 
 const generationSchema = z.object({
@@ -888,6 +898,55 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(buildStoryboardView(db, id)));
   });
 
+  /** 删除一镜；后面的镜头自动前移，保持镜号连续 */
+  app.delete("/api/conversations/:id/storyboard/shots/:shotId", (req, res) => {
+    const id = routeParam(req.params.id);
+    const shot = db.getStoryboardShot(routeParam(req.params.shotId));
+    if (!shot || shot.conversationId !== id) {
+      return res.status(404).json(fail("STORYBOARD_SHOT_NOT_FOUND", "镜头不存在或不属于这个会话"));
+    }
+    db.deleteStoryboardShot(shot.id);
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  /** 手动添加角色。同名只更新描述，不会生成第二张卡 */
+  app.post("/api/conversations/:id/storyboard/characters", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const input = storyboardSettingAddSchema.parse(req.body ?? {});
+    db.upsertStoryboardCharacters(id, [{ name: input.name, prompt: input.prompt ?? "" }]);
+    res.status(201).json(ok(buildStoryboardView(db, id)));
+  });
+
+  app.post("/api/conversations/:id/storyboard/scenes", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const input = storyboardSettingAddSchema.parse(req.body ?? {});
+    db.upsertStoryboardScenes(id, [{ name: input.name, prompt: input.prompt ?? "" }]);
+    res.status(201).json(ok(buildStoryboardView(db, id)));
+  });
+
+  /** 删除角色 / 场景；镜头里对应的标签会一起清掉，避免留下没法生成的空引用 */
+  app.delete("/api/conversations/:id/storyboard/characters/:characterId", (req, res) => {
+    const id = routeParam(req.params.id);
+    const character = db.getStoryboardCharacter(routeParam(req.params.characterId));
+    if (!character || character.conversationId !== id) {
+      return res.status(404).json(fail("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话"));
+    }
+    db.deleteStoryboardCharacter(character.id);
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
+  app.delete("/api/conversations/:id/storyboard/scenes/:sceneId", (req, res) => {
+    const id = routeParam(req.params.id);
+    const scene = db.getStoryboardScene(routeParam(req.params.sceneId));
+    if (!scene || scene.conversationId !== id) {
+      return res.status(404).json(fail("STORYBOARD_SCENE_NOT_FOUND", "场景不存在或不属于这个会话"));
+    }
+    db.deleteStoryboardScene(scene.id);
+    res.json(ok(buildStoryboardView(db, id)));
+  });
+
   /** 给一个角色绑定参考图；传 null 回到「自动用该角色第一个已完成镜头」 */
   /** 校验「这张图属于本会话」——设定图只能从会话素材里选，不能指到别人的产物 */
   function assertConversationImage(conversationId: string, assetId: string) {
@@ -959,6 +1018,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const result = await generateStoryboardSettings({
       db, runner, conversationId: id,
       characterIds: input.characterIds, sceneIds: input.sceneIds,
+      alias: input.alias,
     });
     res.status(202).json(ok(result));
   }));
@@ -1026,7 +1086,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     const input = storyboardGenerateSchema.parse(req.body ?? {});
     const result = await generateStoryboardShots({
-      db, runner, conversationId: id, shotIds: input.shotIds,
+      db, runner, conversationId: id, shotIds: input.shotIds, alias: input.alias,
     });
     res.status(202).json(ok(result));
   }));

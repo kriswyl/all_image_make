@@ -85,6 +85,16 @@ button.storyboard-progress-pill:hover {
   font-size: 11.5px;
 }
 .storyboard-modal-actions .icon-button.compact { width: 31px; height: 31px; flex-basis: 31px; }
+/* 分镜 / 设定图共用的生图模型选择：和右侧动作按钮同高，品牌图标在前 */
+.storyboard-model-select {
+  min-height: 31px;
+  padding: 0 9px;
+  background: var(--surface);
+  border-color: var(--line);
+  border-radius: var(--radius-control);
+  font-size: 11px;
+}
+.storyboard-model-select .select-menu-label { font-weight: 500; }
 
 /* ── 主体：可拖动 / 可收起的左右分栏 ─────────────────────────────────── */
 /*
@@ -261,6 +271,60 @@ button.storyboard-progress-pill:hover {
   background: var(--surface);
   text-decoration: none;
 }
+.setting-section-actions { display: flex; align-items: center; gap: 1px; margin-left: auto; }
+.setting-section-actions .link-btn { margin-left: 0; }
+.setting-section-actions .link-btn svg { flex: 0 0 auto; }
+
+/* 手动添加角色 / 场景：一行名字 + 添加 / 取消，不另开弹窗 */
+.setting-add-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 8px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+}
+.setting-add-form input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 29px;
+  min-height: 29px;
+  padding: 0 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+}
+.setting-add-form .primary-button.compact {
+  min-height: 29px;
+  padding: 0 10px;
+  border-radius: var(--radius-xs);
+  font-size: 10.5px;
+}
+.setting-add-form .link-btn { min-height: 29px; padding: 0 6px; font-size: 10.5px; }
+
+/* 设定卡标题右侧的删除键：低调，悬停才变红 */
+.setting-card-delete {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  margin-left: auto;
+  padding: 0;
+  place-items: center;
+  color: var(--muted-soft);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  opacity: .55;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out), opacity var(--dur-1) var(--ease-out);
+}
+.setting-card:hover .setting-card-delete,
+.setting-card-delete:focus-visible { opacity: 1; }
+.setting-card-delete:hover:not(:disabled) { color: var(--coral); background: var(--coral-soft); }
+.setting-card-delete:disabled { opacity: .2; cursor: default; }
 
 .setting-empty {
   padding: 16px 14px;
@@ -657,6 +721,23 @@ button.storyboard-progress-pill:hover {
   text-decoration: none;
 }
 .shot-actions .link-btn:disabled { color: var(--muted-soft); opacity: .7; cursor: default; }
+/* 单镜删除：放在动作行最右，平时灰、悬停变红 */
+.shot-delete {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  margin-left: auto;
+  padding: 0;
+  place-items: center;
+  color: var(--muted-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.shot-delete:hover:not(:disabled) { color: var(--coral); background: var(--coral-soft); border-color: transparent; }
+.shot-delete:disabled { opacity: .45; cursor: default; }
 
 .storyboard-empty {
   flex: 1 1 auto;
@@ -689,6 +770,20 @@ button.storyboard-progress-pill:hover {
 .storyboard-confirm { width: min(640px, 92vw); }
 .storyboard-confirm-backdrop { z-index: 90; }
 .storyboard-reference-note { margin: 0 0 8px; color: var(--ink-soft); font-size: 11.5px; line-height: 1.7; }
+.storyboard-confirm-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font-size: 11.5px;
+}
+.storyboard-confirm-model > span { color: var(--muted); }
+.storyboard-confirm-model > strong { color: var(--ink); font-weight: 600; }
+.storyboard-confirm-model > small { margin-left: auto; color: var(--muted); font-size: 10.5px; }
 .storyboard-reference-note.is-warning { color: var(--warning); }
 .storyboard-billing { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.7; }
 
