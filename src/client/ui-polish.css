@@ -664,20 +664,20 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 
 /* ── 9. 全局自绘 tooltip ──────────────────────────────────────────────────
    原生 title 已由 GlobalTooltip 搬到 data-tooltip；这里只负责外观。
-   深色卡片、最多约 6 行，和侧栏会话提示、图片悬停胶囊保持同一套语言。 */
+   样式 A：浅色白卡 + 1px 细边 + 柔和投影，按用户要求把圆角加大到 12px。 */
 .global-tooltip {
   position: fixed;
   z-index: 300;
   max-width: min(320px, calc(100vw - 16px));
-  padding: 7px 10px;
-  color: #fff;
-  background: #1a1a1a;
-  border: 1px solid rgba(255, 255, 255, .08);
-  border-radius: var(--radius-xs);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .20);
   max-height: min(200px, 40vh);
+  padding: 8px 11px;
   overflow: hidden;
-  font-size: 11.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid #e6e6e6;
+  border-radius: var(--radius-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .09);
+  font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
