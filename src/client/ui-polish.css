@@ -1,12 +1,18 @@
 /*
- * 全局 UI 打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版。
+ * 全局 UI 系统层（最后加载，只做横切关注点）
  *
- * 这一份放在最后加载，专门覆盖前面那些「能用但不够好看」的细节，
- * 不改动业务组件里的结构。
+ * 这里不重新定义布局，只负责四件事：
+ *   1. 字体渲染与可读性
+ *   2. 所有可交互元素的过渡/按压/焦点反馈
+ *   3. 弹窗、菜单、抽屉、灯箱的进出场
+ *   4. 滚动条、选中色、图片淡入这类细节
+ *
+ * 圆角、动效时长、缓动都来自 styles.css 的 :root 令牌，这里不再写魔法数字。
  */
 
-/* ── 字体：Windows 上不要强行 grayscale 抗锯齿，交给 ClearType ───────────── */
+/* ── 1. 字体：Windows 交给 ClearType ────────────────────────────────────── */
 :root {
+  /* 全局 grayscale 抗锯齿会让 12–14px 中文发虚，Windows 上必须用 auto */
   -webkit-font-smoothing: auto;
   /* 次级文字提一档对比度：小字号下 #8a8a8a 太淡 */
   --muted: #686868;
@@ -31,61 +37,346 @@ body,
 .chat-caps-item strong,
 .chat-caps-item .chat-caps-model strong { letter-spacing: 0; }
 
-/* ── 所有下拉框统一圆角 ─────────────────────────────────────────────────── */
-select {
-  border-radius: 10px;
+/* ── 2. 交互基座：统一的过渡、按压与焦点 ────────────────────────────────── */
+
+/*
+ * 一份选择器清单覆盖全站可交互元素。写在 :where() 里会丢掉优先级，
+ * 被前面同权重的规则盖掉，所以这里保留普通选择器，靠「后加载」取胜。
+ */
+button,
+[role="button"],
+summary,
+a,
+input,
+textarea,
+select,
+.nav-button,
+.brand,
+.sidebar-conv,
+.sidebar-menu-item,
+.chat-caps-item,
+.model-picker-option,
+.chat-option,
+.mode-chip,
+.filter-tabs button,
+.asset-library-tabs > button,
+.asset-library-thumb,
+.composer-canvas-thumb,
+.canvas-bar-thumb,
+.tool-card-thumb,
+.stage-thumb,
+.recent-thumb,
+.history-thumb,
+.preset-card,
+.unit-card,
+.key-card,
+.music-track,
+.confirm-option {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: var(--dur-2);
+  transition-timing-function: var(--ease-in-out);
 }
+
+/* 按压反馈：按钮缩得比卡片多一点，卡片只做「按下去」的暗示 */
+button:active:not(:disabled):not(.titlebar-control),
+[role="button"]:active:not([aria-disabled="true"]),
+.nav-button:active,
+.sidebar-conv:active,
+.sidebar-menu-item:active,
+.chat-option:active:not(:disabled),
+.mode-chip:active {
+  transform: scale(.97);
+}
+.primary-button:active:not(:disabled),
+.secondary-button:active:not(:disabled),
+.asset-library-thumb:active,
+.composer-canvas-thumb:active,
+.canvas-bar-thumb:active,
+.tool-card-thumb:active,
+.stage-thumb:active,
+.recent-thumb:active,
+.history-thumb:active {
+  transform: scale(.985);
+}
+.preset-card:active,
+.unit-card:active,
+.chat-caps-item:active:not(.is-default) {
+  transform: scale(.993);
+}
+
+/* 键盘焦点：浅灰底上的深色细环，比浏览器默认蓝框更符合黑白骨架 */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid rgba(13, 13, 13, .55);
+  outline-offset: 2px;
+}
+/* 输入类控件自带聚焦描边，不要再叠一圈 outline */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+input[type="checkbox"]:focus-visible { outline: none; }
+/* 深色遮罩上的按钮需要反色焦点环，否则黑环看不见 */
+.chat-lightbox button:focus-visible,
+.image-preview-backdrop button:focus-visible,
+.history-preview-bar button:focus-visible {
+  outline-color: rgba(255, 255, 255, .8);
+}
+
+/* ── 3. 控件：下拉圆角、输入态、禁用态 ─────────────────────────────────── */
+
+select { border-radius: var(--radius-control); }
 .chat-control select,
 .model-picker-trigger,
-.chat-caps > summary {
-  border-radius: 999px;
-}
+.chat-caps > summary { border-radius: var(--radius-pill); }
+
 .chat-caps-defaults select {
   height: 36px;
   min-height: 36px;
-  padding: 0 8px;
-  border-radius: 10px;
+  /* 右侧留出原生箭头的位置，否则长模型名会压到箭头上 */
+  padding: 0 30px 0 8px;
+  border-radius: var(--radius-control);
   font-size: 12px;
   background: var(--surface-soft);
 }
-.asset-library-tools > select { border-radius: 10px; }
+.asset-library-tools > select { border-radius: var(--radius-control); }
 
-/* ── 点击过渡：全局轻微按压，卡片/选项也有一点反馈 ─────────────────────── */
-button,
-.chat-caps-item,
-.chat-option,
-.filter-tabs button,
-.asset-library-thumb,
-.composer-canvas-thumb,
-.canvas-bar-thumb {
+input:not([type="checkbox"]):not([type="radio"]):focus,
+textarea:focus,
+select:focus {
+  border-color: var(--line-hover);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, .055);
+}
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+/* 复选框与开关：勾选过程也要有过渡，而不是瞬间跳 */
+input[type="checkbox"] {
   transition:
-    transform 120ms ease,
-    background-color 160ms ease,
-    border-color 160ms ease,
-    color 160ms ease,
-    box-shadow 160ms ease,
-    opacity 160ms ease;
+    background-color var(--dur-1) var(--ease-in-out),
+    border-color var(--dur-1) var(--ease-in-out),
+    box-shadow var(--dur-1) var(--ease-in-out);
 }
-button:active:not(:disabled) {
-  transform: scale(.97);
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--line-hover);
+  background-color: var(--surface-soft);
 }
-.primary-button:active:not(:disabled) {
-  transform: scale(.98);
+input[type="checkbox"]:checked:hover:not(:disabled) {
+  background-color: var(--accent-dark);
+  border-color: transparent;
 }
-.chat-caps-item:active:not(.is-default),
-.asset-library-thumb:active,
-.composer-canvas-thumb:active,
-.canvas-bar-thumb:active {
-  transform: scale(.985);
+/* 勾选的一瞬间轻轻弹一下：比直接换底图更容易被看见 */
+@keyframes ui-check-pop {
+  0% { transform: scale(.88); }
+  60% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease-out); }
+.switch-field input[type="checkbox"]::after {
+  transition: transform var(--dur-2) var(--ease-out);
 }
 
-/* ── 模型面板：从「两列清单」改成三列卡片 ─────────────────────────────── */
+/* ── 4. 弹层进出场 ────────────────────────────────────────────────────────
+   遮罩只淡入，内容轻微上浮；菜单从触发点方向展开，抽屉从右侧滑入。
+   退出不动画（React 卸载时没有过渡窗口），保证关闭是即时的。 */
+@keyframes ui-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes ui-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-menu-in {
+  from { opacity: 0; transform: scale(.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-drawer-in {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.modal-backdrop,
+.storyboard-overlay,
+.image-preview-backdrop,
+.chat-lightbox,
+.asset-library-overlay {
+  animation: ui-fade-in var(--dur-2) var(--ease-out);
+}
+.modal,
+.storyboard-modal { animation: ui-dialog-in var(--dur-3) var(--ease-out); }
+.asset-library { animation: ui-drawer-in var(--dur-3) var(--ease-out); }
+
+.model-picker-menu,
+.sidebar-conv-menu,
+.sidebar-menu,
+.update-popover,
+.provider-contact-popover,
+.canvas-bar-menu {
+  transform-origin: top right;
+  animation: ui-menu-in var(--dur-2) var(--ease-out);
+}
+.model-picker-menu { transform-origin: bottom right; }
+
+.toast { animation: ui-toast-in var(--dur-2) var(--ease-out); }
+
+/* 灯箱里的媒体直接淡入，不要再叠一个缩放 */
+.chat-lightbox-body,
+.image-preview { animation: ui-fade-in var(--dur-3) var(--ease-out); }
+
+/* ── 5. 细节：滚动条 / 选中色 / 媒体淡入 ───────────────────────────────── */
+
+/* 页面标题统一到 19px：工作台原来 19、渠道页 17，切换时会「跳字号」 */
+.page-header h1 { font-size: 19px; letter-spacing: -.015em; }
+
+/* 切换导航时页面淡入。只动 opacity，不碰 transform——
+   transform 会给 position:fixed 的子弹层造一个新的包含块，灯箱会错位。 */
+.workspace > .page,
+.workspace > .chat-view {
+  animation: ui-fade-in var(--dur-2) var(--ease-out);
+}
+
+/* 侧栏收起 / 展开：列宽跟着过渡，内容淡出后再 hidden。
+   visibility 延迟到淡出结束，键盘 Tab 不会落进已经看不见的侧栏。 */
+@media (min-width: 721px) {
+  .app-shell { transition: grid-template-columns var(--dur-3) var(--ease-out); }
+  .sidebar {
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      visibility 0s linear 0s;
+  }
+  .app-shell.is-sidebar-hidden .sidebar {
+    opacity: 0;
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      visibility 0s linear var(--dur-2);
+  }
+}
+
+/* 输入框聚焦：边框 + 一圈很淡的外环，和下拉框同一套语言 */
+.composer-box:focus-within {
+  border-color: var(--line-hover);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .06), 0 0 0 3px rgba(0, 0, 0, .04);
+}
+
+
+/* 缩略图悬停：边框从透明变灰，选中态则加深，避免「点了没反应」 */
+.asset-library-thumb:hover { border-color: var(--line-strong); }
+.asset-library-item.is-selected .asset-library-thumb:hover { border-color: var(--ink); }
+.music-track:hover { border-color: var(--line-strong); }
+/* 工具胶囊：悬停时边框加深，和卡片语言保持一致 */
+.tool-pill:hover { border-color: var(--line-strong); }
+
+/* 分镜/表格/附件这些「列表型」元素也走同一套过渡，别一换状态就硬切 */
+.shot-card,
+.storyboard-row,
+.storyboard-character,
+.composer-attachment,
+.chat-bubble-thumb,
+.chat-control,
+.data-table tbody tr {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: var(--dur-2);
+  transition-timing-function: var(--ease-in-out);
+}
+.shot-card:hover,
+.storyboard-character:hover { border-color: var(--line-strong); }
+
+/* 折叠区展开时内容淡入，避免「啪」地跳出来 */
+.advanced-panel[open] .advanced-body,
+.music-lyrics[open] pre {
+  animation: ui-fade-in var(--dur-2) var(--ease-out);
+}
+
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d4d4d4 transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #bdbdbd;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+::selection {
+  color: #fff;
+  background: rgba(13, 13, 13, .88);
+}
+
+/* 滚动到边界时不要把整页一起带着滚 */
+.chat-thread,
+.chat-caps-body,
+.asset-library-grid,
+.sidebar-conv-list,
+.modal-body,
+.shot-list,
+.storyboard-list,
+.music-stage,
+.model-picker-menu {
+  overscroll-behavior: contain;
+}
+
+/* 窗口外壳与工具条不参与文本选择，拖窗口时不会选蓝一片 */
+.titlebar,
+.nav-button,
+.chat-header-controls,
+.composer-bar,
+.filter-tabs button,
+.asset-library-tabs > button,
+.model-picker-trigger {
+  user-select: none;
+}
+
+/* 图片加载完成时轻轻淡入：避免缩略图一次全闪出来 */
+@keyframes ui-media-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.chat-bubble-thumb img,
+.tool-card-thumb img,
+.asset-library-thumb > img,
+.composer-canvas-thumb > img,
+.canvas-bar-thumb > img,
+.stage-image img,
+.storyboard-thumb > img,
+.history-thumb img,
+.recent-thumb img {
+  animation: ui-media-in var(--dur-3) var(--ease-out);
+}
+
+/* ── 6. 模型面板 ────────────────────────────────────────────────────────────
+   从「两列清单」重排成三列卡片：生图 / 生视频 / 音频并排，
+   三个默认模型下拉也并排，模型真名是主角，渠道和简称降为小标签。 */
+
 .chat-caps > summary {
   min-height: 30px;
   padding: 0 10px 0 11px;
   color: var(--ink-soft);
   background: var(--surface);
   border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
   font-size: 12px;
 }
 .chat-caps > summary:hover {
@@ -100,26 +391,20 @@ button:active:not(:disabled) {
 .chat-caps-chevron {
   flex: 0 0 auto;
   color: var(--muted);
-  transition: transform 150ms ease;
+  transition: transform var(--dur-2) var(--ease-in-out);
 }
-.chat-caps[open] .chat-caps-chevron {
-  transform: rotate(180deg);
-}
+.chat-caps[open] .chat-caps-chevron { transform: rotate(180deg); }
 
 .chat-caps-body {
   top: 40px;
   width: min(980px, calc(100vw - 24px));
   max-height: min(76vh, 720px);
   padding: 14px;
-  border-radius: 16px;
+  border-radius: var(--radius-panel);
   border: 1px solid var(--line);
   box-shadow: 0 24px 60px rgba(0, 0, 0, .16);
 }
-.chat-caps[open] .chat-caps-body { animation: caps-in 150ms ease; }
-@keyframes caps-in {
-  from { opacity: 0; transform: translateY(-6px) scale(.99); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
+.chat-caps[open] .chat-caps-body { animation: ui-dialog-in var(--dur-2) var(--ease-out); }
 
 .chat-caps-defaults {
   padding: 4px 2px 14px;
@@ -167,17 +452,17 @@ button:active:not(:disabled) {
   padding: 9px 10px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: var(--radius-control);
 }
 .chat-caps-item:hover {
   background: var(--surface-soft);
   border-color: var(--line-strong);
-  border-radius: 11px;
+  border-radius: var(--radius-control);
 }
 .chat-caps-item:focus-visible {
-  outline: 2px solid var(--line-strong);
-  outline-offset: -2px;
-  border-radius: 11px;
+  outline: 2px solid rgba(13, 13, 13, .55);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
 }
 .chat-caps-item.is-default {
   background: #fafafa;
@@ -185,73 +470,23 @@ button:active:not(:disabled) {
 }
 .chat-caps-item:last-of-type { border-bottom: 1px solid var(--line); }
 .chat-caps-logo { width: 28px; height: 28px; }
-.chat-caps-model { gap: 5px; }
+.chat-caps-model { gap: 5px; min-width: 0; }
 .chat-caps-item strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 12.5px;
   font-weight: 600;
-}
-.chat-caps-meta {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.55;
-}
-.chat-caps-adjust {
-  padding: 2px 8px;
-  color: var(--muted);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font-size: 10.5px;
-  opacity: .8;
-}
-.chat-caps-adjust:hover {
-  color: var(--ink);
-  background: var(--surface-soft);
-  border-color: var(--line-strong);
-}
-.chat-caps-note {
-  margin: 10px 2px 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-.chat-caps-empty { font-size: 11.5px; color: var(--muted); }
-
-@media (max-width: 900px) {
-  .chat-caps-body { width: min(760px, calc(100vw - 16px)); }
-  .chat-caps-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .chat-caps-defaults-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 640px) {
-  .chat-caps-body { width: calc(100vw - 16px); }
-  .chat-caps-columns,
-  .chat-caps-defaults-grid { grid-template-columns: 1fr; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  button,
-  .chat-caps-item,
-  .chat-option,
-  .filter-tabs button,
-  .asset-library-thumb,
-  .composer-canvas-thumb,
-  .canvas-bar-thumb {
-    transition: none;
-  }
-  button:active:not(:disabled),
-  .primary-button:active:not(:disabled),
-  .chat-caps-item:active:not(.is-default),
-  .asset-library-thumb:active,
-  .composer-canvas-thumb:active,
-  .canvas-bar-thumb:active {
-    transform: none;
-  }
-  .chat-caps-body { animation: none; }
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-caps-meta {
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
 }
 .chat-caps-item .chat-caps-channel {
   min-width: 0;
@@ -267,12 +502,64 @@ button:active:not(:disabled) {
   padding: 0 5px;
   color: var(--ink-soft);
   background: var(--surface-soft);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-caps > summary {
-  transition: transform 120ms ease, background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+.chat-caps-adjust {
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  opacity: .8;
 }
-.chat-caps > summary:active { transform: scale(.98); }
+.chat-caps-adjust:hover {
+  color: var(--ink);
+  background: var(--surface-soft);
+  border-color: var(--line-strong);
+}
+.chat-caps-note {
+  margin: 10px 2px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-caps-empty { font-size: 11.5px; color: var(--muted); }
+
+/* ── 7. 窄窗口 ──────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .chat-caps-body { width: min(760px, calc(100vw - 16px)); }
+  .chat-caps-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chat-caps-defaults-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .chat-caps-body { width: calc(100vw - 16px); }
+  .chat-caps-columns,
+  .chat-caps-defaults-grid { grid-template-columns: 1fr; }
+}
+
+/* ── 8. 尊重系统的「减少动态效果」 ──────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:active:not(:disabled),
+  [role="button"]:active,
+  .primary-button:active:not(:disabled),
+  .secondary-button:active:not(:disabled),
+  .asset-library-thumb:active,
+  .composer-canvas-thumb:active,
+  .canvas-bar-thumb:active,
+  .preset-card:active,
+  .unit-card:active,
+  .chat-caps-item:active:not(.is-default) {
+    transform: none;
+  }
+}

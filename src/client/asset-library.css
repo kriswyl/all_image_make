@@ -57,7 +57,7 @@
   padding: 0 5px;
   color: var(--muted);
   background: var(--surface-soft);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
 }
@@ -79,7 +79,7 @@
   color: var(--muted);
   background: var(--surface-soft);
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius-control);
 }
 .asset-library-search:focus-within { background: var(--surface); border-color: #c9c9c9; box-shadow: 0 0 0 3px rgba(0, 0, 0, .05); }
 .asset-library-search input {
@@ -121,8 +121,9 @@
   overflow: hidden;
   background: var(--surface-soft);
   border: 2px solid transparent;
-  border-radius: 10px;
-  cursor: zoom-in;
+  border-radius: var(--radius-control);
+  /* 单击是「加入/移出画布」，不是打开大图，别给放大镜的暗示 */
+  cursor: pointer;
 }
 .asset-library-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .asset-library-item.is-selected .asset-library-thumb { border-color: var(--accent); }
@@ -135,7 +136,7 @@
   overflow: hidden;
   color: var(--ink);
   background: rgba(255, 255, 255, .9);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   font-size: 9.5px;
   line-height: 1.5;
   text-overflow: ellipsis;
@@ -148,7 +149,7 @@
   padding: 1px 5px;
   color: #fff;
   background: var(--accent);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   font-size: 9px;
   font-weight: 700;
   line-height: 1.5;
@@ -166,7 +167,7 @@
   color: #fff;
   background: rgba(0, 0, 0, .28);
   border: 1px solid rgba(255, 255, 255, .7);
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
 }
 .asset-library-check.is-on { background: var(--accent); border-color: var(--accent); }
 .asset-library-caption {
@@ -221,7 +222,7 @@
   color: var(--muted);
   background: var(--surface);
   border: 1px dashed var(--line-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
 }
 .asset-strip-more:hover { color: var(--ink); background: var(--surface-soft); }
 .asset-strip-more span { font-size: 9.5px; }
@@ -229,7 +230,7 @@
 .asset-strip-more-hint { align-self: center; color: var(--muted-soft); font-size: 10px; white-space: nowrap; }
 .asset-strip-role {
   padding: 0 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 9px;
   line-height: 1.5;
   white-space: nowrap;
@@ -244,7 +245,7 @@
   color: var(--ink-soft);
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 10.5px;
 }
 .canvas-section-library:hover { color: var(--ink); background: var(--surface-soft); }
@@ -264,7 +265,7 @@
   padding: 1px 7px;
   color: var(--accent-dark);
   background: var(--accent-soft);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 10px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -277,7 +278,7 @@
   color: var(--ink-soft);
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 10.5px;
 }
 .canvas-bar-manage:hover { color: var(--ink); background: var(--surface-soft); }
@@ -300,7 +301,7 @@
   overflow: hidden;
   background: var(--surface-soft);
   border: 2px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   cursor: zoom-in;
 }
 .canvas-bar-thumb:hover { border-color: var(--line-strong); }
@@ -316,7 +317,7 @@
   padding: 0 3px;
   color: #fff;
   background: var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 9px;
   font-weight: 700;
   line-height: 1;
@@ -345,7 +346,7 @@
   padding: 4px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   box-shadow: var(--shadow-card);
 }
 .canvas-bar-menu-title { padding: 4px 8px 2px; color: var(--muted); font-size: 10px; }
@@ -357,7 +358,7 @@
   color: var(--ink);
   background: none;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-xs);
   font-size: 12px;
   text-align: left;
 }
@@ -374,7 +375,7 @@
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
 }
 .canvas-bar-toggle:hover { color: var(--ink); background: var(--surface-soft); }
 /* 画布最多 8 张：一排 8 列均分，正好铺满整行 */
@@ -401,7 +402,7 @@
   overflow: hidden;
   background: var(--surface-soft);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   cursor: zoom-in;
 }
 .composer-canvas-thumb:hover { border-color: var(--line-strong); }
@@ -417,7 +418,7 @@
   padding: 0 3px;
   color: #fff;
   background: var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 9px;
   font-weight: 700;
   line-height: 1;
