@@ -1,8 +1,8 @@
 /**
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
-import { AlertCircle, FileText, Info } from "lucide-react";
-import { assetRef, type ChatMessage } from "../../shared/agent-types";
+import { AlertCircle, FileText, Info, Maximize2 } from "lucide-react";
+import type { ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
 
 /**
@@ -25,7 +25,7 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
                 key={assetId}
                 type="button"
                 className="chat-bubble-thumb"
-                title={`${assetRef(assetId)} · 点开看`}
+                aria-label="点开查看大图"
                 onClick={() => onPreview?.(assetId)}
               >
                 <img
@@ -39,6 +39,10 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
                     image.src = api.assetUrl(`/api/assets/${assetId}/file`);
                   }}
                 />
+                <span className="chat-image-hint">
+                  <Maximize2 size={11} />
+                  <span>查看大图</span>
+                </span>
               </button>
             ))}
           </div>

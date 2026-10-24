@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Mic, Music, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Maximize2, Mic, Music, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -261,7 +261,7 @@ export function ToolCard({
             type="button"
             className="tool-card-thumb"
             onClick={() => onPreview(assetId)}
-            title={isVideoResult ? "点开看" : "点开看（也可以直接拖到下面的输入框）"}
+            aria-label={isVideoResult ? "点开查看视频" : "点开查看大图，也可以拖到下面的输入框"}
             // 图片能拖进输入框当参考，视频不行——画布只收图片
             {...(isVideoResult ? {} : {
               draggable: true,
@@ -269,6 +269,10 @@ export function ToolCard({
             })}
           >
             <ResultThumb assetId={assetId} asset={produced} isVideo={isVideoResult} />
+            <span className="chat-image-hint">
+              <Maximize2 size={11} />
+              <span>{isVideoResult ? "查看视频" : "查看大图"}</span>
+            </span>
           </button>
         ) : null}
       </div>

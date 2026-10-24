@@ -440,9 +440,10 @@
 .composer-attachment.is-canvas .composer-attachment-remove { top: -5px; right: -5px; }
 
 /* ── 对话里的图：按完整画面展示，不裁主体 ─────────────────────────────────
- * 单张：容器高度跟随图片自身比例，最大 280px；多张：120px 方格内 contain，
+ * 单张：容器高度跟随图片自身比例，最大 240px；多张：120px 方格内 contain，
  * 宁可留一点底色，也不把人物头顶 / 画面边缘裁掉。点开仍是原图灯箱。 */
 .chat-bubble-thumb {
+  position: relative;
   width: 120px;
   height: 120px;
   background: var(--surface-soft);
@@ -456,7 +457,7 @@
   display: inline-block;
   width: auto;
   height: auto;
-  max-width: min(280px, 100%);
+  max-width: min(240px, 100%);
   max-height: none;
   background: var(--surface-soft);
 }
@@ -464,12 +465,13 @@
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: min(280px, 50vh);
+  max-height: min(240px, 45vh);
   object-fit: contain;
 }
 
 /* 工具卡结果同理：不再固定 300×188 裁切，按原比例缩到最大 280×220 */
 .tool-card-thumb {
+  position: relative;
   display: inline-block;
   width: auto;
   max-width: min(280px, 100%);
@@ -486,6 +488,39 @@
   max-height: 220px;
   object-fit: contain;
 }
+/* 悬停信息：自绘黑色胶囊，替代浏览器原生 title 的白框 */
+.chat-image-hint {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  color: #fff;
+  background: rgba(13, 13, 13, .68);
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity var(--dur-1) var(--ease-in-out), transform var(--dur-1) var(--ease-out);
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+.chat-bubble-thumb:hover .chat-image-hint,
+.chat-bubble-thumb:focus-visible .chat-image-hint,
+.tool-card-thumb:hover .chat-image-hint,
+.tool-card-thumb:focus-visible .chat-image-hint {
+  opacity: 1;
+  transform: none;
+}
+/* 多图缩略图只有 120px，悬停只留放大图标，别把图盖住 */
+.chat-bubble-thumbs > :not(:only-child) .chat-image-hint { right: 5px; bottom: 5px; padding: 5px; }
+.chat-bubble-thumbs > :not(:only-child) .chat-image-hint > span { display: none; }
+
 @media (max-width: 720px) {
   .chat-bubble-thumbs > :only-child.chat-bubble-thumb { max-width: 100%; }
   .tool-card-thumb { max-width: 100%; }
