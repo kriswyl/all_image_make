@@ -82,3 +82,62 @@ export function midjourneyButtonLabel(button: MidjourneyButton): string {
   if (/strong/i.test(label)) return "变体（强烈）";
   return /^V\d/i.test(label) ? `变体 ${label}` : "变体";
 }
+
+/**
+ * 四宫格象限：1=左上 2=右上 3=左下 4=右下。
+ *
+ * MJ 一次出四张拼成一张，`U1`/`V1` 指的就是这四个位置。按钮排成同样的 2×2，
+ * 用户不用再换算「U3 到底是第几张」。
+ */
+export const MIDJOURNEY_QUADRANT_NAMES = ["左上", "右上", "左下", "右下"] as const;
+
+export function midjourneyQuadrant(button: MidjourneyButton): number | null {
+  const fromLabel = /^[UV]\s*([1-4])\b/i.exec(button.label?.trim() ?? "");
+  if (fromLabel) return Number(fromLabel[1]);
+  // 部分渠道的 label 只有 Upscale，但 customId 里仍带象限号：MJ::JOB::upsample::3::hash
+  const fromId = /::([1-4])::/.exec(button.customId);
+  return fromId ? Number(fromId[1]) : null;
+}
+
+export interface MidjourneyButtonGroups {
+  /** 象限 → 该象限的放大/变体按钮；缺哪张就缺哪个键 */
+  quadrants: Map<number, { upscale?: MidjourneyButton; variation?: MidjourneyButton }>;
+  /** 重绘等没有象限归属的按钮 */
+  extras: MidjourneyButton[];
+}
+
+export function groupMidjourneyButtons(buttons: MidjourneyButton[]): MidjourneyButtonGroups {
+  const quadrants: MidjourneyButtonGroups["quadrants"] = new Map();
+  const extras: MidjourneyButton[] = [];
+  for (const button of buttons) {
+    const kind = midjourneyActionKind(button.customId, button.label);
+    const index = kind === "reroll" ? null : midjourneyQuadrant(button);
+    if (!kind || !index) {
+      extras.push(button);
+      continue;
+    }
+    const cell = quadrants.get(index) ?? {};
+    // 同一象限出现第二个同类按钮（比如细化版 / 创意版放大）时不要覆盖丢掉，挪到额外一行
+    if (kind === "upscale" && !cell.upscale) cell.upscale = button;
+    else if (kind === "variation" && !cell.variation) cell.variation = button;
+    else {
+      extras.push(button);
+      continue;
+    }
+    quadrants.set(index, cell);
+  }
+  return { quadrants, extras };
+}
+
+export function midjourneyActionTooltip(button: MidjourneyButton): string {
+  const label = midjourneyButtonLabel(button);
+  const kind = midjourneyActionKind(button.customId, button.label);
+  const index = midjourneyQuadrant(button);
+  if (!index || !kind) {
+    return kind === "reroll" ? "重新生成一组四宫格" : `用 Midjourney 继续：${label}`;
+  }
+  const position = MIDJOURNEY_QUADRANT_NAMES[index - 1];
+  return kind === "upscale"
+    ? `放大第 ${index} 张（四宫格${position}）`
+    : `以第 ${index} 张生成变体（四宫格${position}）`;
+}

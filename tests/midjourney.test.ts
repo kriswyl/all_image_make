@@ -3,8 +3,10 @@ import { buildGenerationRequest } from "../src/server/adapters";
 import { asyncProviderSpec } from "../src/server/async-providers";
 import { buildCapabilityAliases } from "../src/server/capabilities";
 import {
+  groupMidjourneyButtons,
   midjourneyButtonLabel,
   midjourneyModelForCustomId,
+  midjourneyQuadrant,
   midjourneyUsableButtons,
 } from "../src/shared/midjourney";
 import type { DbChannel } from "../src/server/db";
@@ -107,6 +109,29 @@ describe("Midjourney 轮询与按钮", () => {
     expect(midjourneyButtonLabel({ customId: "MJ::JOB::upsample::1::x", label: "U1" })).toBe("放大 U1");
     expect(midjourneyButtonLabel({ customId: "MJ::JOB::upscale::1::x", label: "Upscale (Subtle)" })).toBe("放大（细腻）");
     expect(midjourneyButtonLabel({ customId: "MJ::JOB::variation::1::x", label: "Vary (Strong)" })).toBe("变体（强烈）");
+  });
+
+  it("按四宫格象限分组：U/V 各归各位，重绘单独放", () => {
+    const buttons = midjourneyUsableButtons([
+      { customId: "MJ::JOB::upsample::1::x", label: "U1" },
+      { customId: "MJ::JOB::upsample::2::x", label: "U2" },
+      { customId: "MJ::JOB::upsample::3::x", label: "U3" },
+      { customId: "MJ::JOB::upsample::4::x", label: "U4" },
+      { customId: "MJ::JOB::variation::1::x", label: "V1" },
+      { customId: "MJ::JOB::variation::2::x", label: "V2" },
+      { customId: "MJ::JOB::variation::3::x", label: "V3" },
+      { customId: "MJ::JOB::variation::4::x", label: "V4" },
+      { customId: "MJ::JOB::reroll::0::x::SOLO", label: "🔄" },
+    ]);
+    const { quadrants, extras } = groupMidjourneyButtons(buttons);
+    expect([...quadrants.keys()]).toEqual([1, 2, 3, 4]);
+    expect(quadrants.get(1)?.upscale?.label).toBe("U1");
+    expect(quadrants.get(1)?.variation?.label).toBe("V1");
+    expect(quadrants.get(4)?.upscale?.label).toBe("U4");
+    expect(extras.map((button) => midjourneyButtonLabel(button))).toEqual(["重绘"]);
+    // label 只剩 Upscale 时，从 customId 的序号兜底
+    expect(midjourneyQuadrant({ customId: "MJ::JOB::upsample::3::x", label: "Upscale" })).toBe(3);
+    expect(midjourneyQuadrant({ customId: "MJ::JOB::reroll::0::x::SOLO" })).toBeNull();
   });
 
   it("只保留能直接执行的动作，区域变体/缩放/动画都隐藏", () => {

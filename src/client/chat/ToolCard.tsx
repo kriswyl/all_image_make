@@ -19,6 +19,7 @@ import type { Asset } from "../../shared/types";
 import {
   midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton,
 } from "../../shared/midjourney";
+import { MidjourneyActions } from "../ui/MidjourneyActions";
 
 const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_image: ImageIcon,
@@ -301,22 +302,12 @@ export function ToolCard({
         ) : null}
 
         {mjButtons.length ? (
-          <div className="tool-card-mj-actions" aria-label="Midjourney 后续操作">
-            {mjButtons.map((button) => {
-              const label = midjourneyButtonLabel(button);
-              return (
-                <button
-                  key={button.customId}
-                  type="button"
-                  title={`用 Midjourney 继续：${label}`}
-                  disabled={mjBusy}
-                  onClick={() => void midjourneyAct(button)}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          <MidjourneyActions
+            buttons={mjButtons}
+            busy={mjBusy}
+            onAct={(button) => void midjourneyAct(button)}
+            className="tool-card-mj"
+          />
         ) : null}
       </div>
     </div>

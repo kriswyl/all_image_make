@@ -15,6 +15,7 @@ import { useImagePaste } from "../useImagePaste";
 import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "../task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES } from "../../shared/types";
 import { isMidjourneyActionModel, midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
+import { MidjourneyActions } from "../ui/MidjourneyActions";
 import type { Asset, Channel, ImageSizeValue, Task, TaskStatus } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
@@ -548,22 +549,13 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
         </div>
       ) : null}
       {midjourneyButtons.length ? (
-        <div className="mj-actions" aria-label="Midjourney 后续操作">
-          {midjourneyButtons.map((button) => (
-            <button
-              key={button.customId}
-              type="button"
-              className="mj-action-button"
-              disabled={Boolean(actingCustomId)}
-              onClick={() => void midjourneyAct(button)}
-              title={midjourneyButtonLabel(button)}
-            >
-              {actingCustomId === button.customId ? <LoaderCircle className="spin" size={14} /> : null}
-              {button.emoji ? <span aria-hidden="true">{button.emoji}</span> : null}
-              {midjourneyButtonLabel(button)}
-            </button>
-          ))}
-        </div>
+        <MidjourneyActions
+          buttons={midjourneyButtons}
+          busy={Boolean(actingCustomId)}
+          activeId={actingCustomId}
+          onAct={(button) => void midjourneyAct(button)}
+          className="mj-actions"
+        />
       ) : null}
       {recentTasks.length ? (
         <div className="recent-strip" aria-label="最近生成">
