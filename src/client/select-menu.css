@@ -1,0 +1,174 @@
+/* ── 自绘下拉菜单 / 图片选择器 ───────────────────────────────────────────
+   原生 select 的展开项由系统绘制，改不了灰条和字体；这两套控件替代它。
+   浮层通过 portal 挂到 body，位置由 SelectMenu.tsx 计算。 */
+
+.select-menu-trigger {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: var(--ink-soft);
+  background: var(--surface-soft);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  font-size: 10.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.select-menu-trigger:hover:not(:disabled),
+.select-menu-trigger.is-open {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--line-hover);
+}
+.select-menu-trigger:disabled { opacity: .55; cursor: not-allowed; }
+.select-menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.select-menu-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform var(--dur-2) var(--ease-in-out);
+}
+.select-menu-trigger.is-open .select-menu-chevron { transform: rotate(180deg); }
+
+.select-menu-popover {
+  position: fixed;
+  z-index: 200;
+  max-height: 300px;
+  padding: 4px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  outline: none;
+  animation: ui-menu-in var(--dur-2) var(--ease-out);
+}
+.select-menu-option {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+  text-align: left;
+}
+.select-menu-option > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-menu-option > svg { flex: 0 0 auto; color: var(--ink); }
+.select-menu-option:hover,
+.select-menu-option.is-active { color: var(--ink); background: var(--surface-soft); }
+.select-menu-option.is-selected { color: var(--ink); font-weight: 600; }
+.select-menu-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* 选已有图：缩略图网格，比一长串「分镜第 N 镜」好认 */
+.image-picker-trigger {
+  display: inline-flex;
+  min-height: 29px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  font-size: 10.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.image-picker-trigger:hover:not(:disabled),
+.image-picker-trigger.is-open {
+  color: var(--ink);
+  background: var(--surface-soft);
+  border-color: var(--line-hover);
+}
+.image-picker-trigger:disabled { opacity: .5; cursor: not-allowed; }
+.image-picker-count {
+  min-width: 15px;
+  padding: 0 4px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-radius: var(--radius-pill);
+  font-size: 9px;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.image-picker-menu {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  max-height: 400px;
+  flex-direction: column;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  outline: none;
+  animation: ui-menu-in var(--dur-2) var(--ease-out);
+}
+.image-picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.image-picker-head strong { color: var(--ink); font-size: 12px; font-weight: 600; }
+.image-picker-head span { color: var(--muted); font-size: 10px; }
+.image-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+  padding: 2px;
+  overflow-y: auto;
+}
+.image-picker-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.image-picker-option img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  transition: border-color var(--dur-1) var(--ease-in-out), transform var(--dur-1) var(--ease-out);
+}
+.image-picker-option:hover img { border-color: var(--line-hover); transform: scale(1.015); }
+.image-picker-option span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

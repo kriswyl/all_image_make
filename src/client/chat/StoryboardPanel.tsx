@@ -9,7 +9,7 @@
  * 缺哪张就在镜头行里直接写出来，而不是让用户花了钱才发现人物又变了。
  */
 import {
-  CheckCircle2, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle,
+  CheckCircle2, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle, Maximize2,
   Mountain, PanelLeftClose, PanelLeftOpen, RefreshCw, Sparkles, Upload, UserRound, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -23,6 +23,7 @@ import {
 import type { CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { AssetLightbox } from "./AssetLightbox";
+import { ImagePickerMenu, SelectMenu, SuggestInput } from "../ui/SelectMenu";
 
 type ToastKind = "ok" | "error";
 type SettingKind = "character" | "scene";
@@ -570,18 +571,15 @@ export function StoryboardPanel({
               onClick={() => { setUploadTarget({ kind, id: item.id }); uploadRef.current?.click(); }}>
               <Upload size={12} />上传
             </button>
-            <select
-              className="setting-card-pick"
-              value=""
-              disabled={anyBusy || !imageOptions.length}
-              onChange={(event) => void chooseSettingAsset(kind, item, event.target.value)}
-              title="用本会话已有的一张图作为设定图"
-            >
-              <option value="">选已有图</option>
-              {imageOptions.map((option) => (
-                <option key={option.asset.id} value={option.asset.id}>{option.label}</option>
-              ))}
-            </select>
+            <ImagePickerMenu
+              disabled={anyBusy}
+              options={imageOptions.map((option) => ({
+                id: option.asset.id,
+                label: option.label,
+                url: api.assetUrl(option.asset.thumbUrl ?? option.asset.url),
+              }))}
+              onSelect={(assetId) => void chooseSettingAsset(kind, item, assetId)}
+            />
             {item.asset && !item.confirmed ? (
               <button type="button" className="primary-button compact" disabled={anyBusy}
                 onClick={() => void confirmSetting(kind, item)}>
@@ -791,49 +789,64 @@ export function StoryboardPanel({
 
                     <div className="shot-main">
                       <div className="shot-meta">
-                        <label className="shot-kind">
-                          {shot.kind === "video" ? <Film size={12} /> : <ImageIcon size={12} />}
-                          <select value={shot.kind} disabled={activeShot}
-                            onChange={(event) => void saveShot(shot.id, { kind: event.target.value as "image" | "video" })}>
-                            <option value="image">图片</option>
-                            <option value="video">视频</option>
-                          </select>
-                        </label>
-                        <label className="shot-aspect">
-                          <select value={shot.aspectRatio} disabled={activeShot}
-                            onChange={(event) => void saveShot(shot.id, { aspectRatio: event.target.value })}>
-                            {STORYBOARD_ASPECT_RATIOS.map((ratio) => (
-                              <option key={ratio || "auto"} value={ratio}>{ratio || "默认画幅"}</option>
-                            ))}
-                          </select>
-                        </label>
+                        <SelectMenu
+                          className="shot-kind"
+                          ariaLabel={`第 ${shot.index} 镜的产物类型`}
+                          value={shot.kind}
+                          disabled={activeShot}
+                          leading={shot.kind === "video" ? <Film size={12} /> : <ImageIcon size={12} />}
+                          options={[{ value: "image", label: "图片" }, { value: "video", label: "视频" }]}
+                          onChange={(value) => void saveShot(shot.id, { kind: value as "image" | "video" })}
+                        />
+                        <SelectMenu
+                          className="shot-aspect"
+                          ariaLabel={`第 ${shot.index} 镜的画幅`}
+                          value={shot.aspectRatio}
+                          disabled={activeShot}
+                          options={STORYBOARD_ASPECT_RATIOS.map((ratio) => ({
+                            value: ratio,
+                            label: ratio || "默认画幅",
+                          }))}
+                          onChange={(value) => void saveShot(shot.id, { aspectRatio: value })}
+                        />
                         <label className="shot-character" title="出场角色；多个人物用「、」分隔">
                           <UserRound size={11} />
-                          <input list={`storyboard-characters-${conversationId}`}
+                          <SuggestInput
                             value={characterDrafts[shot.id] ?? shot.character}
-                            placeholder="无人物" maxLength={120} disabled={activeShot}
-                            onChange={(event) => changeCharacter(shot, event.target.value)}
+                            suggestions={characters.map((item) => item.name)}
+                            multiple
+                            placeholder="无人物"
+                            maxLength={120}
+                            disabled={activeShot}
+                            ariaLabel={`第 ${shot.index} 镜的出场角色`}
+                            onChange={(value) => changeCharacter(shot, value)}
                             onBlur={() => {
                               const timer = saveTimers.current.get(`character:${shot.id}`);
                               if (!timer) return;
                               clearTimeout(timer);
                               saveTimers.current.delete(`character:${shot.id}`);
                               void saveShot(shot.id, { character: (characterDrafts[shot.id] ?? shot.character).trim() });
-                            }} />
+                            }}
+                          />
                         </label>
                         <label className="shot-character" title="场景名；同一地点用同一个名字">
                           <Mountain size={11} />
-                          <input list={`storyboard-scenes-${conversationId}`}
+                          <SuggestInput
                             value={sceneDrafts[shot.id] ?? shot.scene}
-                            placeholder="无场景" maxLength={80} disabled={activeShot}
-                            onChange={(event) => changeScene(shot, event.target.value)}
+                            suggestions={scenes.map((item) => item.name)}
+                            placeholder="无场景"
+                            maxLength={80}
+                            disabled={activeShot}
+                            ariaLabel={`第 ${shot.index} 镜的场景`}
+                            onChange={(value) => changeScene(shot, value)}
                             onBlur={() => {
                               const timer = saveTimers.current.get(`scene:${shot.id}`);
                               if (!timer) return;
                               clearTimeout(timer);
                               saveTimers.current.delete(`scene:${shot.id}`);
                               void saveShot(shot.id, { scene: (sceneDrafts[shot.id] ?? shot.scene).trim() });
-                            }} />
+                            }}
+                          />
                         </label>
                         <span className={`shot-status is-${shot.status}`} title={shot.errorMessage ?? undefined}>
                           {shotStatusLabel(shot)}
@@ -857,6 +870,7 @@ export function StoryboardPanel({
                           {shot.kind === "video"
                             ? <video src={api.assetUrl(shot.asset.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
                             : <img src={api.assetUrl(shot.asset.thumbUrl ?? shot.asset.url)} alt="" loading="lazy" />}
+                          <span className="shot-thumb-hint"><Maximize2 size={11} />预览</span>
                         </button>
                       ) : <span className="shot-thumb is-empty">{shot.kind === "video" ? <Film size={18} /> : <ImageIcon size={18} />}</span>}
                       <div className="shot-actions">
@@ -895,12 +909,6 @@ export function StoryboardPanel({
           </main>
         </div>
 
-        <datalist id={`storyboard-characters-${conversationId}`}>
-          {characters.map((character) => <option key={character.id} value={character.name} />)}
-        </datalist>
-        <datalist id={`storyboard-scenes-${conversationId}`}>
-          {scenes.map((scene) => <option key={scene.id} value={scene.name} />)}
-        </datalist>
         <input
           ref={uploadRef}
           className="file-input"
