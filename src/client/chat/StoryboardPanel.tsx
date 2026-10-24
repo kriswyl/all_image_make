@@ -85,6 +85,7 @@ export function StoryboardPanel({
   tagCharactersDisabled = false,
   capabilities,
   defaultImageAlias = "",
+  onAssetsChanged,
 }: {
   conversationId: string;
   refreshKey: number;
@@ -99,6 +100,8 @@ export function StoryboardPanel({
   capabilities: CapabilityRow[];
   /** 用户没在分镜里单独选过时，跟随对话页的默认生图模型 */
   defaultImageAlias?: string;
+  /** 设定图 / 分镜结果新增或替换时通知外面刷新会话素材 */
+  onAssetsChanged?: () => void;
 }) {
   const [data, setData] = useState<StoryboardView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -155,6 +158,27 @@ export function StoryboardPanel({
     : imageModels.find((cap) => cap.alias === defaultImageAlias)?.alias ?? imageModels[0]?.alias ?? "";
   const imageModel = imageModels.find((cap) => cap.alias === imageAlias);
 
+  /**
+   * 分镜 / 设定图完成后，会话素材库不会自己知道——它只跟着 ChatView 的整份视图走。
+   * 这里盯住所有产物 id：新增、重跑替换、删除都会变，变了就通知外面重拉会话视图。
+   */
+  const assetSignature = useMemo(() => [
+    ...shots.map((shot) => `s:${shot.id}:${shot.asset?.id ?? ""}`),
+    ...characters.map((item) => `c:${item.id}:${item.asset?.id ?? ""}`),
+    ...scenes.map((item) => `p:${item.id}:${item.asset?.id ?? ""}`),
+  ].join("|"), [shots, characters, scenes]);
+  const lastAssetSignature = useRef<string | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    if (lastAssetSignature.current === null) {
+      lastAssetSignature.current = assetSignature;
+      return;
+    }
+    if (lastAssetSignature.current === assetSignature) return;
+    lastAssetSignature.current = assetSignature;
+    onAssetsChanged?.();
+  }, [assetSignature, data, onAssetsChanged]);
+
   async function load(quiet = true) {
     const seq = ++loadSeq.current;
     if (!quiet) setLoading(true);
@@ -186,6 +210,7 @@ export function StoryboardPanel({
     setSceneDrafts({});
     setSettingPromptDrafts({});
     setSelected(new Set());
+    lastAssetSignature.current = null;
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);

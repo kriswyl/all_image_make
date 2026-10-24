@@ -1001,7 +1001,7 @@ export function ChatView({
               <div className="chat-thread-inner" ref={threadInnerRef}>
               {!rows.length && !hasStream ? (
                 <div className="chat-thread-empty">
-                  <p>说一句话开始。它会自己决定是画图、改图、优化提示词，还是接着上一张生成视频。</p>
+                  <p>说一句话开始。可以画图、改图、拆剧本做分镜，也能生成视频、音乐和配音。</p>
                 </div>
               ) : null}
 
@@ -1076,6 +1076,7 @@ export function ChatView({
                 images={sessionImages}
                 capabilities={capabilities}
                 defaultImageAlias={defaults.image}
+                onAssetsChanged={() => { if (activeId) void reloadView(activeId); }}
                 onClose={() => setStoryboardOpen(false)}
                 onToast={toast}
                 onAddToCanvas={(assetId) => {
