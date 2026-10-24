@@ -249,20 +249,21 @@
   line-height: 1.1;
 }
 .ink-needs-lede { margin: 0 0 16px; color: var(--faint); font-size: 12.5px; }
+/* 生图 / 视频 / 音乐 / 语音 / 对话五类各占一格，不再把音乐和语音塞进「音频」 */
 .ink-needs-grid {
   display: grid;
-  width: min(820px, 100%);
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  width: min(960px, 100%);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
 }
 .ink-need {
   position: relative;
   display: flex;
-  min-height: 136px;
+  min-height: 126px;
   align-items: flex-start;
   flex-direction: column;
   gap: 6px;
-  padding: 17px 15px;
+  padding: 14px 13px;
   color: var(--ink);
   background: rgba(255, 255, 255, .76);
   border: 1px solid var(--line);

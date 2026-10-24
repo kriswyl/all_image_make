@@ -14,30 +14,33 @@ import {
 import { api } from "../api";
 import { openExternal } from "../external";
 import { adapterLabels } from "../labels";
-import { ModelLogo } from "../chat/ModelLogo";
+import { ModelLogo, type ModelKind } from "../chat/ModelLogo";
 import type { Channel } from "../../shared/types";
 import {
   MODEL_GROUPS, draftForGroup, duplicateFor, groupsForKind, recommendedModelFor,
   type ModelGroup, type ModelGroupKind,
 } from "../../shared/model-catalog";
 
-type ChapterKind = "chat" | "image" | "video" | "audio";
+/** 和模型组的展示品类一一对应；音乐 / 语音虽然同属音频任务，引导里分两章讲 */
+type ChapterKind = ModelGroupKind;
 type Stage =
   | "welcome" | "needs"
   | "chat-intro" | "chat-select"
   | "image-intro" | "image-select"
   | "video-intro" | "video-select"
-  | "audio-intro" | "audio-select"
+  | "music-intro" | "music-select"
+  | "speech-intro" | "speech-select"
   | "config" | "finish";
 type Transition = "forward" | "back" | null;
 
 /** 章节顺序和「你需要？」里的选项顺序一致：先用的排前面，对话大脑放最后 */
-const CHAPTER_ORDER: ChapterKind[] = ["image", "video", "audio", "chat"];
+const CHAPTER_ORDER: ChapterKind[] = ["image", "video", "music", "speech", "chat"];
 
 const NEED_OPTIONS: Array<{ kind: ChapterKind; label: string; hint: string; char: string }> = [
   { kind: "image", label: "生图", hint: "画图、改图、图生图", char: "绘" },
   { kind: "video", label: "生视频", hint: "文生视频、首尾帧、参考图", char: "动" },
-  { kind: "audio", label: "生音乐", hint: "灵感、自定义歌词、纯音乐", char: "乐" },
+  { kind: "music", label: "生音乐", hint: "Suno 写歌、歌词、纯音乐", char: "乐" },
+  { kind: "speech", label: "生语音", hint: "配音、旁白、双人对话", char: "声" },
   { kind: "chat", label: "对话创作", hint: "和 AI 一起规划与生成", char: "对" },
 ];
 
@@ -88,26 +91,42 @@ const CHAPTERS: Record<ChapterKind, {
     selectHint: "可以多选；万相、Seedance、可灵各自成组。",
     note: "可以多选，也可以先跳过",
   },
-  audio: {
+  music: {
     index: "第四章", num: "04", en: "CHAPTER 04",
     title: "选择音乐模型",
     selectTitle: "选一颗做歌的种子",
     char: "乐",
     poem: "丝竹入耳 · 心声成曲",
     lede: "让旋律落地，\n让歌词有声音。",
-    selectHint: "Suno 负责写歌，Gemini 负责配音/旁白；可以多选。",
-    note: "音乐和配音都归在音频类",
+    selectHint: "Suno 负责写歌：灵感描述、自定义歌词、纯音乐；可以多选。",
+    note: "写歌和配音不是同一组模型，下一章单独配",
+  },
+  speech: {
+    index: "第五章", num: "05", en: "CHAPTER 05",
+    title: "选择语音模型",
+    selectTitle: "选一个适合的声音",
+    char: "声",
+    poem: "字落有声 · 声入人心",
+    lede: "让文字开口，\n让旁白有温度。",
+    selectHint: "Gemini TTS 负责配音 / 旁白，30 个预置音色；可以多选。",
+    note: "之后也能随时更换音色",
   },
 };
 
-const MODES: Record<ChapterKind, string> = { image: "生图", video: "视频", audio: "音乐", chat: "对话" };
-const KIND_MARKS: Record<ChapterKind, string> = { image: "绘", video: "动", audio: "乐", chat: "对" };
+const MODES: Record<ChapterKind, string> = { image: "生图", video: "视频", music: "音乐", speech: "语音", chat: "对话" };
+const KIND_MARKS: Record<ChapterKind, string> = { image: "绘", video: "动", music: "乐", speech: "声", chat: "对" };
+
+/** 模型 logo 仍按渠道品类找品牌（Suno / Gemini 都在 audio 下） */
+function logoKind(kind: ChapterKind): ModelKind {
+  return kind === "music" || kind === "speech" ? "audio" : kind;
+}
 
 function kindOfStage(stage: Stage): ChapterKind | null {
   if (stage.startsWith("chat-")) return "chat";
   if (stage.startsWith("image-")) return "image";
   if (stage.startsWith("video-")) return "video";
-  if (stage.startsWith("audio-")) return "audio";
+  if (stage.startsWith("music-")) return "music";
+  if (stage.startsWith("speech-")) return "speech";
   return null;
 }
 
@@ -197,7 +216,7 @@ export function ImmersiveOnboarding({
   const chapter = kind
     ? {
         ...CHAPTERS[kind],
-        index: `第${["一", "二", "三", "四"][chapterIndex] ?? chapterIndex + 1}章`,
+        index: `第${["一", "二", "三", "四", "五"][chapterIndex] ?? chapterIndex + 1}章`,
         num: String(chapterIndex + 1).padStart(2, "0"),
         en: `CHAPTER ${String(chapterIndex + 1).padStart(2, "0")}`,
       }
@@ -635,7 +654,7 @@ export function ImmersiveOnboarding({
                   >
                     {bubble.recommended ? <span className="ink-bubble-rec">推荐</span> : null}
                     <span className="ink-bubble-logo">
-                      <ModelLogo model={bubble.model} kind={bubble.group.kind} size={bubble.style.size >= 130 ? 22 : 19} />
+                      <ModelLogo model={bubble.model} kind={logoKind(bubble.group.kind)} size={bubble.style.size >= 130 ? 22 : 19} />
                     </span>
                     <span className="ink-bubble-name">{bubble.model}</span>
                     <span className="ink-bubble-sub">{bubble.group.unit.label}</span>
@@ -715,7 +734,7 @@ export function ImmersiveOnboarding({
                         </div>
                         <div className="ink-config-models">
                           {(selected[row.group.key] ?? []).map((model) => (
-                            <span key={model}><ModelLogo model={model} kind={row.group.kind} size={11} />{model}</span>
+                            <span key={model}><ModelLogo model={model} kind={logoKind(row.group.kind)} size={11} />{model}</span>
                           ))}
                         </div>
                         <span className="ink-config-badge">{row.duplicate ? "更新已有" : "新建"}</span>

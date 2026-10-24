@@ -6,25 +6,31 @@ import {
   buildChannelDrafts, findConflictChannels, findProviderPreset,
   PROVIDER_PRESETS, type ChannelDraft, type UnitSelection,
 } from "../../shared/provider-presets";
-import { channelKindOf, type Channel, type ChannelKind } from "../../shared/types";
+import { channelKindOf, type Channel } from "../../shared/types";
+import type { ModelGroupKind } from "../../shared/model-catalog";
+import { modelBrand } from "../chat/ModelLogo";
 
 type SaveMode = "create" | "skip";
 
 /**
- * 渠道单元按用途分三组。
+ * 渠道单元按用途分组。
  *
- * 一个中转站常常同时卖三类密钥（生图、视频、对话），平铺十来张卡片时
- * 「我要找的那个视频模型组在哪」全靠肉眼扫。分组之后一眼定位。
+ * 一个中转站常常同时卖好几类密钥，平铺十来张卡片时「我要找的那个视频模型组在哪」
+ * 全靠肉眼扫。分组之后一眼定位；音乐和语音虽然都是音频任务，但模型完全不同，
+ * 选模型时也分开两栏，避免把 Gemini 的配音模型当成写歌的。
  */
-const UNIT_GROUPS: ReadonlyArray<{ kind: ChannelKind; label: string }> = [
+const UNIT_GROUPS: ReadonlyArray<{ kind: ModelGroupKind; label: string }> = [
   { kind: "image", label: "生图" },
   { kind: "video", label: "视频" },
-  { kind: "audio", label: "音频" },
+  { kind: "music", label: "音乐" },
+  { kind: "speech", label: "语音" },
   { kind: "chat", label: "对话（当大脑用）" },
 ];
 
-function unitGroupOf(adapterType: string): ChannelKind {
-  return channelKindOf(adapterType);
+function unitGroupOf(adapterType: string): ModelGroupKind {
+  if (adapterType === "suno-music") return "music";
+  if (adapterType === "gemini-tts") return "speech";
+  return channelKindOf(adapterType) as ModelGroupKind;
 }
 type RowResult = { status: "saving" | "done" | "error"; message?: string };
 type TestResult = { status: "testing" | "ok" | "error"; message?: string };
@@ -184,17 +190,29 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                   <section key={group.kind} className="preset-group">
                     <h3 className="unit-group-title">{group.label}<span>{items.length}</span></h3>
                     <div className="preset-grid">
-              {items.map((item, index) => (
-                <button type="button" key={item.id} className={`preset-card ${providerId === item.id ? "selected" : ""}`} onClick={() => selectProvider(item.id)}>
-                  {/* 有站点品牌图标的用图标，没有的退回通用 Server 图标 + 配色 */}
-                  <span className={`preset-icon ${item.logo ? "has-logo" : `tone-${index % 3}`}`}>
-                    {item.logo ? <img src={item.logo} alt="" loading="lazy" decoding="async" /> : <Server size={21} />}
-                  </span>
-                  <span className="preset-title">{item.label}{providerId === item.id ? <CheckCircle2 className="preset-check" size={16} /> : null}</span>
-                  <span className="preset-url">{item.baseUrl}</span>
-                  <span className="preset-tags">{item.units.map((unit) => <span key={unit.id} className="preset-tag">{unit.label}</span>)}</span>
-                </button>
-              ))}
+              {items.map((item, index) => {
+                // 卡片主图标用模型组自己的牌子（Suno / Gemini / GPT…），
+                // 同一站点的十张卡才不会全是同一枚紫色方块；认不出再退回站点图标。
+                const unit = item.units[0];
+                const brand = unit?.models[0]
+                  ? modelBrand(unit.models[0], channelKindOf(unit.adapterType))
+                  : null;
+                const icon = brand?.logo ?? item.logo;
+                return (
+                  <button type="button" key={item.id} className={`preset-card ${providerId === item.id ? "selected" : ""}`} onClick={() => selectProvider(item.id)}>
+                    <span className={`preset-icon ${icon ? "has-logo" : `tone-${index % 3}`}`}>
+                      {icon ? <img src={icon} alt="" loading="lazy" decoding="async" /> : <Server size={21} />}
+                    </span>
+                    <span className="preset-title">{item.label}{providerId === item.id ? <CheckCircle2 className="preset-check" size={16} /> : null}</span>
+                    <span className="preset-url">{item.baseUrl}</span>
+                    <span className="preset-tags">
+                      {item.units.map((entry) => (
+                        <span key={entry.id} className="preset-tag">{entry.label}</span>
+                      ))}
+                    </span>
+                  </button>
+                );
+              })}
                     </div>
                   </section>
                 );

@@ -12,7 +12,13 @@ import {
 import { channelKindOf } from "./kinds.js";
 import type { Channel } from "./types.js";
 
-export type ModelGroupKind = "image" | "video" | "audio" | "chat";
+/**
+ * 模型组的展示品类。
+ *
+ * 渠道层仍然只有 `audio`（音乐和语音共用任务类型），但「先选模型」和引导里必须
+ * 把 Suno 写歌与 Gemini 配音拆开——否则一个「音频」类里躺着两种完全不同的模型。
+ */
+export type ModelGroupKind = "image" | "video" | "music" | "speech" | "chat";
 
 export interface ModelGroup {
   /** `${presetId}:${unitId}`，选择状态和 React key 都用它 */
@@ -23,7 +29,10 @@ export interface ModelGroup {
 }
 
 function kindOf(unit: ChannelUnitPreset): ModelGroupKind {
-  return channelKindOf(unit.adapterType);
+  // 渠道层把两者都算 audio；这里按适配器再拆一次，Suno 写歌 / Gemini 配音各归各的章节
+  if (unit.adapterType === "suno-music") return "music";
+  if (unit.adapterType === "gemini-tts") return "speech";
+  return channelKindOf(unit.adapterType) as ModelGroupKind;
 }
 
 export const MODEL_GROUPS: ModelGroup[] = PROVIDER_PRESETS.flatMap((preset) => preset.units.map((unit) => ({
@@ -36,7 +45,8 @@ export const MODEL_GROUPS: ModelGroup[] = PROVIDER_PRESETS.flatMap((preset) => p
 export const MODEL_GROUP_SECTIONS: Array<{ kind: ModelGroupKind; label: string; hint: string }> = [
   { kind: "image", label: "生图", hint: "画图、改图、图生图" },
   { kind: "video", label: "视频", hint: "文生视频、首尾帧、参考生视频" },
-  { kind: "audio", label: "音频", hint: "音乐生成、配音、旁白" },
+  { kind: "music", label: "音乐", hint: "Suno 写歌、自定义歌词、纯音乐" },
+  { kind: "speech", label: "语音", hint: "Gemini 配音、旁白、双人对话" },
   { kind: "chat", label: "对话", hint: "对话工作区的大脑，不出图" },
 ];
 

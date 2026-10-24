@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
   ImagePlus, KeyRound, LoaderCircle, Mic, Minus, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
@@ -60,6 +61,48 @@ function latestActivity(tasks: Task[]) {
 
 export function App() {
   const [view, setView] = useState<View>("generate");
+
+  /**
+   * 切工作区。
+   *
+   * 支持 View Transitions 的内核（WebView2 / Chrome 111+）走整页快照：旧页轻微
+   * 上移、新页从下方托起，比单纯闪一下有方向感；快照层做 transform 不会影响
+   * 页面里 position:fixed 的弹层。旧内核和「减少动态效果」退回普通切换。
+   *
+   * `flushSync` 不能省：startViewTransition 的回调必须同步完成 DOM 更新，
+   * 否则新快照拍到的还是旧页面。
+   */
+  function switchView(next: View, extra?: () => void) {
+    if (next === view) { extra?.(); return; }
+    const doc = document as Document & { startViewTransition?: (callback: () => void) => unknown };
+    if (!doc.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setView(next);
+      extra?.();
+      return;
+    }
+    let applied = false;
+    const apply = () => {
+      if (applied) return;
+      applied = true;
+      flushSync(() => { setView(next); extra?.(); });
+    };
+    try {
+      const transition = doc.startViewTransition(apply) as { skipTransition?: () => void } | undefined;
+      // 窗口最小化 / 后台标签页里 rAF 会被节流，快照回调可能迟迟不来。
+      // 等 200ms 还没切换就直接切，页面功能不能被动画卡住。
+      window.setTimeout(() => {
+        if (applied) return;
+        applied = true;
+        try { transition?.skipTransition?.(); } catch { /* 已结束 */ }
+        setView(next);
+        extra?.();
+      }, 200);
+    } catch {
+      // 快照被取消 / 内核实现异常时不能把用户卡在原页面
+      setView(next);
+      extra?.();
+    }
+  }
   /**
    * 新用户向导：一个渠道都没有时占住主区，直到用户真的配好渠道、
    * 或者点「先自己看看」主动跳过。跳过的选择记在本机，免得每次开都弹。
@@ -653,14 +696,14 @@ export function App() {
             active={view === "chat"}
             icon={<SquarePen size={16} />}
             label="对话创作"
-            onClick={() => { dismissWelcome(); setView("chat"); setNewChatSignal((value) => value + 1); }}
+            onClick={() => { dismissWelcome(); switchView("chat", () => setNewChatSignal((value) => value + 1)); }}
           />
-          <NavButton active={view === "generate"} icon={<ImageIcon size={16} />} label="图片生成" onClick={() => { dismissWelcome(); setView("generate"); }} />
-          <NavButton active={view === "video"} icon={<Film size={16} />} label="视频生成" onClick={() => { dismissWelcome(); setView("video"); }} />
-          <NavButton active={view === "music"} icon={<Music size={16} />} label="音乐生成" onClick={() => { dismissWelcome(); setView("music"); }} />
-          <NavButton active={view === "speech"} icon={<Mic size={16} />} label="语音生成" onClick={() => { dismissWelcome(); setView("speech"); }} />
-          <NavButton active={view === "history"} icon={<History size={16} />} label="历史记录" unread={historyUnread} onClick={() => { dismissWelcome(); setView("history"); }} />
-          <NavButton active={view === "channels"} icon={<Plug size={16} />} label="模型设置" onClick={() => { dismissWelcome(); setView("channels"); }} />
+          <NavButton active={view === "generate"} icon={<ImageIcon size={16} />} label="图片生成" onClick={() => { dismissWelcome(); switchView("generate"); }} />
+          <NavButton active={view === "video"} icon={<Film size={16} />} label="视频生成" onClick={() => { dismissWelcome(); switchView("video"); }} />
+          <NavButton active={view === "music"} icon={<Music size={16} />} label="音乐生成" onClick={() => { dismissWelcome(); switchView("music"); }} />
+          <NavButton active={view === "speech"} icon={<Mic size={16} />} label="语音生成" onClick={() => { dismissWelcome(); switchView("speech"); }} />
+          <NavButton active={view === "history"} icon={<History size={16} />} label="历史记录" unread={historyUnread} onClick={() => { dismissWelcome(); switchView("history"); }} />
+          <NavButton active={view === "channels"} icon={<Plug size={16} />} label="模型设置" onClick={() => { dismissWelcome(); switchView("channels"); }} />
         </nav>
 
         {/*

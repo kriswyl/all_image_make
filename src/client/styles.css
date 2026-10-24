@@ -923,17 +923,17 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .wizard-step.passed .wizard-step-dot { color: var(--accent); background: var(--accent-soft); border-color: var(--line-strong); }
 .wizard-body { align-content: start; gap: 13px; }
 
-.preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 12px; }
-.preset-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 16px; text-align: left; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-control); cursor: pointer; transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease; }
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 228px)); justify-content: start; gap: 10px; }
+.preset-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px; text-align: left; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-control); cursor: pointer; transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease; }
 .preset-card:hover { transform: translateY(-2px); border-color: var(--line-strong); box-shadow: 0 8px 20px rgba(0, 0, 0, .06); }
 .preset-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1); }
-.preset-title { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 14px; font-weight: 700; }
+.preset-title { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 13.5px; font-weight: 700; }
 .preset-title svg { color: var(--accent); }
 .preset-check { margin-left: auto; }
-.preset-url { color: var(--muted); font: 11px "Cascadia Code", Consolas, monospace; }
-.preset-desc { color: var(--muted); font-size: 11px; line-height: 1.6; }
-.preset-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
-.preset-tag { padding: 2px 8px; color: var(--ink-soft); background: rgba(0, 0, 0, .08); border-radius: var(--radius-control); font-size: 10px; font-weight: 650; }
+.preset-url { color: var(--muted); font: 10.5px "Cascadia Code", Consolas, monospace; }
+.preset-desc { color: var(--muted); font-size: 10.5px; line-height: 1.55; }
+.preset-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 1px; }
+.preset-tag { padding: 2px 7px; color: var(--ink-soft); background: rgba(0, 0, 0, .08); border-radius: var(--radius-control); font-size: 9.5px; font-weight: 650; }
 .preset-custom { background: var(--surface); border-style: dashed; }
 
 .unit-card, .key-card { display: grid; gap: 11px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); transition: border-color 140ms ease, box-shadow 140ms ease; }
@@ -1060,7 +1060,7 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 .preset-card { border: 0; border-radius: var(--radius); box-shadow: var(--shadow-card); }
 .preset-card:hover { transform: translateY(-3px); box-shadow: 0 6px 14px rgba(0, 0, 0, .05), 0 20px 44px rgba(0, 0, 0, .10); }
 .preset-card.selected { background: var(--surface); box-shadow: 0 0 0 2px var(--accent), var(--shadow-card); }
-.preset-icon { display: grid; width: 44px; height: 44px; place-items: center; margin-bottom: 4px; color: #fff; border-radius: var(--radius-card); }
+.preset-icon { display: grid; width: 36px; height: 36px; place-items: center; margin-bottom: 2px; color: #fff; border-radius: var(--radius-card); }
 .preset-icon.tone-0 { background: #3d3d3d; }
 .preset-icon.tone-1 { background: #6e6e6e; }
 .preset-icon.tone-2 { background: #8a8a8a; }
@@ -1069,8 +1069,8 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
   background: #fff;
   box-shadow: inset 0 0 0 1px var(--line), 0 2px 8px rgba(0, 0, 0, .07);
 }
-.preset-icon.has-logo img { display: block; width: 30px; height: 30px; object-fit: contain; }
-.preset-title { font-size: 15px; }
+.preset-icon.has-logo img { display: block; width: 25px; height: 25px; object-fit: contain; }
+.preset-title { font-size: 13.5px; }
 .preset-title svg { color: inherit; }
 .preset-url { color: var(--accent); }
 .preset-tag { color: var(--accent-dark); background: var(--accent-soft); }

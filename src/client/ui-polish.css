@@ -207,7 +207,42 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 }
 .modal,
 .storyboard-modal { animation: ui-dialog-in var(--dur-3) var(--ease-out); }
-.asset-library { animation: ui-drawer-in var(--dur-3) var(--ease-out); }
+
+/* 侧栏切换工作区：交给 View Transitions，旧页轻微上移、新页从下方托起。
+   快照层做 transform 不会给 position:fixed 的弹层造包含块，灯箱不会错位；
+   不支持 View Transitions 的旧内核退回下面那条纯 opacity 淡入。 */
+@keyframes view-switch-out {
+  to { opacity: 0; transform: translateY(-6px) scale(.996); }
+}
+@keyframes view-switch-in {
+  from { opacity: 0; transform: translateY(10px) scale(.997); }
+  to { opacity: 1; transform: none; }
+}
+.workspace { view-transition-name: workspace; }
+/* 只动工作区，侧栏保持不动；根快照的默认交叉淡化会让整窗一起闪 */
+::view-transition-old(root),
+::view-transition-new(root) { animation: none; }
+::view-transition-old(workspace) {
+  animation: view-switch-out 160ms var(--ease-out) both;
+}
+::view-transition-new(workspace) {
+  animation: view-switch-in 280ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+/* 素材库：抽屉整块从右侧滑入，内部信息再错开一点，避免「啪」地出现 */
+@keyframes asset-drawer-slide {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+@keyframes asset-content-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: none; }
+}
+.asset-library { animation: asset-drawer-slide 340ms cubic-bezier(.22, 1, .36, 1); }
+.asset-library-head { animation: asset-content-in 260ms var(--ease-out) 60ms both; }
+.asset-library-tabs { animation: asset-content-in 260ms var(--ease-out) 100ms both; }
+.asset-library-tools { animation: asset-content-in 260ms var(--ease-out) 130ms both; }
+.asset-library-grid { animation: asset-content-in 300ms var(--ease-out) 160ms both; }
 
 /* 分镜工作台：大浮层从下方托起，左右两栏再稍微错开淡入 */
 @keyframes storyboard-in {
@@ -247,11 +282,14 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 /* 页面标题统一到 19px：工作台原来 19、渠道页 17，切换时会「跳字号」 */
 .page-header h1 { font-size: 19px; letter-spacing: -.015em; }
 
-/* 切换导航时页面淡入。只动 opacity，不碰 transform——
-   transform 会给 position:fixed 的子弹层造一个新的包含块，灯箱会错位。 */
-.workspace > .page,
-.workspace > .chat-view {
-  animation: ui-fade-in var(--dur-2) var(--ease-out);
+/* 旧内核的退回方案：只淡入、不碰 transform——transform 会给 position:fixed 的
+   弹层造一个新的包含块，灯箱会错位。支持 View Transitions 时上面那条接管，
+   这里必须让开，否则快照会拍到 opacity:0 的新页面。 */
+@supports not (view-transition-name: workspace) {
+  .workspace > .page,
+  .workspace > .chat-view {
+    animation: ui-fade-in var(--dur-2) var(--ease-out);
+  }
 }
 
 /* 侧栏收起 / 展开：列宽跟着过渡，内容淡出后再 hidden。

@@ -8,6 +8,7 @@
 import { Image as ImageIcon, Layers, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { SelectMenu } from "../ui/SelectMenu";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 
@@ -156,10 +157,14 @@ export function AssetLibrary({
             <input value={query} onChange={(event) => setQuery(event.target.value)}
               placeholder="搜索画面描述 / 文件名 / 镜号…" />
           </label>
-          <select value={sort} onChange={(event) => setSort(event.target.value as Sort)}>
-            <option value="newest">最新优先</option>
-            <option value="oldest">最早优先</option>
-          </select>
+          <SelectMenu
+            value={sort}
+            options={[{ value: "newest", label: "最新优先" }, { value: "oldest", label: "最早优先" }]}
+            onChange={(next) => setSort(next as Sort)}
+            ariaLabel="排序方式"
+            minWidth={96}
+            className="asset-sort"
+          />
         </div>
 
         <div className="asset-library-grid">
