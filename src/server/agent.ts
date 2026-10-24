@@ -57,6 +57,7 @@ import {
   type VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import { isImageAsset, MAX_CANVAS_IMAGES, taskKindFor } from "../shared/types.js";
+import { midjourneyUsableButtons } from "../shared/midjourney.js";
 import {
   MAX_ROUNDS, MAX_AUTO_CONTINUE, MAX_SESSION_TASKS, MAX_PARSE_RETRY,
   MAX_VISION_READS_PER_ROUND, MAX_VISION_IMAGES,
@@ -188,7 +189,8 @@ export class AgentService {
     });
     return {
       ...conversation,
-      messages: this.db.listMessages(conversationId),
+      // 老消息里没有 MJ 按钮；读视图时从任务 meta 补上，历史结果也能直接继续 U/V/R
+      messages: this.db.listMessages(conversationId).map((message) => this.withMidjourneyButtons(message)),
       // token 账本：状态行显示「上下文多大 / 这个会话一共花了多少 token」
       usage: this.db.conversationUsage(conversationId),
       // 当前画布那一组，顺序同 canvasAssetIds（不能按时间重排——第一张是画布序号 1）。
@@ -200,6 +202,22 @@ export class AgentService {
       // 灯箱照旧当图片渲染，用户看到的就是一个裂图（需求.md 问题 3）
       mediaAssets: entries.map(toCanvasAsset),
       storyboardCount: this.db.countStoryboardShots(conversationId),
+    };
+  }
+
+  /** 老 MJ 结果没有把按钮写进消息；视图层从任务 meta 补，不改库 */
+  private withMidjourneyButtons(message: ChatMessage): ChatMessage {
+    const result = message.toolResult;
+    const taskId = result?.taskId;
+    const data = result?.data;
+    if (!taskId || !data || typeof data.model !== "string" || !data.model.startsWith("mj_")) return message;
+    if (Array.isArray(data.midjourneyButtons)) return message;
+    const task = this.db.getTaskView(taskId);
+    const buttons = midjourneyUsableButtons(task?.remoteMeta?.midjourney?.buttons ?? []);
+    if (!buttons.length) return message;
+    return {
+      ...message,
+      toolResult: { ...result, data: { ...data, midjourneyButtons: buttons, midjourneyTaskId: taskId } },
     };
   }
 
