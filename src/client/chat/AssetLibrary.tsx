@@ -5,8 +5,9 @@
  * 哪张被选成了首帧 / 尾帧。这里用网格 + 来源筛选 + 搜索来解决「找图」，
  * 底部动作直接改画布顺序——首帧就是画布第 1 张，尾帧是第 2 张，其余是参考图。
  */
-import { Image as ImageIcon, Layers, Search, X } from "lucide-react";
+import { Eye, Image as ImageIcon, Layers, LoaderCircle, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api";
 import { SelectMenu } from "../ui/SelectMenu";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
@@ -44,6 +45,7 @@ export function AssetLibrary({
   onToggleCanvas,
   onSetFirst,
   onSetLast,
+  onDeleteAsset,
   initialTab = "all",
 }: {
   open: boolean;
@@ -55,6 +57,8 @@ export function AssetLibrary({
   onToggleCanvas: (assetId: string) => void;
   onSetFirst: (assetId: string) => void;
   onSetLast: (assetId: string) => void;
+  /** 右键删除：永久删除磁盘文件并清理会话里的引用 */
+  onDeleteAsset: (assetId: string) => Promise<void> | void;
   /** 从画布条的「管理」打开时直接落在「画布」页 */
   initialTab?: Tab;
 }) {
@@ -62,12 +66,17 @@ export function AssetLibrary({
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("newest");
   const [focused, setFocused] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ assetId: string; x: number; y: number } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setFocused(null);
     setQuery("");
     setTab(initialTab);
+    setMenu(null);
+    setDeleteTarget(null);
   }, [open, initialTab]);
 
   useEffect(() => {
@@ -76,6 +85,27 @@ export function AssetLibrary({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // 右键菜单：点外面 / 滚动画布 / 改窗口大小 / Esc 都收起，避免菜单飘在原地
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onPointerDown = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest(".asset-context-menu")) return;
+      close();
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   const positions = useMemo(() => new Map(canvasIds.map((id, index) => [id, index])), [canvasIds]);
 
@@ -116,6 +146,18 @@ export function AssetLibrary({
   function focusAndToggle(id: string) {
     setFocused(id);
     onToggleCanvas(id);
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await onDeleteAsset(deleteTarget.id);
+      setDeleteTarget(null);
+      setFocused(null);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   const tabs: Array<{ id: Tab; label: string; count: number }> = [
@@ -171,7 +213,20 @@ export function AssetLibrary({
           {entries.map(({ entry, position, origin }) => {
             const inCanvas = position >= 0;
             return (
-              <div key={entry.asset.id} className={`asset-library-item ${inCanvas ? "is-in-canvas" : ""} ${focused === entry.asset.id ? "is-focused" : ""}`}>
+              <div
+                key={entry.asset.id}
+                className={`asset-library-item ${inCanvas ? "is-in-canvas" : ""} ${focused === entry.asset.id ? "is-focused" : ""}`}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  // 菜单宽高固定，靠近右边 / 底部时往回收，避免被窗口裁掉
+                  setMenu({
+                    assetId: entry.asset.id,
+                    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 184)),
+                    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 148)),
+                  });
+                }}
+              >
                 <button
                   type="button"
                   className="asset-library-thumb"
@@ -236,6 +291,79 @@ export function AssetLibrary({
           </div>
         </footer>
       </div>
+
+      {menu ? (() => {
+        const item = entries.find(({ entry }) => entry.asset.id === menu.assetId);
+        if (!item) return null;
+        const inCanvas = positions.has(menu.assetId);
+        return createPortal(
+          <div
+            className="canvas-bar-menu asset-context-menu"
+            role="menu"
+            aria-label="图片操作"
+            style={{ left: menu.x, top: menu.y }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="canvas-bar-menu-title">{originLabel(item.entry)} · {item.entry.asset.fileName}</div>
+            <button type="button" role="menuitem" onClick={() => { setMenu(null); onPreview(menu.assetId); }}>
+              <Eye size={13} />查看大图
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => { setMenu(null); onToggleCanvas(menu.assetId); }}
+            >
+              <Layers size={13} />{inCanvas ? "移出画布" : "加入画布"}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                // 画面描述可能很长，确认框只留一小段，别把弹窗撑成一面墙
+                const raw = item.entry.prompt.trim() || item.entry.asset.fileName;
+                setDeleteTarget({
+                  id: menu.assetId,
+                  label: raw.length > 36 ? `${raw.slice(0, 36)}…` : raw,
+                });
+                setMenu(null);
+              }}
+            >
+              <Trash2 size={13} />删除图片
+            </button>
+          </div>,
+          document.body,
+        );
+      })() : null}
+
+      {deleteTarget ? createPortal(
+        <div
+          className="modal-backdrop storyboard-confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteTarget(null); }}
+        >
+          <div className="modal storyboard-confirm asset-delete-dialog" role="dialog" aria-modal="true" aria-label="删除图片">
+            <div className="modal-header">
+              <div><Trash2 size={18} /><h2>删除图片</h2></div>
+              <button type="button" className="icon-button" onClick={() => setDeleteTarget(null)} disabled={deleting}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <p className="modal-lead">确定删除「<strong>{deleteTarget.label}</strong>」？</p>
+              <p className="storyboard-reference-note">
+                会删除磁盘上的原图和缩略图，并从生成历史、画布和相关分镜引用里移除，无法恢复。
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary-button" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button>
+              <button type="button" className="primary-button danger" disabled={deleting} onClick={() => void confirmDelete()}>
+                {deleting ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />}
+                {deleting ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   );
 }

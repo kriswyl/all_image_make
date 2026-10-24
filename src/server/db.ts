@@ -549,6 +549,139 @@ export class AppDatabase {
     return { assets, inputs };
   }
 
+  /**
+   * 从会话素材库里永久删除一张图片。
+   *
+   * 和「删任务」的区别：这里以**图片**为单位。一个任务只出了这一张时连任务和
+   * 参考图一起清掉；任务还有别的产物时只删这一张，历史记录保留。删除后把消息、
+   * 画布、分镜和角色 / 场景里的引用一起摘掉，避免画出裂图或留下指向空任务的卡片。
+   */
+  deleteConversationAsset(conversationId: string, assetId: string): {
+    files: StoredFileRef[];
+    inputs: string[];
+    taskRemoved: boolean;
+  } | null {
+    const asset = this.getAsset(assetId);
+    if (!asset) return null;
+    const taskId = asset.taskId;
+    const siblingRow = this.db.prepare("SELECT COUNT(*) AS count FROM assets WHERE task_id = ?")
+      .get(taskId) as DbRow | undefined;
+    const taskRemoved = Number(siblingRow?.count ?? 0) <= 1;
+    const files: StoredFileRef[] = [];
+    const inputs: string[] = [];
+    if (taskRemoved) {
+      const removed = this.deleteTask(taskId);
+      files.push(...removed.assets);
+      inputs.push(...removed.inputs);
+    } else {
+      files.push({ baseDir: asset.baseDir, relativePath: asset.relativePath });
+      if (asset.thumbPath) files.push({ baseDir: this.thumbsDir, relativePath: asset.thumbPath });
+      this.db.prepare("DELETE FROM assets WHERE id = ?").run(assetId);
+    }
+
+    const at = now();
+    // 一个任务出了多张图时，消息原来锚在删掉的那张上；改锚到同任务剩下的图，
+    // 否则「会话素材」会把同一任务的其余产物一起藏掉
+    const fallbackRow = taskRemoved ? undefined : this.db.prepare(
+      "SELECT id FROM assets WHERE task_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
+    ).get(taskId) as DbRow | undefined;
+    const fallbackAssetId = fallbackRow?.id == null ? null : String(fallbackRow.id);
+    // 消息：主图 / 附带图 / 工具结果里的 taskId 都要断干净，否则前端会去请求已删的缩略图
+    const messages = this.db.prepare(
+      "SELECT id, asset_id, asset_refs, task_id, tool_result_json FROM messages WHERE conversation_id = ?",
+    ).all(conversationId) as DbRow[];
+    const updateMessage = this.db.prepare(
+      "UPDATE messages SET asset_id = ?, asset_refs = ?, task_id = ?, tool_result_json = ? WHERE id = ?",
+    );
+    for (const row of messages) {
+      let changed = false;
+      let messageAssetId = row.asset_id == null ? null : String(row.asset_id);
+      if (messageAssetId === assetId) { messageAssetId = fallbackAssetId; changed = true; }
+
+      let assetRefs: string[] | null = row.asset_refs == null ? null : (() => {
+        try { return JSON.parse(String(row.asset_refs)) as string[]; } catch { return null; }
+      })();
+      if (Array.isArray(assetRefs) && assetRefs.includes(assetId)) {
+        assetRefs = assetRefs.filter((id) => id !== assetId);
+        changed = true;
+      }
+
+      let messageTaskId = row.task_id == null ? null : String(row.task_id);
+      if (taskRemoved && messageTaskId === taskId) { messageTaskId = null; changed = true; }
+
+      let toolResultJson = row.tool_result_json == null ? null : String(row.tool_result_json);
+      if (toolResultJson) {
+        try {
+          const result = JSON.parse(toolResultJson) as Record<string, unknown>;
+          const data = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : null;
+          let resultChanged = false;
+          if (result.assetId === assetId) { delete result.assetId; resultChanged = true; }
+          if (data?.assetId === assetId) { delete data.assetId; resultChanged = true; }
+          if (Array.isArray(data?.assetIds)) {
+            const ids = (data.assetIds as string[]).filter((id) => id !== assetId);
+            if (ids.length !== (data.assetIds as string[]).length) {
+              if (ids.length) data.assetIds = ids; else delete data.assetIds;
+              resultChanged = true;
+            }
+          }
+          if (taskRemoved && result.taskId === taskId) { delete result.taskId; resultChanged = true; }
+          if (taskRemoved && data?.midjourneyTaskId === taskId) { delete data.midjourneyTaskId; resultChanged = true; }
+          if (resultChanged) { changed = true; toolResultJson = JSON.stringify(result); }
+          else toolResultJson = row.tool_result_json == null ? null : String(row.tool_result_json);
+        } catch {
+          // 旧数据里偶有非 JSON，保持原样
+        }
+      }
+
+      if (!changed) continue;
+      updateMessage.run(
+        messageAssetId,
+        assetRefs?.length ? JSON.stringify(assetRefs) : null,
+        messageTaskId,
+        toolResultJson,
+        String(row.id),
+      );
+    }
+
+    // 画布：删掉的图不能继续占着首帧 / 尾帧的位置
+    const conversationRow = this.db.prepare(
+      "SELECT canvas_asset_ids, current_asset_id FROM conversations WHERE id = ?",
+    ).get(conversationId) as DbRow | undefined;
+    if (conversationRow) {
+      const canvas = canvasIdsFromRow(conversationRow.canvas_asset_ids).filter((id) => id !== assetId);
+      const current = conversationRow.current_asset_id == null ? null : String(conversationRow.current_asset_id);
+      this.db.prepare(
+        "UPDATE conversations SET canvas_asset_ids = ?, current_asset_id = ?, updated_at = ? WHERE id = ?",
+      ).run(JSON.stringify(canvas), current === assetId ? null : current, at, conversationId);
+    }
+
+    // 分镜 / 设定：任务没了就把指针清空，镜头回到「未生成」
+    if (taskRemoved) {
+      this.db.prepare(
+        "UPDATE conversation_shots SET task_id = NULL, updated_at = ? WHERE conversation_id = ? AND task_id = ?",
+      ).run(at, conversationId, taskId);
+    }
+    this.db.prepare(
+      "UPDATE conversation_characters SET asset_id = NULL, confirmed = 0, updated_at = ? WHERE conversation_id = ? AND asset_id = ?",
+    ).run(at, conversationId, assetId);
+    this.db.prepare(
+      "UPDATE conversation_scenes SET asset_id = NULL, confirmed = 0, updated_at = ? WHERE conversation_id = ? AND asset_id = ?",
+    ).run(at, conversationId, assetId);
+    if (taskRemoved) {
+      this.db.prepare(
+        "UPDATE conversation_characters SET task_id = NULL, confirmed = 0, updated_at = ? WHERE conversation_id = ? AND task_id = ?",
+      ).run(at, conversationId, taskId);
+      this.db.prepare(
+        "UPDATE conversation_scenes SET task_id = NULL, confirmed = 0, updated_at = ? WHERE conversation_id = ? AND task_id = ?",
+      ).run(at, conversationId, taskId);
+    }
+    this.db.prepare(
+      "UPDATE conversations SET storyboard_reference_asset_id = NULL, storyboard_reference_mode = 'auto' WHERE id = ? AND storyboard_reference_asset_id = ?",
+    ).run(conversationId, assetId);
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+    return { files, inputs, taskRemoved };
+  }
+
   /** 批量删除：清空历史走这条，避免前端逐条发请求 */
   deleteTasks(ids: string[], options: { keepFiles?: boolean } = {}): { deleted: string[]; assets: StoredFileRef[]; inputs: string[] } {
     const assets: StoredFileRef[] = [];

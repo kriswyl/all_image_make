@@ -547,6 +547,24 @@ export function ChatView({
     writeCanvas([...current, assetId]);
   }
 
+  /**
+   * 素材库右键删除：服务端会一并清理任务、文件以及消息 / 画布 / 分镜引用，
+   * 返回整份会话视图，这里直接回灌即可。
+   */
+  async function deleteSessionAsset(assetId: string) {
+    const id = activeId;
+    if (!id) return;
+    try {
+      const next = await api.deleteConversationAsset(id, assetId);
+      setView(next);
+      setPreview((current) => current === assetId ? null : current);
+      toast("ok", "已删除图片");
+    } catch (error) {
+      toastError(error);
+      throw error;
+    }
+  }
+
   /** 设为首帧：移到画布第 1 位；不在画布里就加进来 */
   function setCanvasFirst(assetId: string) {
     if (!view) return;
@@ -1165,6 +1183,7 @@ export function ChatView({
         onToggleCanvas={toggleCanvasSelection}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
+        onDeleteAsset={deleteSessionAsset}
       />
 
       {preview ? (

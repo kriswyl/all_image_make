@@ -1,4 +1,13 @@
 /* ── 素材库抽屉 ─────────────────────────────────────────────────────────── */
+/* 右键菜单：沿用画布条那套，只补一个不换行的标题和更高层级 */
+.asset-context-menu { z-index: 130; min-width: 176px; }
+.asset-context-menu .canvas-bar-menu-title {
+  max-width: 176px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-delete-dialog { width: min(440px, 92vw); }
 .asset-library-overlay {
   position: fixed;
   inset: 0;

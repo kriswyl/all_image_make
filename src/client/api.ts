@@ -189,6 +189,8 @@ export const api = {
     method: "POST",
     body: JSON.stringify(input),
   }),
+  deleteConversationAsset: (id: string, assetId: string) =>
+    request<ConversationView>(`/api/conversations/${id}/assets/${assetId}`, { method: "DELETE" }),
   updateConversation: (id: string, patch: ConversationPatch) => request<ConversationView>(`/api/conversations/${id}`, {
     method: "PATCH",
     body: JSON.stringify(patch),

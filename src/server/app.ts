@@ -719,6 +719,26 @@ export function createApp(options: { dataDir?: string } = {}) {
    * 立即返回 202，产出全部走 `/events` 那条 SSE（§14）。
    * 这里不 await 生成过程：一趟生图可能几十秒，卡着 HTTP 连接只会让前端超时。
    */
+  /**
+   * 素材库里删除一张图。
+   *
+   * 只允许删本会话素材列表里出现的图；删除任务 / 文件后再把消息、画布、分镜、
+   * 角色场景里的引用断掉，返回整份会话视图，前端不用自己猜哪里变了。
+   */
+  app.delete("/api/conversations/:id/assets/:assetId", asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    const assetId = routeParam(req.params.assetId);
+    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === assetId);
+    if (!belongs) throw new AppError("ASSET_NOT_FOUND", "这张图不属于当前会话", 404);
+    const removed = db.deleteConversationAsset(id, assetId);
+    if (!removed) throw new AppError("ASSET_NOT_FOUND", "图片不存在", 404);
+    await removeStoredFiles(removed.files, removed.inputs, db.inputsDir);
+    const view = agent.buildView(id);
+    if (!view) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    res.json(ok(view));
+  }));
+
   app.post("/api/conversations/:id/messages", (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
