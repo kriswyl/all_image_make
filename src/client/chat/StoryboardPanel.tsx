@@ -9,7 +9,7 @@
  * 缺哪张就在镜头行里直接写出来，而不是让用户花了钱才发现人物又变了。
  */
 import {
-  CheckCircle2, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle, Maximize2,
+  CheckCircle2, Clapperboard, Download, Image as ImageIcon, Layers, LoaderCircle, Maximize2,
   Mountain, PanelLeftClose, PanelLeftOpen, RefreshCw, Sparkles, Upload, UserRound, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -775,7 +775,6 @@ export function StoryboardPanel({
                 const activeShot = isStoryboardShotActive(shot.status);
                 const succeeded = shot.status === "succeeded";
                 const checked = selected.has(shot.id);
-                const kindAvailable = shot.kind === "video" ? data?.canGenerateVideo : data?.canGenerateImage;
                 return (
                   <div key={shot.id} className={`shot-card ${checked ? "is-selected" : ""} ${succeeded ? "is-done" : ""}`}>
                     <div className="shot-pick">
@@ -789,15 +788,6 @@ export function StoryboardPanel({
 
                     <div className="shot-main">
                       <div className="shot-meta">
-                        <SelectMenu
-                          className="shot-kind"
-                          ariaLabel={`第 ${shot.index} 镜的产物类型`}
-                          value={shot.kind}
-                          disabled={activeShot}
-                          leading={shot.kind === "video" ? <Film size={12} /> : <ImageIcon size={12} />}
-                          options={[{ value: "image", label: "图片" }, { value: "video", label: "视频" }]}
-                          onChange={(value) => void saveShot(shot.id, { kind: value as "image" | "video" })}
-                        />
                         <SelectMenu
                           className="shot-aspect"
                           ariaLabel={`第 ${shot.index} 镜的画幅`}
@@ -867,15 +857,15 @@ export function StoryboardPanel({
                     <div className="shot-side">
                       {shot.asset ? (
                         <button type="button" className="shot-thumb" title="点开看大图" onClick={() => setPreview(shot.asset)}>
-                          {shot.kind === "video"
+                          {shot.asset.mimeType.startsWith("video/")
                             ? <video src={api.assetUrl(shot.asset.url)} muted playsInline preload="metadata" onContextMenu={(event) => event.preventDefault()} />
                             : <img src={api.assetUrl(shot.asset.thumbUrl ?? shot.asset.url)} alt="" loading="lazy" />}
                           <span className="shot-thumb-hint"><Maximize2 size={11} />预览</span>
                         </button>
-                      ) : <span className="shot-thumb is-empty">{shot.kind === "video" ? <Film size={18} /> : <ImageIcon size={18} />}</span>}
+                      ) : <span className="shot-thumb is-empty"><ImageIcon size={18} /></span>}
                       <div className="shot-actions">
                         <button type="button" className="link-btn"
-                          disabled={Boolean(missing) || activeShot || submitting || !kindAvailable || missingSettings.length > 0}
+                          disabled={Boolean(missing) || activeShot || submitting || !data?.canGenerateImage || missingSettings.length > 0}
                           onClick={() => setConfirming([shot.id])}>
                           {activeShot ? <LoaderCircle size={12} className="spin" /> : succeeded ? <RefreshCw size={12} /> : <Sparkles size={12} />}
                           {activeShot ? "生成中" : succeeded ? "重跑" : "生成"}

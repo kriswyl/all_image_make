@@ -878,7 +878,8 @@ export function createApp(options: { dataDir?: string } = {}) {
       ...(input.sourceText !== undefined ? { sourceText: input.sourceText } : {}),
       ...(input.character !== undefined ? { character: input.character } : {}),
       ...(input.scene !== undefined ? { scene: input.scene } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      // 分镜暂时只生成图片；旧前端传 video 也归一成 image
+      ...(input.kind !== undefined ? { kind: "image" as const } : {}),
       ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
     });
     // 用户手填的新角色 / 场景名也要进设定表，否则没法给它绑参考图

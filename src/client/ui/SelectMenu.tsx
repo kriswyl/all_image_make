@@ -58,15 +58,21 @@ function useDismiss(
       onEscape?.();
     };
     const onLayout = () => close();
+    const onScroll = (event: Event) => {
+      // 菜单自己的内部滚动不能把菜单关掉——这正是「图片列表滚不动」的原因
+      const target = event.target;
+      if (target instanceof Node && refs.some((ref) => ref.current?.contains(target))) return;
+      close();
+    };
     document.addEventListener("mousedown", onMouseDown);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", onLayout);
-    window.addEventListener("scroll", onLayout, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", onLayout);
-      window.removeEventListener("scroll", onLayout, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [open, close, refs, onEscape]);
 }

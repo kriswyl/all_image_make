@@ -156,7 +156,12 @@ function referenceView(db: AppDatabase, reference: ResolvedReference, shots: Sto
 
 export function buildStoryboardView(db: AppDatabase, conversationId: string): StoryboardView {
   const aliases = buildCapabilityAliases(db.listChannels());
-  const shots = db.listStoryboardShots(conversationId);
+  /*
+   * 分镜暂时只做图片：老数据里标成 video 的镜头也按图片读。
+   * 不改数据库里的 kind，以后要恢复视频时不用做数据迁移。
+   */
+  const shots = db.listStoryboardShots(conversationId)
+    .map((shot) => ({ ...shot, kind: "image" as const }));
   return {
     shots,
     canGenerateImage: Boolean(resolveAlias(aliases, undefined, "image", db.getSetting("agentDefaultImageAlias") ?? undefined)),
@@ -299,7 +304,8 @@ export async function generateStoryboardShots(input: {
   if (shots.some((shot) => !shot)) {
     throw new AppError("STORYBOARD_SHOT_NOT_FOUND", "有镜头不属于这个会话，可能已经被重新拆分", 404);
   }
-  const selected = shots as StoryboardShot[];
+  // 分镜暂时只出图片；库里历史 video 镜头也按图片提交，不动原数据
+  const selected = (shots as StoryboardShot[]).map((shot) => ({ ...shot, kind: "image" as const }));
   const missing = selected.find((shot) => storyboardShotMissing(shot));
   if (missing) {
     throw new AppError("STORYBOARD_SHOT_INCOMPLETE", `第 ${missing.index} 镜${storyboardShotMissing(missing)}，请先补全`, 400);

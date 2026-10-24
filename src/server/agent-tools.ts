@@ -1209,19 +1209,18 @@ async function createStoryboard(
     prompt: shot.prompt,
     character: shot.character?.trim() ?? "",
     scene: shot.scene?.trim() ?? "",
-    kind: shot.kind ?? "image" as const,
+    // 分镜暂时只生成图片；模型即使填了 video 也归一成 image
+    kind: "image" as const,
     aspectRatio: normalizeStoryboardAspect(shot.aspectRatio),
   }));
   const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots, {
     characters: args.characters, scenes: args.scenes,
   });
   const incomplete = saved.filter((shot) => storyboardShotMissing(shot));
-  const videoCount = saved.filter((shot) => shot.kind === "video").length;
   const characterNames = [...new Set(shots.flatMap((shot) => parseCharacterNames(shot.character)))];
   const sceneNames = [...new Set(shots.map((shot) => shot.scene).filter(Boolean))];
   const summary = [
     `已拆成 ${saved.length} 个镜头`,
-    videoCount ? `（其中 ${videoCount} 个视频镜头）` : "",
     characterNames.length ? `，角色：${characterNames.join("、")}` : "",
     sceneNames.length ? `，场景：${sceneNames.join("、")}` : "",
     "，还没有提交生成。",
@@ -1232,7 +1231,6 @@ async function createStoryboard(
   return okResult(summary, {
     data: {
       storyboardCount: saved.length,
-      storyboardVideoCount: videoCount,
       storyboardCharacters: characterNames,
       storyboardScenes: sceneNames,
       storyboardIncomplete: incomplete.map((shot) => shot.index),

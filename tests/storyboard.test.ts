@@ -153,7 +153,8 @@ describe("脚本文档与分镜表", () => {
     expect(shots[0]!.aspectRatio).toBe("16:9");
     expect(shots[0]!.status).toBe("planned");
     expect(shots[0]!.character).toBe("苏晚");
-    expect(shots[1]!.kind).toBe("video");
+    // 分镜暂时只生成图片：模型传 video 也会被归一
+    expect(shots[1]!.kind).toBe("image");
     expect(context.db.listStoryboardCharacters(conversationId).map((character) => character.name)).toEqual(["苏晚"]);
   });
 
@@ -168,7 +169,8 @@ describe("脚本文档与分镜表", () => {
       .expect(200)).body.data;
     expect(patched.shots[0]!.prompt).toBe("一个人站在雨夜的桥上，远景");
     expect(patched.shots[0]!.aspectRatio).toBe("9:16");
-    expect(patched.shots[0]!.kind).toBe("video");
+    // 分镜暂时只生成图片：PATCH 传 video 也归一到 image
+    expect(patched.shots[0]!.kind).toBe("image");
 
     await request(app).patch(`/api/conversations/${conversationId}/storyboard/shots/${shot!.id}`)
       .send({ aspectRatio: "17:9" })
@@ -245,6 +247,55 @@ describe("脚本文档与分镜表", () => {
       .send({ shotIds: ids })
       .expect(400);
     expect(tooMany.body.error.code).toBe("STORYBOARD_BATCH_TOO_LARGE");
+  });
+
+  it("分镜暂时只生成图片：历史 video 镜头也走生图渠道", async () => {
+    let imageCalls = 0;
+    const mock = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      req.on("end", () => {
+        if (req.url?.startsWith("/v1/images/generations")) {
+          imageCalls += 1;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
+          return;
+        }
+        res.writeHead(404).end();
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const { app, context, conversationId } = await bootConversation("storyboard-image-lock-", base);
+    await context.db.saveChannel({
+      name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
+      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    });
+    // 老数据里标成 video 的镜头：生成时必须按图片走，不能去找视频渠道
+    const [shot] = context.db.replaceStoryboard(conversationId, [
+      { sourceText: "旧视频镜头", prompt: "雨夜街道，一个男人撑伞走过", kind: "video", aspectRatio: "16:9" },
+    ]);
+
+    const response = await request(app).post(`/api/conversations/${conversationId}/storyboard/generate`)
+      .send({ shotIds: [shot!.id] })
+      .expect(202);
+    expect(response.body.data.submitted).toBe(1);
+    expect(response.body.data.failures).toEqual([]);
+
+    const done = await waitShotDone(app, conversationId, shot!.id);
+    expect(done.status).toBe("succeeded");
+    expect(imageCalls).toBe(1);
+
+    // 对前端展示也归一成图片，不留下 video 的类型选项
+    const view = (await request(app).get(`/api/conversations/${conversationId}/storyboard`).expect(200)).body.data as {
+      shots: Array<{ kind: string }>;
+    };
+    expect(view.shots[0]!.kind).toBe("image");
   });
 
   it("多镜没有角色参考时：先生成基准镜头，其余镜头带参考图重发", async () => {

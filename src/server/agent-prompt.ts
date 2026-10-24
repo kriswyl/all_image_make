@@ -1,6 +1,6 @@
 import { MAX_SESSION_TASKS } from "./agent-constants.js";
 import { assetRef, type Conversation } from "../shared/agent-types.js";
-import { MAX_STORYBOARD_SHOTS, storyboardKindLabel, type StoryboardShot } from "../shared/storyboard.js";
+import { MAX_STORYBOARD_SHOTS, type StoryboardShot } from "../shared/storyboard.js";
 
 /**
  * §7 系统提示词。
@@ -36,7 +36,7 @@ export function buildSystemPrompt(
   const storyboardLines = storyboard.slice(0, MAX_STORYBOARD_SHOTS).map((shot) => {
     const status = shot.status === "planned" ? "未生成" : shot.status === "succeeded" ? "已生成" : shot.status === "failed" ? "失败" : "生成中";
     const prompt = shot.prompt.replace(/\s+/g, " ").slice(0, 80);
-    return `- 第 ${shot.index} 镜｜${storyboardKindLabel(shot.kind)}｜${status}｜场景：${shot.scene || "无"}｜角色：${shot.character || "无"}｜${prompt || "（没有画面描述）"}`;
+    return `- 第 ${shot.index} 镜｜图片｜${status}｜场景：${shot.scene || "无"}｜角色：${shot.character || "无"}｜${prompt || "（没有画面描述）"}`;
   });
   return [
     "你是「语布」里的创作助手。用户用自然语言说想要什么图片、视频或音乐，你负责把它变成可执行的生成任务。",
@@ -84,7 +84,7 @@ export function buildSystemPrompt(
     "- create_storyboard — 把脚本/故事拆成会话内分镜表。**只规划，不生成、不花钱**。",
     "  args: {characters?: [{name, prompt}], scenes?: [{name, prompt}], shots: [{sourceText, prompt(必填), character, scene, kind, aspectRatio}]}",
     "  每个 prompt 必须是**自足的画面描述**（人物、场景、构图、光线、风格），不能写「同上」「接着上一镜」。",
-    "  sourceText 保留剧本原文，用来核对有没有漏段；kind 默认 image，用户明确要视频镜头才填 video；",
+    "  sourceText 保留剧本原文，用来核对有没有漏段；**分镜目前只生成图片**，kind 一律填 image（可省略），不要填 video；",
     "  aspectRatio 只在用户或剧本明确要求时填（16:9 / 9:16 / 1:1 / 4:3 / 3:4）。",
     "  **character 是这一镜的出场角色名**：同一个人全片用同一个名字（例如「林昭」）；",
     "  一镜有多个人物时用「、」连接（例如「林小满、老陈」）。空镜、道具特写、片尾字幕留空。",
