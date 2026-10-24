@@ -33,6 +33,8 @@
   --accent: #0d0d0d;
   --accent-dark: #000000;
   --accent-soft: #f0f0f0;
+  /* 主色块上的文字：浅色主题是黑底白字，深色主题反过来是白底黑字 */
+  --accent-contrast: #ffffff;
   --coral: #d92d20;
   --coral-ink: #b42318;
   --coral-line: #f0c9c5;
@@ -376,7 +378,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   font-size: 12.5px;
   font-weight: 500;
 }
-.update-primary { color: #fff; background: var(--accent); border: 1px solid var(--accent); }
+.update-primary { color: var(--accent-contrast); background: var(--accent); border: 1px solid var(--accent); }
 .update-primary:hover { background: var(--accent-dark); }
 .update-secondary { color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line-strong); }
 .update-secondary:hover { color: var(--ink); background: var(--surface-soft); }
@@ -460,7 +462,7 @@ input::placeholder, textarea::placeholder { color: var(--muted-soft); }
 .onboarding-step.is-active { color: var(--ink); background: var(--surface-soft); font-weight: 650; }
 .onboarding-step.is-passed { color: var(--ink-soft); }
 .onboarding-step-dot { display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; font-size: 10px; }
-.onboarding-step.is-active .onboarding-step-dot { color: #fff; background: var(--accent); border-color: var(--accent); }
+.onboarding-step.is-active .onboarding-step-dot { color: var(--accent-contrast); background: var(--accent); border-color: var(--accent); }
 .onboarding-step.is-passed .onboarding-step-dot { color: var(--ink); background: var(--surface); }
 
 .onboarding-body { animation: onboarding-rise .26s ease-out; }
@@ -732,7 +734,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
   font-size: 13px;
   font-weight: 700;
 }
-.primary-button { color: #fff; background: var(--accent); border: 1px solid var(--accent); }
+.primary-button { color: var(--accent-contrast); background: var(--accent); border: 1px solid var(--accent); }
 .primary-button:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
 .secondary-button { color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); }
 .secondary-button:hover { background: var(--surface-soft); }
@@ -918,7 +920,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .wizard-step-dot { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; color: var(--muted-soft); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 50%; font-size: 11px; font-weight: 700; }
 .wizard-step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wizard-step.active { color: var(--ink); font-weight: 700; }
-.wizard-step.active .wizard-step-dot { color: #fff; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.wizard-step.active .wizard-step-dot { color: var(--accent-contrast); background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .wizard-step.passed { color: var(--muted); }
 .wizard-step.passed .wizard-step-dot { color: var(--accent); background: var(--accent-soft); border-color: var(--line-strong); }
 .wizard-body { align-content: start; gap: 13px; }
@@ -960,7 +962,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .key-input::placeholder { color: var(--muted-soft); }
 .key-required-flag {
   padding: 1px 7px;
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-dialog);
   font-size: 10px;
@@ -1313,7 +1315,7 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 }
 
 .mode-chip.active {
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-color: transparent;
   box-shadow: 0 2px 6px rgba(0, 0, 0, .22);
@@ -1918,8 +1920,9 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 
 .confirm-card { max-width: 620px; padding: 14px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow-card); }
 .confirm-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.confirm-card-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px; font-weight: 600; color: #fff; background: var(--accent); border-radius: var(--radius-pill); }
-.confirm-card-badge.is-warn { background: var(--warning); }
+.confirm-card-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px; font-weight: 600; color: var(--accent-contrast); background: var(--accent); border-radius: var(--radius-pill); }
+/* 警告底本身够深，深色主题下也继续用白字，别跟着主色反转 */
+.confirm-card-badge.is-warn { color: #fff; background: var(--warning); }
 .confirm-card-model { font-size: 11.5px; color: var(--muted); }
 .confirm-card-message { margin: 10px 0 0; font-size: 13px; line-height: 1.7; }
 .confirm-card-say { margin: 6px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--muted); }
@@ -1974,7 +1977,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .asset-strip-thumb img { display: block; object-fit: cover; border-radius: var(--radius-control); }
 /* 边框 + 序号就是「被标记」：语义是「属不属于这一组」，图钉那个形状在暗示"只有一根指针" */
 .asset-strip-item.is-in-canvas .asset-strip-thumb { border-color: var(--accent); }
-.asset-strip-order { position: absolute; left: 2px; top: 2px; display: inline-flex; align-items: center; justify-content: center; min-width: 13px; height: 13px; padding: 0 3px; font-size: 9px; font-weight: 700; line-height: 1; color: #fff; background: var(--accent); border-radius: var(--radius-xs); }
+.asset-strip-order { position: absolute; left: 2px; top: 2px; display: inline-flex; align-items: center; justify-content: center; min-width: 13px; height: 13px; padding: 0 3px; font-size: 9px; font-weight: 700; line-height: 1; color: var(--accent-contrast); background: var(--accent); border-radius: var(--radius-xs); }
 /* 主图角标：它不是「第 0 张」这种位置概念，而是「视频首帧/助手默认改的那张」，得写出来。
    `line-height` 必须自己给：缩略图容器为了消掉图片下方的空隙设了 `line-height: 0`，
    角标是它的**文本**子节点、会继承过去，行盒塌成 0 高——角标就只剩 3px 的色条，
@@ -2031,7 +2034,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .composer-attach.is-on { color: var(--ink); background: var(--accent-soft); border-color: var(--line-strong); }
 
 /* 发送是一个圆形黑键，向上箭头——没有文字，省掉一个「发送」按钮的宽度 */
-.composer-send { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; color: #fff; background: var(--accent); border: 0; border-radius: 50%; }
+.composer-send { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; color: var(--accent-contrast); background: var(--accent); border: 0; border-radius: 50%; }
 .composer-send:hover:not(:disabled) { background: var(--accent-dark); }
 .composer-stop { min-height: 30px; padding: 0 12px; }
 

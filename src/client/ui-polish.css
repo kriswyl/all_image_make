@@ -600,7 +600,7 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
   align-items: center;
   gap: 3px;
   padding: 1px 6px 1px 4px;
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-pill);
   font-size: 9.5px;

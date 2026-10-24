@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, Eye, FolderOpen, KeyRound, LoaderCircle, RotateCcw, Settings2, X } from "lucide-react";
+import { AlertCircle, Eye, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { IMAGE_SIZE_VALUES, type ImageSizeValue } from "../../shared/types";
+import { readThemeMode, setThemeMode, type ThemeMode } from "../theme";
 import type { Toast } from "../app-shared";
 
+const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: React.ReactNode }> = [
+  { value: "system", label: "跟随系统", icon: <Monitor size={15} /> },
+  { value: "light", label: "浅色", icon: <Sun size={15} /> },
+  { value: "dark", label: "深色", icon: <Moon size={15} /> },
+];
+
 /**
- * 设置：素材目录 + gemini 渠道的缺省输出尺寸。
+ * 设置：外观主题 + 素材目录 + gemini 渠道的缺省输出尺寸。
  *
  * 目录由桌面版的原生选择器挑，服务端只负责校验和落库；切换只影响之后生成的
  * 产物，历史记录里的旧产物按各自记录保存的目录读取，不会被搬动。
@@ -25,6 +32,12 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged
   const isDefault = assetsDir === defaultAssetsDir;
   const canPick = isTauriRuntime();
   const [imageSize, setImageSize] = useState<ImageSizeValue | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => readThemeMode());
+
+  function chooseTheme(next: ThemeMode) {
+    setTheme(next);
+    setThemeMode(next);
+  }
 
   useEffect(() => {
     void api.settings().then((current) => setImageSize(current.geminiImageSize)).catch(() => undefined);
@@ -83,6 +96,24 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged
           <button className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={18} /></button>
         </div>
         <div className="modal-body">
+          <div className="settings-section">
+            <h3>外观</h3>
+            <p className="modal-lead">深色主题适合夜间使用；「跟随系统」会随 Windows 的浅色 / 深色设置自动切换。</p>
+            <div className="settings-segment">
+              {THEME_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`secondary-button ${theme === option.value ? "is-on" : ""}`}
+                  aria-pressed={theme === option.value}
+                  onClick={() => chooseTheme(option.value)}
+                >
+                  {option.icon}{option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="settings-section">
             <h3>素材目录</h3>
             <p className="modal-lead">生成的图片和视频保存到下面这个目录。{isDefault ? "当前是默认位置。" : "当前使用自定义位置。"}</p>

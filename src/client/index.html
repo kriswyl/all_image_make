@@ -7,6 +7,11 @@
     <meta name="theme-color" content="#202521" />
     <title>ChatCanvas</title>
     <link rel="icon" type="image/png" href="/app-icon.png" />
+    <!--
+      首屏防闪白：主题要在 CSS 之前定好。独立文件而不是内联脚本，因为 Tauri 的
+      CSP 只允许同源脚本；main.tsx 里的 initTheme 会再做一次并监听系统主题变化。
+    -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

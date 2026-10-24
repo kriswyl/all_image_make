@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { GlobalTooltip } from "./ui/GlobalTooltip";
+import { initTheme } from "./theme";
 // 拉丁字母用 Inter（Codex 那套 Söhne 的免费替身）；中文字面由系统里的
 // Noto Sans SC 可变字体接管，见 styles.css 里的 font-family 栈。
 // 这份 CSS 带 unicode-range，浏览器只会去取真正用到的 latin 子集。
@@ -20,6 +21,10 @@ import "./asset-library.css";
 import "./ui-polish.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里
 import "./onboarding.css";
+// 深色主题的令牌与局部补丁，必须最后加载才能盖住上面各组件的浅色字面量
+import "./theme.css";
+
+initTheme();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

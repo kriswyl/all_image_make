@@ -1,0 +1,272 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   深色主题
+
+   工作台的组件样式全部从 styles.css 的令牌取色，所以这里只做两件事：
+   1. 在 `html[data-theme="dark"]` 上把令牌整体换成深色一套；
+   2. 给少数「写死成白色」的局部补上深色对应值（Logo 底板、透明角标、
+      开关滑块、滚动条这类，令牌覆盖不到）。
+   本文件必须在所有组件样式之后加载，见 main.tsx。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  color: var(--ink);
+  background: var(--canvas);
+
+  /* 文字：主文字接近白，次级降到中灰；对比度按 12–14px 中文可读来定 */
+  --ink: #f2f2f2;
+  --ink-soft: #c9c9c9;
+  --muted: #9b9b9b;
+  --muted-soft: #787878;
+
+  /* 面：画布最深，面板抬一层，悬停再抬一层；靠色差而不是投影分层 */
+  --line: #292929;
+  --line-strong: #3a3a3a;
+  --line-hover: #525252;
+  --surface: #171717;
+  --surface-soft: #202020;
+  --surface-hover: #2c2c2c;
+  --canvas: #0e0e0e;
+  --sidebar: #111111;
+  --charcoal: #242424;
+
+  /* 强调色反转：浅色主题是黑底白字，深色主题是白底黑字 */
+  --accent: #f2f2f2;
+  --accent-dark: #ffffff;
+  --accent-soft: #2a2a2a;
+  --accent-contrast: #0f0f0f;
+
+  /* 语义色提亮一档，深底上才不糊 */
+  --coral: #ff7a6e;
+  --coral-ink: #ffa198;
+  --coral-line: #5c2b27;
+  --coral-soft: #2b1512;
+  --warning: #f5a524;
+  --warning-soft: #2a1e0b;
+  --ok: #3dd68c;
+  --ok-strong: #6ee7b7;
+  --ok-soft: #10271c;
+
+  --shadow: 0 24px 60px rgba(0, 0, 0, .58);
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, .40);
+  --shadow-card: 0 8px 28px rgba(0, 0, 0, .46);
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px rgba(255, 255, 255, .32);
+  --focus-border: #f2f2f2;
+}
+
+/* 浅色主题显式写一条，避免系统切回时 color-scheme 残留 */
+html[data-theme="light"] { color-scheme: light; }
+
+/* ── 外壳与焦点 ─────────────────────────────────────────────────────────── */
+
+html[data-theme="dark"] input:focus,
+html[data-theme="dark"] textarea:focus,
+html[data-theme="dark"] select:focus {
+  border-color: var(--line-hover);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .08);
+}
+html[data-theme="dark"] input[type="checkbox"]:focus-visible,
+html[data-theme="dark"] .header-selects select:focus,
+html[data-theme="dark"] .header-picker .model-picker-trigger:focus-visible {
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, .12);
+}
+html[data-theme="dark"] button:focus-visible,
+html[data-theme="dark"] a:focus-visible,
+html[data-theme="dark"] summary:focus-visible,
+html[data-theme="dark"] [role="button"]:focus-visible,
+html[data-theme="dark"] [tabindex]:focus-visible,
+html[data-theme="dark"] .chat-caps-card:focus-visible {
+  outline-color: rgba(255, 255, 255, .62);
+}
+
+/* 勾选框：主色在深色主题里是浅色，白色对勾会消失，换成深色对勾 */
+html[data-theme="dark"] input[type="checkbox"]:checked {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23111111' stroke-width='3.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+}
+
+/* 两套开关：未选中是深灰轨道 + 浅色滑块，选中后轨道变浅、滑块反过来 */
+html[data-theme="dark"] .toggle-track,
+html[data-theme="dark"] .switch-field input[type="checkbox"] {
+  background-color: #3a3a3a;
+}
+html[data-theme="dark"] .toggle-track > span,
+html[data-theme="dark"] .switch-field input[type="checkbox"]::after {
+  background: #f2f2f2;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+}
+html[data-theme="dark"] .toggle input:checked + .toggle-track > span,
+html[data-theme="dark"] .switch-field input[type="checkbox"]:checked::after {
+  background: #111111;
+}
+html[data-theme="dark"] .switch-field input[type="checkbox"]:hover:not(:disabled) {
+  background-color: #454545;
+}
+html[data-theme="dark"] .switch-field input[type="checkbox"]:checked:hover:not(:disabled) {
+  background-color: var(--accent-dark);
+}
+
+/* 原生滚动条在 WebView2 里有自己的一套颜色，color-scheme 不够，还要显式给 */
+html[data-theme="dark"] * { scrollbar-color: #454545 transparent; }
+html[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #454545; }
+html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #5f5f5f; }
+html[data-theme="dark"] ::selection {
+  color: #111111;
+  background: rgba(255, 255, 255, .86);
+}
+
+/* 自绘窗口：外圈描边和投影在深底上要更轻、更深，否则像一圈白线 */
+html.tauri-window[data-theme="dark"] .app-shell {
+  border-color: rgba(255, 255, 255, .08);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+}
+
+/* ── 组件里写死的浅色补丁 ───────────────────────────────────────────────── */
+
+/* 原本给「透明 PNG 垫白底」的几处：深色下改垫面板色 */
+html[data-theme="dark"] .reference-thumb,
+html[data-theme="dark"] .inpaint-mask-thumb,
+html[data-theme="dark"] .mask-canvas-stage {
+  background: var(--surface-soft);
+}
+
+/* 结果舞台的透明格子：浅色主题用白色格，深色下必须压到很淡，否则整块发亮 */
+html[data-theme="dark"] .result-stage {
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, .035) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, .035) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, .035) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, .035) 75%);
+}
+
+/* 半透明白色胶囊 / 角标：换成半透明黑，同时保持文字用主题色 */
+html[data-theme="dark"] .empty-result-icon,
+html[data-theme="dark"] .canvas-section-clear {
+  background: rgba(255, 255, 255, .06);
+}
+html[data-theme="dark"] .asset-strip-origin,
+html[data-theme="dark"] .asset-library-origin,
+html[data-theme="dark"] .setting-status {
+  color: var(--ink);
+  background: rgba(16, 16, 16, .84);
+  border-color: rgba(255, 255, 255, .10);
+}
+
+/* 「尾帧」在素材库和画布条里用蓝色区分，浅蓝底在深色下会刺眼 */
+html[data-theme="dark"] .asset-strip-role.is-last {
+  color: #8ab4ff;
+  background: #1c2b4a;
+}
+
+/* 输入 / 描边类字面量 */
+html[data-theme="dark"] .global-tooltip,
+html[data-theme="dark"] .sidebar-conv-tooltip {
+  border-color: var(--line);
+}
+html[data-theme="dark"] .composer.is-drop .composer-box { border-color: var(--line-hover); }
+html[data-theme="dark"] .form-error { border-color: var(--coral-line); }
+html[data-theme="dark"] .onboarding-key-input.is-missing input { border-color: var(--warning); }
+html[data-theme="dark"] .tool-param.is-dropped { border-color: #5d431a; }
+html[data-theme="dark"] .key-warning:hover { color: var(--warning); }
+html[data-theme="dark"] .status-badge.succeeded { color: var(--ok-strong); }
+html[data-theme="dark"] .status-badge.cancelled { color: var(--muted); }
+html[data-theme="dark"] .channel-state.enabled::before { background: var(--ok); }
+
+/* 纸白底上的品牌 Logo 仍保留浅底，深色下压成暖白，避免一块纯白特别跳 */
+html[data-theme="dark"] .preset-icon.has-logo { background: #ededed; }
+
+/* 单色厂商 mark 和产品标都是黑色描边，深色下直接反色 */
+html[data-theme="dark"] .brand-mark-img { filter: invert(1); }
+html[data-theme="dark"] .model-logo.is-mono { filter: invert(1); }
+
+html[data-theme="dark"] .toast { border: 1px solid var(--line-strong); }
+
+/* ── 沉浸式引导：把「宣纸」换成「夜色」 ─────────────────────────────────── */
+
+html[data-theme="dark"] .ink-onboarding {
+  --ink: #ececec;
+  --ink-soft: #c3c6c3;
+  --muted: #9a9f9b;
+  --faint: #767b77;
+  --line: rgba(255, 255, 255, .14);
+  --line-strong: rgba(255, 255, 255, .27);
+  --seal: #e6e8e6;
+  background: #0e0f0e;
+}
+
+/* 浅色主题里「深色块 + 白字」的元素，在深色下反过来是「浅色块 + 深字」 */
+html[data-theme="dark"] .ink-mark,
+html[data-theme="dark"] .ink-primary,
+html[data-theme="dark"] .ink-seal,
+html[data-theme="dark"] .ink-need-char,
+html[data-theme="dark"] .ink-need-check,
+html[data-theme="dark"] .ink-bubble-seal,
+html[data-theme="dark"] .ink-config-mark {
+  color: #101110;
+}
+html[data-theme="dark"] .ink-primary:hover:not(:disabled) { background: #ffffff; }
+html[data-theme="dark"] .ink-key-link {
+  background: #191b19;
+}
+html[data-theme="dark"] .ink-key-link:hover {
+  color: #101110;
+  background: var(--ink);
+}
+html[data-theme="dark"] .ink-key-link:hover span { color: rgba(16, 17, 16, .62); }
+
+html[data-theme="dark"] .ink-progress i { background: rgba(255, 255, 255, .16); }
+html[data-theme="dark"] .ink-need {
+  background: rgba(255, 255, 255, .045);
+}
+html[data-theme="dark"] .ink-need.is-on {
+  background: #1d1f1d;
+}
+html[data-theme="dark"] .ink-enso-char { color: rgba(255, 255, 255, .07); }
+html[data-theme="dark"] .ink-splash { background: rgba(255, 255, 255, .10); }
+html[data-theme="dark"] .ink-vertical-label { color: rgba(255, 255, 255, .07); }
+html[data-theme="dark"] .ink-burst-drop { background: rgba(255, 255, 255, .45); }
+
+html[data-theme="dark"] .ink-bubble {
+  background: rgba(255, 255, 255, .06);
+  border-color: #303330;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+html[data-theme="dark"] .ink-bubble:hover {
+  background: #1e201e;
+  box-shadow: 0 20px 46px rgba(0, 0, 0, .48);
+}
+html[data-theme="dark"] .ink-bubble.is-selected {
+  background: #1e201e;
+  box-shadow: 0 0 0 2px #0e0f0e, 0 0 0 3px var(--ink), 0 18px 40px rgba(0, 0, 0, .45);
+}
+html[data-theme="dark"] .ink-bubble-rec {
+  color: #111111;
+  background: #c3c6c3;
+}
+html[data-theme="dark"] .ink-bubble-logo,
+html[data-theme="dark"] .ink-config-models svg,
+html[data-theme="dark"] .ink-config-models img {
+  filter: grayscale(1) brightness(1.8);
+  opacity: .78;
+}
+/* 单色 mark 已经在全局反过一次，这里只叠灰度和提亮；彩色图标提亮就够 */
+html[data-theme="dark"] .ink-bubble-logo .model-logo.is-mono,
+html[data-theme="dark"] .ink-config-models .model-logo.is-mono {
+  filter: invert(1);
+}
+
+html[data-theme="dark"] .ink-config-card {
+  background: #151715;
+  box-shadow: 0 26px 70px rgba(0, 0, 0, .48);
+}
+html[data-theme="dark"] .ink-config-card::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .16); }
+html[data-theme="dark"] .ink-config-row { border-bottom-color: rgba(255, 255, 255, .08); }
+html[data-theme="dark"] .ink-config-row.is-highlight { background: rgba(255, 255, 255, .035); }
+html[data-theme="dark"] .ink-config-models span { background: #202220; }
+html[data-theme="dark"] .ink-onboarding input { background: #101110; }
+html[data-theme="dark"] .ink-onboarding input:focus { box-shadow: 0 0 0 3px rgba(255, 255, 255, .08); }
+html[data-theme="dark"] .ink-config-fields label.is-missing input { background: #1a1c1b; }
+html[data-theme="dark"] .ink-config-state.error { color: var(--coral); }
+
+/* 引导里的水墨 SVG 是写死 #242724 的，深色下直接改笔画 / 山形 */
+html[data-theme="dark"] .ink-onboarding path[stroke="#242724"] { stroke: #d9dcd9; }
+html[data-theme="dark"] .ink-onboarding .ink-mountains path { fill: #a9b8b0; }

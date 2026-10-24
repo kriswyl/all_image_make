@@ -79,12 +79,18 @@ export function modelBrand(model: string, kind: ModelKind) {
   return null;
 }
 
+/**
+ * 这些厂商的 mark 是单色的（`fill="currentColor"`，作为 img 引用时解析成黑色）。
+ * 深色主题下要反色才看得见，所以单独标出来；彩色图标不能跟着反，否则会变成负片。
+ */
+const MONO_LOGO_FILES = new Set([openaiLogo, fluxLogo, grokLogo, midjourneyLogo, sunoLogo]);
+
 export function ModelLogo({ model, kind, size = 20 }: { model: string; kind: ModelKind; size?: number }) {
   const brand = modelBrand(model, kind);
   if (!brand) return null;
   return (
     <img
-      className="model-logo"
+      className={`model-logo ${MONO_LOGO_FILES.has(brand.logo) ? "is-mono" : ""}`}
       src={brand.logo}
       alt=""
       title={brand.name}

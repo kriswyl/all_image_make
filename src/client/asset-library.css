@@ -155,7 +155,7 @@
   right: 4px;
   top: 4px;
   padding: 1px 5px;
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-xs);
   font-size: 9px;
@@ -177,7 +177,7 @@
   border: 1px solid rgba(255, 255, 255, .7);
   border-radius: var(--radius-xs);
 }
-.asset-library-check.is-on { background: var(--accent); border-color: var(--accent); }
+.asset-library-check.is-on { color: var(--accent-contrast); background: var(--accent); border-color: var(--accent); }
 .asset-library-caption {
   overflow: hidden;
   color: var(--muted);
@@ -323,7 +323,7 @@
   height: 14px;
   place-items: center;
   padding: 0 3px;
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-xs);
   font-size: 9px;
@@ -424,7 +424,7 @@
   height: 15px;
   place-items: center;
   padding: 0 3px;
-  color: #fff;
+  color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-xs);
   font-size: 9px;

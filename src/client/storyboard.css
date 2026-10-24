@@ -231,7 +231,7 @@ button.storyboard-progress-pill:hover {
   font-size: 9px;
   font-variant-numeric: tabular-nums;
 }
-.rail-progress.is-done { color: #fff; background: var(--accent); border-color: transparent; }
+.rail-progress.is-done { color: var(--accent-contrast); background: var(--accent); border-color: transparent; }
 .rail-label {
   margin-top: auto;
   color: var(--muted-soft);
@@ -554,7 +554,7 @@ button.storyboard-progress-pill:hover {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.shot-card.is-done .shot-index { color: #fff; background: var(--accent); border-color: transparent; }
+.shot-card.is-done .shot-index { color: var(--accent-contrast); background: var(--accent); border-color: transparent; }
 .shot-card.is-selected .shot-index { border-color: var(--ink); }
 
 .shot-main { display: flex; min-width: 0; flex-direction: column; }
