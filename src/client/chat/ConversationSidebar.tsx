@@ -45,7 +45,7 @@ export function ConversationSidebar({
 
   /**
    * 会话行原来用原生 title 显示最后一条消息，浏览器会弹一条又长又难看的白框。
-   * 这里改成自绘深色提示：延迟 220ms 出现，跟着行右侧固定定位，最多 5 行。
+   * 这里改成自绘深色提示：延迟和全局 tooltip 一致（700ms），跟着行右侧固定定位，最多 5 行。
    */
   function showTip(target: HTMLElement, item: SidebarConversation) {
     const text = item.lastMessage?.trim() ?? "";
@@ -60,7 +60,7 @@ export function ConversationSidebar({
         x: Math.max(8, Math.min(rect.right + 10, window.innerWidth - width - 8)),
         y: Math.max(8, Math.min(rect.top - 4, window.innerHeight - 210)),
       });
-    }, 220);
+    }, 700);
   }
 
   function hideTip() {
@@ -91,7 +91,7 @@ export function ConversationSidebar({
         <div className="sidebar-group">
       <div className="sidebar-group-title">
         <span>最近</span>
-        <button type="button" className="sidebar-group-add" aria-label="新建会话" onClick={onCreate}>
+        <button type="button" className="sidebar-group-add" aria-label="新建会话" data-tooltip="新建会话" onClick={onCreate}>
           <Plus size={13} />
         </button>
       </div>
@@ -144,6 +144,7 @@ export function ConversationSidebar({
               type="button"
               className="icon-button compact danger sidebar-conv-del"
               aria-label="删除会话"
+              data-tooltip="删除会话"
               onClick={() => onDelete(item.id)}
             >
               <Trash2 size={12} />
