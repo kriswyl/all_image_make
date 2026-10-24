@@ -584,19 +584,19 @@ input::placeholder, textarea::placeholder { color: var(--muted-soft); }
 /* Midjourney：排除内容单独占一行 */
 .mj-no-field { grid-column: 1 / -1; }
 
-/* Midjourney：U/V 按四宫格原图的象限排 2×2，按钮位置和原图一一对应 */
+/* Midjourney：放大 / 变体各排一个 2×2 小键盘，格子和原图象限一一对应；重绘单独一列 */
 .mj-quad-actions { width: min(340px, 100%); }
 .mj-actions { padding: 10px 12px 0; }
+.mj-quad-blocks { display: flex; align-items: flex-start; gap: 12px; }
 .mj-quad-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, 46px);
   gap: 4px;
   padding: 4px;
   background: var(--surface-soft);
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
 }
-.mj-quad { display: grid; gap: 3px; min-width: 0; }
 .mj-quad-actions button {
   display: inline-flex;
   min-width: 0;
@@ -618,14 +618,15 @@ input::placeholder, textarea::placeholder { color: var(--muted-soft); }
   cursor: pointer;
   transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
-.mj-quad button { width: 100%; }
+.mj-quad-grid button { width: 100%; }
 .mj-quad-actions button:hover:not(:disabled) {
   color: var(--ink);
   background: var(--surface-soft);
   border-color: var(--line-hover);
 }
 .mj-quad-actions button:disabled { opacity: .45; cursor: not-allowed; }
-.mj-quad-extras { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+/* 和小键盘面板的 4px 内边距 + 1px 边框对齐，让重绘和 U1/V1 在同一条线上 */
+.mj-quad-extras { display: flex; flex-direction: column; gap: 4px; padding-top: 5px; }
 
 /* 语音生成：风格输入占满参数行，快捷风格用小一号胶囊 */
 .tts-style-field { grid-column: 1 / -1; }
