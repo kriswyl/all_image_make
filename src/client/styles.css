@@ -2309,6 +2309,29 @@ html.tauri-window.is-maximized .app-shell {
   box-shadow: none;
 }
 
+/* 全屏遮罩要跟外壳一起内缩：它们原来是 inset:0，会盖住窗口外圈那 10px 透明留白，
+   打开分镜 / 素材库 / 灯箱时整窗就变成一块方形灰板，圆角和外圈阴影全没了。
+   现在和 .app-shell 对齐到 10px 内缩 + 12px 圆角，并裁掉溢出的抽屉。 */
+html.tauri-window .modal-backdrop,
+html.tauri-window .storyboard-overlay,
+html.tauri-window .image-preview-backdrop,
+html.tauri-window .chat-lightbox,
+html.tauri-window .asset-library-overlay,
+html.tauri-window .ink-onboarding {
+  inset: 10px;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+}
+html.tauri-window.is-maximized .modal-backdrop,
+html.tauri-window.is-maximized .storyboard-overlay,
+html.tauri-window.is-maximized .image-preview-backdrop,
+html.tauri-window.is-maximized .chat-lightbox,
+html.tauri-window.is-maximized .asset-library-overlay,
+html.tauri-window.is-maximized .ink-onboarding {
+  inset: 0;
+  border-radius: 0;
+}
+
 /* ── 脚本文档附件 ───────────────────────────────────────────────────────── */
 .composer-attachment.is-document {
   width: auto;
