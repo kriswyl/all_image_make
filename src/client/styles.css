@@ -1733,50 +1733,18 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .chat-caps > summary { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; min-height: 32px; color: var(--muted); background: var(--surface-soft); border-radius: var(--radius-control); cursor: pointer; list-style: none; }
 .chat-caps > summary::-webkit-details-marker { display: none; }
 .chat-caps[open] > summary { color: var(--accent-dark); background: var(--accent-soft); }
-/* 两列以后要宽一些；窄窗口（浏览器里拖小）就收到视口以内，别从左边溢出去 */
+/* 浮层的基础定位与滚动；面板尺寸、标签和卡片排版在 ui-polish.css 的模型面板一节 */
 .chat-caps-body { position: absolute; right: 0; top: 38px; z-index: 20; width: min(660px, calc(100vw - 32px)); max-height: min(70vh, 460px); overflow-y: auto; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
-/* 生图 / 生视频两列并排：混成一列时，找一个视频模型要先滑过一屏图片模型 */
-.chat-caps-columns { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 0 16px; align-items: start; }
-.chat-caps-column h4 { margin: 10px 6px 4px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
-.chat-caps-empty { margin: 2px 6px 8px; color: var(--muted-soft); font-size: 11.5px; line-height: 1.7; }
-
-/* 一行一个模型：左边厂商标识，右边真名 + 默认徽标，下面一行写渠道和对话里用的简称 */
-.chat-caps-item { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 1px 9px; padding: 7px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
-.chat-caps-item:hover { background: var(--surface-soft); border-radius: var(--radius-control); }
-.chat-caps-item:focus-visible { outline: 2px solid var(--line-strong); outline-offset: -2px; border-radius: var(--radius-control); }
-/* 已经是默认的那一行不用再点，指针也别给「可点」的暗示 */
-.chat-caps-item.is-default { cursor: default; }
-.chat-caps-item:last-of-type { border-bottom: 0; }
-.chat-caps-item em { font-style: normal; font-size: 10.5px; color: var(--muted); align-self: center; }
-.chat-caps-item strong { font-size: 12.5px; color: var(--ink); }
-.chat-caps-item span { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
+/* 模型卡片的网格：图标占左列两行，名字和渠道在右列 */
 .chat-caps-logo { grid-row: span 2; display: grid; place-items: center; align-self: start; width: 26px; height: 26px; grid-column: 1 !important; }
 .model-logo { display: block; width: 18px; height: 18px; object-fit: contain; }
 .channel-logo-fallback { flex: 0 0 auto; color: var(--muted); }
 /* 真名是主角：认不出厂牌时也得一眼看出用的是哪个模型 */
 .chat-caps-model { display: flex; align-items: center; gap: 6px; grid-column: 2; }
-.chat-caps-kind { flex: 0 0 auto; padding: 1px 5px; color: var(--muted); background: var(--surface-soft); border-radius: var(--radius-xs); font-size: 10px; }
 .chat-caps-meta { grid-column: 2; }
-/* 「调整」：淡着常显，指到这一行才变实。
-   一开始写成完全隐藏、悬停才出现，结果就是用户打开面板找不到这个按钮——「有没有做」都看不出来。 */
-.chat-caps-adjust { grid-column: 3; grid-row: 1 / span 2; align-self: center; padding: 3px 9px; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-pill); font-size: 11px; opacity: .5; transition: opacity 120ms ease; }
-.chat-caps-item:hover .chat-caps-adjust, .chat-caps-adjust:focus-visible { opacity: 1; }
-.chat-caps-adjust:hover { color: var(--ink); background: var(--surface); border-color: var(--line-strong); }
 .chat-caps-note { margin: 8px 6px 2px; font-size: 11px; line-height: 1.6; color: var(--muted); }
-/* 默认生图 / 生视频模型（问题 5）：一并标出「现在实际用的是哪个」，说的和做的才对得上 */
-.chat-caps-defaults { padding: 8px 6px 10px; border-bottom: 1px solid var(--line); }
-/* 两个默认值并排：它们是对等的两件事，竖着摆占掉一整屏的宽度却只放两个小下拉 */
-.chat-caps-defaults-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
-.chat-caps-defaults label { display: block; }
-.chat-caps-defaults label + label { margin-top: 8px; }
-.chat-caps-defaults label > span { display: block; margin-bottom: 4px; font-size: 10.5px; color: var(--muted); }
-.chat-caps-defaults select { width: 100%; min-height: 28px; padding: 0 4px; font-size: 11.5px; }
-.chat-caps-hint { margin: 8px 0 0; font-size: 10.5px; line-height: 1.65; color: var(--muted-soft); }
 .chat-caps-alias { display: flex; align-items: center; gap: 6px; }
 .chat-caps-flag { flex: 0 0 auto; padding: 1px 5px; font-style: normal; font-size: 10px; color: var(--accent-dark); background: var(--accent-soft); border-radius: var(--radius-xs); }
-.chat-caps-item.is-default strong { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
-
 /* 消息流居中成一条窄列（720px）：对话是「读」的界面，宽屏下拉满一行反而难读 */
 /* 滚动容器本身只负责滚动；内层才是纵向流。分开是为了让 ResizeObserver 能感知
    图片异步加载带来的高度变化（容器自己的高度是固定的，不会触发 resize） */
@@ -2238,7 +2206,7 @@ input:not([type="checkbox"]):not([type="radio"]), textarea, select,
 .icon-button.compact { border-radius: var(--radius-card); }
 
 .nav-button, .sidebar-menu-item, .sidebar-conv,
-.sidebar-search, .chat-caps-item { border-radius: var(--radius-control); }
+.sidebar-search, .chat-caps-card { border-radius: var(--radius-card); }
 
 .status-badge, .mode-chip, .chat-control, .prompt-polish,
 .model-picker-trigger, .model-chip, .preset-tag, .unit-adapter,

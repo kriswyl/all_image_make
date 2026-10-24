@@ -34,8 +34,7 @@ body,
 }
 .chat-bubble-assistant { font-weight: 450; }
 .chat-bubble-user { color: var(--ink); }
-.chat-caps-item strong,
-.chat-caps-item .chat-caps-model strong { letter-spacing: 0; }
+.chat-caps-card strong { letter-spacing: 0; }
 
 /* ── 2. 交互基座：统一的过渡、按压与焦点 ────────────────────────────────── */
 
@@ -54,7 +53,7 @@ select,
 .brand,
 .sidebar-conv,
 .sidebar-menu-item,
-.chat-caps-item,
+.chat-caps-card,
 .model-picker-option,
 .chat-option,
 .mode-chip,
@@ -100,7 +99,7 @@ button:active:not(:disabled):not(.titlebar-control),
 }
 .preset-card:active,
 .unit-card:active,
-.chat-caps-item:active:not(.is-default) {
+.chat-caps-card:active:not(.is-default) {
   transform: scale(.993);
 }
 
@@ -134,15 +133,6 @@ select { border-radius: var(--radius-control); }
 .model-picker-trigger,
 .chat-caps > summary { border-radius: var(--radius-pill); }
 
-.chat-caps-defaults select {
-  height: 36px;
-  min-height: 36px;
-  /* 右侧留出原生箭头的位置，否则长模型名会压到箭头上 */
-  padding: 0 30px 0 8px;
-  border-radius: var(--radius-control);
-  font-size: 12px;
-  background: var(--surface-soft);
-}
 .asset-library-tools > select { border-radius: var(--radius-control); }
 
 input:not([type="checkbox"]):not([type="radio"]):focus,
@@ -367,8 +357,9 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 }
 
 /* ── 6. 模型面板 ────────────────────────────────────────────────────────────
-   从「两列清单」重排成三列卡片：生图 / 生视频 / 音频并排，
-   三个默认模型下拉也并排，模型真名是主角，渠道和简称降为小标签。 */
+   一类模型一屏：类型标签切换，卡片本身就是默认选择器。
+   默认项用「黑描边 + 实心默认徽标 + 顶部默认行」三重标记，
+   不再有和列表重复的三个下拉框。 */
 
 .chat-caps > summary {
   min-height: 30px;
@@ -397,147 +388,230 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 
 .chat-caps-body {
   top: 40px;
-  width: min(980px, calc(100vw - 24px));
-  max-height: min(76vh, 720px);
-  padding: 14px;
+  width: min(820px, calc(100vw - 24px));
+  max-height: min(74vh, 680px);
+  padding: 12px;
   border-radius: var(--radius-panel);
   border: 1px solid var(--line);
   box-shadow: 0 24px 60px rgba(0, 0, 0, .16);
 }
 .chat-caps[open] .chat-caps-body { animation: ui-dialog-in var(--dur-2) var(--ease-out); }
 
-.chat-caps-defaults {
-  padding: 4px 2px 14px;
-  border-bottom: 1px solid var(--line);
+/* 类型标签：分段控件，选中项浮到白底上 */
+.chat-caps-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-soft);
+  border-radius: var(--radius-control);
 }
-.chat-caps-defaults-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px 14px;
-}
-.chat-caps-defaults label + label { margin-top: 0; }
-.chat-caps-defaults label > span {
-  margin-bottom: 5px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-.chat-caps-hint {
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.chat-caps-columns {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0 14px;
-  margin-top: 12px;
-}
-.chat-caps-column { min-width: 0; }
-.chat-caps-column h4 {
-  display: flex;
+.chat-caps-tabs > button {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 0 0 8px;
-  padding: 0 2px;
-  color: var(--ink-soft);
+  min-height: 30px;
+  padding: 0 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
   font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0;
+  font-weight: 550;
+}
+.chat-caps-tabs > button:hover { color: var(--ink); }
+.chat-caps-tabs > button.is-active {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .08), 0 0 0 1px rgba(0, 0, 0, .04);
+}
+.chat-caps-tab-count {
+  min-width: 16px;
+  padding: 0 5px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-radius: var(--radius-pill);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.chat-caps-tabs > button.is-active .chat-caps-tab-count {
+  color: var(--ink-soft);
+  background: var(--accent-soft);
 }
 
-.chat-caps-item {
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  gap: 3px 9px;
-  margin-bottom: 6px;
-  padding: 9px 10px;
+/* 当前默认：一行说清楚，不用再去下面找哪个被选中 */
+.chat-caps-default-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-height: 20px;
+  margin: 12px 2px 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.chat-caps-default-label { display: inline-flex; align-items: center; }
+.chat-caps-default-label::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.chat-caps-default-line strong {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.chat-caps-default-channel {
+  padding-left: 8px;
+  color: var(--muted);
+  border-left: 1px solid var(--line-strong);
+  font-size: 11px;
+}
+.chat-caps-default-empty { color: var(--muted); }
+
+/* 两列卡片：390px 一列，长模型名也放得下 */
+.chat-caps-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.chat-caps-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 2px 10px;
+  min-width: 0;
+  padding: 10px 11px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
+  cursor: pointer;
 }
-.chat-caps-item:hover {
+.chat-caps-card:hover {
   background: var(--surface-soft);
-  border-color: var(--line-strong);
-  border-radius: var(--radius-control);
+  border-color: var(--line-hover);
 }
-.chat-caps-item:focus-visible {
+.chat-caps-card.is-default,
+.chat-caps-card.is-default:hover {
+  background: var(--surface);
+  border-color: var(--ink);
+  cursor: default;
+}
+.chat-caps-card:focus-visible {
   outline: 2px solid rgba(13, 13, 13, .55);
   outline-offset: 2px;
-  border-radius: var(--radius-control);
 }
-.chat-caps-item.is-default {
-  background: #fafafa;
-  border-color: var(--line-strong);
+
+.chat-caps-logo {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  grid-row: 1 / span 2;
+  place-items: center;
 }
-.chat-caps-item:last-of-type { border-bottom: 1px solid var(--line); }
-.chat-caps-logo { width: 28px; height: 28px; }
-.chat-caps-model { gap: 5px; min-width: 0; }
-.chat-caps-item strong {
+.chat-caps-model {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  /* 给右上角的调整键留位，名字再长也不会压到它 */
+  padding-right: 22px;
+}
+.chat-caps-model strong {
   min-width: 0;
   overflow: hidden;
+  color: var(--ink);
   font-size: 12.5px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-caps-flag {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px 1px 4px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  font-size: 9.5px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 15px;
+}
 .chat-caps-meta {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 5px;
-  min-width: 0;
   color: var(--muted);
   font-size: 11px;
-  line-height: 1.55;
+  line-height: 1.5;
 }
-.chat-caps-item .chat-caps-channel {
+.chat-caps-channel {
   min-width: 0;
   overflow: hidden;
-  color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-caps-item .chat-caps-alias {
-  flex: 0 0 auto;
-  max-width: 58%;
+.chat-caps-meta-sep { flex: 0 0 auto; color: var(--line-strong); }
+.chat-caps-alias {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
-  padding: 0 5px;
   color: var(--ink-soft);
-  background: var(--surface-soft);
-  border-radius: var(--radius-xs);
   font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-caps-adjust {
-  padding: 2px 8px;
+.chat-caps-gear {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
   color: var(--muted);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  font-size: 10.5px;
-  opacity: .8;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  opacity: .5;
 }
-.chat-caps-adjust:hover {
+.chat-caps-card:hover .chat-caps-gear,
+.chat-caps-gear:focus-visible { opacity: 1; }
+.chat-caps-gear:hover {
   color: var(--ink);
-  background: var(--surface-soft);
-  border-color: var(--line-strong);
+  background: var(--accent-soft);
 }
+
 .chat-caps-note {
-  margin: 10px 2px 0;
-  color: var(--muted);
+  margin: 12px 2px 2px;
+  color: var(--muted-soft);
   font-size: 11px;
 }
-.chat-caps-empty { font-size: 11.5px; color: var(--muted); }
+.chat-caps-empty {
+  grid-column: 1 / -1;
+  margin: 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
 
 /* ── 7. 窄窗口 ──────────────────────────────────────────────────────────── */
-@media (max-width: 900px) {
-  .chat-caps-body { width: min(760px, calc(100vw - 16px)); }
-  .chat-caps-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .chat-caps-defaults-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 640px) {
-  .chat-caps-body { width: calc(100vw - 16px); }
-  .chat-caps-columns,
-  .chat-caps-defaults-grid { grid-template-columns: 1fr; }
+@media (max-width: 760px) {
+  .chat-caps-body {
+    width: calc(100vw - 16px);
+    padding: 10px;
+  }
+  .chat-caps-grid { grid-template-columns: 1fr; }
 }
 
 /* ── 8. 尊重系统的「减少动态效果」 ──────────────────────────────────────── */
@@ -559,7 +633,7 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
   .canvas-bar-thumb:active,
   .preset-card:active,
   .unit-card:active,
-  .chat-caps-item:active:not(.is-default) {
+  .chat-caps-card:active:not(.is-default) {
     transform: none;
   }
 }
