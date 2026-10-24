@@ -27,7 +27,6 @@ import {
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
-import { AssetStrip } from "./chat/AssetStrip";
 import { Composer, isScriptDocument } from "./chat/Composer";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
@@ -119,12 +118,6 @@ export function ChatView({
   const [preview, setPreview] = useState<string | null>(null);
   const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [libraryTab, setLibraryTab] = useState<"all" | "canvas">("all");
-
-  function openLibrary(tab: "all" | "canvas" = "all") {
-    setLibraryTab(tab);
-    setLibraryOpen(true);
-  }
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
@@ -954,7 +947,7 @@ export function ChatView({
                   type="button"
                   className="chat-control chat-toggle"
                   title="打开素材库：筛选、搜索、批量选图，设为首帧 / 尾帧"
-                  onClick={() => openLibrary("all")}
+                  onClick={() => setLibraryOpen(true)}
                 >
                   <Images size={13} />
                   素材 {sessionImages.length}
@@ -1084,23 +1077,6 @@ export function ChatView({
               />
             ) : null}
 
-            {canvasImages.length ? (
-              <div className="chat-canvas">
-                <div className="canvas-panel">
-                  <AssetStrip
-                    assets={sessionImages}
-                    canvasIds={canvasImages.map((asset) => asset.id)}
-                    onPreview={setPreview}
-                    onSetFirst={setCanvasFirst}
-                    onSetLast={setCanvasLast}
-                    onRemove={(assetId) => removeCanvasBatch([assetId])}
-                    onOpenLibrary={() => openLibrary("canvas")}
-                    onClear={() => writeCanvas([])}
-                  />
-                </div>
-              </div>
-            ) : null}
-
             <Composer
               running={running}
               uploading={uploading}
@@ -1171,7 +1147,11 @@ export function ChatView({
               onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
               onAssetAttached={(assetId) => addCanvasBatch([assetId])}
-              onAssetDetached={(assetId) => removeCanvasBatch([assetId])}
+              canvasItems={canvasImages.map((asset, index) => ({ asset, index }))}
+              onPreviewCanvas={setPreview}
+              onRemoveCanvas={(assetId) => removeCanvasBatch([assetId])}
+              onSetCanvasFirst={setCanvasFirst}
+              onSetCanvasLast={setCanvasLast}
             />
           </>
         )}
@@ -1186,7 +1166,6 @@ export function ChatView({
         onToggleCanvas={toggleCanvasSelection}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
-        initialTab={libraryTab}
       />
 
       {preview ? (

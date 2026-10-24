@@ -388,3 +388,63 @@
 @media (max-width: 720px) {
   .canvas-bar-items { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+
+/* 输入框里的画布附件：和本地待发图同一排，尺寸更大、带角色角标 */
+.composer-attachments .composer-attachment { width: 80px; height: 80px; }
+.composer-attachment.is-canvas { overflow: visible; background: transparent; border: 0; }
+.composer-canvas-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: zoom-in;
+}
+.composer-canvas-thumb:hover { border-color: var(--line-strong); }
+.composer-canvas-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.composer-canvas-order {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  display: inline-grid;
+  min-width: 15px;
+  height: 15px;
+  place-items: center;
+  padding: 0 3px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.composer-canvas-role {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0 2px;
+  color: #fff;
+  background: rgba(0, 0, 0, .62);
+  font-size: 8.5px;
+  line-height: 1.3;
+  text-align: center;
+}
+.composer-canvas-role.is-last { background: rgba(37, 99, 235, .78); }
+.composer-canvas-role.is-ref { background: rgba(0, 0, 0, .5); }
+.composer-attachment.is-canvas .composer-attachment-remove { top: -5px; right: -5px; }
+
+/* 对话里的图放大一点：单张最多 280px，工具卡结果 300×188 */
+.chat-bubble-thumb { width: 120px; height: 120px; }
+.chat-bubble-thumb img { height: 120px; }
+.chat-bubble-thumbs > :only-child.chat-bubble-thumb { max-width: min(320px, 100%); }
+.chat-bubble-thumbs > :only-child.chat-bubble-thumb img { max-height: 280px; }
+.tool-card-thumb { width: 300px; height: 188px; }
+@media (max-width: 720px) {
+  .tool-card-thumb { width: 100%; height: auto; aspect-ratio: 4 / 3; }
+}
+.composer-attachments .composer-attachment.is-document { width: auto; min-width: 132px; max-width: 230px; height: 80px; }

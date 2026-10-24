@@ -18,21 +18,21 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
 import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
-import { api } from "../api";
 import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
+import { CanvasTray, type CanvasTrayItem } from "./CanvasTray";
 
 /**
- * 待发附件。三种来源：
+ * 待发附件。只放**本地文件**：
  * - 图片 `file`：从资源管理器拖/选进来的本地图片，发送时才真的上传
  * - 文档 `file`：`.txt` / `.md` 剧本，发送时读成文本再上传
- * - `assetId`：会话里**已经生成**的图，被拖进来当参考——不用上传，发送时并进画布
+ *
+ * 会话里已有的产物不进这里——拖进来会直接进画布，和画布缩略图只出现一次。
  */
 type PendingAttachment = {
   url: string;
   name: string;
-  file?: File;
-  assetId?: string;
+  file: File;
   kind: "image" | "document";
 };
 
@@ -61,7 +61,11 @@ export function Composer({
   onSend,
   onInterrupt,
   onAssetAttached,
-  onAssetDetached,
+  canvasItems = [],
+  onPreviewCanvas,
+  onRemoveCanvas,
+  onSetCanvasFirst,
+  onSetCanvasLast,
 }: {
   running: boolean;
   /** 图正在上传：按钮转圈，这期间不许再放进来 */
@@ -80,9 +84,14 @@ export function Composer({
    */
   onSend: (text: string, files: File[], assetIds: string[]) => void;
   onInterrupt: () => void;
-  /** 把已有产物拖进输入框时，立刻同步到画布；移除附件时再移出 */
+  /** 已有产物拖进输入框时，直接加入画布（同一份缩略图只出现一次） */
   onAssetAttached?: (assetId: string) => void;
-  onAssetDetached?: (assetId: string) => void;
+  /** 这一轮画布里已经选好的图，直接排在附件区 */
+  canvasItems?: CanvasTrayItem[];
+  onPreviewCanvas?: (assetId: string) => void;
+  onRemoveCanvas?: (assetId: string) => void;
+  onSetCanvasFirst?: (assetId: string) => void;
+  onSetCanvasLast?: (assetId: string) => void;
 }) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]);
@@ -101,15 +110,15 @@ export function Composer({
     const images = files.filter(isImageFile);
     const documents = files.filter(isScriptDocument);
     // 页内拖过来的产物不用再过格式和大小那两关：它本来就已经在会话里了
-    const fromCanvas = assetIds.filter((id) => !pending.some((item) => item.assetId === id));
-    if (!images.length && !documents.length && !fromCanvas.length) {
+    const attachedAssets = assetIds.filter((id) => !canvasItems.some((item) => item.asset.id === id));
+    if (!images.length && !documents.length && !attachedAssets.length) {
       // 拖了文件但没一张能收，才提示；拖的是别的东西就当没发生
       if (files.length) setReject("只支持 PNG、JPEG、WebP 图片，或 .txt / .md 脚本文档");
       return;
     }
     const currentImages = pending.filter((item) => item.kind === "image").length;
     const currentDocuments = pending.filter((item) => item.kind === "document").length;
-    if (currentImages + images.length + fromCanvas.length > MAX_REFERENCE_IMAGES) {
+    if (currentImages + images.length > MAX_REFERENCE_IMAGES) {
       setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
     }
@@ -126,16 +135,14 @@ export function Composer({
       ...current,
       ...images.map((file) => ({ file, name: file.name, url: URL.createObjectURL(file), kind: "image" as const })),
       ...documents.map((file) => ({ file, name: file.name, url: "", kind: "document" as const })),
-      ...fromCanvas.map((assetId) => ({ assetId, name: assetId, url: api.assetUrl(`/api/assets/${assetId}/thumb`), kind: "image" as const })),
     ]);
-    // 拖进来的既有产物立刻进画布：用户看到的就是「这一轮要带的图」
-    for (const assetId of fromCanvas) onAssetAttached?.(assetId);
+    // 拖进来的既有产物直接进「这一轮要带的图」，不再额外挂一份附件
+    for (const assetId of attachedAssets) onAssetAttached?.(assetId);
   }
 
   function removePending(item: PendingAttachment) {
-    // 只有本地图片才有 blob 地址要回收；文档和产物都没有 blob
-    if (item.file && item.url) URL.revokeObjectURL(item.url);
-    if (item.assetId) onAssetDetached?.(item.assetId);
+    // 只有本地图片才有 blob 地址要回收；文档没有 blob
+    if (item.url) URL.revokeObjectURL(item.url);
     setPending((current) => current.filter((entry) => entry !== item));
   }
 
@@ -147,14 +154,13 @@ export function Composer({
     const value = text.trim();
     // 图必须跟着一句话走：助手拿到一张没有说明的图，只能瞎猜要拿它做什么
     if (!value || running || disabled || uploading) return;
-    const files = pending.filter((item) => item.file).map((item) => item.file!);
-    const assetIds = pending.filter((item) => item.assetId).map((item) => item.assetId!);
+    const files = pending.map((item) => item.file);
     setText("");
     setPending([]);
     setReject(null);
-    // 交出去之后由 ChatView 负责上传/并入画布，blob 地址在这里就没用了
-    pending.forEach((item) => { if (item.file && item.url) URL.revokeObjectURL(item.url); });
-    onSend(value, files, assetIds);
+    // 交出去之后由 ChatView 负责上传 / 并入画布，blob 地址在这里就没用了
+    pending.forEach((item) => { if (item.url) URL.revokeObjectURL(item.url); });
+    onSend(value, files, []);
     // 高度被撑开过的话收回去，否则下一条消息的输入框还是大的
     if (areaRef.current) areaRef.current.style.height = "auto";
   }
@@ -162,8 +168,15 @@ export function Composer({
   return (
     <div className={`composer ${active ? "is-drop" : ""}`} {...dropProps}>
       <div className="composer-box">
-        {pending.length ? (
+        {canvasItems.length || pending.length ? (
           <div className="composer-attachments">
+            <CanvasTray
+              items={canvasItems}
+              onPreview={onPreviewCanvas ?? (() => undefined)}
+              onRemove={onRemoveCanvas ?? (() => undefined)}
+              onSetFirst={onSetCanvasFirst ?? (() => undefined)}
+              onSetLast={onSetCanvasLast ?? (() => undefined)}
+            />
             {pending.map((item) => (
               <div
                 key={item.kind === "document" ? `doc:${item.name}:${item.file?.size}` : item.url || item.name}
@@ -275,8 +288,8 @@ export function Composer({
         {pending.some((item) => item.kind === "document") ? (
           <span className="composer-hint-pending">{pending.filter((item) => item.kind === "document").length} 个脚本文档将在发送时读取</span>
         ) : null}
-        {pending.some((item) => item.assetId) ? (
-          <span className="composer-hint-pending">{pending.filter((item) => item.assetId).length} 张引用自本会话，会一起进画布</span>
+        {canvasItems.length ? (
+          <span className="composer-hint-pending">{canvasItems.length} 张已选入这一轮（①首帧 / ②尾帧 / 其余参考），发送后清空</span>
         ) : null}
         <div className="composer-hint-right">
           {statusSlot}
