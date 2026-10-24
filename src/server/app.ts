@@ -1165,6 +1165,10 @@ async function removeStoredFile(baseDir: string, relativePath: string) {
 function publicChannel(channel: DbChannel, sessionKeys: KeyStore): Channel {
   return {
     ...channel,
+    // mj_edits 不再作为可选模型展示：有参考图时 mj_imagine 会自动走图生图接口
+    ...(channel.adapterType === "midjourney"
+      ? { models: channel.models.filter((model) => model !== "mj_edits") }
+      : {}),
     hasKey: channel.authType === "none" || Boolean(sessionKeys.get(channel.id) || (channel.secretEnv && process.env[channel.secretEnv])),
   };
 }

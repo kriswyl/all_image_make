@@ -66,7 +66,7 @@ const GEMINI_TTS_MODELS = [
   "gemini-3.8-flash-lite-tts",
   "gemini-3.1-flash-tts-preview",
 ];
-const MIDJOURNEY_MODELS = ["mj_imagine", "mj_edits", "mj_upscale", "mj_variation", "mj_reroll"];
+const MIDJOURNEY_MODELS = ["mj_imagine", "mj_upscale", "mj_variation", "mj_reroll"];
 
 /**
  * 对话（大脑）模型候选。
@@ -148,7 +148,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       {
         id: "midjourney",
         label: "Midjourney 生图",
-        description: "mj_imagine 文生图 / mj_edits 图生图，支持 U/V/R 后续动作",
+        description: "mj_imagine 文生图（加参考图自动走图生图），支持 U/V/R 后续动作",
         adapterType: "midjourney",
         authType: "bearer",
         channelName: "{provider}",

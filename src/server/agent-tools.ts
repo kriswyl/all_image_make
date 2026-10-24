@@ -28,6 +28,7 @@ import type { TaskRunner, ReferenceImageUpload } from "./tasks.js";
 import { AppError } from "./tasks.js";
 import type { CapabilityAlias } from "./capabilities.js";
 import { describeAliasChoice, resolveAlias } from "./capabilities.js";
+import { midjourneyUsableButtons } from "../shared/midjourney.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "./diagnose.js";
 import { callBrain, type BrainMessage } from "./brain.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
@@ -1104,6 +1105,8 @@ async function generateImage(
         salvageNote ? `${salvageNote}。` : "",
         notes.length ? `注意：${notes.join("；")}` : "",
       ].join("");
+      // MJ 的四宫格结果带 U/V/R 按钮；塞进卡片 data，用户能在对话里直接继续操作
+      const midjourneyButtons = midjourneyUsableButtons(task.remoteMeta?.midjourney?.buttons ?? []);
       return {
         result: {
           ok: true,
@@ -1119,6 +1122,7 @@ async function generateImage(
             usedFallback: resolution.usedFallback,
             ...(choice ? { aliasNote: choice } : {}),
             parameterNotes,
+            ...(midjourneyButtons.length ? { midjourneyButtons, midjourneyTaskId: task.id } : {}),
           },
         },
         terminal: false,

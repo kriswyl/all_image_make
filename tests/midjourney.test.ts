@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildGenerationRequest } from "../src/server/adapters";
 import { asyncProviderSpec } from "../src/server/async-providers";
+import { buildCapabilityAliases } from "../src/server/capabilities";
 import {
   midjourneyButtonLabel,
   midjourneyModelForCustomId,
@@ -117,5 +118,14 @@ describe("Midjourney 轮询与按钮", () => {
       { customId: "MJ::JOB::animate::1::x", label: "Animate (High motion)" },
     ]);
     expect(buttons.map((button) => button.label)).toEqual(["U1", "V1"]);
+  });
+});
+
+describe("Midjourney 模型展示", () => {
+  it("能力清单只暴露 mj_imagine，不展示 mj_edits 和动作模型", () => {
+    const aliases = buildCapabilityAliases([channel]);
+    expect(aliases.map((item) => item.model)).toEqual(["mj_imagine"]);
+    expect(aliases[0]!.alias).toBe("mj");
+    expect(aliases[0]!.kind).toBe("image");
   });
 });

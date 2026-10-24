@@ -10,6 +10,7 @@ import { isTerminalStatus } from "./tasks.js";
 import { MAX_AUTO_CONTINUE } from "./agent-constants.js";
 import { assetRef, type AgentStreamEvent, type ToolResult } from "../shared/agent-types.js";
 import { taskKindFor } from "../shared/types.js";
+import { midjourneyUsableButtons } from "../shared/midjourney.js";
 
 export interface TaskEventHost {
   db: AppDatabase;
@@ -63,6 +64,12 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   // async 标记只在「等任务」时有意义；落库时丢掉，免得回放给大脑时它以为还没做完
   const previous = pending.toolResult ?? { ok: false, summary: "" };
   const { async: _pending, ...rest } = previous;
+  // Midjourney 的 U/V/R 按钮藏在任务 meta 里；带上给对话卡片直接渲染，
+  // 用户不用跳去生成历史才能继续放大 / 变体 / 重绘。
+  const midjourneyButtons = midjourneyUsableButtons(event.task.remoteMeta?.midjourney?.buttons ?? []);
+  const data = midjourneyButtons.length
+    ? { ...(previous.data ?? {}), midjourneyButtons, midjourneyTaskId: event.task.id }
+    : previous.data;
   const result: ToolResult = {
     ...rest, ok, summary, taskId: event.task.id,
     ...(produced ? {
@@ -70,6 +77,7 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
       assetIds: producedAssets.map((asset) => asset.id),
       mimeType: produced.mimeType,
     } : {}),
+    ...(data ? { data } : {}),
   };
   db.updateMessage(pending.id, {
     content: summary, toolResult: result, status: ok ? "ok" : "error",

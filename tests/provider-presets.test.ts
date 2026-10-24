@@ -73,11 +73,12 @@ describe("provider presets", () => {
     expect(draft!.input.endpoint).toBe("/v1beta/models/{model}:generateContent");
   });
 
-  it("adds Midjourney with submit and action models", () => {
+  it("adds Midjourney with mj_imagine and action models", () => {
     const mj = findProviderPreset("tiantoken-midjourney")!;
     expect(mj.units.map((unit) => unit.adapterType)).toEqual(["midjourney"]);
+    // mj_edits 不再展示：加参考图时 mj_imagine 自动走图生图
     expect(mj.units[0]!.models).toEqual([
-      "mj_imagine", "mj_edits", "mj_upscale", "mj_variation", "mj_reroll",
+      "mj_imagine", "mj_upscale", "mj_variation", "mj_reroll",
     ]);
     const [draft] = buildChannelDrafts(mj, [selectionFor(mj, "midjourney")]);
     expect(draft!.input.endpoint).toBe("/mj/submit/imagine");

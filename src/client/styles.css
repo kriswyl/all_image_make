@@ -1677,6 +1677,40 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .sidebar-conv-menu button.danger { color: var(--coral); }
 .sidebar-conv-menu button.danger:hover { color: var(--coral); background: var(--coral-soft); }
 .sidebar-conv-empty { margin: 0; padding: 2px 8px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+/* 会话行悬停：深色卡片式提示，替代原生 title 白框 */
+.sidebar-conv-tooltip {
+  position: fixed;
+  z-index: 160;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 9px 11px;
+  color: #fff;
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .22);
+  pointer-events: none;
+  animation: ui-menu-in var(--dur-2) var(--ease-out);
+}
+.sidebar-conv-tooltip-title {
+  display: block;
+  margin-bottom: 3px;
+  color: rgba(255, 255, 255, .58);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.sidebar-conv-tooltip p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, .88);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
 .sidebar-group-add { display: grid; width: 20px; height: 20px; margin-left: auto; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: var(--radius-xs); }
 .sidebar-group-add:hover { color: var(--ink); background: var(--accent-soft); }
 
@@ -1837,6 +1871,25 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .tool-card-thumb { display: block; width: 216px; max-width: 100%; height: 134px; margin-top: 8px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-control); cursor: zoom-in; }
 .tool-card-thumb img, .tool-card-thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }
 .tool-card-thumb:hover { border-color: var(--line-strong); }
+/* Midjourney 结果下的 U/V/R 按钮：直接留在对话里，不用跳去历史 */
+.tool-card-mj-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.tool-card-mj-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  font-size: 10.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tool-card-mj-actions button:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-soft);
+  border-color: var(--line-hover);
+}
+.tool-card-mj-actions button:disabled { opacity: .55; cursor: default; }
 /* 参数核对（问题 1）：摆在卡片正面，因为「请求体里到底带没带」正是用户要盯的那件事 */
 .tool-card-params { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .tool-param { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11px; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-pill); }

@@ -16,6 +16,9 @@ import {
   type AgentToolName, type CanvasAsset, type ChatMessage, type ToolResult,
 } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
+import {
+  midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton,
+} from "../../shared/midjourney";
 
 const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_image: ImageIcon,
@@ -98,6 +101,7 @@ export function ToolCard({
 }) {
   const [open, setOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [mjBusy, setMjBusy] = useState(false);
   const tool = message.toolName ?? "reply";
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
   const payload = result?.toolResult ?? null;
@@ -131,6 +135,13 @@ export function ToolCard({
     ? produced.mimeType.startsWith("audio/")
     : payload?.mimeType?.startsWith("audio/") ?? false;
   const resultAssetIds = payload?.assetIds?.length ? payload.assetIds : assetId ? [assetId] : [];
+  const mjButtons = midjourneyUsableButtons(
+    Array.isArray(payload?.data?.midjourneyButtons)
+      ? payload.data.midjourneyButtons as MidjourneyButton[]
+      : [],
+  );
+  const mjTaskId = typeof payload?.data?.midjourneyTaskId === "string"
+    ? payload.data.midjourneyTaskId : result?.taskId;
 
   async function downloadFile(asset: Asset) {
     if (downloadingId) return;
@@ -141,6 +152,19 @@ export function ToolCard({
       onToast?.("error", error instanceof Error ? error.message : "下载失败");
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  async function midjourneyAct(button: MidjourneyButton) {
+    if (!mjTaskId || mjBusy) return;
+    setMjBusy(true);
+    try {
+      await api.midjourneyAction(mjTaskId, button.customId, midjourneyButtonLabel(button));
+      onToast?.("ok", `已提交「${midjourneyButtonLabel(button)}」，到「历史记录」查看结果`);
+    } catch (error) {
+      onToast?.("error", error instanceof Error ? error.message : "Midjourney 操作提交失败");
+    } finally {
+      setMjBusy(false);
     }
   }
 
@@ -274,6 +298,25 @@ export function ToolCard({
               <span>{isVideoResult ? "查看视频" : "查看大图"}</span>
             </span>
           </button>
+        ) : null}
+
+        {mjButtons.length ? (
+          <div className="tool-card-mj-actions" aria-label="Midjourney 后续操作">
+            {mjButtons.map((button) => {
+              const label = midjourneyButtonLabel(button);
+              return (
+                <button
+                  key={button.customId}
+                  type="button"
+                  title={`用 Midjourney 继续：${label}`}
+                  disabled={mjBusy}
+                  onClick={() => void midjourneyAct(button)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         ) : null}
       </div>
     </div>

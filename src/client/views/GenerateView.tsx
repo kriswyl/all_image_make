@@ -94,6 +94,13 @@ export function GenerateView(props: {
    */
   const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1;
   useEffect(() => { if (!maskAvailable) setMaskEditorOpen(false); }, [maskAvailable]);
+  // 旧版本可能把 mj_edits / 动作模型存成了上次选择；它们已不在下拉里，回落到 mj_imagine
+  useEffect(() => {
+    if (!isMidjourney) return;
+    if (props.selectedModel === "mj_edits" || isMidjourneyActionModel(props.selectedModel)) {
+      props.onModelChange("mj_imagine");
+    }
+  }, [isMidjourney, props.selectedModel, props.onModelChange]);
   const drop = useFileDrop(!submitting && referenceImages.length < MAX_REFERENCE_IMAGES, references.dropFiles);
   const dropActive = drop.active;
   const dropProps = drop.dropProps;
@@ -107,9 +114,6 @@ export function GenerateView(props: {
     if (!channel) return props.onToast("error", "请先添加渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
-    if (isMidjourney && props.selectedModel === "mj_edits" && !referenceImages.length) {
-      return props.onToast("error", "mj_edits 需要先添加 1 张参考图；纯文生图请选 mj_imagine");
-    }
     let requestedSize = size === "auto" ? undefined : size;
     if (size === "custom") {
       requestedSize = customSize(customWidth, customHeight);
@@ -210,7 +214,7 @@ export function GenerateView(props: {
               {isMidjourney ? (
                 <p className="mode-hint">
                   提示词支持 Midjourney 原生参数（如 <code>--ar 16:9</code>、<code>--v 7</code>、<code>--no text</code>）；
-                  加参考图会自动走 mj_edits（只取第 1 张），否则走 mj_imagine。结果是一张四宫格。
+                  加参考图会自动走 MJ 的图生图接口（只取第 1 张），否则走 mj_imagine。结果是一张四宫格。
                 </p>
               ) : null}
               <div className="reference-block">

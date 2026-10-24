@@ -18,6 +18,7 @@ afterEach(async () => {
 async function startMock() {
   const submits: Array<{ path: string; body: Record<string, unknown> }> = [];
   let origin = "";
+  let chatCalls = 0;
   const task = (id: string, status: string, image = false) => ({
     id,
     action: id === "mj-1" ? "IMAGINE" : "UPSCALE",
@@ -38,6 +39,15 @@ async function startMock() {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     req.on("end", () => {
+      if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+        chatCalls += 1;
+        const plan = chatCalls === 1
+          ? { tool: "generate_image", args: { prompt: "a cat" }, say: "这就画。" }
+          : { tool: "reply", args: { text: "画好了。" }, say: "画好了。" };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+        return;
+      }
       if (req.method === "POST" && (url.pathname === "/mj/submit/imagine" || url.pathname === "/mj/submit/action")) {
         submits.push({ path: url.pathname, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -48,6 +58,11 @@ async function startMock() {
         const id = url.pathname.split("/")[3]!;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(task(id, "SUCCESS", true)));
+        return;
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/mj/image/")) {
+        res.writeHead(200, { "Content-Type": "image/png" });
+        res.end(Buffer.from(pngBase64, "base64"));
         return;
       }
       if (req.method === "GET" && url.pathname.startsWith("/mj/image/")) {
@@ -120,5 +135,46 @@ describe("Midjourney 端到端", () => {
       path: "/mj/submit/action",
       body: { taskId: "mj-1", customId: "MJ::JOB::upsample::1::abc" },
     });
+  }, 20_000);
+});
+
+describe("Midjourney 对话结果", () => {
+  it("生成图片的工具结果带上 U/V/R 按钮", async () => {
+    const mock = await startMock();
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "chatcanvas-mj-chat-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+
+    const brain = await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: mock.origin, adapterType: "openai-chat", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
+      models: ["mock-brain"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+    await request(app).post("/api/channels").send({
+      name: "MJ", baseUrl: mock.origin, adapterType: "midjourney", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/mj/submit/imagine",
+      models: ["mj_imagine", "mj_edits", "mj_upscale", "mj_variation", "mj_reroll"],
+      allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+
+    const conversationId = (await request(app).post("/api/conversations")
+      .send({ brainChannelId: brain.body.data.id, brainModel: "mock-brain" }).expect(201)).body.data.id as string;
+    await request(app).post(`/api/conversations/${conversationId}/messages`).send({ text: "画一只猫" }).expect(202);
+
+    type ToolRow = {
+      role: string; toolName: string | null; status: string;
+      toolResult: { data?: { midjourneyButtons?: unknown[]; midjourneyTaskId?: string } } | null;
+    };
+    let row: ToolRow | null = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data as { messages: ToolRow[] };
+      row = view.messages.find((item) => item.role === "tool" && item.status === "ok") ?? null;
+      if (row) break;
+    }
+
+    expect(row).toBeTruthy();
+    expect(row!.toolResult?.data?.midjourneyButtons).toHaveLength(3);
+    expect(row!.toolResult?.data?.midjourneyTaskId).toBeTruthy();
   }, 20_000);
 });

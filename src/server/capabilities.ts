@@ -147,8 +147,10 @@ export function buildCapabilityAliases(channels: DbChannel[]): CapabilityAlias[]
     if (channelKind === "chat") continue;
     const kind: CapabilityKind = channelKind;
     for (const model of channel.models) {
-      // 放大/变体/重绘必须先有 MJ 任务，不能作为普通生图模型交给大脑
-      if (channel.adapterType === "midjourney" && isMidjourneyActionModel(model)) continue;
+      // 放大/变体/重绘必须先有 MJ 任务，不能作为普通生图模型交给大脑。
+      // mj_edits 也不再展示：加参考图时 mj_imagine 会自动走 edits 接口，用户不需要单独选它。
+      if (channel.adapterType === "midjourney"
+        && (model === "mj_edits" || isMidjourneyActionModel(model))) continue;
       entries.push({
         kind, channelId: channel.id, channelName: channel.name, model,
         adapterType: channel.adapterType, traits: traitsFor(channel.adapterType, kind),
