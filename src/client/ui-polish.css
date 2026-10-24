@@ -209,6 +209,22 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 .storyboard-modal { animation: ui-dialog-in var(--dur-3) var(--ease-out); }
 .asset-library { animation: ui-drawer-in var(--dur-3) var(--ease-out); }
 
+/* 分镜工作台：大浮层从下方托起，左右两栏再稍微错开淡入 */
+@keyframes storyboard-in {
+  from { opacity: 0; transform: translateY(18px) scale(.975); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes storyboard-pane-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.storyboard-overlay { animation: ui-fade-in 200ms var(--ease-out); }
+.storyboard-modal { animation: storyboard-in 320ms var(--ease-out); }
+.storyboard-settings-scroll,
+.storyboard-settings-rail,
+.storyboard-shots { animation: storyboard-pane-in 260ms var(--ease-out) 90ms both; }
+.storyboard-shots { animation-delay: 130ms; }
+
 .model-picker-menu,
 .sidebar-conv-menu,
 .sidebar-menu,

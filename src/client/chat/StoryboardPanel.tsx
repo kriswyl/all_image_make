@@ -10,9 +10,10 @@
  */
 import {
   CheckCircle2, Clapperboard, Download, Film, Image as ImageIcon, Layers, LoaderCircle,
-  Mountain, RefreshCw, Sparkles, Upload, UserRound, X,
+  Mountain, PanelLeftClose, PanelLeftOpen, RefreshCw, Sparkles, Upload, UserRound, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../api";
 import {
   isStoryboardShotActive, storyboardShotMissing,
@@ -28,6 +29,31 @@ type SettingKind = "character" | "scene";
 type SettingItem = StoryboardCharacter | StoryboardScene;
 
 const ACTIVE_SETTING_STATUS = new Set(["queued", "validating", "submitting", "running"]);
+/** 设定栏的宽度 / 收起状态跟着用户走，下一次打开还是他习惯的样子 */
+const SETTINGS_WIDTH_KEY = "yida.storyboard.settingsWidth";
+const SETTINGS_COLLAPSED_KEY = "yida.storyboard.settingsCollapsed";
+const SETTINGS_WIDTH_DEFAULT = 360;
+const SETTINGS_WIDTH_MIN = 280;
+const SETTINGS_WIDTH_MAX = 520;
+type CSSVars = CSSProperties & Record<`--${string}`, string>;
+
+function readSettingsCollapsed() {
+  try {
+    return localStorage.getItem(SETTINGS_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readSettingsWidth() {
+  try {
+    const value = Number(localStorage.getItem(SETTINGS_WIDTH_KEY));
+    if (Number.isFinite(value) && value >= SETTINGS_WIDTH_MIN && value <= SETTINGS_WIDTH_MAX) return value;
+  } catch {
+    // localStorage 不可用时用默认宽度
+  }
+  return SETTINGS_WIDTH_DEFAULT;
+}
 
 function statusLabel(status: string): string {
   if (status === "planned" || status === "none") return "未生成";
@@ -80,6 +106,13 @@ export function StoryboardPanel({
   const uploadRef = useRef<HTMLInputElement>(null);
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const loadSeq = useRef(0);
+  /** 设定栏可收窄 / 收起：确认完设定后把宽度还给分镜表 */
+  const [settingsCollapsed, setSettingsCollapsed] = useState(readSettingsCollapsed);
+  const [settingsWidth, setSettingsWidth] = useState(readSettingsWidth);
+  const [resizing, setResizing] = useState(false);
+  const settingsWidthRef = useRef(settingsWidth);
+  const resizeStart = useRef<{ x: number; width: number } | null>(null);
+  const autoCollapsed = useRef(false);
 
   const shots = data?.shots ?? [];
   const characters = data?.characters ?? [];
@@ -158,6 +191,86 @@ export function StoryboardPanel({
   const settingsConfirmed = [...characters, ...scenes].filter((item) => item.confirmed).length;
   const settingsTotal = characters.length + scenes.length;
   const shotDone = shots.filter((shot) => shot.status === "succeeded").length;
+
+  /**
+   * 设定全部确认后自动收起一次——这是「设定完了，把空间让给分镜」。
+   * 用户手动展开过（localStorage 里已经有值）就不再自动收，避免抢控制权。
+   */
+  useEffect(() => {
+    if (autoCollapsed.current) return;
+    if (!settingsTotal || settingsConfirmed < settingsTotal) return;
+    try {
+      if (localStorage.getItem(SETTINGS_COLLAPSED_KEY) !== null) return;
+    } catch {
+      return;
+    }
+    // 等浮层入场动画走完再收，避免「边淡入边收窄」的拥挤感
+    const timer = window.setTimeout(() => {
+      autoCollapsed.current = true;
+      setSettingsCollapsed(true);
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [settingsConfirmed, settingsTotal]);
+
+  function setSettingsOpen(open: boolean) {
+    setSettingsCollapsed(!open);
+    try {
+      localStorage.setItem(SETTINGS_COLLAPSED_KEY, open ? "0" : "1");
+    } catch {
+      // 隐身模式 / 存储被禁用时只在本次会话生效
+    }
+  }
+
+  function expandSettings(section?: "characters" | "scenes") {
+    setSettingsOpen(true);
+    if (!section) return;
+    // 等收起态卸掉、栏宽展开后再滚到对应分组
+    window.setTimeout(() => {
+      document.getElementById(`storyboard-settings-${section}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, 220);
+  }
+
+  function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (settingsCollapsed) return;
+    event.preventDefault();
+    resizeStart.current = { x: event.clientX, width: settingsWidthRef.current };
+    setResizing(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!resizeStart.current) return;
+    const next = Math.min(
+      SETTINGS_WIDTH_MAX,
+      Math.max(SETTINGS_WIDTH_MIN, resizeStart.current.width + event.clientX - resizeStart.current.x),
+    );
+    settingsWidthRef.current = next;
+    setSettingsWidth(next);
+  }
+
+  function finishResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!resizeStart.current) return;
+    resizeStart.current = null;
+    setResizing(false);
+    try {
+      localStorage.setItem(SETTINGS_WIDTH_KEY, String(settingsWidthRef.current));
+    } catch {
+      // 同上
+    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function resetSettingsWidth() {
+    settingsWidthRef.current = SETTINGS_WIDTH_DEFAULT;
+    setSettingsWidth(SETTINGS_WIDTH_DEFAULT);
+    try {
+      localStorage.setItem(SETTINGS_WIDTH_KEY, String(SETTINGS_WIDTH_DEFAULT));
+    } catch {
+      // 同上
+    }
+  }
 
   function settingMissing(shot: StoryboardShot): string[] {
     if (shot.kind !== "image" || !data) return [];
@@ -422,7 +535,7 @@ export function StoryboardPanel({
           {item.asset
             ? <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" />
             : <span className="setting-card-placeholder"><Icon size={22} /><small>{statusLabel(item.status)}</small></span>}
-          <span className={`setting-status is-${item.status}`}>
+          <span className={`setting-status is-${item.status} ${item.confirmed ? "is-confirmed" : ""}`}>
             {isActive ? <LoaderCircle size={11} className="spin" /> : item.confirmed ? <CheckCircle2 size={11} /> : null}
             {item.confirmed ? "已确认" : item.asset ? "待确认" : statusLabel(item.status)}
           </span>
@@ -494,10 +607,17 @@ export function StoryboardPanel({
             </div>
           </div>
           <div className="storyboard-progress">
-            <span className={settingsConfirmed === settingsTotal && settingsTotal ? "is-done" : ""}>
+            <button
+              type="button"
+              className={`storyboard-progress-pill ${settingsConfirmed === settingsTotal && settingsTotal ? "is-done" : ""}`}
+              onClick={() => setSettingsOpen(settingsCollapsed)}
+              title={settingsCollapsed ? "展开角色 / 场景设定" : "收起角色 / 场景设定"}
+              aria-expanded={!settingsCollapsed}
+            >
+              {settingsCollapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
               设定图 {settingsConfirmed}/{settingsTotal}
-            </span>
-            <span>分镜 {shotDone}/{shots.length}</span>
+            </button>
+            <span className="storyboard-progress-pill">分镜 {shotDone}/{shots.length}</span>
             {loading ? <LoaderCircle size={13} className="spin" /> : null}
           </div>
           <div className="storyboard-modal-actions">
@@ -517,38 +637,112 @@ export function StoryboardPanel({
           </div>
         </header>
 
-        <div className="storyboard-modal-body">
-          <aside className="storyboard-settings">
-            <section className="setting-section">
-              <div className="setting-section-head">
-                <div><UserRound size={14} /><h3>角色设定</h3><span>{characters.length}</span></div>
-                {characters.length ? (
-                  <button type="button" className="link-btn"
-                    onClick={() => void generateSettings(characters.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch), [])}>
-                    生成全部
-                  </button>
-                ) : null}
+        <div
+          className={`storyboard-modal-body ${settingsCollapsed ? "is-settings-collapsed" : ""} ${resizing ? "is-resizing" : ""}`}
+          style={{ "--storyboard-settings-width": settingsCollapsed ? "56px" : `${settingsWidth}px` } as CSSVars}
+        >
+          <aside className={`storyboard-settings ${settingsCollapsed ? "is-collapsed" : ""}`}>
+            {settingsCollapsed ? (
+              /* 收起态：只留一条窄轨，角色 / 场景数量和确认进度还看得见，点一下就能回去 */
+              <div className="storyboard-settings-rail">
+                <button type="button" className="rail-toggle" title="展开角色 / 场景设定" onClick={() => expandSettings()}>
+                  <PanelLeftOpen size={16} />
+                </button>
+                <button type="button" className="rail-stat" title={`角色设定 · ${characters.length}`} onClick={() => expandSettings("characters")}>
+                  <UserRound size={15} />
+                  <span>{characters.length}</span>
+                </button>
+                <button type="button" className="rail-stat" title={`场景设定 · ${scenes.length}`} onClick={() => expandSettings("scenes")}>
+                  <Mountain size={15} />
+                  <span>{scenes.length}</span>
+                </button>
+                <span
+                  className={`rail-progress ${settingsTotal && settingsConfirmed === settingsTotal ? "is-done" : ""}`}
+                  title={`设定图已确认 ${settingsConfirmed}/${settingsTotal}`}
+                >
+                  {settingsConfirmed}/{settingsTotal}
+                </span>
+                <span className="rail-label">设定图</span>
               </div>
-              {characters.length
-                ? characters.map((item) => renderSettingCard("character", item))
-                : <div className="setting-empty">还没有角色标签。点右上角「标注角色/场景」，或直接在镜头里填角色名。</div>}
-            </section>
+            ) : (
+              <>
+                <div className="storyboard-settings-head">
+                  <strong>角色与场景</strong>
+                  <span className={`storyboard-settings-count ${settingsTotal && settingsConfirmed === settingsTotal ? "is-done" : ""}`}>
+                    {settingsTotal ? `${settingsConfirmed}/${settingsTotal} 已确认` : "暂无设定"}
+                  </span>
+                  <button type="button" className="icon-button compact" title="收起设定图，把宽度让给分镜" onClick={() => setSettingsOpen(false)}>
+                    <PanelLeftClose size={15} />
+                  </button>
+                </div>
+                <div className="storyboard-settings-scroll">
+                  <section className="setting-section" id="storyboard-settings-characters">
+                    <div className="setting-section-head">
+                      <div><UserRound size={14} /><h3>角色设定</h3><span>{characters.length}</span></div>
+                      {characters.length ? (
+                        <button type="button" className="link-btn"
+                          onClick={() => void generateSettings(characters.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch), [])}>
+                          生成全部
+                        </button>
+                      ) : null}
+                    </div>
+                    {characters.length
+                      ? characters.map((item) => renderSettingCard("character", item))
+                      : <div className="setting-empty">还没有角色标签。点右上角「标注角色/场景」，或直接在镜头里填角色名。</div>}
+                  </section>
 
-            <section className="setting-section">
-              <div className="setting-section-head">
-                <div><Mountain size={14} /><h3>场景设定</h3><span>{scenes.length}</span></div>
-                {scenes.length ? (
-                  <button type="button" className="link-btn"
-                    onClick={() => void generateSettings([], scenes.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch))}>
-                    生成全部
-                  </button>
-                ) : null}
-              </div>
-              {scenes.length
-                ? scenes.map((item) => renderSettingCard("scene", item))
-                : <div className="setting-empty">还没有场景标签。标注后可以给每个地点生成一张空镜设定图。</div>}
-            </section>
+                  <section className="setting-section" id="storyboard-settings-scenes">
+                    <div className="setting-section-head">
+                      <div><Mountain size={14} /><h3>场景设定</h3><span>{scenes.length}</span></div>
+                      {scenes.length ? (
+                        <button type="button" className="link-btn"
+                          onClick={() => void generateSettings([], scenes.filter((item) => !item.asset).map((item) => item.id).slice(0, maxBatch))}>
+                          生成全部
+                        </button>
+                      ) : null}
+                    </div>
+                    {scenes.length
+                      ? scenes.map((item) => renderSettingCard("scene", item))
+                      : <div className="setting-empty">还没有场景标签。标注后可以给每个地点生成一张空镜设定图。</div>}
+                  </section>
+                </div>
+              </>
+            )}
           </aside>
+
+          {/* 收起时保留这个网格项（宽度 0），列数不变，展开/收起才能真的做宽度过渡 */}
+          <div
+            className={`storyboard-splitter ${settingsCollapsed ? "is-hidden" : ""}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖动调整设定栏宽度"
+            aria-hidden={settingsCollapsed}
+            aria-valuenow={settingsWidth}
+            aria-valuemin={SETTINGS_WIDTH_MIN}
+            aria-valuemax={SETTINGS_WIDTH_MAX}
+            title="拖动调整宽度，双击恢复默认"
+            tabIndex={settingsCollapsed ? -1 : 0}
+            onPointerDown={beginResize}
+            onPointerMove={moveResize}
+            onPointerUp={finishResize}
+            onPointerCancel={finishResize}
+            onDoubleClick={resetSettingsWidth}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const next = Math.min(
+                SETTINGS_WIDTH_MAX,
+                Math.max(SETTINGS_WIDTH_MIN, settingsWidthRef.current + (event.key === "ArrowLeft" ? -16 : 16)),
+              );
+              settingsWidthRef.current = next;
+              setSettingsWidth(next);
+              try {
+                localStorage.setItem(SETTINGS_WIDTH_KEY, String(next));
+              } catch {
+                // 同上
+              }
+            }}
+          />
 
           <main className="storyboard-shots">
             <div className="storyboard-shots-toolbar">
