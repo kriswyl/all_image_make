@@ -135,7 +135,7 @@ export function AssetLibrary({
             <Layers size={16} />
             <div>
               <h2>素材库</h2>
-              <p>共 {assets.length} 张图 · 点图选中，双击看大图</p>
+              <p>共 {assets.length} 张图 · 点图加入 / 移出画布，双击看大图</p>
             </div>
           </div>
           <button type="button" className="icon-button compact" title="关闭" onClick={onClose}><X size={15} /></button>
