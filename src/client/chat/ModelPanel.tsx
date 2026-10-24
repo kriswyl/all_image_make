@@ -1,4 +1,4 @@
-import { ListTree } from "lucide-react";
+import { ChevronDown, ListTree } from "lucide-react";
 import { ModelLogo } from "./ModelLogo";
 import type { Channel, TaskKind } from "../../shared/types";
 
@@ -43,7 +43,11 @@ export function ModelPanel({
 
   return (
     <details className="chat-caps" ref={capsRef}>
-      <summary title="助手现在能调哪些模型"><ListTree size={13} />图片 · 视频 · 音频模型</summary>
+      <summary title="助手现在能调哪些模型">
+        <ListTree size={13} />
+        <span>图片 · 视频 · 音频模型</span>
+        <ChevronDown size={13} className="chat-caps-chevron" />
+      </summary>
       <div className="chat-caps-body">
         <div className="chat-caps-defaults">
           <div className="chat-caps-defaults-grid">
@@ -101,7 +105,10 @@ export function ModelPanel({
                         <strong title={cap.model}>{cap.model}</strong>
                         {effective ? <i className="chat-caps-flag">默认</i> : null}
                       </span>
-                      <span className="chat-caps-meta">{cap.channelName} · 叫「{cap.alias}」</span>
+                      <span className="chat-caps-meta">
+                        <span className="chat-caps-channel" title={cap.channelName}>{cap.channelName}</span>
+                        <span className="chat-caps-alias" title={cap.alias}>「{cap.alias}」</span>
+                      </span>
                       {onConfigureChannel && cap.channelId ? (
                         <button
                           type="button"
@@ -125,7 +132,7 @@ export function ModelPanel({
             );
           })}
         </div>
-        <p className="chat-caps-note">上面是真名，下面那个是对话里用的简称——你在对话里说「用 Gemini 画」就够了，不必记真实模型 ID。</p>
+        <p className="chat-caps-note">卡片上方是模型真名，下一行是对话里用的简称——你在对话里说「用 Gemini 画」就够了，不必记真实模型 ID。</p>
       </div>
     </details>
   );

@@ -1,0 +1,278 @@
+/*
+ * 全局 UI 打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版。
+ *
+ * 这一份放在最后加载，专门覆盖前面那些「能用但不够好看」的细节，
+ * 不改动业务组件里的结构。
+ */
+
+/* ── 字体：Windows 上不要强行 grayscale 抗锯齿，交给 ClearType ───────────── */
+:root {
+  -webkit-font-smoothing: auto;
+  /* 次级文字提一档对比度：小字号下 #8a8a8a 太淡 */
+  --muted: #686868;
+  --muted-soft: #8d8d8d;
+}
+
+html,
+body,
+#root {
+  -webkit-font-smoothing: auto;
+}
+
+/* 对话正文：14px + 450 字重，中文在高分屏上更实 */
+.chat-bubble {
+  font-size: 14px;
+  font-weight: 450;
+  line-height: 1.75;
+  color: var(--ink);
+}
+.chat-bubble-assistant { font-weight: 450; }
+.chat-bubble-user { color: var(--ink); }
+.chat-caps-item strong,
+.chat-caps-item .chat-caps-model strong { letter-spacing: 0; }
+
+/* ── 所有下拉框统一圆角 ─────────────────────────────────────────────────── */
+select {
+  border-radius: 10px;
+}
+.chat-control select,
+.model-picker-trigger,
+.chat-caps > summary {
+  border-radius: 999px;
+}
+.chat-caps-defaults select {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: var(--surface-soft);
+}
+.asset-library-tools > select { border-radius: 10px; }
+
+/* ── 点击过渡：全局轻微按压，卡片/选项也有一点反馈 ─────────────────────── */
+button,
+.chat-caps-item,
+.chat-option,
+.filter-tabs button,
+.asset-library-thumb,
+.composer-canvas-thumb,
+.canvas-bar-thumb {
+  transition:
+    transform 120ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+}
+button:active:not(:disabled) {
+  transform: scale(.97);
+}
+.primary-button:active:not(:disabled) {
+  transform: scale(.98);
+}
+.chat-caps-item:active:not(.is-default),
+.asset-library-thumb:active,
+.composer-canvas-thumb:active,
+.canvas-bar-thumb:active {
+  transform: scale(.985);
+}
+
+/* ── 模型面板：从「两列清单」改成三列卡片 ─────────────────────────────── */
+.chat-caps > summary {
+  min-height: 30px;
+  padding: 0 10px 0 11px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  font-size: 12px;
+}
+.chat-caps > summary:hover {
+  color: var(--ink);
+  background: var(--surface-soft);
+}
+.chat-caps[open] > summary {
+  color: var(--ink);
+  background: var(--accent-soft);
+  border-color: var(--line-strong);
+}
+.chat-caps-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform 150ms ease;
+}
+.chat-caps[open] .chat-caps-chevron {
+  transform: rotate(180deg);
+}
+
+.chat-caps-body {
+  top: 40px;
+  width: min(980px, calc(100vw - 24px));
+  max-height: min(76vh, 720px);
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .16);
+}
+.chat-caps[open] .chat-caps-body { animation: caps-in 150ms ease; }
+@keyframes caps-in {
+  from { opacity: 0; transform: translateY(-6px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.chat-caps-defaults {
+  padding: 4px 2px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.chat-caps-defaults-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.chat-caps-defaults label + label { margin-top: 0; }
+.chat-caps-defaults label > span {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.chat-caps-hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chat-caps-columns {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 14px;
+  margin-top: 12px;
+}
+.chat-caps-column { min-width: 0; }
+.chat-caps-column h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0 2px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.chat-caps-item {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 3px 9px;
+  margin-bottom: 6px;
+  padding: 9px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.chat-caps-item:hover {
+  background: var(--surface-soft);
+  border-color: var(--line-strong);
+  border-radius: 11px;
+}
+.chat-caps-item:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: -2px;
+  border-radius: 11px;
+}
+.chat-caps-item.is-default {
+  background: #fafafa;
+  border-color: var(--line-strong);
+}
+.chat-caps-item:last-of-type { border-bottom: 1px solid var(--line); }
+.chat-caps-logo { width: 28px; height: 28px; }
+.chat-caps-model { gap: 5px; }
+.chat-caps-item strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.chat-caps-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.chat-caps-adjust {
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  opacity: .8;
+}
+.chat-caps-adjust:hover {
+  color: var(--ink);
+  background: var(--surface-soft);
+  border-color: var(--line-strong);
+}
+.chat-caps-note {
+  margin: 10px 2px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-caps-empty { font-size: 11.5px; color: var(--muted); }
+
+@media (max-width: 900px) {
+  .chat-caps-body { width: min(760px, calc(100vw - 16px)); }
+  .chat-caps-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chat-caps-defaults-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .chat-caps-body { width: calc(100vw - 16px); }
+  .chat-caps-columns,
+  .chat-caps-defaults-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  .chat-caps-item,
+  .chat-option,
+  .filter-tabs button,
+  .asset-library-thumb,
+  .composer-canvas-thumb,
+  .canvas-bar-thumb {
+    transition: none;
+  }
+  button:active:not(:disabled),
+  .primary-button:active:not(:disabled),
+  .chat-caps-item:active:not(.is-default),
+  .asset-library-thumb:active,
+  .composer-canvas-thumb:active,
+  .canvas-bar-thumb:active {
+    transform: none;
+  }
+  .chat-caps-body { animation: none; }
+}
+.chat-caps-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.chat-caps-item .chat-caps-channel {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-caps-item .chat-caps-alias {
+  flex: 0 0 auto;
+  max-width: 58%;
+  overflow: hidden;
+  padding: 0 5px;
+  color: var(--ink-soft);
+  background: var(--surface-soft);
+  border-radius: 5px;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-caps > summary {
+  transition: transform 120ms ease, background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.chat-caps > summary:active { transform: scale(.98); }

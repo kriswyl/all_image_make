@@ -13,6 +13,8 @@ import "./styles.css";
 import "./storyboard.css";
 // 素材库抽屉：和分镜工作台一样独立成文件，避免 styles.css 继续膨胀
 import "./asset-library.css";
+// 最后加载的全局打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版
+import "./ui-polish.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里
 import "./onboarding.css";
 

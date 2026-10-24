@@ -951,7 +951,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---- 视觉风格：紫色主色、无边框柔和卡片 ---- */
+/* ---- 视觉风格：黑白主色、无边框柔和卡片 ---- */
 .nav-button, .primary-button, .secondary-button, .icon-button, input, textarea, select,
 .preset-card, .unit-card, .data-table tbody tr { transition: transform 160ms ease, background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease; }
 
@@ -1424,12 +1424,12 @@ select {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 34px;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237c3aed' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b6b6b' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 11px center;
   background-size: 13px 13px;
 }
-select:disabled { color: #a9a4bd; background-color: #f3f1fa; cursor: not-allowed; }
+select:disabled { color: var(--muted-soft); background-color: var(--surface-soft); cursor: not-allowed; }
 
 /* ---- 复选框：方形勾选框 + 药丸开关，替代浏览器原生控件 ---- */
 input[type="checkbox"] {
@@ -1902,7 +1902,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .canvas-section { padding: 7px 10px 8px; }
 .canvas-section-head { display: flex; align-items: baseline; gap: 8px; }
 .canvas-section-title { display: inline-flex; flex: none; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); }
-/* 「画布 N 张」是个事实标签，用浅紫药丸让"紫色=画布"这条线索继续成立；
+/* 「画布 N 张」是个事实标签，用浅灰药丸让"画布"这条线索继续成立；
    `min-width: 0` 才允许它被挤到省略号（flex 子项默认 min-width: auto，窄窗口下会把整行撑出去） */
 .canvas-section-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; padding: 1px 8px; font-size: 10.5px; font-weight: 600; color: var(--accent-dark); background: var(--accent-soft); border-radius: 999px; text-overflow: ellipsis; white-space: nowrap; }
 .canvas-section-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 10.5px; color: var(--muted-soft); text-overflow: ellipsis; white-space: nowrap; }
