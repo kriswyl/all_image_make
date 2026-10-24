@@ -439,13 +439,55 @@
 .composer-canvas-role.is-ref { background: rgba(0, 0, 0, .5); }
 .composer-attachment.is-canvas .composer-attachment-remove { top: -5px; right: -5px; }
 
-/* 对话里的图放大一点：单张最多 280px，工具卡结果 300×188 */
-.chat-bubble-thumb { width: 120px; height: 120px; }
-.chat-bubble-thumb img { height: 120px; }
-.chat-bubble-thumbs > :only-child.chat-bubble-thumb { max-width: min(320px, 100%); }
-.chat-bubble-thumbs > :only-child.chat-bubble-thumb img { max-height: 280px; }
-.tool-card-thumb { width: 300px; height: 188px; }
+/* ── 对话里的图：按完整画面展示，不裁主体 ─────────────────────────────────
+ * 单张：容器高度跟随图片自身比例，最大 280px；多张：120px 方格内 contain，
+ * 宁可留一点底色，也不把人物头顶 / 画面边缘裁掉。点开仍是原图灯箱。 */
+.chat-bubble-thumb {
+  width: 120px;
+  height: 120px;
+  background: var(--surface-soft);
+}
+.chat-bubble-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.chat-bubble-thumbs > :only-child.chat-bubble-thumb {
+  display: inline-block;
+  width: auto;
+  height: auto;
+  max-width: min(280px, 100%);
+  max-height: none;
+  background: var(--surface-soft);
+}
+.chat-bubble-thumbs > :only-child.chat-bubble-thumb img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(280px, 50vh);
+  object-fit: contain;
+}
+
+/* 工具卡结果同理：不再固定 300×188 裁切，按原比例缩到最大 280×220 */
+.tool-card-thumb {
+  display: inline-block;
+  width: auto;
+  max-width: min(280px, 100%);
+  height: auto;
+  max-height: none;
+  background: var(--surface-soft);
+  line-height: 0;
+}
+.tool-card-thumb img,
+.tool-card-thumb video {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: contain;
+}
 @media (max-width: 720px) {
-  .tool-card-thumb { width: 100%; height: auto; aspect-ratio: 4 / 3; }
+  .chat-bubble-thumbs > :only-child.chat-bubble-thumb { max-width: 100%; }
+  .tool-card-thumb { max-width: 100%; }
 }
 .composer-attachments .composer-attachment.is-document { width: auto; min-width: 132px; max-width: 230px; height: 88px; }
