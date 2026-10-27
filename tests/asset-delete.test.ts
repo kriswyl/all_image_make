@@ -56,7 +56,13 @@ describe("素材库删除图片", () => {
     const [shot] = db.replaceStoryboard(conversationId, [
       { sourceText: "镜头一", prompt: "一只猫坐在窗台上", kind: "image", aspectRatio: "16:9" },
     ]);
-    db.updateStoryboardShot(shot!.id, { taskId });
+    db.updateStoryboardShot(shot!.id, {
+      taskId,
+      videoMode: "reference",
+      firstFrameAssetId: assetId,
+      lastFrameAssetId: assetId,
+      referenceAssetIds: [assetId],
+    });
     db.upsertStoryboardCharacters(conversationId, [{ name: "苏晚" }]);
     const character = db.listStoryboardCharacters(conversationId)[0]!;
     db.setStoryboardCharacterAsset(character.id, assetId);
@@ -68,6 +74,11 @@ describe("素材库删除图片", () => {
     expect(db.getTaskView(taskId)).toBeNull();
     expect(db.getConversation(conversationId)!.canvasAssetIds).not.toContain(assetId);
     expect(db.getStoryboardShot(shot!.id)!.taskId).toBeNull();
+    expect(db.getStoryboardShot(shot!.id)).toMatchObject({
+      firstFrameAssetId: null,
+      lastFrameAssetId: null,
+      referenceAssetIds: [],
+    });
     const afterCharacter = db.getStoryboardCharacter(character.id)!;
     expect(afterCharacter.assetId).toBeNull();
     expect(afterCharacter.confirmed).toBe(false);

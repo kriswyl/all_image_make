@@ -3,9 +3,36 @@ import type { AppDatabase } from "./db.js";
 import type { KeyStore } from "./key-store.js";
 import { AppError } from "./tasks.js";
 
-export type PromptTarget = "image" | "video";
+export type PromptTarget = "image" | "video" | "dialogue" | "sound";
 
 function optimizeMessages(prompt: string, target: PromptTarget): BrainMessage[] {
+  if (target === "dialogue") {
+    return [
+      {
+        role: "system",
+        content: [
+          "你是影视台词编剧。把用户给的台词改写得自然、口语化、适合演员说出口，保留原意和人物关系。",
+          "每行一句；有多个人物时保留「角色：台词」前缀，同一人物全篇用同一个名字。",
+          "只改台词本身，不要写画面描述、动作说明、旁白解释或镜头语言。",
+          "只输出改写后的台词，不要解释、不要加引号、不要包 markdown 代码块。",
+        ].join("\n"),
+      },
+      { role: "user", content: prompt },
+    ];
+  }
+  if (target === "sound") {
+    return [
+      {
+        role: "system",
+        content: [
+          "你是影视声音设计。把用户给的环境声 / 音效描述改写得具体、可执行：写清声源、远近、强弱、节奏和空间混响。",
+          "不要写台词、配乐旋律或画面描述；只输出声音设计本身。",
+          "只输出改写后的音效描述，不要解释、不要加引号、不要包 markdown 代码块。",
+        ].join("\n"),
+      },
+      { role: "user", content: prompt },
+    ];
+  }
   const label = target === "video" ? "视频" : "图片";
   return [
     {

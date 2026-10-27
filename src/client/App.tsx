@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LoaderCircle, Mic, Minus, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
-  Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Trash2, Upload, Wand2, X,
+  ImagePlus, KeyRound, LayoutGrid, LoaderCircle, Mic, Minus, Moon, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Sun, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, isTauriRuntime } from "./api";
@@ -14,6 +14,7 @@ import { AddChannelWizard } from "./channels/AddChannelWizard";
 import { ChannelDialog } from "./channels/ChannelDialog";
 import { ChannelsView } from "./channels/ChannelsView";
 import { ChatView } from "./ChatView";
+import { BoardWorkspace } from "./board/BoardWorkspace";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
@@ -37,6 +38,7 @@ import { usePolling } from "./hooks/usePolling";
 import { ClearHistoryDialog, HistoryView } from "./views/HistoryView";
 import { SettingsDialog } from "./dialogs/SettingsDialog";
 import { DiagnosticDialog } from "./dialogs/DiagnosticDialog";
+import { setThemeMode, useTheme } from "./theme";
 
 export type { Toast, View } from "./app-shared";
 
@@ -61,6 +63,7 @@ function latestActivity(tasks: Task[]) {
 
 export function App() {
   const [view, setView] = useState<View>("generate");
+  const theme = useTheme();
 
   /**
    * 切工作区。
@@ -163,6 +166,7 @@ export function App() {
   const [assetDirOpen, setAssetDirOpen] = useState(false);
   const [assetsPath, setAssetsPath] = useState("");
   const [defaultAssetsPath, setDefaultAssetsPath] = useState("");
+  const [dataPath, setDataPath] = useState("");
   const [toast, setToast] = useState<Toast | null>(null);
   /** 侧栏里给会话列表留的挂载点：DOM 节点要等挂载后才拿得到，所以用 state 兜一层 */
   const sidebarRecentRef = useRef<HTMLDivElement>(null);
@@ -184,6 +188,13 @@ export function App() {
    */
   const [sidebarHidden, setSidebarHidden] = usePersistentState("sidebarHidden", false);
   const toggleSidebar = () => setSidebarHidden((hidden) => !hidden);
+
+  /** 无限画布是整页画布：进去时默认收起侧栏，把空间留给画布 */
+  function enterBoard() {
+    dismissWelcome();
+    setSidebarHidden(true);
+    switchView("board");
+  }
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!event.ctrlKey || event.altKey || event.metaKey) return;
@@ -341,6 +352,7 @@ export function App() {
         setTasks(data.tasks);
         setAssetsPath(data.service.assetsPath);
         setDefaultAssetsPath(data.service.defaultAssetsPath);
+        setDataPath(data.service.dataPath);
         const images = data.channels.filter((item) => isImageAdapter(item.adapterType));
         const videos = data.channels.filter((item) => isVideoAdapter(item.adapterType));
         const musics = data.channels.filter((item) => item.adapterType === "suno-music");
@@ -594,6 +606,16 @@ export function App() {
           >
             {sidebarHidden ? <PanelLeft size={15} /> : <PanelLeftClose size={15} />}
           </button>
+          {/* 深色开关放到标题栏左上角，紧挨侧边栏开关；图标显示的是「点下去会切到哪边」 */}
+          <button
+            type="button"
+            className="titlebar-toggle titlebar-theme"
+            title={theme.resolved === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+            aria-label={theme.resolved === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+            onClick={() => setThemeMode(theme.resolved === "dark" ? "light" : "dark")}
+          >
+            {theme.resolved === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
           <span
             className="titlebar-title"
             data-tauri-drag-region
@@ -639,14 +661,39 @@ export function App() {
                 <PanelLeftClose size={15} />
               </button>
             ) : null}
-            <button className="brand" onClick={() => setWorkspaceMenuOpen((open) => !open)} aria-expanded={workspaceMenuOpen}>
+            {/*
+              logo 点击切换「对话创作 ↔ 无限画布」；旁边的下拉箭头才打开设置菜单。
+              这样既满足「点 logo 进画布」，又不把原来的设置入口吞掉。
+            */}
+            <button
+              className="brand"
+              title={view === "board" ? "返回对话创作" : "进入无限画布"}
+              onClick={() => {
+                setWorkspaceMenuOpen(false);
+                if (view === "board") {
+                  dismissWelcome();
+                  switchView("chat");
+                } else {
+                  enterBoard();
+                }
+              }}
+            >
               <span className="brand-mark"><BrandMark size={18} /></span>
               {/* 两行：英文主名在上，中文名「语布」压成小字在下。代价是侧栏高 10px */}
               <span className="brand-text">
                 <span className="brand-name">ChatCanvas</span>
                 <span className="brand-sub">语布</span>
               </span>
-              <ChevronDown size={14} className="brand-chevron" />
+            </button>
+            <button
+              type="button"
+              className="brand-menu"
+              aria-label="工作区菜单"
+              aria-expanded={workspaceMenuOpen}
+              title="设置 / 素材目录"
+              onClick={() => setWorkspaceMenuOpen((open) => !open)}
+            >
+              <ChevronDown size={14} />
             </button>
             <button
               className={`icon-button compact ${searchOpen ? "is-on" : ""}`}
@@ -697,6 +744,12 @@ export function App() {
             icon={<SquarePen size={16} />}
             label="对话创作"
             onClick={() => { dismissWelcome(); switchView("chat", () => setNewChatSignal((value) => value + 1)); }}
+          />
+          <NavButton
+            active={view === "board"}
+            icon={<LayoutGrid size={16} />}
+            label="无限画布"
+            onClick={enterBoard}
           />
           <NavButton active={view === "generate"} icon={<ImageIcon size={16} />} label="图片生成" onClick={() => { dismissWelcome(); switchView("generate"); }} />
           <NavButton active={view === "video"} icon={<Film size={16} />} label="视频生成" onClick={() => { dismissWelcome(); switchView("video"); }} />
@@ -784,6 +837,13 @@ export function App() {
             onConfigureChannel={setEditorChannel}
             onDiagnostics={openDiagnostics}
             onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)}
+          />
+        ) : null}
+        {!loading && view === "board" ? (
+          <BoardWorkspace
+            sidebarHost={sidebarRecentEl}
+            onOpenMenu={() => setSidebarHidden(false)}
+            onToast={showToast}
           />
         ) : null}
         {!loading && view === "channels" ? (
@@ -910,6 +970,7 @@ export function App() {
         <SettingsDialog
           assetsDir={assetsPath}
           defaultAssetsDir={defaultAssetsPath}
+          dataPath={dataPath}
           onClose={() => setAssetDirOpen(false)}
           onChanged={(next) => { setAssetsPath(next); void refreshTasks(); }}
           onToast={showToast}

@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LoaderCircle, Maximize2, Mic, Music, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -21,6 +21,12 @@ import {
 } from "../../shared/midjourney";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
 
+/** 已下线的旧工具：只用于把历史消息里的工具卡显示成人话，不再出现在工具清单里 */
+const LEGACY_TOOL_LABELS: Record<string, string> = {
+  create_storyboard: "拆分镜（旧）",
+  tag_storyboard_characters: "标注角色 / 场景（旧）",
+};
+
 const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_image: ImageIcon,
   edit_image: Sparkles,
@@ -30,8 +36,11 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_video: Film,
   generate_music: Music,
   generate_speech: Mic,
-  create_storyboard: Clapperboard,
-  tag_storyboard_characters: Clapperboard,
+  create_storyboard_template: Clapperboard,
+  create_canvas_template: LayoutGrid,
+  board_read: Eye,
+  board_apply: SlidersHorizontal,
+  board_generate: Sparkles,
   ask: Sparkles,
   reply: Sparkles,
 };
@@ -58,13 +67,11 @@ function resultDetail(tool: AgentToolName, result: ToolResult | null) {
     if (data.musicInstrumental === true) rows.push(["纯音乐", "是"]);
   }
   if (typeof data.round === "number") rows.push(["轮次", `第 ${data.round} 轮`]);
-  if (tool === "create_storyboard" && typeof data.storyboardCount === "number") {
-    rows.push(["镜头数", `${data.storyboardCount} 个`]);
-    if (typeof data.storyboardVideoCount === "number" && data.storyboardVideoCount > 0) {
-      rows.push(["视频镜头", `${data.storyboardVideoCount} 个`]);
-    }
-    if (Array.isArray(data.storyboardCharacters) && data.storyboardCharacters.length) {
-      rows.push(["角色", data.storyboardCharacters.filter((item) => typeof item === "string").join("、")]);
+  if (typeof data.templateId === "string") {
+    if (typeof data.templateName === "string") rows.push(["模板", data.templateName]);
+    if (typeof data.templateNodeCount === "number") rows.push(["节点数", `${data.templateNodeCount} 个`]);
+    if (typeof data.templateGroupCount === "number" && data.templateGroupCount > 0) {
+      rows.push(["分组", `${data.templateGroupCount} 个`]);
     }
   }
   // set_canvas 一次设了多张时把整组列出来：ToolResult.assetId 只装得下主图，
@@ -87,6 +94,7 @@ export function ToolCard({
   onPreview,
   onDiagnostics,
   onToast,
+  onImportTemplate,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
@@ -99,6 +107,7 @@ export function ToolCard({
   /** 打开应用内诊断弹窗；Tauri webview 会拦掉 window.open，所以不能再走新窗口 */
   onDiagnostics?: (taskId: string) => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
+  onImportTemplate?: (templateId: string, name: string, description?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
@@ -143,6 +152,10 @@ export function ToolCard({
   );
   const mjTaskId = typeof payload?.data?.midjourneyTaskId === "string"
     ? payload.data.midjourneyTaskId : result?.taskId;
+  const templateId = typeof payload?.data?.templateId === "string" ? payload.data.templateId : null;
+  const templateName = typeof payload?.data?.templateName === "string" ? payload.data.templateName : "画布模板";
+  const templateDescription = typeof payload?.data?.templateDescription === "string"
+    ? payload.data.templateDescription : undefined;
 
   async function downloadFile(asset: Asset) {
     if (downloadingId) return;
@@ -175,7 +188,8 @@ export function ToolCard({
    */
   const pillArg = (prompt
     ?? (typeof args.assetId === "string" ? assetRef(args.assetId) : null)
-    ?? result?.content
+    // 无限画布工具的 result.content 就是整段总结，放进胶囊会和下面正文重复两遍
+    ?? (tool.startsWith("board_") ? "" : result?.content)
     ?? "").replace(/\s+/g, " ").trim();
 
   return (
@@ -190,7 +204,7 @@ export function ToolCard({
         */}
         <button type="button" className="tool-pill" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
           <span className="tool-pill-icon"><Icon size={13} /></span>
-          <span className="tool-pill-name">{agentToolLabels[tool]}</span>
+          <span className="tool-pill-name">{agentToolLabels[tool] ?? LEGACY_TOOL_LABELS[tool] ?? tool}</span>
           {pillArg ? <span className="tool-pill-arg">{pillArg}</span> : null}
           <span className="tool-pill-status">
             {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
@@ -205,6 +219,20 @@ export function ToolCard({
 
         {orphaned ? <div className="tool-card-result">这一轮被中断了，没有拿到结果（你可以直接再说一次）。</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
+
+        {templateId ? (
+          <div className="tool-card-template-action">
+            <button
+              type="button"
+              className="secondary-button compact"
+              disabled={!onImportTemplate}
+              onClick={() => onImportTemplate?.(templateId, templateName, templateDescription)}
+            >
+              <LayoutGrid size={12} />导入无限画布
+            </button>
+            <span>只创建节点和提示词，不会自动生成</span>
+          </div>
+        ) : null}
 
         {/* 请求参数核对留在正面（问题 1）：它本来就是「发出去没有」这件事的证据，不该藏进折叠里 */}
         {paramNotes.length ? <ParamChips notes={paramNotes} /> : null}

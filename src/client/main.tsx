@@ -11,12 +11,12 @@ import "@fontsource-variable/inter/wght.css";
 import "@fontsource/ma-shan-zheng/chinese-simplified-400.css";
 import "@fontsource/ma-shan-zheng/latin-400.css";
 import "./styles.css";
-// 分镜工作台的独立样式：大浮层、设定卡、镜头表，避免继续把 styles.css 撑大
-import "./storyboard.css";
 // 自绘下拉 / 图片选择器：替代浏览器原生 select 的弹层
 import "./select-menu.css";
 // 素材库抽屉：和分镜工作台一样独立成文件，避免 styles.css 继续膨胀
 import "./asset-library.css";
+// 无限画布（独立自由画布）：节点、连线、浮动 Agent 的样式
+import "./board/board.css";
 // 最后加载的全局打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版
 import "./ui-polish.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里

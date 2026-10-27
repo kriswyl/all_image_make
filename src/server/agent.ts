@@ -73,8 +73,12 @@ import {
   EMPTY_REPLY_CORRECTION, IDENTITY_CORRECTION, collectTurnAttachmentIds, looksLikeIdentityDrift,
   toBrainMessage, type BuiltContext,
 } from "./agent-context.js";
-import { describeBrainFailure, isBrainDown, isFatalBrainError, isVisionError } from "./agent-brain-errors.js";
+import {
+  describeBrainFailure, isBrainDown, isBrainTimeout, isFatalBrainError, isVisionError,
+} from "./agent-brain-errors.js";
 import { buildSystemPrompt } from "./agent-prompt.js";
+import { previewBoardOps } from "./board-agent.js";
+import { boardApplySchema } from "../shared/board-ops.js";
 import { BatchExecutor, type BatchOutcome } from "./agent-batch.js";
 import { isVisionBlocked, observeImages } from "./agent-vision.js";
 import { handleTaskEvent } from "./agent-task-events.js";
@@ -632,10 +636,17 @@ export class AgentService {
     if (!plan) {
       // 实在解析不出来：把模型原话当成回答显示，用户至少看得到发生了什么
       const fallback = result.content.trim();
+      const exhausted = result.truncated
+        || (result.usage != null
+          && result.usage.completionTokens > 0
+          && result.usage.reasoningTokens >= result.usage.completionTokens);
+      const emptyText = exhausted
+        ? "（模型这次只输出了思考过程，正文被长度上限截断；已自动加长额度重试过一次。可以再发一次，或到模型设置换一个非推理模型。）"
+        : "（大脑没有返回内容，请再发一次。）";
       const message = this.db.appendMessage({
-        conversationId, role: "assistant", content: fallback || "（大脑没有返回内容）",
+        conversationId, role: "assistant", content: fallback || emptyText,
         status: fallback ? "ok" : "error",
-        errorMessage: fallback ? null : "大脑返回了空内容",
+        errorMessage: fallback ? null : (exhausted ? "大脑把输出额度用在了思考上" : "大脑返回了空内容"),
       });
       this.broadcast(conversationId, { type: "message", message });
       this.setStatus(conversationId, "idle");
@@ -749,15 +760,39 @@ export class AgentService {
         const refs = call.args.imageRefs;
         return !Array.isArray(refs) || refs.length === 0;
       });
+    // 无限画布的删除类操作要确认；不删有内容节点时直接执行
+    const boardOpsPreview = conversation.kind === "board" && conversation.boardId
+      && calls.length === 1 && calls[0]!.tool === "board_apply"
+      ? (() => {
+        const parsed = boardApplySchema.safeParse(calls[0]!.args);
+        if (!parsed.success) return null;
+        try {
+          return previewBoardOps(this.db, conversation.boardId!, parsed.data.ops);
+        } catch {
+          return null;
+        }
+      })()
+      : null;
     // 选图本身就不成立时先别摆确认卡：卡片上写不出「用哪几张」，
     // 用户点了确认也只会得到一个失败。直接执行，让工具把原因回灌给大脑去 ask / 重选。
-    const needsConfirm = !videoSelection?.error && !imageSelectionMissing && (overTaskLimit
-      || (calls.length === 1 && shouldConfirm(calls[0]!.tool, isContinuation, conversation.videoConfirmPolicy)));
+    const needsConfirm = Boolean(boardOpsPreview?.needsConfirm) || (!videoSelection?.error && !imageSelectionMissing && (overTaskLimit
+      || (calls.length === 1 && shouldConfirm(calls[0]!.tool, isContinuation, conversation.videoConfirmPolicy))));
     if (needsConfirm) {
-      const preview = buildConfirmPreview(
-        this.db, conversation, calls, overTaskLimit ? "session_limit" : "video_policy",
-        videoSelection?.selection, plan.consistency, this.defaultAliases(),
-      );
+      const preview: ConfirmPreview = boardOpsPreview?.needsConfirm
+        ? {
+          reason: "board_destructive",
+          prompt: "",
+          model: "",
+          channelName: "",
+          message: boardOpsPreview.message,
+          boardDeleteNodes: boardOpsPreview.deleteNodes,
+          boardDeleteWithAssets: boardOpsPreview.deleteWithAssets,
+          boardSummary: boardOpsPreview.summary,
+        }
+        : buildConfirmPreview(
+          this.db, conversation, calls, overTaskLimit ? "session_limit" : "video_policy",
+          videoSelection?.selection, plan.consistency, this.defaultAliases(),
+        );
       // 待确认的是**整批**，所以 toolName 留空、calls 存在 plan 里：
       // 写一个 toolName 上去只会让 UI 把它当成「只画一张」，确认后也只知道要跑那一个
       const pendingPlan: AgentPlan = {
@@ -996,11 +1031,13 @@ export class AgentService {
   private reportTurnFailure(conversationId: string, error: unknown) {
     // 大脑这一侧的报错原样透传会把上游返回体（可能含 Base URL、请求片段）落进
     // SQLite 和界面，所以这类只留下翻译过的一句话，本地校验类错误才用原文
-    const message = isBrainDown(error)
-      ? `助手用不了了：${describeBrainFailure(error)}。检查一下「渠道配置」里的对话渠道。`
-      : error instanceof AppError
-        ? error.message
-        : error instanceof Error ? error.message : "处理这一轮时出错了";
+    const message = isBrainTimeout(error)
+      ? "对话模型思考超时了。可以把剧本拆短一点 / 少要求一些细节，或者到模型设置换一个非推理模型再试。"
+      : isBrainDown(error)
+        ? `助手用不了了：${describeBrainFailure(error)}。检查一下「渠道配置」里的对话渠道。`
+        : error instanceof AppError
+          ? error.message
+          : error instanceof Error ? error.message : "处理这一轮时出错了";
     const note = this.db.appendMessage({
       conversationId, role: "system", status: "error", content: message, errorMessage: message,
     });

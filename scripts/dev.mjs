@@ -3,7 +3,9 @@ import { spawn } from "node:child_process";
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 // Windows 上 npm 是 .cmd 脚本，新版 Node 要求加 shell: true 才能启动
 const children = [
-  spawn(npm, ["run", "dev:server"], { stdio: "inherit", shell: true }),
+  // 预览面板 / 桌面壳会往子进程注入 PORT；这里固定成 Web 开发用的 17891，
+  // 否则 API 会去抢 Vite 的 5173，Vite 再代理 17891 时就是 ECONNREFUSED。
+  spawn(npm, ["run", "dev:server"], { stdio: "inherit", shell: true, env: { ...process.env, PORT: "17891" } }),
   spawn(npm, ["run", "dev:web"], { stdio: "inherit", shell: true }),
 ];
 

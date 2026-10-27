@@ -9,7 +9,7 @@ import type { Toast } from "./app-shared";
  */
 export function PromptPolishButton(props: {
   prompt: string;
-  target: "image" | "video";
+  target: "image" | "video" | "dialogue" | "sound";
   disabled?: boolean;
   onPolished: (prompt: string) => void;
   onToast: (kind: Toast["kind"], message: string) => void;

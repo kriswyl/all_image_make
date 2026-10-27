@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertCircle, Eye, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { IMAGE_SIZE_VALUES, type ImageSizeValue } from "../../shared/types";
-import { readThemeMode, setThemeMode, type ThemeMode } from "../theme";
+import { setThemeMode, useTheme, type ThemeMode } from "../theme";
 import type { Toast } from "../app-shared";
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: React.ReactNode }> = [
@@ -21,9 +21,10 @@ const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: React.ReactN
  * `imageConfig.imageSize`，缺了上游直接回「Unsupported resolution」。补默认值
  * 时必须让用户看得见、也改得动——所以它在这儿，而不是藏在某个常量里。
  */
-export function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged, onToast }: {
+export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose, onChanged, onToast }: {
   assetsDir: string;
   defaultAssetsDir: string;
+  dataPath: string;
   onClose: () => void;
   onChanged: (assetsDir: string) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
@@ -32,12 +33,7 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged
   const isDefault = assetsDir === defaultAssetsDir;
   const canPick = isTauriRuntime();
   const [imageSize, setImageSize] = useState<ImageSizeValue | null>(null);
-  const [theme, setTheme] = useState<ThemeMode>(() => readThemeMode());
-
-  function chooseTheme(next: ThemeMode) {
-    setTheme(next);
-    setThemeMode(next);
-  }
+  const { mode: theme } = useTheme();
 
   useEffect(() => {
     void api.settings().then((current) => setImageSize(current.geminiImageSize)).catch(() => undefined);
@@ -106,11 +102,26 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, onClose, onChanged
                   type="button"
                   className={`secondary-button ${theme === option.value ? "is-on" : ""}`}
                   aria-pressed={theme === option.value}
-                  onClick={() => chooseTheme(option.value)}
+                  onClick={() => setThemeMode(option.value)}
                 >
                   {option.icon}{option.label}
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>画布数据</h3>
+            <p className="modal-lead">
+              无限画布的节点、连线、分组、版本历史和素材索引都存在下面这个 SQLite 文件里。
+            </p>
+            <div className="settings-path">{dataPath || "（未获取到）"}</div>
+            <div className="modal-note">
+              <AlertCircle size={15} />
+              <span>
+                数据库路径不在运行中切换，避免画布和历史写到一半。要整体搬到别的盘，用启动环境变量
+                <code>DATA_DIR</code> 指向新目录后再启动；素材文件可以单独在下面改目录。
+              </span>
             </div>
           </div>
 

@@ -8,15 +8,20 @@
 import type { AppDatabase, AssetRow } from "./db.js";
 import type { KeyStore } from "./key-store.js";
 import { AppError } from "./tasks.js";
-import { callBrain, type BrainContentPart, type BrainMessage, type BrainResult } from "./brain.js";
+import {
+  BRAIN_RETRY_MAX_TOKENS, callBrain,
+  type BrainContentPart, type BrainMessage, type BrainResult,
+} from "./brain.js";
 import { buildCapabilityAliases, buildCapabilityManifest, markVisionUnsupported } from "./capabilities.js";
 import { assetThumbDataUri } from "./vision.js";
 import { MAX_VISION_IMAGES } from "./agent-constants.js";
-import { buildSystemPrompt } from "./agent-prompt.js";
+import { buildBoardSystemPrompt, buildSystemPrompt } from "./agent-prompt.js";
+import { describeBoard } from "./board-agent.js";
 import { collectTurnDocuments, renderDocumentContext, toBrainMessage, type BuiltContext } from "./agent-context.js";
-import { isFatalBrainError, isVisionError } from "./agent-brain-errors.js";
+import { isBrainTimeout, isFatalBrainError, isVisionError } from "./agent-brain-errors.js";
 import { isVisionBlocked } from "./agent-vision.js";
 import { assetRef, type AgentStreamEvent, type Conversation } from "../shared/agent-types.js";
+import type { ImageBoardNode } from "../shared/board.js";
 import { isImageAsset } from "../shared/types.js";
 
 export interface BrainHost {
@@ -48,11 +53,12 @@ export class BrainRunner {
     messages: BrainMessage[],
     controller: AbortController,
     conversationId: string,
-    options: { silent?: boolean } = {},
+    options: { silent?: boolean; maxTokens?: number } = {},
   ): Promise<BrainResult> {
     const { channel, key } = this.requireBrain(conversation);
     const result = await callBrain({
       channel, key, model: conversation.brainModel, messages,
+      ...(options.maxTokens ? { maxTokens: options.maxTokens } : {}),
       signal: controller.signal,
       onDelta: options.silent ? undefined : (delta) => {
         if (delta.reasoning) this.host.broadcast(conversationId, { type: "reasoning", text: delta.reasoning });
@@ -74,14 +80,33 @@ export class BrainRunner {
     controller: AbortController,
   ): Promise<BrainResult> {
     try {
-      return await this.callBrainRaw(conversation, built.messages, controller, conversation.id);
+      let result = await this.callBrainRaw(conversation, built.messages, controller, conversation.id);
+      /**
+       * 推理模型可能把输出额度全用在 reasoning 上，正文是空串（finish_reason=length）。
+       * 这时直接落「大脑没有返回内容」等于把用户上传的脚本白读一遍；自动加长额度再试一次。
+       */
+      if (!result.content.trim()) {
+        try {
+          result = await this.callBrainRaw(
+            conversation,
+            built.messages,
+            controller,
+            conversation.id,
+            { maxTokens: BRAIN_RETRY_MAX_TOKENS },
+          );
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          // 加长额度失败（模型上限更低 / 中转站拒绝）就保留第一次的空结果，让上层给出解释
+        }
+      }
+      return result;
     } catch (error) {
       if (built.visionAttached && isVisionError(error)) {
         this.degradeVision(conversation, error);
         const retry = await this.buildBrainMessages({ ...conversation, visionEnabled: false }, []);
         return this.callBrainRaw(conversation, retry.messages, controller, conversation.id);
       }
-      if (isFatalBrainError(error) || controller.signal.aborted) throw error;
+      if (isFatalBrainError(error) || isBrainTimeout(error) || controller.signal.aborted) throw error;
       return this.callBrainRaw(conversation, built.messages, controller, conversation.id);
     }
   }
@@ -103,6 +128,7 @@ export class BrainRunner {
   }
 
   async assemble(conversation: Conversation, turnAttachmentIds: string[]): Promise<BuiltContext> {
+    if (conversation.kind === "board") return this.assembleBoard(conversation);
     const db = this.host.db;
     const aliases = buildCapabilityAliases(db.listChannels());
     const manifest = buildCapabilityManifest(aliases);
@@ -120,7 +146,7 @@ export class BrainRunner {
         role: "system",
         content: buildSystemPrompt(
           manifest, conversation, canvasImages, hasTurnAttachments, songs,
-          db.listStoryboardShots(conversation.id), db.listConversationDocuments(conversation.id),
+          db.listConversationDocuments(conversation.id),
         ),
       },
     ];
@@ -172,6 +198,58 @@ export class BrainRunner {
         visionAttached = true;
       }
       if (visionAttached) messages.push({ role: "user", content: parts });
+    }
+    return { messages, visionAttached };
+  }
+
+  /**
+   * 无限画布线程的上下文：只装系统提示词 + 自己的历史消息。
+   * 不装参考图组、分镜、脚本文档、歌曲，也不附视觉缩略图。
+   */
+  private async assembleBoard(conversation: Conversation): Promise<BuiltContext> {
+    const db = this.host.db;
+    const aliases = buildCapabilityAliases(db.listChannels());
+    const manifest = buildCapabilityManifest(aliases);
+    const board = db.getBoardByThread(conversation.id);
+    const boardContext = board
+      ? describeBoard(board, {
+        scope: board.selection.length ? "selection" : "all",
+        depth: 1,
+        limit: 40,
+      })
+      : "当前无限画布不存在（可能已经被删除）。";
+    const messages: BrainMessage[] = [{
+      role: "system",
+      content: buildBoardSystemPrompt(manifest, boardContext),
+    }];
+    for (const message of db.listMessages(conversation.id)) {
+      const converted = toBrainMessage(message);
+      if (converted) messages.push(converted);
+    }
+
+    // 只附用户选中的图片节点：没选中就只给 ref / 标题，避免大脑对看不到的图瞎猜
+    let visionAttached = false;
+    if (board && conversation.visionEnabled && !isVisionBlocked(db, conversation)) {
+      const selected = board.doc.nodes
+        .filter((node): node is ImageBoardNode =>
+          node.type === "image" && Boolean(node.assetId) && board.selection.includes(node.id))
+        .slice(0, MAX_VISION_IMAGES);
+      if (selected.length) {
+        const parts: BrainContentPart[] = [{
+          type: "text",
+          text: `[无限画布选中的图片] 用户当前选中的是下面这些节点，缩略图附在后面；说「这张」「这几张」时指的就是它们。${selected.length > MAX_VISION_IMAGES ? `（超过 ${MAX_VISION_IMAGES} 张，只附了前 ${MAX_VISION_IMAGES} 张）` : ""}`,
+        }];
+        for (const node of selected) {
+          const asset = db.getAsset(node.assetId!);
+          if (!asset || !isImageAsset(asset)) continue;
+          const dataUri = await assetThumbDataUri(db, asset);
+          if (!dataUri) continue;
+          parts.push({ type: "text", text: `${node.ref}「${node.title || "图片"}」` });
+          parts.push({ type: "image_url", image_url: { url: dataUri } });
+          visionAttached = true;
+        }
+        if (visionAttached) messages.push({ role: "user", content: parts });
+      }
     }
     return { messages, visionAttached };
   }

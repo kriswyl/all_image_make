@@ -253,6 +253,9 @@ export class TaskRunner {
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared);
 
+      // 用户在请求飞行中点了停止：结果不再落库，也不要把它改回 succeeded
+      if (this.db.getTaskRow(taskId)?.status === "cancelled") return;
+
       // 异步厂商（视频 / 音乐）：提交响应里拿远端 id，交给统一的轮询器
       const spec = asyncProviderSpec(channel.adapterType);
       const asyncTaskId = spec ? (spec.extractTaskId?.(result.payload) ?? extractAsyncTaskId(result.payload)) : null;

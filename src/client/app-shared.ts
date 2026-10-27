@@ -2,7 +2,7 @@ import type { Asset } from "../shared/types";
 
 /** 应用外壳和工作台共用的轻量类型，避免所有组件都反过来 import App.tsx */
 export type Toast = { kind: "success" | "error"; message: string };
-export type View = "generate" | "video" | "music" | "speech" | "chat" | "channels" | "history";
+export type View = "generate" | "video" | "music" | "speech" | "chat" | "channels" | "history" | "board";
 
 export type ReferenceImageState = { file: File; previewUrl: string };
 

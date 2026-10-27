@@ -140,6 +140,14 @@ export function klingConversationModes(model: string | undefined): ConversationV
   return klingModesForModel(model).filter((mode): mode is ConversationVideoMode => mode !== "motion-control");
 }
 
+/** 各视频适配器的默认参数。视频工作台、对话工具和无限画布共用一份，用户不必重新学 */
+export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; audio: boolean }> = {
+  "wan-video": { duration: 5, resolution: "720P", audio: true },
+  "seedance-video": { duration: 5, resolution: "720p", audio: false },
+  "grok-video": { duration: 8, resolution: "720p", audio: false },
+  "kling-video": { duration: 5, resolution: "720p", audio: false },
+};
+
 /** 每个适配器真正支持的模式。Grok 只有文生/图生（参考图） */
 export const VIDEO_MODES_BY_ADAPTER: Record<VideoAdapter, ConversationVideoMode[]> = {
   "grok-video": ["text-to-video", "reference"],

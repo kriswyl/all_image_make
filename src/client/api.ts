@@ -2,7 +2,10 @@ import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearSco
 import type {
   AgentStreamEvent, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
-import type { StoryboardShot, StoryboardView } from "../shared/storyboard";
+import type {
+  BoardAudioKind, BoardDoc, BoardSummary, BoardUiState, BoardView, BoardViewport, BoardVideoMode,
+} from "../shared/board";
+import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -62,7 +65,13 @@ function assetExtension(asset: Asset) {
  * 只保留 message 的话这个判断就做不了。
  */
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number, public readonly code: string) {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code: string,
+    /** 服务端附带的上下文，例如版本冲突时的当前无限画布 */
+    public readonly details?: unknown,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -80,6 +89,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
       payload.error?.message ?? `请求失败：HTTP ${response.status}`,
       response.status,
       payload.error?.code ?? "",
+      payload.error?.details,
     );
   }
   return payload.data;
@@ -175,7 +185,7 @@ export const api = {
     }>;
   }>("/api/agent/capabilities"),
   /** 工作台的提示词润色：调用对话模型，只返回改写后的文本 */
-  optimizePrompt: (prompt: string, target: "image" | "video") => request<{
+  optimizePrompt: (prompt: string, target: "image" | "video" | "dialogue" | "sound") => request<{
     prompt: string;
     channelName: string;
     model: string;
@@ -223,82 +233,158 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ documents }),
     }),
-  storyboard: (id: string) => request<StoryboardView>(`/api/conversations/${id}/storyboard`),
-  updateStoryboardReference: (id: string, patch: { referenceMode?: "auto" | "manual" | "off"; referenceAssetId?: string | null }) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard`, {
+  // ── 无限画布（FREE_CANVAS_PLAN.md） ───────────────────────────────────────
+  boards: () => request<BoardSummary[]>("/api/boards"),
+  board: (id: string) => request<BoardView>(`/api/boards/${id}`),
+  createBoard: (input: { title?: string } = {}) => request<BoardView>("/api/boards", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  importBoard: (file: unknown) => request<{ board: BoardView; missingAssets: string[] }>("/api/boards/import", {
+    method: "POST",
+    body: JSON.stringify({ file }),
+  }),
+  templates: () => request<CanvasTemplateSummary[]>("/api/templates"),
+  template: (id: string) => request<CanvasTemplate>(`/api/templates/${id}`),
+  updateTemplate: (id: string, patch: { name?: string; description?: string }) =>
+    request<CanvasTemplate>(`/api/templates/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
-  updateStoryboardShot: (
-    id: string,
-    shotId: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "scene" | "kind" | "aspectRatio">>,
-  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  }),
-  updateStoryboardCharacter: (
-    id: string,
-    characterId: string,
-    patch: { assetId?: string | null; prompt?: string; confirmed?: boolean },
-  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/characters/${characterId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  }),
-  updateStoryboardScene: (
-    id: string,
-    sceneId: string,
-    patch: { assetId?: string | null; prompt?: string; confirmed?: boolean },
-  ) => request<StoryboardView>(`/api/conversations/${id}/storyboard/scenes/${sceneId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  }),
-  addStoryboardSetting: (id: string, kind: "character" | "scene", name: string, prompt?: string) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard/${kind === "character" ? "characters" : "scenes"}`, {
-      method: "POST",
-      body: JSON.stringify({ name, ...(prompt ? { prompt } : {}) }),
-    }),
-  deleteStoryboardSetting: (id: string, kind: "character" | "scene", settingId: string) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard/${kind === "character" ? "characters" : "scenes"}/${settingId}`, {
-      method: "DELETE",
-    }),
-  addStoryboardShot: (id: string, input: Partial<Pick<StoryboardShot, "prompt" | "character" | "scene" | "aspectRatio">> = {}) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard/shots`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  deleteStoryboardShot: (id: string, shotId: string) =>
-    request<StoryboardView>(`/api/conversations/${id}/storyboard/shots/${shotId}`, { method: "DELETE" }),
-  generateStoryboardSettings: (id: string, characterIds: string[], sceneIds: string[], alias?: string) =>
-    request<{
-      submitted: number;
-      failures: Array<{ id: string; name: string; kind: "character" | "scene"; error: string }>;
-      view: StoryboardView;
-    }>(`/api/conversations/${id}/storyboard/settings/generate`, {
-      method: "POST",
-      body: JSON.stringify({ characterIds, sceneIds, ...(alias ? { alias } : {}) }),
-    }),
-  uploadStoryboardSetting: (id: string, kind: "character" | "scene", settingId: string, file: File) => {
-    const form = new FormData();
-    form.append("image", file, file.name);
-    return request<StoryboardView>(`/api/conversations/${id}/storyboard/settings/${kind}/${settingId}/upload`, {
-      method: "POST",
-      body: form,
-    });
-  },
-  generateStoryboardShots: (id: string, shotIds: string[], alias?: string) => request<{
-    submitted: number;
-    failures: Array<{ shotId: string; index: number; error: string }>;
-    shots: StoryboardShot[];
-    referenceAssetId: string | null;
-    characterReferences: Array<{ character: string; assetId: string }>;
-    sceneReferences: Array<{ scene: string; assetId: string }>;
-    note?: string;
-  }>(`/api/conversations/${id}/storyboard/generate`, {
+  deleteTemplate: (id: string) =>
+    request<{ deleted: true }>(`/api/templates/${id}`, { method: "DELETE" }),
+  migrateStoryboards: (input: { replaceExisting?: boolean } = {}) => request<{
+    migrated: Array<{
+      conversationId: string; title: string; boardId: string; templateId: string; nodeCount: number; version: number;
+    }>;
+    skipped: number;
+    failed: Array<{ conversationId: string; message: string }>;
+  }>("/api/templates/migrate-storyboards", {
     method: "POST",
-    body: JSON.stringify({ shotIds, ...(alias ? { alias } : {}) }),
+    body: JSON.stringify(input),
   }),
-  clearStoryboard: (id: string) => request<{ removed: number } & StoryboardView>(`/api/conversations/${id}/storyboard`, { method: "DELETE" }),
+  cleanupStoryboards: () => request<{ cleaned: string[]; skipped: number }>(
+    "/api/templates/cleanup-storyboards",
+    { method: "POST" },
+  ),
+  createBoardFromTemplate: (templateId: string, title?: string) =>
+    request<BoardView>("/api/boards/from-template", {
+      method: "POST",
+      body: JSON.stringify({ templateId, ...(title ? { title } : {}) }),
+    }),
+  importTemplateToBoard: (boardId: string, templateId: string) =>
+    request<{ board: BoardView; addedNodes: number }>(`/api/boards/${boardId}/templates`, {
+      method: "POST",
+      body: JSON.stringify({ templateId }),
+    }),
+  renameBoard: (id: string, title: string) => request<BoardView>(`/api/boards/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  }),
+  saveBoard: (id: string, input: {
+    doc: BoardDoc;
+    viewport?: BoardViewport;
+    baseVersion: number;
+    reason?: string;
+  }) => request<BoardView>(`/api/boards/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  }),
+  saveBoardSelection: (id: string, selection: string[]) => request<{ saved: true }>(`/api/boards/${id}/selection`, {
+    method: "PUT",
+    body: JSON.stringify({ selection }),
+  }),
+  saveBoardUiState: (id: string, uiState: BoardUiState) => request<{ saved: true }>(`/api/boards/${id}/ui-state`, {
+    method: "PUT",
+    body: JSON.stringify({ uiState }),
+  }),
+  saveBoardViewport: (id: string, viewport: BoardViewport) => request<BoardView>(`/api/boards/${id}/viewport`, {
+    method: "PUT",
+    body: JSON.stringify({ viewport }),
+  }),
+  undoBoard: (id: string, baseVersion: number) => request<BoardView>(`/api/boards/${id}/undo`, {
+    method: "POST",
+    body: JSON.stringify({ baseVersion }),
+  }),
+  redoBoard: (id: string, baseVersion: number) => request<BoardView>(`/api/boards/${id}/redo`, {
+    method: "POST",
+    body: JSON.stringify({ baseVersion }),
+  }),
+  boardHistory: (id: string) => request<{
+    currentVersion: number;
+    entries: Array<{ version: number; reason: string; createdAt: string; current: boolean }>;
+  }>(`/api/boards/${id}/history`),
+  restoreBoardVersion: (id: string, version: number, baseVersion: number) =>
+    request<BoardView>(`/api/boards/${id}/history/${version}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ baseVersion }),
+    }),
+  generateBoardNode: (id: string, input: {
+    nodeId: string;
+    overrides?: {
+      prompt?: string;
+      model?: string;
+      size?: string;
+      imageSize?: string;
+      quality?: string;
+      count?: number;
+      videoMode?: BoardVideoMode;
+      durationSeconds?: number;
+      resolution?: string;
+      audio?: boolean;
+      audioKind?: BoardAudioKind;
+      voice?: string;
+      ttsStyle?: string;
+      instrumental?: boolean;
+    };
+  }) => request<{
+    board: BoardView;
+    task: Task | null;
+    kind: "image" | "video" | "text" | "audio";
+    resultNodeIds: string[];
+    configNodeId: string;
+    prompt: string;
+    referenceCount: number;
+    modelAlias: string;
+  }>(`/api/boards/${id}/generate`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  cancelBoardTask: (id: string, taskId: string) =>
+    request<Task>(`/api/boards/${id}/tasks/${taskId}/cancel`, { method: "POST" }),
+  retryBoardTask: (id: string, taskId: string) =>
+    request<{ task: Task; resultNodeIds: string[]; configNodeId: string }>(
+      `/api/boards/${id}/tasks/${taskId}/retry`,
+      { method: "POST" },
+    ),
+  boardAssets: (id: string) => request<Asset[]>(`/api/boards/${id}/assets`),
+  addAssetsToBoard: (id: string, items: Array<{ assetId: string; title?: string; prompt?: string }>) =>
+    request<{
+      board: BoardView;
+      added: Array<{ assetId: string; nodeRef: string }>;
+      skipped: number;
+    }>(`/api/boards/${id}/bridge/assets`, {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  appendConversationCanvas: (id: string, assetIds: string[]) =>
+    request<{
+      conversationId: string;
+      canvasAssetIds: string[];
+      added: string[];
+      skipped: number;
+    }>(`/api/conversations/${id}/canvas/append`, {
+      method: "POST",
+      body: JSON.stringify({ assetIds }),
+    }),
+  uploadBoardAsset: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<Asset>(`/api/boards/${id}/assets`, { method: "POST", body: form });
+  },
+  deleteBoardAsset: (id: string, assetId: string) =>
+    request<BoardView>(`/api/boards/${id}/assets/${assetId}`, { method: "DELETE" }),
+  deleteBoard: (id: string) => request<{ threadId: string }>(`/api/boards/${id}`, { method: "DELETE" }),
   /**
    * §13.5 视频确认卡片 / 会话额度提醒的两个出口。
    *

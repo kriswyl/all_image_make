@@ -114,10 +114,11 @@ html[data-theme="dark"] ::selection {
   background: rgba(255, 255, 255, .86);
 }
 
-/* 自绘窗口：外圈描边和投影在深底上要更轻、更深，否则像一圈白线 */
+/* 自绘窗口：深色下保留一条很淡的描边，但**不要外圈投影**——
+   黑底周围有一圈阴影会显得软件浮在一块脏玻璃上。 */
 html.tauri-window[data-theme="dark"] .app-shell {
   border-color: rgba(255, 255, 255, .08);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+  box-shadow: none;
 }
 
 /* ── 组件里写死的浅色补丁 ───────────────────────────────────────────────── */

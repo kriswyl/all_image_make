@@ -21,6 +21,13 @@ export function isFatalBrainError(error: unknown): boolean {
   return status === 401 || status === 403 || status === 404;
 }
 
+/** brain 调用自己的 AbortSignal.timeout / 网络超时：不要原样重试，也别把英文 DOMException 弹给用户 */
+export function isBrainTimeout(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "TimeoutError") return true;
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : "";
+  return /aborted due to timeout|TimeoutError|ETIMEDOUT|timed out/i.test(message);
+}
+
 /**
  * §15 直通模式的触发条件：**大脑这一侧挂了**，而不是「用户这句话有问题」。
  *

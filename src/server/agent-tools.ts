@@ -20,10 +20,10 @@ import type {
 } from "../shared/agent-types.js";
 import { assetRef } from "../shared/agent-types.js";
 import {
-  supportedVideoModes, VIDEO_CAPABILITIES, videoModeLabel,
+  supportedVideoModes, VIDEO_CAPABILITIES, VIDEO_DEFAULTS, videoModeLabel,
   type ConversationVideoMode, type VideoAdapter,
 } from "../shared/video-capabilities.js";
-import type { AppDatabase, AssetRow } from "./db.js";
+import type { AppDatabase, AssetRow, BoardRecord } from "./db.js";
 import type { TaskRunner, ReferenceImageUpload } from "./tasks.js";
 import { AppError } from "./tasks.js";
 import type { CapabilityAlias } from "./capabilities.js";
@@ -34,8 +34,13 @@ import { callBrain, type BrainMessage } from "./brain.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import {
-  MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS, normalizeStoryboardAspect, parseCharacterNames, storyboardShotMissing,
-} from "../shared/storyboard.js";
+  boardApplySchema, boardGenerateSchema, boardReadSchema,
+  type BoardApplyArgs, type BoardGenerateArgs, type BoardReadArgs,
+} from "../shared/board-ops.js";
+import { applyBoardOps, describeBoard } from "./board-agent.js";
+import { buildBoardDelta, generateBoardConfig } from "./board.js";
+import { buildStoryboardTemplateInput, createCanvasTemplate, storyboardTemplateInput } from "./canvas-template.js";
+import { canvasTemplateInputSchema, type CanvasTemplateInput } from "../shared/canvas-template.js";
 import type { KeyStore } from "./key-store.js";
 
 /** §16：`extraReferences` 上限和现有 MAX_REFERENCE_IMAGES 对齐 */
@@ -130,49 +135,26 @@ export const generateSpeechSchema = z.object({
   modelHint: z.string().trim().max(80).optional(),
 });
 
-export const createStoryboardSchema = z.object({
-  /** 角色设定：名字 + 一句外貌/服装描述，用来生成角色设定图 */
+/** 新流程用的精简分镜模板：不写旧分镜表，直接生成无限画布模板 */
+export const createStoryboardTemplateSchema = z.object({
+  title: z.string().trim().max(80).optional(),
   characters: z.array(z.object({
     name: nonEmpty(40),
-    prompt: z.string().trim().max(2000).optional(),
-  })).max(20).optional(),
-  /** 场景设定：名字 + 一句空间/光线描述，用来生成场景设定图 */
+    prompt: z.string().trim().max(300).optional(),
+  })).max(12).optional(),
   scenes: z.array(z.object({
     name: nonEmpty(80),
-    prompt: z.string().trim().max(2000).optional(),
-  })).max(20).optional(),
+    prompt: z.string().trim().max(300).optional(),
+  })).max(12).optional(),
   shots: z.array(z.object({
-    /** 剧本原文。模型拆镜时保留，用来核对有没有漏段 */
-    sourceText: z.string().trim().max(20000).optional(),
-    prompt: nonEmpty(20000),
-    /** 出场角色名；多个人物用「、」分隔，必须用和设定里一致的名字 */
+    prompt: nonEmpty(600),
     character: z.string().trim().max(120).optional(),
-    /** 场景名，必须用和设定里一致的名字 */
     scene: z.string().trim().max(80).optional(),
-    kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
-    aspectRatio: z.string().trim().max(10).optional(),
-  })).min(1).max(MAX_STORYBOARD_SHOTS),
-});
-
-export const tagStoryboardCharactersSchema = z.object({
-  /** 顺便补充角色设定描述；已有角色只更新非空描述 */
-  characters: z.array(z.object({
-    name: nonEmpty(40),
-    prompt: z.string().trim().max(2000).optional(),
-  })).max(20).optional(),
-  /** 顺便补充场景设定描述 */
-  scenes: z.array(z.object({
-    name: nonEmpty(80),
-    prompt: z.string().trim().max(2000).optional(),
-  })).max(20).optional(),
-  assignments: z.array(z.object({
-    /** 镜号，从 1 开始 */
-    index: z.coerce.number().int().min(1),
-    /** 角色名；多个人物用「、」分隔；空串表示这一镜是空镜 / 道具 / 字幕 */
-    character: z.string().trim().max(120).optional(),
-    /** 场景名；空串表示没有场景设定 */
-    scene: z.string().trim().max(80).optional(),
-  })).min(1).max(MAX_STORYBOARD_SHOTS),
+    dialogue: z.string().trim().max(1000).optional(),
+    speaker: z.string().trim().max(120).optional(),
+    shotSize: z.string().trim().max(20).optional(),
+    cameraMove: z.string().trim().max(20).optional(),
+  })).min(1).max(30),
 });
 
 export const askSchema = z.object({
@@ -193,8 +175,11 @@ export const TOOL_SCHEMAS = {
   generate_video: generateVideoSchema,
   generate_music: generateMusicSchema,
   generate_speech: generateSpeechSchema,
-  create_storyboard: createStoryboardSchema,
-  tag_storyboard_characters: tagStoryboardCharactersSchema,
+  create_storyboard_template: createStoryboardTemplateSchema,
+  create_canvas_template: canvasTemplateInputSchema,
+  board_read: boardReadSchema,
+  board_apply: boardApplySchema,
+  board_generate: boardGenerateSchema,
   ask: askSchema,
   reply: replySchema,
 } as const;
@@ -627,13 +612,7 @@ export function repairTruncatedObject(text: string): string | null {
 }
 
 export { parseLooseJson, sliceFirstObject };
-/** 各视频适配器的默认参数。和视频工作台的面板默认值保持一致，用户不必重新学 */
-export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; audio: boolean }> = {
-  "wan-video": { duration: 5, resolution: "720P", audio: true },
-  "seedance-video": { duration: 5, resolution: "720p", audio: false },
-  "grok-video": { duration: 8, resolution: "720p", audio: false },
-  "kling-video": { duration: 5, resolution: "720p", audio: false },
-};
+export { VIDEO_DEFAULTS };
 
 async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise<ToolOutcome> {
   const resolution = resolveAlias(ctx.aliases, args.modelHint, "video", ctx.defaultAliases.video);
@@ -1198,103 +1177,189 @@ function setCanvas(ctx: ToolContext, args: SetCanvasArgs): ToolOutcome {
 }
 
 /**
- * 拆分镜：只落库，不提交任何生成任务。
+ * 生成一块可反复导入无限画布的模板。
  *
- * 刻意不做「拆完顺手画第一张」：一屏 20 个镜头里只要有 3 个描述偏了，
- * 用户就要为 3 张错图付钱。先让他看清整张表，再在面板上逐镜确认。
+ * 只落模板，不创建无限画布、不提交生成；用户点卡片上的「导入无限画布」才实例化。
  */
-async function createStoryboard(
+function createCanvasTemplateTool(ctx: ToolContext, args: CanvasTemplateInput): ToolOutcome {
+  try {
+    const template = createCanvasTemplate(ctx.db, args, {
+      source: "agent",
+      conversationId: ctx.conversation.id,
+    });
+    const groupCount = template.doc.groups?.length ?? 0;
+    return okResult(
+      `已生成模板「${template.name}」：${template.doc.nodes.length} 个节点${groupCount ? `、${groupCount} 个分组` : ""}。点「导入无限画布」选择目标板。`,
+      {
+        data: {
+          templateId: template.id,
+          templateName: template.name,
+          templateDescription: template.description,
+          templateNodeCount: template.doc.nodes.length,
+          templateGroupCount: groupCount,
+        },
+      },
+    );
+  } catch (error) {
+    return failResult(`生成模板失败：${describeError(error)}`, "TEMPLATE_CREATE_FAILED");
+  }
+}
+
+/** 新流程：拆镜 → 直接生成无限画布模板（含角色 / 场景参考），不写旧分镜表 */
+function createStoryboardTemplateTool(
   ctx: ToolContext,
-  args: z.infer<typeof createStoryboardSchema>,
-): Promise<ToolOutcome> {
-  const previous = ctx.db.listStoryboardShots(ctx.conversation.id);
-  const shots = args.shots.map((shot) => ({
-    sourceText: shot.sourceText ?? "",
-    prompt: shot.prompt,
-    character: shot.character?.trim() ?? "",
-    scene: shot.scene?.trim() ?? "",
-    // 分镜暂时只生成图片；模型即使填了 video 也归一成 image
-    kind: "image" as const,
-    aspectRatio: normalizeStoryboardAspect(shot.aspectRatio),
-  }));
-  const saved = ctx.db.replaceStoryboard(ctx.conversation.id, shots, {
-    characters: args.characters, scenes: args.scenes,
-  });
-  const incomplete = saved.filter((shot) => storyboardShotMissing(shot));
-  const characterNames = [...new Set(shots.flatMap((shot) => parseCharacterNames(shot.character)))];
-  const sceneNames = [...new Set(shots.map((shot) => shot.scene).filter(Boolean))];
-  const summary = [
-    `已拆成 ${saved.length} 个镜头`,
-    characterNames.length ? `，角色：${characterNames.join("、")}` : "",
-    sceneNames.length ? `，场景：${sceneNames.join("、")}` : "",
-    "，还没有提交生成。",
-    incomplete.length ? `有 ${incomplete.length} 个镜头的画面描述太短（第 ${incomplete.map((shot) => shot.index).join("、")} 镜），请先补全。` : "",
-    previous.length ? "旧的镜头表已替换，之前生成的结果仍在生成历史里。" : "",
-    "请用户在下方分镜面板里确认描述和画幅，再点生成。",
-  ].join("");
-  return okResult(summary, {
+  args: z.infer<typeof createStoryboardTemplateSchema>,
+): ToolOutcome {
+  try {
+    const input = buildStoryboardTemplateInput({
+      name: args.title?.trim() || `${ctx.conversation.title} · 分镜`,
+      description: `${args.shots.length} 个镜头，含角色 / 场景参考；导入无限画布后不会自动生成。`,
+      characters: args.characters?.map((item) => ({ name: item.name, prompt: item.prompt })),
+      scenes: args.scenes?.map((item) => ({ name: item.name, prompt: item.prompt })),
+      shots: args.shots.map((shot, index) => ({
+        index: index + 1,
+        prompt: shot.prompt,
+        character: shot.character,
+        scene: shot.scene,
+        kind: "image",
+        dialogue: shot.dialogue,
+        speaker: shot.speaker,
+        shotSize: shot.shotSize,
+        cameraMove: shot.cameraMove,
+      })),
+    });
+    const template = createCanvasTemplate(ctx.db, input, {
+      source: "storyboard",
+      conversationId: ctx.conversation.id,
+    });
+    const groupCount = template.doc.groups?.length ?? 0;
+    return okResult(
+      `已生成分镜模板「${template.name}」：${args.shots.length} 镜、${template.doc.nodes.length} 个节点${groupCount ? `、${groupCount} 个分组` : ""}。点「导入无限画布」选择目标板；不会自动生成。`,
+      {
+        data: {
+          templateId: template.id,
+          templateName: template.name,
+          templateDescription: template.description,
+          templateNodeCount: template.doc.nodes.length,
+          templateGroupCount: groupCount,
+          storyboardCount: args.shots.length,
+          storyboardCharacters: args.characters?.map((item) => item.name) ?? [],
+          storyboardScenes: args.scenes?.map((item) => item.name) ?? [],
+        },
+      },
+    );
+  } catch (error) {
+    return failResult(`生成分镜模板失败：${describeError(error)}`, "STORYBOARD_TEMPLATE_FAILED");
+  }
+}
+
+/** 工具统一入口：先校验参数，再分发。参数不合法的错误会回灌给大脑让它重试 */
+const BOARD_TOOL_NAMES = new Set(["board_read", "board_apply", "board_generate"]);
+
+function boardForTool(ctx: ToolContext): BoardRecord | null {
+  if (ctx.conversation.kind !== "board" || !ctx.conversation.boardId) return null;
+  return ctx.db.getBoardRecord(ctx.conversation.boardId);
+}
+
+function boardReadTool(ctx: ToolContext, args: BoardReadArgs): ToolOutcome {
+  const board = boardForTool(ctx);
+  if (!board) return failResult("board_read 只能在无限画布线程里使用", "BOARD_ONLY");
+  const text = describeBoard(board, args);
+  return okResult(text, {
     data: {
-      storyboardCount: saved.length,
-      storyboardCharacters: characterNames,
-      storyboardScenes: sceneNames,
-      storyboardIncomplete: incomplete.map((shot) => shot.index),
+      boardId: board.id,
+      nodeCount: board.doc.nodes.length,
+      edgeCount: board.doc.edges.length,
     },
   });
 }
 
-/**
- * 给已有分镜补角色标签。
- *
- * 单独开一个工具而不是让模型重新 `create_storyboard`：重拆会整表替换，
- * 已经生成好的镜头和 task_id 全丢，用户为那几张图付的钱就白花了。
- * 这里只改 `character_name`，生成结果和镜号原样保留。
- */
-async function tagStoryboardCharacters(
-  ctx: ToolContext,
-  args: z.infer<typeof tagStoryboardCharactersSchema>,
-): Promise<ToolOutcome> {
-  const shots = ctx.db.listStoryboardShots(ctx.conversation.id);
-  if (!shots.length) return failResult("当前会话还没有分镜表，先拆镜再标注角色", "STORYBOARD_EMPTY");
-  const byIndex = new Map(shots.map((shot) => [shot.index, shot]));
-  const unknown: number[] = [];
-  let updated = 0;
-  for (const assignment of args.assignments) {
-    const shot = byIndex.get(assignment.index);
-    if (!shot) { unknown.push(assignment.index); continue; }
-    ctx.db.updateStoryboardShot(shot.id, {
-      ...(assignment.character !== undefined ? { character: assignment.character.trim() } : {}),
-      ...(assignment.scene !== undefined ? { scene: assignment.scene.trim() } : {}),
+function boardApplyTool(ctx: ToolContext, args: BoardApplyArgs): ToolOutcome {
+  const board = boardForTool(ctx);
+  if (!board) return failResult("board_apply 只能在无限画布线程里使用", "BOARD_ONLY");
+  try {
+    const result = applyBoardOps(ctx.db, board.id, args.ops);
+    ctx.emit({
+      type: "board",
+      boardId: board.id,
+      version: result.board.version,
+      reason: "agent:apply",
+      delta: buildBoardDelta(board.id, board.doc, result.board.doc, board.version, result.board.version),
     });
-    updated += 1;
+    return okResult(result.summary, { data: result.data });
+  } catch (error) {
+    return failResult(describeError(error), "BOARD_APPLY_FAILED");
   }
-  ctx.db.upsertStoryboardCharacters(ctx.conversation.id, [
-    ...(args.characters ?? []),
-    ...args.assignments.flatMap((item) => parseCharacterNames(item.character ?? "")).map((name) => ({ name })),
-  ]);
-  ctx.db.upsertStoryboardScenes(ctx.conversation.id, [
-    ...(args.scenes ?? []),
-    ...args.assignments.map((item) => item.scene ?? "").filter(Boolean).map((name) => ({ name })),
-  ]);
-  const names = [...new Set(args.assignments.flatMap((item) => parseCharacterNames(item.character ?? "")))];
-  const sceneNames = [...new Set(args.assignments.map((item) => (item.scene ?? "").trim()).filter(Boolean))];
-  const summary = [
-    `已给 ${updated} 镜标注角色 / 场景`,
-    names.length ? `（角色：${names.join("、")}）` : "",
-    sceneNames.length ? `（场景：${sceneNames.join("、")}）` : "",
-    unknown.length ? `；第 ${unknown.join("、")} 镜不存在，已跳过` : "",
-    "。已经生成的结果没有被改动；接着可以生成设定图。",
-  ].join("");
-  return okResult(summary, {
-    data: { taggedCount: updated, characters: names, scenes: sceneNames },
-  });
 }
 
-/** 工具统一入口：先校验参数，再分发。参数不合法的错误会回灌给大脑让它重试 */
+async function boardGenerateTool(ctx: ToolContext, args: BoardGenerateArgs): Promise<ToolOutcome> {
+  const board = boardForTool(ctx);
+  if (!board) return failResult("board_generate 只能在无限画布线程里使用", "BOARD_ONLY");
+  const target = board.doc.nodes.find((node) => node.ref === args.nodeRef);
+  if (!target || target.type === "text") {
+    return failResult(`节点 ${args.nodeRef} 不能生成：请指定配置 / 图片 / 视频 / 音频节点`, "BOARD_CONFIG_NOT_FOUND");
+  }
+  try {
+    const result = await generateBoardConfig({
+      db: ctx.db,
+      runner: ctx.runner,
+      keys: ctx.sessionKeys,
+      boardId: board.id,
+      nodeId: target.id,
+      ...(args.overrides ? { overrides: args.overrides } : {}),
+    });
+    const resultNodes = result.board.doc.nodes.filter((node) => result.resultNodeIds.includes(node.id));
+    const refs = resultNodes.map((node) => node.ref);
+    const unit = result.kind === "video" ? "个视频"
+      : result.kind === "text" ? "段文本"
+        : result.kind === "audio" ? "个音频"
+          : "张图";
+    ctx.emit({
+      type: "board",
+      boardId: board.id,
+      version: result.board.version,
+      reason: "agent:generate",
+      delta: buildBoardDelta(board.id, board.doc, result.board.doc, board.version, result.board.version),
+    });
+    const summary = result.task
+      ? `已提交：${args.nodeRef} 生成 ${refs.length} ${unit}，结果节点 ${refs.join("、")}；taskId=${result.task.id}。结果会由画布回填。`
+      : `已生成：${args.nodeRef} 的 ${refs.length} 段文本已写入结果节点 ${refs.join("、")}。`;
+    return okResult(
+      summary,
+      {
+        ...(result.task ? { taskId: result.task.id } : {}),
+        data: {
+          nodeRef: args.nodeRef,
+          ...(result.task ? { taskId: result.task.id } : {}),
+          kind: result.kind,
+          resultRefs: refs,
+          resultNodeIds: result.resultNodeIds,
+          modelAlias: result.modelAlias,
+          referenceCount: result.referenceCount,
+        },
+      },
+    );
+  } catch (error) {
+    return failResult(describeError(error), "BOARD_GENERATE_FAILED");
+  }
+}
+
 export async function runAgentTool(
   name: keyof typeof TOOL_SCHEMAS,
   rawArgs: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolOutcome> {
+  // 无限画布线程只开放 board_* 和纯文本工具，避免大脑把对话 / 分镜工具用错地方
+  if (ctx.conversation.kind === "board"
+    && !BOARD_TOOL_NAMES.has(name)
+    && name !== "ask"
+    && name !== "reply") {
+    return failResult(
+      `无限画布线程只能使用 board_read / board_apply / board_generate / ask / reply，不能调用 ${name}`,
+      "BOARD_TOOL_ONLY",
+    );
+  }
+
   const schema = TOOL_SCHEMAS[name];
   const parsed = schema.safeParse(rawArgs);
   if (!parsed.success) {
@@ -1317,8 +1382,11 @@ export async function runAgentTool(
     case "generate_video": return generateVideo(ctx, parsed.data as GenerateVideoArgs);
     case "generate_music": return generateMusic(ctx, parsed.data as GenerateMusicArgs);
     case "generate_speech": return generateSpeech(ctx, parsed.data as GenerateSpeechArgs);
-    case "create_storyboard": return createStoryboard(ctx, parsed.data as z.infer<typeof createStoryboardSchema>);
-    case "tag_storyboard_characters": return tagStoryboardCharacters(ctx, parsed.data as z.infer<typeof tagStoryboardCharactersSchema>);
+    case "create_storyboard_template": return createStoryboardTemplateTool(ctx, parsed.data as z.infer<typeof createStoryboardTemplateSchema>);
+    case "create_canvas_template": return createCanvasTemplateTool(ctx, parsed.data as CanvasTemplateInput);
+    case "board_read": return boardReadTool(ctx, parsed.data as BoardReadArgs);
+    case "board_apply": return boardApplyTool(ctx, parsed.data as BoardApplyArgs);
+    case "board_generate": return boardGenerateTool(ctx, parsed.data as BoardGenerateArgs);
     // ask / reply 由 Agent 循环直接处理（它们只需要生成一段文本，没有副作用）
     case "ask": return okResult((parsed.data as AskArgs).question);
     case "reply": return okResult((parsed.data as ReplyArgs).text);

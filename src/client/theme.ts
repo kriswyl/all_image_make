@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import { isTauriRuntime } from "./api";
 
 /**
@@ -13,6 +14,37 @@ export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "yida.theme";
+
+/**
+ * React 侧的主题订阅。
+ *
+ * 设置弹窗和标题栏按钮都要跟着「系统主题变化 / 另一处切换」一起更新，
+ * 所以不在各自的组件里存一份 state，而是让 theme.ts 做唯一数据源。
+ * 快照里带 revision，确保同一模式重复 apply 时 useSyncExternalStore 也能拿到新值。
+ */
+const themeListeners = new Set<() => void>();
+let themeRevision = 0;
+
+function emitThemeChange() {
+  themeRevision += 1;
+  for (const listener of themeListeners) listener();
+}
+
+function subscribeTheme(listener: () => void) {
+  themeListeners.add(listener);
+  return () => { themeListeners.delete(listener); };
+}
+
+function themeSnapshot() {
+  const mode = readThemeMode();
+  const resolved = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  return `${mode}|${resolved}|${themeRevision}`;
+}
+
+export function useTheme(): { mode: ThemeMode; resolved: ResolvedTheme } {
+  const [mode, resolved] = useSyncExternalStore(subscribeTheme, themeSnapshot, themeSnapshot).split("|");
+  return { mode: mode as ThemeMode, resolved: resolved as ResolvedTheme };
+}
 
 /** 存储里可能是旧版本、手改过的值，认不出来的都退回「跟随系统」 */
 export function normalizeThemeMode(value: string | null | undefined): ThemeMode {
@@ -52,6 +84,8 @@ function syncThemeColor(resolved: ResolvedTheme) {
  * 桌面版顺手把 Tauri 窗口的 theme 也切过去，原生对话框和系统菜单才会跟着变。
  * 「跟随系统」传 null，交还给 Windows 自己判断。
  */
+let appliedWindowTheme: ThemeMode | null | undefined;
+
 export function applyTheme(mode: ThemeMode) {
   if (typeof document === "undefined") return;
   const resolved = resolveTheme(mode, systemPrefersDark());
@@ -61,11 +95,18 @@ export function applyTheme(mode: ThemeMode) {
   // theme-init.js 为了首帧防闪写了一条内联背景；主 CSS 到了就交还给令牌
   root.style.backgroundColor = "";
   syncThemeColor(resolved);
+  emitThemeChange();
 
   if (isTauriRuntime()) {
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(mode === "system" ? null : mode))
-      .catch(() => undefined);
+    // 只在目标值真的变了才调 setTheme：setTheme(null) 可能反过来触发
+    // prefers-color-scheme 变化，不加这个守卫，「跟随系统」会自己套自己。
+    const target = mode === "system" ? null : mode;
+    if (appliedWindowTheme !== target) {
+      appliedWindowTheme = target;
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(target))
+        .catch(() => undefined);
+    }
   }
 }
 

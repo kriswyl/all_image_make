@@ -68,10 +68,15 @@ export interface CallBrainOptions {
  * 默认输出上限。实测推理模型会先花几十到几百个 token 推理再输出正文，
  * 上限给小了会只拿到满额 reasoning_tokens 和空 content（finish_reason: "length"）。
  */
-export const BRAIN_DEFAULT_MAX_TOKENS = 4096;
+export const BRAIN_DEFAULT_MAX_TOKENS = 16_384;
+/** 推理模型在长上下文里可能把 16K 全用在思考上；空正文时再用这一档重试一次 */
+export const BRAIN_RETRY_MAX_TOKENS = 32_768;
 
-/** 单次大脑调用的默认超时。推理模型单次实测约 2-3 秒，留足余量但别让用户干等 */
-export const BRAIN_DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * 单次大脑调用的默认超时。推理模型长上下文 + 大输出实测会超过 2 分钟，
+ * 给到 4 分钟；界面有停止按钮，不需要靠短超时兜底。
+ */
+export const BRAIN_DEFAULT_TIMEOUT_MS = 240_000;
 
 export class BrainError extends Error {
   constructor(public code: string, message: string, public status?: number) {

@@ -6,7 +6,8 @@
  * 浮层里的排版和「图片 · 视频模型」面板用同一套语言：标识 + 真名 + 渠道。
  */
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ModelLogo, type ModelKind } from "./ModelLogo";
 
 export interface ModelOption {
@@ -42,13 +43,60 @@ export function ModelPicker({
   ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
-  // 点别处收起。浮层是自绘的，浏览器不会替我们做这件事
+  const positionMenu = () => {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const margin = 12;
+    const width = Math.min(360, window.innerWidth - margin * 2);
+    const left = Math.max(margin, Math.min(rect.right - width, window.innerWidth - width - margin));
+    const below = window.innerHeight - rect.bottom - margin;
+    const above = rect.top - margin;
+    // 先按调用方指定的方向；那个方向放不下 180px 时自动翻到另一边
+    const preferDown = menuPlacement === "down";
+    const down = preferDown ? (below >= 180 || below >= above) : above < 180;
+    const space = down ? below : above;
+    setAnchor({
+      left,
+      width,
+      ...(down ? { top: rect.bottom + 6 } : { bottom: window.innerHeight - rect.top + 6 }),
+      maxHeight: Math.max(160, Math.min(320, space)),
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setAnchor(null);
+      return;
+    }
+    positionMenu();
+    const onViewportChange = () => positionMenu();
+    window.addEventListener("resize", onViewportChange);
+    // capture：画布 / 检查器内部滚动也能重新贴住触发按钮
+    window.addEventListener("scroll", onViewportChange, true);
+    return () => {
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("scroll", onViewportChange, true);
+    };
+  }, [open, menuPlacement]);
+
+  // 点别处收起。浮层是 portal，触发器和菜单要分别判断
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
-      if (ref.current && event.target instanceof Node && !ref.current.contains(event.target)) setOpen(false);
+      if (!(event.target instanceof Node)) return;
+      if (ref.current?.contains(event.target) || menuRef.current?.contains(event.target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
@@ -59,6 +107,7 @@ export function ModelPicker({
   return (
     <div className={`model-picker ${className ?? ""}`} ref={ref}>
       <button
+        ref={triggerRef}
         type="button"
         className={`model-picker-trigger ${open ? "is-open" : ""}`}
         disabled={disabled}
@@ -72,11 +121,19 @@ export function ModelPicker({
         <ChevronDown size={13} className="model-picker-chevron" />
       </button>
 
-      {open ? (
+      {open && anchor ? createPortal(
         <div
-          className={`model-picker-menu ${menuPlacement === "down" ? "is-down" : ""}`}
+          ref={menuRef}
+          className={`model-picker-menu is-portaled ${menuPlacement === "down" ? "is-down" : ""}`}
           role="listbox"
           aria-label={ariaLabel ?? "模型"}
+          style={{
+            left: anchor.left,
+            width: anchor.width,
+            maxHeight: anchor.maxHeight,
+            ...(anchor.top === undefined ? {} : { top: anchor.top }),
+            ...(anchor.bottom === undefined ? {} : { bottom: anchor.bottom }),
+          }}
         >
           {options.map((item) => (
             <button
@@ -95,7 +152,8 @@ export function ModelPicker({
               {item.value === value ? <Check size={13} className="model-picker-check" /> : null}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </div>
   );

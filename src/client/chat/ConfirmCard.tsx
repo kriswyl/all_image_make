@@ -77,6 +77,32 @@ export function ConfirmCard({
     onApprove(patch);
   }
 
+  if (preview.reason === "board_destructive") {
+    return (
+      <div className="chat-row chat-row-assistant">
+        <div className="confirm-card">
+          <div className="confirm-card-head">
+            <span className="confirm-card-badge is-warn"><AlertCircle size={13} />无限画布操作</span>
+            <span className="confirm-card-model">{preview.boardSummary ?? "需要确认"}</span>
+          </div>
+          <p className="confirm-card-message">{preview.message}</p>
+          {message.content ? <p className="confirm-card-say">{message.content}</p> : null}
+          <div className="confirm-card-batch">
+            将删除 {preview.boardDeleteNodes ?? 0} 个节点，其中 {preview.boardDeleteWithAssets ?? 0} 个绑定了素材或生成结果。素材文件本身不会被删除。
+          </div>
+          <div className="confirm-card-actions">
+            <button type="button" className="secondary-button" onClick={onReject} disabled={busy}>
+              <X size={14} />先不改
+            </button>
+            <button type="button" className="primary-button" onClick={() => onApprove({})} disabled={busy}>
+              <Check size={14} />确认执行
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="chat-row chat-row-assistant">
       <div className="confirm-card">

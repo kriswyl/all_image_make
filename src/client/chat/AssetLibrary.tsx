@@ -13,7 +13,7 @@ import { SelectMenu } from "../ui/SelectMenu";
 import { assetRef, type CanvasAsset } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 
-type Tab = "all" | "generate" | "storyboard" | "setting" | "upload" | "canvas";
+type Tab = "all" | "generate" | "storyboard" | "setting" | "upload" | "bridge" | "canvas";
 type Sort = "newest" | "oldest";
 
 function fallbackToFull(event: React.SyntheticEvent<HTMLImageElement>, asset: Asset) {
@@ -33,6 +33,7 @@ function originLabel(entry: CanvasAsset): string {
   if (entry.source === "storyboard") return `第 ${entry.round} 镜`;
   if (entry.source === "setting") return "设定图";
   if (entry.source === "upload") return "上传";
+  if (entry.source === "bridge") return "无限画布";
   return `第 ${entry.round} 轮`;
 }
 
@@ -135,6 +136,7 @@ export function AssetLibrary({
     storyboard: assets.filter((entry) => entry.source === "storyboard").length,
     setting: assets.filter((entry) => entry.source === "setting").length,
     upload: assets.filter((entry) => entry.source === "upload").length,
+    bridge: assets.filter((entry) => entry.source === "bridge").length,
     canvas: assets.filter((entry) => positions.has(entry.asset.id)).length,
   }), [assets, positions]);
 
@@ -166,6 +168,7 @@ export function AssetLibrary({
     { id: "storyboard", label: "分镜", count: counts.storyboard },
     { id: "setting", label: "设定", count: counts.setting },
     { id: "upload", label: "上传", count: counts.upload },
+    { id: "bridge", label: "无限画布", count: counts.bridge },
     { id: "canvas", label: "画布", count: counts.canvas },
   ];
 

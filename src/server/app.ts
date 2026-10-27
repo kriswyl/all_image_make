@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import multer from "multer";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
+import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
 import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../shared/types.js";
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import { AppDatabase, type DbChannel, type StoredFileRef } from "./db.js";
@@ -15,6 +16,7 @@ import { assertEndpoint, assertSafeUrl, displayFileName, redact, safeFileName } 
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
 import { AgentService } from "./agent.js";
 import { buildCapabilityAliases, buildCapabilityManifest } from "./capabilities.js";
+import { pickBrainChannel, readAgentDefaults } from "./agent-settings.js";
 import { optimizePromptForWorkbench } from "./prompt-optimizer.js";
 import { readThumbBytes, writeThumbnail } from "./vision.js";
 import {
@@ -23,11 +25,17 @@ import {
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
 import { midjourneyModelForCustomId } from "../shared/midjourney.js";
+import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard.js";
 import {
-  MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS, MAX_STORYBOARD_SHOTS, STORYBOARD_SHOT_KINDS,
-  normalizeStoryboardAspect,
-} from "../shared/storyboard.js";
-import { buildStoryboardView, generateStoryboardSettings, generateStoryboardShots } from "./storyboard.js";
+  addAssetsToBoard, appendConversationCanvasAssets,
+  cancelBoardTask, createBoard, deleteBoard, detachAssetFromBoards, generateBoardConfig, getBoard,
+  importBoard, listBoardAssets, listBoardHistory, listBoards, redoBoard, removeBoardAsset, renameBoard,
+  restoreBoardVersion, retryBoardTask, saveBoard,
+  saveBoardSelection, saveBoardUiState, saveBoardViewport, storeBoardUpload, undoBoard,
+} from "./board.js";
+import {
+  cleanupMigratedStoryboards, createBoardFromTemplate, importTemplateIntoBoard, migrateAllStoryboards,
+} from "./canvas-template.js";
 
 const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
@@ -126,6 +134,103 @@ const conversationPatchSchema = z.object({
   currentAssetId: z.string().uuid().nullable().optional(),
 });
 
+const boardCreateSchema = z.object({
+  title: z.string().trim().max(80).optional(),
+});
+
+const boardRenameSchema = z.object({
+  title: z.string().trim().min(1).max(80),
+});
+
+const boardSaveSchema = z.object({
+  doc: z.unknown(),
+  viewport: z.unknown().optional(),
+  baseVersion: z.coerce.number().int().min(1),
+  reason: z.string().trim().max(200).optional(),
+});
+
+const boardVersionSchema = z.object({
+  baseVersion: z.coerce.number().int().min(1),
+});
+
+const boardImportSchema = z.object({
+  file: z.unknown(),
+});
+
+const boardBridgeSchema = z.object({
+  items: z.array(z.object({
+    assetId: z.string().trim().min(1).max(80),
+    title: z.string().trim().max(80).optional(),
+    prompt: z.string().max(20000).optional(),
+  })).min(1).max(50),
+});
+
+const canvasAppendSchema = z.object({
+  assetIds: z.array(z.string().trim().min(1).max(80)).min(1).max(50),
+});
+
+const templateImportSchema = z.object({
+  templateId: z.string().trim().min(1).max(80),
+  title: z.string().trim().max(80).optional(),
+});
+
+const boardTemplateSchema = z.object({
+  templateId: z.string().trim().min(1).max(80),
+});
+
+const templateUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().trim().max(500).optional(),
+});
+
+const storyboardMigrationSchema = z.object({
+  replaceExisting: z.boolean().optional(),
+});
+
+const boardSelectionSchema = z.object({
+  selection: z.array(z.string().trim().min(1).max(80)).max(50),
+});
+
+const boardUiStateSchema = z.object({
+  uiState: z.unknown(),
+});
+
+const boardViewportSchema = z.object({
+  viewport: z.unknown(),
+});
+
+const boardGenerateSchema = z.object({
+  nodeId: z.string().trim().min(1).max(80),
+  overrides: z.object({
+    prompt: z.string().max(20000).optional(),
+    model: z.string().trim().max(80).optional(),
+    size: z.string().trim().max(60).optional(),
+    imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
+    quality: z.string().trim().max(40).optional(),
+    negativePrompt: z.string().trim().max(2_000).optional(),
+    aspectRatio: z.string().trim().max(20).optional(),
+    seed: z.coerce.number().int().min(0).max(2_147_483_647).optional(),
+    style: z.enum(["auto", "vivid", "natural"]).optional(),
+    background: z.enum(["auto", "opaque", "transparent"]).optional(),
+    outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+    moderation: z.enum(["auto", "low"]).optional(),
+    count: z.coerce.number().int().min(1).max(8).optional(),
+    videoMode: z.enum(BOARD_VIDEO_MODES).optional(),
+    durationSeconds: z.coerce.number().int().min(1).max(30).optional(),
+    resolution: z.string().trim().max(20).optional(),
+    audio: z.boolean().optional(),
+    promptExtend: z.boolean().optional(),
+    watermark: z.boolean().optional(),
+    audioKind: z.enum(BOARD_AUDIO_KINDS).optional(),
+    voice: z.string().trim().max(40).optional(),
+    ttsStyle: z.string().trim().max(200).optional(),
+    instrumental: z.boolean().optional(),
+    musicTitle: z.string().trim().max(80).optional(),
+    musicTags: z.string().trim().max(1_000).optional(),
+    musicNegativeTags: z.string().trim().max(1_000).optional(),
+  }).optional(),
+});
+
 const messageCreateSchema = z.object({
   /** 文本消息；图片附件在 M1 之后补，届时放宽成可选 */
   text: z.string().trim().min(1).max(20000),
@@ -138,7 +243,7 @@ const messageCreateSchema = z.object({
 
 const promptOptimizeSchema = z.object({
   prompt: z.string().trim().min(1).max(20000),
-  target: z.enum(["image", "video"]),
+  target: z.enum(["image", "video", "dialogue", "sound"]),
 });
 
 const confirmSchema = z.object({
@@ -162,57 +267,6 @@ const conversationDocumentSchema = z.object({
   })).min(1).max(3),
 });
 
-const storyboardSettingsSchema = z.object({
-  referenceMode: z.enum(["auto", "manual", "off"]).optional(),
-  referenceAssetId: z.string().uuid().nullable().optional(),
-});
-
-/** 手动添加一镜：只带可选的初始值，默认是空描述、沿用上一镜画幅 */
-const storyboardShotAddSchema = z.object({
-  prompt: z.string().trim().max(20000).optional(),
-  character: z.string().trim().max(120).optional(),
-  scene: z.string().trim().max(80).optional(),
-  aspectRatio: z.string().trim().max(10).optional(),
-});
-
-const storyboardShotPatchSchema = z.object({
-  prompt: z.string().trim().max(20000).optional(),
-  sourceText: z.string().trim().max(20000).optional(),
-  /** 出场角色名；空串表示空镜 / 道具 / 字幕 */
-  character: z.string().trim().max(120).optional(),
-  /** 场景名；空串表示没有场景设定 */
-  scene: z.string().trim().max(80).optional(),
-  kind: z.enum(STORYBOARD_SHOT_KINDS).optional(),
-  aspectRatio: z.string().trim().max(10).optional(),
-});
-
-const storyboardSettingPatchSchema = z.object({
-  /** null = 清掉手动绑定，回到「看最近一次生成」 */
-  assetId: z.string().uuid().nullable().optional(),
-  prompt: z.string().trim().max(2000).optional(),
-  confirmed: z.boolean().optional(),
-});
-
-/** 手动添加角色 / 场景：名字必填，描述可以先空着，之后再在卡片里补 */
-const storyboardSettingAddSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  prompt: z.string().trim().max(2000).optional(),
-});
-
-const storyboardSettingsGenerateSchema = z.object({
-  characterIds: z.array(z.string().uuid()).max(8).default([]),
-  sceneIds: z.array(z.string().uuid()).max(8).default([]),
-  /** 用户选中的生图模型 alias；缺省用默认生图模型 */
-  alias: z.string().trim().max(80).optional(),
-});
-
-const storyboardGenerateSchema = z.object({
-  // 上限由 service 检查：Zod 先拦掉的话，前端只能拿到一条通用的参数错误，
-  // 分不清是「没选镜头」还是「一次选了太多」
-  shotIds: z.array(z.string().uuid()).min(1),
-  /** 用户选中的生图模型 alias；缺省用默认生图模型 */
-  alias: z.string().trim().max(80).optional(),
-});
 
 const generationSchema = z.object({
   channelId: z.string().uuid(),
@@ -382,6 +436,193 @@ export function createApp(options: { dataDir?: string } = {}) {
       service: { version: APP_VERSION, dataPath: db.filePath, assetsPath: db.assetsDir, defaultAssetsPath: db.defaultAssetsDir },
     }));
   });
+
+  // ── 无限画布（FREE_CANVAS_PLAN.md） ───────────────────────────────────────
+
+  app.get("/api/boards", (_req, res) => {
+    res.json(ok(listBoards(db)));
+  });
+
+  app.post("/api/boards", (req, res) => {
+    const input = boardCreateSchema.parse(req.body ?? {});
+    res.status(201).json(ok(createBoard(db, input)));
+  });
+
+  app.post("/api/boards/import", (req, res) => {
+    const input = boardImportSchema.parse(req.body ?? {});
+    res.status(201).json(ok(importBoard(db, { file: input.file })));
+  });
+
+  app.get("/api/templates", (_req, res) => {
+    res.json(ok(db.listCanvasTemplateSummaries()));
+  });
+
+  app.post("/api/templates/migrate-storyboards", (req, res) => {
+    const input = storyboardMigrationSchema.parse(req.body ?? {});
+    res.json(ok(migrateAllStoryboards(db, { replaceExisting: input.replaceExisting })));
+  });
+
+  app.post("/api/templates/cleanup-storyboards", (_req, res) => {
+    res.json(ok(cleanupMigratedStoryboards(db)));
+  });
+
+  app.get("/api/templates/:id", (req, res) => {
+    const template = db.getCanvasTemplate(routeParam(req.params.id));
+    if (!template) return res.status(404).json(fail("TEMPLATE_NOT_FOUND", "模板不存在"));
+    res.json(ok(template));
+  });
+
+  app.patch("/api/templates/:id", (req, res) => {
+    const input = templateUpdateSchema.parse(req.body ?? {});
+    const template = db.updateCanvasTemplate(routeParam(req.params.id), input);
+    if (!template) return res.status(404).json(fail("TEMPLATE_NOT_FOUND", "模板不存在"));
+    res.json(ok(template));
+  });
+
+  app.delete("/api/templates/:id", (req, res) => {
+    if (!db.deleteCanvasTemplate(routeParam(req.params.id))) {
+      return res.status(404).json(fail("TEMPLATE_NOT_FOUND", "模板不存在"));
+    }
+    res.json(ok({ deleted: true }));
+  });
+
+  app.post("/api/boards/from-template", (req, res) => {
+    const input = templateImportSchema.parse(req.body ?? {});
+    res.status(201).json(ok(createBoardFromTemplate(db, input.templateId, input.title)));
+  });
+
+  app.post("/api/boards/:id/templates", (req, res) => {
+    const input = boardTemplateSchema.parse(req.body ?? {});
+    res.json(ok(importTemplateIntoBoard(db, routeParam(req.params.id), input.templateId)));
+  });
+
+  app.get("/api/boards/:id", (req, res) => {
+    const board = getBoard(db, routeParam(req.params.id));
+    if (!board) return res.status(404).json(fail("BOARD_NOT_FOUND", "无限画布不存在"));
+    res.json(ok(board));
+  });
+
+  app.patch("/api/boards/:id", (req, res) => {
+    const input = boardRenameSchema.parse(req.body ?? {});
+    res.json(ok(renameBoard(db, routeParam(req.params.id), input.title)));
+  });
+
+  app.put("/api/boards/:id", (req, res) => {
+    const input = boardSaveSchema.parse(req.body ?? {});
+    res.json(ok(saveBoard(db, routeParam(req.params.id), {
+      doc: input.doc,
+      ...(input.viewport === undefined ? {} : { viewport: input.viewport }),
+      baseVersion: input.baseVersion,
+      ...(input.reason ? { reason: input.reason } : {}),
+    })));
+  });
+
+  app.put("/api/boards/:id/selection", (req, res) => {
+    const input = boardSelectionSchema.parse(req.body ?? {});
+    saveBoardSelection(db, routeParam(req.params.id), input.selection);
+    res.json(ok({ saved: true }));
+  });
+
+  app.put("/api/boards/:id/ui-state", (req, res) => {
+    const input = boardUiStateSchema.parse(req.body ?? {});
+    saveBoardUiState(db, routeParam(req.params.id), input.uiState);
+    res.json(ok({ saved: true }));
+  });
+
+  app.put("/api/boards/:id/viewport", (req, res) => {
+    const input = boardViewportSchema.parse(req.body ?? {});
+    res.json(ok(saveBoardViewport(db, routeParam(req.params.id), input.viewport)));
+  });
+
+  app.post("/api/boards/:id/undo", (req, res) => {
+    const input = boardVersionSchema.parse(req.body ?? {});
+    res.json(ok(undoBoard(db, routeParam(req.params.id), input.baseVersion)));
+  });
+
+  app.post("/api/boards/:id/redo", (req, res) => {
+    const input = boardVersionSchema.parse(req.body ?? {});
+    res.json(ok(redoBoard(db, routeParam(req.params.id), input.baseVersion)));
+  });
+
+  app.get("/api/boards/:id/history", (req, res) => {
+    res.json(ok(listBoardHistory(db, routeParam(req.params.id))));
+  });
+
+  app.post("/api/boards/:id/history/:version/restore", (req, res) => {
+    const input = boardVersionSchema.parse(req.body ?? {});
+    const version = Number(routeParam(req.params.version));
+    res.json(ok(restoreBoardVersion(db, routeParam(req.params.id), version, input.baseVersion)));
+  });
+
+  app.post("/api/boards/:id/generate", asyncHandler(async (req, res) => {
+    const input = boardGenerateSchema.parse(req.body ?? {});
+    res.status(202).json(ok(await generateBoardConfig({
+      db,
+      runner,
+      keys: sessionKeys,
+      boardId: routeParam(req.params.id),
+      nodeId: input.nodeId,
+      ...(input.overrides ? { overrides: input.overrides } : {}),
+    })));
+  }));
+
+  app.post("/api/boards/:id/tasks/:taskId/cancel", (req, res) => {
+    res.json(ok(cancelBoardTask(db, runner, routeParam(req.params.id), routeParam(req.params.taskId))));
+  });
+
+  app.post("/api/boards/:id/tasks/:taskId/retry", asyncHandler(async (req, res) => {
+    res.json(ok(await retryBoardTask({
+      db,
+      runner,
+      boardId: routeParam(req.params.id),
+      taskId: routeParam(req.params.taskId),
+    })));
+  }));
+
+  app.get("/api/boards/:id/assets", (req, res) => {
+    res.json(ok(listBoardAssets(db, routeParam(req.params.id))));
+  });
+
+  app.post("/api/boards/:id/assets", conversationUpload.single("file"), asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
+    const asset = await storeBoardUpload(db, routeParam(req.params.id), {
+      buffer: req.file.buffer,
+      mimetype: req.file.mimetype,
+      originalname: req.file.originalname,
+    });
+    res.status(201).json(ok(asset));
+  }));
+
+  app.delete("/api/boards/:id/assets/:assetId", (req, res) => {
+    res.json(ok(removeBoardAsset(db, routeParam(req.params.id), routeParam(req.params.assetId))));
+  });
+
+  // 跨模式桥：分镜 / 其他来源的已有素材 → 无限画布节点
+  app.post("/api/boards/:id/bridge/assets", (req, res) => {
+    const input = boardBridgeSchema.parse(req.body ?? {});
+    res.json(ok(addAssetsToBoard(db, routeParam(req.params.id), input.items)));
+  });
+
+  app.delete("/api/boards/:id", (req, res) => {
+    res.json(ok(deleteBoard(db, routeParam(req.params.id))));
+  });
+
+  /**
+   * 无限画布线程也复用 conversations 表，但它没有分镜、脚本文档和参考图组。
+   * 这些对话专属子路由要明确拒绝，避免从外部调接口把两类数据串在一起。
+   */
+  const chatThreadOnly = (req: Request, res: Response, next: NextFunction) => {
+    const id = routeParam(req.params.id);
+    const conversation = id ? db.getConversation(id) : null;
+    if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    if (conversation.kind !== "chat") {
+      return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "这个操作只支持普通对话", crypto.randomUUID()));
+    }
+    next();
+  };
+  app.use("/api/conversations/:id/documents", chatThreadOnly);
+  app.use("/api/conversations/:id/uploads", chatThreadOnly);
+  app.use("/api/conversations/:id/assets", chatThreadOnly);
 
   app.get("/api/settings", (_req, res) => {
     res.json(ok({
@@ -576,6 +817,8 @@ export function createApp(options: { dataDir?: string } = {}) {
     const id = routeParam(req.params.id);
     if (!db.getTaskRow(id)) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
     const keepFiles = req.query.keepFiles === "1";
+    // 无限画布节点也引用这份素材；先摘掉引用，再删任务和文件
+    for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
     const removed = db.deleteTask(id, { keepFiles });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
     res.json(ok({ deleted: true, keepFiles }));
@@ -601,6 +844,9 @@ export function createApp(options: { dataDir?: string } = {}) {
       targets = db.listAllTaskRows()
         .filter((row) => scope === "all" || db.taskKindRow(row, adapterByChannel) === scope)
         .map((row) => row.id);
+    }
+    for (const id of targets) {
+      for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
     }
     const removed = db.deleteTasks(targets, { keepFiles });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
@@ -680,7 +926,11 @@ export function createApp(options: { dataDir?: string } = {}) {
 
   app.patch("/api/conversations/:id", (req, res) => {
     const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const conversation = db.getConversation(id);
+    if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    if (conversation.kind !== "chat") {
+      return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "这个操作只支持普通对话", crypto.randomUUID()));
+    }
     const patch = conversationPatchSchema.parse(req.body ?? {}) as ConversationPatch;
     // 老前端（`currentAssetId`）归一成新字段。只在**没同时给新字段**时生效：
     // 两个都给的话以新的为准，别让一个废弃字段去覆盖用户刚点的操作
@@ -704,7 +954,12 @@ export function createApp(options: { dataDir?: string } = {}) {
 
   app.delete("/api/conversations/:id", asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const conversation = db.getConversation(id);
+    if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    // 无限画布线程跟着板走，不能从对话删除入口删
+    if (conversation.kind !== "chat") {
+      return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "无限画布请从无限画布入口删除", crypto.randomUUID()));
+    }
     // 正在跑的一轮先掐掉，否则它会把消息写回一张已经删掉的会话
     agent.interrupt(id);
     // 上传的图不属于生成历史，没人引用了就得连文件一起清掉（生成的产物不动）
@@ -738,6 +993,12 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!view) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     res.json(ok(view));
   }));
+
+  // 跨模式桥：无限画布 → 某个对话的参考图组
+  app.post("/api/conversations/:id/canvas/append", chatThreadOnly, (req, res) => {
+    const input = canvasAppendSchema.parse(req.body ?? {});
+    res.json(ok(appendConversationCanvasAssets(db, routeParam(req.params.id), input.assetIds)));
+  });
 
   app.post("/api/conversations/:id/messages", (req, res) => {
     const id = routeParam(req.params.id);
@@ -858,296 +1119,6 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.status(201).json(ok(agent.buildView(id)));
   }));
 
-  /** 会话内分镜表。前端在面板打开/有任务在跑时轮询它 */
-  app.get("/api/conversations/:id/storyboard", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  /**
-   * 角色参考设置。
-   *
-   * auto：用镜号最小的已完成图片镜头；manual：用户指定某张产物；off：不用参考。
-   * 指定 manual 时必须真的给一张**本会话里的图片**，否则等生成时才发现找不到，
-   * 用户会以为「选了却没生效」。
-   */
-  app.patch("/api/conversations/:id/storyboard", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    const current = db.getStoryboardReference(id);
-    const input = storyboardSettingsSchema.parse(req.body ?? {});
-    const mode = input.referenceMode ?? current.mode;
-    let assetId: string | null = null;
-
-    if (mode === "manual") {
-      const wanted = input.referenceAssetId ?? current.assetId;
-      if (!wanted) return res.status(400).json(fail("STORYBOARD_REFERENCE_REQUIRED", "请选择一张图片作为角色参考"));
-      const asset = db.getAsset(wanted);
-      if (!asset || !asset.mimeType.startsWith("image/")) {
-        return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "角色参考必须是图片"));
-      }
-      const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === wanted);
-      if (!belongs) return res.status(400).json(fail("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话"));
-      assetId = wanted;
-    }
-
-    db.setStoryboardReference(id, { assetId, mode });
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 改一镜的画面描述 / 画幅 / 类型。只影响下一次生成，不回滚已经提交的任务 */
-  app.patch("/api/conversations/:id/storyboard/shots/:shotId", (req, res) => {
-    const id = routeParam(req.params.id);
-    const shotId = routeParam(req.params.shotId);
-    const shot = db.getStoryboardShot(shotId);
-    if (!shot || shot.conversationId !== id) {
-      return res.status(404).json(fail("STORYBOARD_SHOT_NOT_FOUND", "镜头不存在或不属于这个会话"));
-    }
-    const input = storyboardShotPatchSchema.parse(req.body ?? {});
-    if (input.prompt !== undefined && !input.prompt.trim()) {
-      return res.status(400).json(fail("STORYBOARD_SHOT_INCOMPLETE", "画面描述不能为空"));
-    }
-    if (input.aspectRatio !== undefined && input.aspectRatio !== "" && normalizeStoryboardAspect(input.aspectRatio) !== input.aspectRatio) {
-      return res.status(400).json(fail("STORYBOARD_ASPECT_INVALID", "不支持的画幅"));
-    }
-    db.updateStoryboardShot(shotId, {
-      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
-      ...(input.sourceText !== undefined ? { sourceText: input.sourceText } : {}),
-      ...(input.character !== undefined ? { character: input.character } : {}),
-      ...(input.scene !== undefined ? { scene: input.scene } : {}),
-      // 分镜暂时只生成图片；旧前端传 video 也归一成 image
-      ...(input.kind !== undefined ? { kind: "image" as const } : {}),
-      ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
-    });
-    // 用户手填的新角色 / 场景名也要进设定表，否则没法给它绑参考图
-    if (input.character) db.upsertStoryboardCharacters(id, [input.character]);
-    if (input.scene) db.upsertStoryboardScenes(id, [input.scene]);
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 在末尾添加一镜。空描述也能先建，填完再生成；上限和脚本拆分一致 */
-  app.post("/api/conversations/:id/storyboard/shots", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    if (db.countStoryboardShots(id) >= MAX_STORYBOARD_SHOTS) {
-      return res.status(400).json(fail("STORYBOARD_TOO_MANY", `一个会话最多 ${MAX_STORYBOARD_SHOTS} 个镜头`));
-    }
-    const input = storyboardShotAddSchema.parse(req.body ?? {});
-    if (input.aspectRatio !== undefined && input.aspectRatio !== ""
-      && normalizeStoryboardAspect(input.aspectRatio) !== input.aspectRatio) {
-      return res.status(400).json(fail("STORYBOARD_ASPECT_INVALID", "不支持的画幅"));
-    }
-    db.addStoryboardShot(id, {
-      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
-      ...(input.character !== undefined ? { character: input.character } : {}),
-      ...(input.scene !== undefined ? { scene: input.scene } : {}),
-      ...(input.aspectRatio !== undefined ? { aspectRatio: normalizeStoryboardAspect(input.aspectRatio) } : {}),
-    });
-    res.status(201).json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 删除一镜；后面的镜头自动前移，保持镜号连续 */
-  app.delete("/api/conversations/:id/storyboard/shots/:shotId", (req, res) => {
-    const id = routeParam(req.params.id);
-    const shot = db.getStoryboardShot(routeParam(req.params.shotId));
-    if (!shot || shot.conversationId !== id) {
-      return res.status(404).json(fail("STORYBOARD_SHOT_NOT_FOUND", "镜头不存在或不属于这个会话"));
-    }
-    db.deleteStoryboardShot(shot.id);
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 手动添加角色。同名只更新描述，不会生成第二张卡 */
-  app.post("/api/conversations/:id/storyboard/characters", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    const input = storyboardSettingAddSchema.parse(req.body ?? {});
-    db.upsertStoryboardCharacters(id, [{ name: input.name, prompt: input.prompt ?? "" }]);
-    res.status(201).json(ok(buildStoryboardView(db, id)));
-  });
-
-  app.post("/api/conversations/:id/storyboard/scenes", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    const input = storyboardSettingAddSchema.parse(req.body ?? {});
-    db.upsertStoryboardScenes(id, [{ name: input.name, prompt: input.prompt ?? "" }]);
-    res.status(201).json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 删除角色 / 场景；镜头里对应的标签会一起清掉，避免留下没法生成的空引用 */
-  app.delete("/api/conversations/:id/storyboard/characters/:characterId", (req, res) => {
-    const id = routeParam(req.params.id);
-    const character = db.getStoryboardCharacter(routeParam(req.params.characterId));
-    if (!character || character.conversationId !== id) {
-      return res.status(404).json(fail("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话"));
-    }
-    db.deleteStoryboardCharacter(character.id);
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  app.delete("/api/conversations/:id/storyboard/scenes/:sceneId", (req, res) => {
-    const id = routeParam(req.params.id);
-    const scene = db.getStoryboardScene(routeParam(req.params.sceneId));
-    if (!scene || scene.conversationId !== id) {
-      return res.status(404).json(fail("STORYBOARD_SCENE_NOT_FOUND", "场景不存在或不属于这个会话"));
-    }
-    db.deleteStoryboardScene(scene.id);
-    res.json(ok(buildStoryboardView(db, id)));
-  });
-
-  /** 给一个角色绑定参考图；传 null 回到「自动用该角色第一个已完成镜头」 */
-  /** 校验「这张图属于本会话」——设定图只能从会话素材里选，不能指到别人的产物 */
-  function assertConversationImage(conversationId: string, assetId: string) {
-    const asset = db.getAsset(assetId);
-    if (!asset || !asset.mimeType.startsWith("image/")) {
-      throw new AppError("STORYBOARD_REFERENCE_INVALID", "设定图必须是图片", 400);
-    }
-    if (!db.listConversationAssets(conversationId).some((entry) => entry.asset.id === assetId)) {
-      throw new AppError("STORYBOARD_REFERENCE_INVALID", "这张图不属于当前会话", 400);
-    }
-    return asset;
-  }
-
-  function settingHasAsset(assetId: string | null, taskId: string | null): boolean {
-    if (assetId && db.getAsset(assetId)) return true;
-    if (!taskId) return false;
-    return Boolean(db.getTaskView(taskId)?.assets?.[0]);
-  }
-
-  app.patch("/api/conversations/:id/storyboard/characters/:characterId", asyncHandler(async (req, res) => {
-    const id = routeParam(req.params.id);
-    const character = db.getStoryboardCharacter(routeParam(req.params.characterId));
-    if (!character || character.conversationId !== id) {
-      throw new AppError("STORYBOARD_CHARACTER_NOT_FOUND", "角色不存在或不属于这个会话", 404);
-    }
-    const input = storyboardSettingPatchSchema.parse(req.body ?? {});
-    if (input.assetId !== undefined) {
-      if (input.assetId) assertConversationImage(id, input.assetId);
-      db.setStoryboardCharacterAsset(character.id, input.assetId);
-    }
-    if (input.prompt !== undefined) db.setStoryboardCharacterPrompt(character.id, input.prompt);
-    if (input.confirmed !== undefined) {
-      const latest = db.getStoryboardCharacter(character.id)!;
-      if (input.confirmed && !settingHasAsset(latest.assetId, latest.taskId)) {
-        throw new AppError("STORYBOARD_SETTING_EMPTY", "先生成或上传设定图，再确认", 400);
-      }
-      db.confirmStoryboardCharacter(character.id, input.confirmed);
-    }
-    res.json(ok(buildStoryboardView(db, id)));
-  }));
-
-  app.patch("/api/conversations/:id/storyboard/scenes/:sceneId", asyncHandler(async (req, res) => {
-    const id = routeParam(req.params.id);
-    const scene = db.getStoryboardScene(routeParam(req.params.sceneId));
-    if (!scene || scene.conversationId !== id) {
-      throw new AppError("STORYBOARD_SCENE_NOT_FOUND", "场景不存在或不属于这个会话", 404);
-    }
-    const input = storyboardSettingPatchSchema.parse(req.body ?? {});
-    if (input.assetId !== undefined) {
-      if (input.assetId) assertConversationImage(id, input.assetId);
-      db.setStoryboardSceneAsset(scene.id, input.assetId);
-    }
-    if (input.prompt !== undefined) db.setStoryboardScenePrompt(scene.id, input.prompt);
-    if (input.confirmed !== undefined) {
-      const latest = db.getStoryboardScene(scene.id)!;
-      if (input.confirmed && !settingHasAsset(latest.assetId, latest.taskId)) {
-        throw new AppError("STORYBOARD_SETTING_EMPTY", "先生成或上传设定图，再确认", 400);
-      }
-      db.confirmStoryboardScene(scene.id, input.confirmed);
-    }
-    res.json(ok(buildStoryboardView(db, id)));
-  }));
-
-  /** 生成角色 / 场景设定图。只提交任务，结果由面板轮询 */
-  app.post("/api/conversations/:id/storyboard/settings/generate", asyncHandler(async (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-    const input = storyboardSettingsGenerateSchema.parse(req.body ?? {});
-    const result = await generateStoryboardSettings({
-      db, runner, conversationId: id,
-      characterIds: input.characterIds, sceneIds: input.sceneIds,
-      alias: input.alias,
-    });
-    res.status(202).json(ok(result));
-  }));
-
-  /**
-   * 上传一张图当角色 / 场景设定图。
-   *
-   * 和对话框上传图同一套落盘与校验；区别是**不写聊天消息、不动画布**——
-   * 这是设定卡上的动作，不该在对话里多出一条「上传了图片」。
-   */
-  app.post(
-    "/api/conversations/:id/storyboard/settings/:kind/:settingId/upload",
-    conversationUpload.single("image"),
-    asyncHandler(async (req, res) => {
-      const id = routeParam(req.params.id);
-      const kind = routeParam(req.params.kind);
-      const settingId = routeParam(req.params.settingId);
-      if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-      const character = kind === "character" ? db.getStoryboardCharacter(settingId) : null;
-      const scene = kind === "scene" ? db.getStoryboardScene(settingId) : null;
-      const setting = character ?? scene;
-      if (!setting || setting.conversationId !== id) {
-        throw new AppError("STORYBOARD_SETTING_NOT_FOUND", "设定卡不存在或不属于这个会话", 404);
-      }
-      const file = req.file;
-      if (!file) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
-      if (!matchesImageSignature(file.buffer, file.mimetype as ReferenceImageUpload["mimeType"])) {
-        throw new AppError("REFERENCE_IMAGE_INVALID", "图片格式与文件内容不匹配", 400);
-      }
-
-      const assetId = crypto.randomUUID();
-      const taskId = crypto.randomUUID();
-      const fileName = safeFileName(`${taskId}-1.${extensionForMime(file.mimetype)}`);
-      await fs.promises.writeFile(path.join(db.assetsDir, fileName), file.buffer);
-      const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
-      const thumbPath = await writeThumbnail(db, assetId, file.buffer);
-      db.createTask({
-        id: taskId, channelId: "", model: "", prompt: "设定图上传",
-        input: {}, origin: "upload", status: "succeeded",
-      });
-      db.insertAsset({
-        id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
-        relativePath: fileName, baseDir: db.assetsDir, sha256, thumbPath,
-      });
-      if (character) {
-        db.setStoryboardCharacterAsset(character.id, assetId);
-        // 用户主动上传的图就是他要用的设定图，不再让他多点一次确认
-        db.confirmStoryboardCharacter(character.id, true);
-      } else {
-        db.setStoryboardSceneAsset(setting.id, assetId);
-        db.confirmStoryboardScene(setting.id, true);
-      }
-      res.status(201).json(ok(buildStoryboardView(db, id)));
-    }),
-  );
-
-  /**
-   * 生成选中的镜头。
-   *
-   * 这条路**不经过大脑**：用户已经在面板上确认过数量、缺信息和计费提示，
-   * 再让大脑重规划一遍只会多花一次调用，还可能把用户改过的提示词又改回去。
-   */
-  app.post("/api/conversations/:id/storyboard/generate", asyncHandler(async (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-    const input = storyboardGenerateSchema.parse(req.body ?? {});
-    const result = await generateStoryboardShots({
-      db, runner, conversationId: id, shotIds: input.shotIds, alias: input.alias,
-    });
-    res.status(202).json(ok(result));
-  }));
-
-  /** 清空分镜（重新拆之前用；已生成的产物留在生成历史里） */
-  app.delete("/api/conversations/:id/storyboard", (req, res) => {
-    const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
-    const removed = db.deleteStoryboard(id);
-    res.json(ok({ removed, ...buildStoryboardView(db, id) }));
-  });
-
   /**
    * SSE 事件流（§14）。
    *
@@ -1242,6 +1213,10 @@ export function createApp(options: { dataDir?: string } = {}) {
       return res.status(400).json(fail("INVALID_INPUT", "输入数据无效", requestId, error.issues));
     }
     const normalized = normalizeError(error);
+    // 5xx 是服务端自己的问题：把堆栈留在终端里，前端只能看到一句重试提示
+    if (normalized.status >= 500) {
+      console.error(`[api ${requestId}] ${normalized.code}: ${normalized.message}`, error);
+    }
     res.status(normalized.status).json(fail(normalized.code, normalized.message, requestId, normalized.details));
   });
 
@@ -1317,62 +1292,6 @@ function assetDownloadName(asset: { fileName: string; mimeType: string }): strin
 
 function readGeminiImageSize(db: AppDatabase): ImageSizeValue {
   return normalizeImageSize(db.getSetting("geminiImageSize")) ?? DEFAULT_IMAGE_SIZE;
-}
-
-/**
- * 旧版只有一个 `agentDefaultAudioAlias`，音乐和语音共用一个值。
- * 新装或已迁移的配置读到空的新键时，把旧值按实际适配器归到对应的一类，
- * 避免升级后用户的默认模型「看起来丢了」。
- */
-function legacyAudioDefault(db: AppDatabase, adapterType: "suno-music" | "gemini-tts") {
-  const legacy = db.getSetting("agentDefaultAudioAlias") ?? "";
-  if (!legacy) return "";
-  const entry = buildCapabilityAliases(db.listChannels()).find((alias) => alias.alias === legacy);
-  return entry?.adapterType === adapterType ? legacy : "";
-}
-
-/** 新建会话时的 Agent 默认值，存在 settings 表里，用户可在设置页改 */
-function readAgentDefaults(db: AppDatabase): {
-  videoConfirmPolicy: VideoConfirmPolicy;
-  visionEnabled: boolean;
-  defaultImageAlias: string;
-  defaultVideoAlias: string;
-  defaultMusicAlias: string;
-  defaultSpeechAlias: string;
-  defaultAudioAlias: string;
-} {
-  const policy = db.getSetting("agentVideoConfirmPolicy");
-  return {
-    // 默认「自动续跑时才问」：用户明确开口要视频时不拦，链条自己往前跑时才拦一下（§13.2）
-    videoConfirmPolicy: (VIDEO_CONFIRM_POLICIES as readonly string[]).includes(policy ?? "")
-      ? (policy as VideoConfirmPolicy) : "auto_only",
-    visionEnabled: db.getSetting("agentVisionEnabled") !== "0",
-    // 空串 = 没设，大脑不点名时退回类目第一个（问题 5）。alias 是否还有效不在这里判断
-    defaultImageAlias: db.getSetting("agentDefaultImageAlias") ?? "",
-    defaultVideoAlias: db.getSetting("agentDefaultVideoAlias") ?? "",
-    defaultMusicAlias: db.getSetting("agentDefaultMusicAlias") ?? legacyAudioDefault(db, "suno-music"),
-    defaultSpeechAlias: db.getSetting("agentDefaultSpeechAlias") ?? legacyAudioDefault(db, "gemini-tts"),
-    // 旧字段继续回传，老前端还能用；新前端不再读它
-    defaultAudioAlias: db.getSetting("agentDefaultAudioAlias") ?? "",
-  };
-}
-
-/**
- * 挑一个对话渠道当大脑。
- *
- * 用户没指定时取第一个启用的对话渠道——通常只配了一个，
- * 加个下拉反而多一步。一个都没有时直接报错，而不是等到第一次说话才失败。
- */
-function pickBrainChannel(db: AppDatabase, channelId?: string, model?: string): { channelId: string; model: string } {
-  const brains = db.listChannels().filter((channel) => channel.enabled && isChatAdapter(channel.adapterType));
-  if (!brains.length) {
-    throw new AppError("BRAIN_UNAVAILABLE", "还没有配置对话模型渠道，请先到「渠道配置」添加一个对话模型（大脑）", 400);
-  }
-  const channel = channelId ? brains.find((item) => item.id === channelId) : brains[0];
-  if (!channel) throw new AppError("BRAIN_UNAVAILABLE", "指定的对话渠道不存在或未启用", 400);
-  const resolved = model && channel.models.includes(model) ? model : channel.models[0];
-  if (!resolved) throw new AppError("BRAIN_UNAVAILABLE", `渠道「${channel.name}」还没有配置任何模型`, 400);
-  return { channelId: channel.id, model: resolved };
 }
 
 function resolveChannelKey(channel: DbChannel, sessionKeys: KeyStore) {

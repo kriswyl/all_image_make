@@ -6,6 +6,7 @@
  * 和这里是两件事——这里只管「已经落库的东西长什么样」。
  */
 import type { Asset } from "./types.js";
+import type { BoardDelta } from "./board.js";
 
 export type ConversationStatus =
   | "idle"
@@ -14,6 +15,17 @@ export type ConversationStatus =
   | "waiting_task"
   /** 卡在视频确认卡片上，等用户点确认（§13） */
   | "awaiting_confirmation";
+
+/**
+ * 会话类型。
+ *
+ * - `chat`：对话创作，出现在侧栏；
+ * - `board`：某个无限画布的 Agent 线程，不出现在侧栏，只从无限画布进入。
+ *
+ * 两者复用 messages / SSE / 大脑引擎，但上下文和工具不同。
+ */
+export const CONVERSATION_KINDS = ["chat", "board"] as const;
+export type ConversationKind = (typeof CONVERSATION_KINDS)[number];
 
 /** §13.2 视频确认策略 */
 export const VIDEO_CONFIRM_POLICIES = ["always", "auto_only", "never"] as const;
@@ -41,8 +53,11 @@ export const AGENT_TOOL_NAMES = [
   "generate_video",
   "generate_music",
   "generate_speech",
-  "create_storyboard",
-  "tag_storyboard_characters",
+  "create_storyboard_template",
+  "create_canvas_template",
+  "board_read",
+  "board_apply",
+  "board_generate",
   "ask",
   "reply",
 ] as const;
@@ -62,8 +77,11 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_video: "生成视频",
   generate_music: "生成音乐",
   generate_speech: "生成配音",
-  create_storyboard: "拆分镜",
-  tag_storyboard_characters: "标注角色/场景",
+  create_storyboard_template: "拆分镜模板",
+  create_canvas_template: "生成画布模板",
+  board_read: "读无限画布",
+  board_apply: "修改无限画布",
+  board_generate: "无限画布生成",
   ask: "提问",
   reply: "回复",
 };
@@ -361,7 +379,7 @@ export interface ConfirmPreview {
    * - `video_policy` / `session_limit`：生成闸门（§13）
    * - `brain_down`：大脑不可用，退化成「按你原话生成」（§15 直通模式）
    */
-  reason: "video_policy" | "session_limit" | "brain_down";
+  reason: "video_policy" | "session_limit" | "brain_down" | "board_destructive";
   prompt: string;
   model: string;
   channelName: string;
@@ -377,6 +395,10 @@ export interface ConfirmPreview {
   resolution?: string;
   audio?: boolean;
   promptExtend?: boolean;
+  /** 无限画布破坏性操作确认卡片 */
+  boardDeleteNodes?: number;
+  boardDeleteWithAssets?: number;
+  boardSummary?: string;
   /** 音乐确认卡片展示用 */
   musicMode?: "inspiration" | "custom" | "cover" | "mashup" | "sound" | "playlist" | "sample";
   musicTitle?: string;
@@ -450,6 +472,9 @@ export interface ChatMessage {
 export interface Conversation {
   id: string;
   title: string;
+  kind: ConversationKind;
+  /** 无限画布线程指向的板 id；普通对话为 null */
+  boardId: string | null;
   brainChannelId: string;
   brainModel: string;
   /**
@@ -538,7 +563,7 @@ export interface CanvasAsset {
    * 两者的可预期行为不一样——上传的图没有提示词、也没花钱——所以「本会话的图」
    * 里要能一眼看出来源，不能长得一模一样。
    */
-  source: "generate" | "upload" | "storyboard" | "setting";
+  source: "generate" | "upload" | "storyboard" | "setting" | "bridge";
 }
 
 /** 简短的产物编号，展示和大脑引用都用它 */
@@ -574,6 +599,8 @@ export type AgentStreamEvent =
   | { type: "reset" }
   /** 视频进度转发 */
   | { type: "progress"; taskId: string; status: string; progress: number | null }
+  /** 无限画布 Agent 改了文档：带上增量，画布能直接合并；delta 缺失时回退整份拉取 */
+  | { type: "board"; boardId: string; version: number; reason?: string; delta?: BoardDelta }
   | { type: "error"; message: string }
   | { type: "done"; status: ConversationStatus };
 

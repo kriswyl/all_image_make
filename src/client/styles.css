@@ -199,6 +199,17 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 /* 拖拽手柄：压在右边线上，比分隔线宽（6px）才好抓；平时透明，指上去才显形 */
 .sidebar-resizer { position: absolute; top: 0; right: -3px; z-index: 5; width: 6px; height: 100%; cursor: col-resize; background: transparent; }
 .sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--line-strong); outline: none; }
+/* 分镜 / 素材库 / 弹窗打开时，侧栏拖拽线虽然被遮罩盖住，仍会从半透明背景里透出来，
+   并且在最上层抢走那 6px 的拖拽。浮层期间直接隐藏，别让它影响操作。 */
+body:has(.storyboard-overlay) .sidebar-resizer,
+body:has(.asset-library-overlay) .sidebar-resizer,
+body:has(.modal-backdrop) .sidebar-resizer,
+body:has(.image-preview-backdrop) .sidebar-resizer,
+body:has(.chat-lightbox) .sidebar-resizer,
+body:has(.ink-onboarding) .sidebar-resizer {
+  visibility: hidden;
+  pointer-events: none;
+}
 
 /* 工作区名 + 下拉菜单是一组，菜单要相对它定位，点自己不该把菜单关了 */
 .sidebar-workspace { position: relative; flex: 0 0 auto; }
@@ -1889,6 +1900,8 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .tool-card-bar { margin-top: 8px; height: 3px; overflow: hidden; background: var(--line); border-radius: var(--radius-pill); }
 .tool-card-bar > span { display: block; height: 100%; background: var(--accent); transition: width 400ms ease; }
 .tool-card-result { margin-top: 7px; font-size: 12px; line-height: 1.65; color: var(--muted); }
+.tool-card-template-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; }
+.tool-card-template-action span { color: var(--muted); font-size: 10.5px; }
 /* 结果缩略图（问题 3）：视频也走这里，但用的是客户端解码的 <video>，服务端缩略图解不了视频 */
 .tool-card-thumb { display: block; width: 216px; max-width: 100%; height: 134px; margin-top: 8px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-control); cursor: zoom-in; }
 .tool-card-thumb img, .tool-card-thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }

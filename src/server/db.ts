@@ -7,13 +7,18 @@ import { taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
 import type {
-  AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationPatch,
+  AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import {
   joinCharacterNames, parseCharacterNames,
-  type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus,
+  type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus, type StoryboardVideoMode,
 } from "../shared/storyboard.js";
+import {
+  BOARD_LIMITS, boardGroups, createEmptyBoardDoc, parseBoardDoc, parseBoardSelection, parseBoardUiState, parseBoardViewport,
+  type BoardDoc, type BoardSummary, type BoardUiState, type BoardViewport,
+} from "../shared/board.js";
+import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template.js";
 
 export interface DbChannel {
   id: string;
@@ -32,7 +37,17 @@ export interface DbChannel {
 }
 
 /** 会话产物的来源：正常生成、用户上传、分镜面板提交，或角色/场景设定图 */
-export type ConversationAssetSource = TaskOrigin | "storyboard" | "setting";
+export type ConversationAssetSource = TaskOrigin | "storyboard" | "setting" | "bridge";
+
+function stringArrayFromJson(value: unknown): string[] {
+  if (value == null) return [];
+  try {
+    const parsed = JSON.parse(String(value)) as unknown;
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((item): item is string => typeof item === "string" && Boolean(item)))] : [];
+  } catch {
+    return [];
+  }
+}
 
 export interface StoredDocument {
   id: string;
@@ -41,6 +56,20 @@ export interface StoredDocument {
   content: string;
   charCount: number;
   createdAt: string;
+}
+
+/** 无限画布的一行 + 解析好的文档 / 视口 / 选中状态 */
+export interface BoardRecord {
+  id: string;
+  title: string;
+  doc: BoardDoc;
+  viewport: BoardViewport;
+  selection: string[];
+  uiState: BoardUiState;
+  version: number;
+  threadId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 type DbRow = Record<string, string | number | null>;
@@ -176,6 +205,10 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS conversations (
         id                   TEXT PRIMARY KEY,
         title                TEXT NOT NULL,
+        -- chat = 对话创作；board = 无限画布的 Agent 线程，不出现在侧栏
+        kind                 TEXT NOT NULL DEFAULT 'chat',
+        -- 无限画布线程指向的板 id；普通对话为 NULL
+        board_id             TEXT,
         brain_channel_id     TEXT NOT NULL,
         brain_model          TEXT NOT NULL,
         -- 已废弃：老版本的单图画布指针。只被下面那次回填读一次，新代码不读也不写。
@@ -239,7 +272,24 @@ export class AppDatabase {
         scene_name       TEXT NOT NULL DEFAULT '',
         kind             TEXT NOT NULL DEFAULT 'image',
         aspect_ratio     TEXT NOT NULL DEFAULT '',
+        dialogue         TEXT NOT NULL DEFAULT '',
+        speaker          TEXT NOT NULL DEFAULT '',
+        shot_size        TEXT NOT NULL DEFAULT '',
+        camera_move      TEXT NOT NULL DEFAULT '',
+        sound_effect     TEXT NOT NULL DEFAULT '',
+        duration_seconds INTEGER NOT NULL DEFAULT 5,
+        video_prompt     TEXT NOT NULL DEFAULT '',
+        voice            TEXT NOT NULL DEFAULT 'Kore',
+        -- 视频输入：首帧默认用本镜分镜图；这里存用户主动覆盖的首帧 / 尾帧 / 参考图
+        video_mode           TEXT NOT NULL DEFAULT 'first-frame',
+        first_frame_asset_id TEXT,
+        last_frame_asset_id  TEXT,
+        reference_asset_ids  TEXT NOT NULL DEFAULT '[]',
+        -- 尾帧续写出来的镜头指向来源镜头；普通镜头为 NULL
+        parent_shot_id       TEXT,
         task_id          TEXT,
+        video_task_id    TEXT,
+        voice_task_id    TEXT,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
       );
@@ -252,6 +302,8 @@ export class AppDatabase {
         name             TEXT NOT NULL,
         -- 设定图提示词（外貌 / 服装 / 年龄…）
         prompt           TEXT NOT NULL DEFAULT '',
+        -- 角色固定音色；空串 = 用镜头 / 默认音色
+        voice            TEXT NOT NULL DEFAULT '',
         asset_id         TEXT,
         task_id          TEXT,
         confirmed        INTEGER NOT NULL DEFAULT 0,
@@ -276,6 +328,84 @@ export class AppDatabase {
       );
       CREATE INDEX IF NOT EXISTS conversation_scenes_conv_idx
         ON conversation_scenes(conversation_id, name);
+      -- 镜头图的手动布局。节点本身仍由分镜现算，这里只记用户拖过的坐标；
+      -- 镜头的增删不会让这一行变成新数据源，找不到对应节点的行直接忽略。
+      CREATE TABLE IF NOT EXISTS conversation_graph_positions (
+        conversation_id TEXT NOT NULL,
+        node_id         TEXT NOT NULL,
+        x               REAL NOT NULL,
+        y               REAL NOT NULL,
+        updated_at      TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, node_id)
+      );
+      -- 无限画布：独立于会话的自由节点画布（FREE_CANVAS_PLAN.md）
+      CREATE TABLE IF NOT EXISTS boards (
+        id                     TEXT PRIMARY KEY,
+        title                  TEXT NOT NULL,
+        doc_json               TEXT NOT NULL,
+        viewport_json          TEXT NOT NULL DEFAULT '',
+        selection_json         TEXT NOT NULL DEFAULT '[]',
+        ui_state_json          TEXT NOT NULL DEFAULT '',
+        version                INTEGER NOT NULL DEFAULT 1,
+        thread_conversation_id TEXT NOT NULL,
+        created_at             TEXT NOT NULL,
+        updated_at             TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS boards_updated_idx ON boards(updated_at DESC);
+      -- 每次保存前的快照；撤销 / 重做只移动当前版本指针，不删未来快照
+      CREATE TABLE IF NOT EXISTS board_history (
+        id         TEXT PRIMARY KEY,
+        board_id   TEXT NOT NULL,
+        version    INTEGER NOT NULL,
+        doc_json   TEXT NOT NULL,
+        reason     TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        UNIQUE(board_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS board_history_board_idx
+        ON board_history(board_id, version DESC);
+      -- 派生索引：文档里引用了哪些素材；保存时重建，删素材时按它找节点
+      CREATE TABLE IF NOT EXISTS board_assets (
+        board_id  TEXT NOT NULL,
+        asset_id  TEXT NOT NULL,
+        node_id   TEXT NOT NULL,
+        PRIMARY KEY (board_id, node_id)
+      );
+      CREATE INDEX IF NOT EXISTS board_assets_asset_idx
+        ON board_assets(board_id, asset_id);
+      -- 任务 → 结果节点映射；完成事件和重启恢复都靠它回写
+      CREATE TABLE IF NOT EXISTS board_tasks (
+        task_id        TEXT NOT NULL,
+        board_id       TEXT NOT NULL,
+        config_node_id TEXT NOT NULL,
+        result_node_id TEXT NOT NULL,
+        kind           TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        -- 一个任务可能产出多张图（count > 1），所以主键必须是「任务 + 结果节点」
+        PRIMARY KEY (task_id, result_node_id)
+      );
+      CREATE INDEX IF NOT EXISTS board_tasks_board_idx
+        ON board_tasks(board_id, created_at DESC);
+      -- 对话里生成、可反复导入无限画布的模板（分镜 / 提示词链 / 自由布局）
+      CREATE TABLE IF NOT EXISTS canvas_templates (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        description     TEXT NOT NULL DEFAULT '',
+        source          TEXT NOT NULL DEFAULT 'agent',
+        conversation_id TEXT,
+        doc_json        TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS canvas_templates_created_idx
+        ON canvas_templates(created_at DESC);
+      -- 旧分镜迁移记录：每个会话只迁移一次，避免重复生成画布
+      CREATE TABLE IF NOT EXISTS storyboard_migrations (
+        conversation_id TEXT PRIMARY KEY,
+        board_id        TEXT NOT NULL,
+        template_id     TEXT NOT NULL,
+        version         INTEGER NOT NULL DEFAULT 1,
+        created_at      TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
@@ -365,9 +495,31 @@ export class AppDatabase {
     if (!shotColumns.some((col) => col.name === "scene_name")) {
       this.db.exec("ALTER TABLE conversation_shots ADD COLUMN scene_name TEXT NOT NULL DEFAULT ''");
     }
+    // 分镜从「只有画面描述」升级成「台词 + 景别 / 运镜 + 视频提示词」；
+    // 老数据库按列幂等补，历史镜头读到空串 / 默认时长，不会损坏原数据。
+    for (const [column, ddl] of [
+      ["dialogue", "ALTER TABLE conversation_shots ADD COLUMN dialogue TEXT NOT NULL DEFAULT ''"],
+      ["speaker", "ALTER TABLE conversation_shots ADD COLUMN speaker TEXT NOT NULL DEFAULT ''"],
+      ["shot_size", "ALTER TABLE conversation_shots ADD COLUMN shot_size TEXT NOT NULL DEFAULT ''"],
+      ["camera_move", "ALTER TABLE conversation_shots ADD COLUMN camera_move TEXT NOT NULL DEFAULT ''"],
+      ["sound_effect", "ALTER TABLE conversation_shots ADD COLUMN sound_effect TEXT NOT NULL DEFAULT ''"],
+      ["duration_seconds", "ALTER TABLE conversation_shots ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 5"],
+      ["video_prompt", "ALTER TABLE conversation_shots ADD COLUMN video_prompt TEXT NOT NULL DEFAULT ''"],
+      ["voice", "ALTER TABLE conversation_shots ADD COLUMN voice TEXT NOT NULL DEFAULT 'Kore'"],
+      ["video_mode", "ALTER TABLE conversation_shots ADD COLUMN video_mode TEXT NOT NULL DEFAULT 'first-frame'"],
+      ["first_frame_asset_id", "ALTER TABLE conversation_shots ADD COLUMN first_frame_asset_id TEXT"],
+      ["last_frame_asset_id", "ALTER TABLE conversation_shots ADD COLUMN last_frame_asset_id TEXT"],
+      ["reference_asset_ids", "ALTER TABLE conversation_shots ADD COLUMN reference_asset_ids TEXT NOT NULL DEFAULT '[]'"],
+      ["parent_shot_id", "ALTER TABLE conversation_shots ADD COLUMN parent_shot_id TEXT"],
+      ["video_task_id", "ALTER TABLE conversation_shots ADD COLUMN video_task_id TEXT"],
+      ["voice_task_id", "ALTER TABLE conversation_shots ADD COLUMN voice_task_id TEXT"],
+    ] as const) {
+      if (!shotColumns.some((col) => col.name === column)) this.db.exec(ddl);
+    }
     const characterColumns = this.db.prepare("PRAGMA table_info(conversation_characters)").all() as Array<{ name: string }>;
     for (const [column, ddl] of [
       ["prompt", "ALTER TABLE conversation_characters ADD COLUMN prompt TEXT NOT NULL DEFAULT ''"],
+      ["voice", "ALTER TABLE conversation_characters ADD COLUMN voice TEXT NOT NULL DEFAULT ''"],
       ["task_id", "ALTER TABLE conversation_characters ADD COLUMN task_id TEXT"],
       ["confirmed", "ALTER TABLE conversation_characters ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0"],
     ] as const) {
@@ -379,6 +531,41 @@ export class AppDatabase {
     }
     if (!conversationColumns.some((col) => col.name === "storyboard_reference_mode")) {
       this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_mode TEXT NOT NULL DEFAULT 'auto'");
+    }
+    // 无限画布线程：普通对话默认 chat；board 线程不出现在侧栏
+    if (!conversationColumns.some((col) => col.name === "kind")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'");
+    }
+    if (!conversationColumns.some((col) => col.name === "board_id")) {
+      this.db.exec("ALTER TABLE conversations ADD COLUMN board_id TEXT");
+    }
+    // 一块板只能有一条 Agent 线程；必须在 kind / board_id 都加完之后再建
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS conversations_board_thread_idx
+        ON conversations(board_id) WHERE kind = 'board' AND board_id IS NOT NULL
+    `);
+    // P0 的 board_tasks 是 task_id 单主键，装不下 count>1 的多个结果节点。
+    // P1 接入前这张表还没有任何行，所以旧表直接重建；有数据就保留旧表不动。
+    const boardTaskColumns = this.db.prepare("PRAGMA table_info(board_tasks)").all() as Array<{ name: string; pk: number }>;
+    const hasCompositeTaskPk = boardTaskColumns.some((column) => column.name === "result_node_id" && column.pk > 0);
+    if (boardTaskColumns.length && !hasCompositeTaskPk) {
+      const rows = this.db.prepare("SELECT COUNT(*) AS total FROM board_tasks").get() as DbRow;
+      if (Number(rows.total) === 0) {
+        this.db.exec(`
+          DROP TABLE board_tasks;
+          CREATE TABLE board_tasks (
+            task_id        TEXT NOT NULL,
+            board_id       TEXT NOT NULL,
+            config_node_id TEXT NOT NULL,
+            result_node_id TEXT NOT NULL,
+            kind           TEXT NOT NULL,
+            created_at     TEXT NOT NULL,
+            PRIMARY KEY (task_id, result_node_id)
+          );
+          CREATE INDEX IF NOT EXISTS board_tasks_board_idx
+            ON board_tasks(board_id, created_at DESC);
+        `);
+      }
     }
     /**
      * 回填**键在 `IS NULL` 上，而不是键在「刚加完列」上**，两个原因：
@@ -396,6 +583,20 @@ export class AppDatabase {
     for (const row of legacyCanvas) {
       writeCanvas.run(JSON.stringify(row.current_asset_id ? [row.current_asset_id] : []), row.id);
     }
+
+    // 分镜迁移从 v1（只有镜头节点）升级到 v2（含角色 / 场景设定参考）
+    const storyboardMigrationColumns = this.db.prepare("PRAGMA table_info(storyboard_migrations)").all() as Array<{ name: string }>;
+    if (!storyboardMigrationColumns.some((column) => column.name === "version")) {
+      this.db.exec("ALTER TABLE storyboard_migrations ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+    }
+
+    // 产品名从「创作板」改成「无限画布」：只改默认标题和 Agent 线程前缀，
+    // 用户自己改过的板名不动。
+    this.db.prepare("UPDATE boards SET title = '未命名无限画布' WHERE title = '未命名创作板'").run();
+    this.db.prepare(`
+      UPDATE conversations SET title = replace(title, '创作板', '无限画布')
+      WHERE kind = 'board' AND board_id IS NOT NULL AND title LIKE '创作板%'
+    `).run();
 
     // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
     // 否则面板里会出现一个「林小满、老陈」的卡片，谁都没法单独绑设定图。
@@ -544,6 +745,7 @@ export class AppDatabase {
     const inputs = this.collectInputImagePaths(id);
     this.db.prepare("DELETE FROM diagnostics WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM assets WHERE task_id = ?").run(id);
+    this.db.prepare("DELETE FROM board_tasks WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
     if (options.keepFiles) return { assets: [], inputs: [] };
     return { assets, inputs };
@@ -655,10 +857,35 @@ export class AppDatabase {
       ).run(JSON.stringify(canvas), current === assetId ? null : current, at, conversationId);
     }
 
+    // 分镜视频输入：被删的图不能继续挂在首帧 / 尾帧 / 参考图里
+    this.db.prepare(
+      "UPDATE conversation_shots SET first_frame_asset_id = NULL, updated_at = ? WHERE conversation_id = ? AND first_frame_asset_id = ?",
+    ).run(at, conversationId, assetId);
+    this.db.prepare(
+      "UPDATE conversation_shots SET last_frame_asset_id = NULL, updated_at = ? WHERE conversation_id = ? AND last_frame_asset_id = ?",
+    ).run(at, conversationId, assetId);
+    const referenceRows = this.db.prepare(
+      "SELECT id, reference_asset_ids FROM conversation_shots WHERE conversation_id = ? AND reference_asset_ids LIKE ?",
+    ).all(conversationId, `%${assetId}%`) as DbRow[];
+    const updateReferences = this.db.prepare(
+      "UPDATE conversation_shots SET reference_asset_ids = ?, updated_at = ? WHERE id = ?",
+    );
+    for (const row of referenceRows) {
+      const ids = stringArrayFromJson(row.reference_asset_ids);
+      const next = ids.filter((id) => id !== assetId);
+      if (next.length !== ids.length) updateReferences.run(JSON.stringify(next), at, String(row.id));
+    }
+
     // 分镜 / 设定：任务没了就把指针清空，镜头回到「未生成」
     if (taskRemoved) {
       this.db.prepare(
         "UPDATE conversation_shots SET task_id = NULL, updated_at = ? WHERE conversation_id = ? AND task_id = ?",
+      ).run(at, conversationId, taskId);
+      this.db.prepare(
+        "UPDATE conversation_shots SET video_task_id = NULL, updated_at = ? WHERE conversation_id = ? AND video_task_id = ?",
+      ).run(at, conversationId, taskId);
+      this.db.prepare(
+        "UPDATE conversation_shots SET voice_task_id = NULL, updated_at = ? WHERE conversation_id = ? AND voice_task_id = ?",
       ).run(at, conversationId, taskId);
     }
     this.db.prepare(
@@ -891,16 +1118,19 @@ export class AppDatabase {
   createConversation(input: {
     title: string; brainChannelId: string; brainModel: string;
     videoConfirmPolicy: VideoConfirmPolicy; visionEnabled: boolean; verbatimPrompt: boolean;
+    /** 缺省是普通对话；无限画布线程由 board 服务显式传 board */
+    kind?: ConversationKind;
+    boardId?: string | null;
   }): Conversation {
     const id = crypto.randomUUID();
     const at = now();
     this.db.prepare(`
       INSERT INTO conversations
-      (id, title, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
+      (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
        video_confirm_policy, vision_enabled, verbatim_prompt, auto_continue_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 0, ?, ?)
     `).run(
-      id, input.title, input.brainChannelId, input.brainModel,
+      id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
       input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, at, at,
     );
     return this.getConversation(id)!;
@@ -912,7 +1142,8 @@ export class AppDatabase {
   }
 
   listConversations(): Conversation[] {
-    const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as DbRow[];
+    // 无限画布的 Agent 线程也是 conversation，但它是板的一部分，不能混进对话侧栏
+    const rows = this.db.prepare("SELECT * FROM conversations WHERE kind = 'chat' ORDER BY updated_at DESC").all() as DbRow[];
     return rows.map((row) => this.conversationFromRow(row));
   }
 
@@ -936,9 +1167,12 @@ export class AppDatabase {
    * 侧栏会被一串「新对话」刷屏。空会话没有消息，也就没有产物和上传图，删掉不丢东西。
    */
   emptyConversationIds(): string[] {
+    // 只清普通对话。无限画布线程刚建出来时也没有消息，但它不是空壳——
+    // 放进这个清理里，用户新建一块板再点「新对话」就会把板的线程删掉。
     const rows = this.db.prepare(
       `SELECT conversations.id AS id FROM conversations
-       WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id)`,
+       WHERE conversations.kind = 'chat'
+         AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id)`,
     ).all() as DbRow[];
     return rows.map((row) => String(row.id));
   }
@@ -1001,6 +1235,8 @@ export class AppDatabase {
     shots: Array<{
       sourceText: string; prompt: string; kind: StoryboardShotKind; aspectRatio: string;
       character?: string; scene?: string;
+      dialogue?: string; speaker?: string; shotSize?: string; cameraMove?: string;
+      soundEffect?: string; durationSeconds?: number; videoPrompt?: string; voice?: string;
     }>,
     settings: {
       characters?: Array<{ name: string; prompt?: string }>;
@@ -1009,15 +1245,24 @@ export class AppDatabase {
   ): StoryboardShot[] {
     const at = now();
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
+    // 重新拆镜会生成全新的 shot id；旧镜头的拖拽位置留着也没人再引用，顺手清掉
+    this.db.prepare(
+      "DELETE FROM conversation_graph_positions WHERE conversation_id = ? AND (node_id LIKE 'shot:%' OR node_id LIKE 'video:%' OR node_id LIKE 'voice:%')",
+    ).run(conversationId);
     const insert = this.db.prepare(`
       INSERT INTO conversation_shots
-      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio, task_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio,
+       dialogue, speaker, shot_size, camera_move, sound_effect, duration_seconds, video_prompt, voice,
+       task_id, video_task_id, voice_task_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
     `);
     for (const [position, shot] of shots.entries()) {
       insert.run(
         crypto.randomUUID(), conversationId, position + 1,
-        shot.sourceText, shot.prompt, shot.character ?? "", shot.scene ?? "", shot.kind, shot.aspectRatio, at, at,
+        shot.sourceText, shot.prompt, shot.character ?? "", shot.scene ?? "", shot.kind, shot.aspectRatio,
+        shot.dialogue ?? "", shot.speaker ?? "", shot.shotSize ?? "", shot.cameraMove ?? "",
+        shot.soundEffect ?? "", shot.durationSeconds ?? 5, shot.videoPrompt ?? "", shot.voice ?? "Kore",
+        at, at,
       );
     }
     // 设定表里的名字和镜头里实际用到的名字取并集：模型偶尔会漏写一个设定，
@@ -1079,7 +1324,7 @@ export class AppDatabase {
   }
 
   listStoryboardCharacters(conversationId: string): Array<{
-    id: string; name: string; prompt: string; assetId: string | null; taskId: string | null;
+    id: string; name: string; prompt: string; voice: string; assetId: string | null; taskId: string | null;
     confirmed: boolean; createdAt: string; updatedAt: string;
   }> {
     const rows = this.db.prepare(
@@ -1087,6 +1332,7 @@ export class AppDatabase {
     ).all(conversationId) as DbRow[];
     return rows.map((row) => ({
       id: String(row.id), name: String(row.name), prompt: String(row.prompt ?? ""),
+      voice: String(row.voice ?? ""),
       assetId: row.asset_id == null ? null : String(row.asset_id),
       taskId: row.task_id == null ? null : String(row.task_id),
       confirmed: Boolean(row.confirmed),
@@ -1111,14 +1357,15 @@ export class AppDatabase {
   }
 
   getStoryboardCharacter(id: string): {
-    id: string; conversationId: string; name: string; prompt: string; assetId: string | null;
+    id: string; conversationId: string; name: string; prompt: string; voice: string; assetId: string | null;
     taskId: string | null; confirmed: boolean;
   } | null {
     const row = this.db.prepare("SELECT * FROM conversation_characters WHERE id = ?").get(id) as DbRow | undefined;
     if (!row) return null;
     return {
       id: String(row.id), conversationId: String(row.conversation_id), name: String(row.name),
-      prompt: String(row.prompt ?? ""), assetId: row.asset_id == null ? null : String(row.asset_id),
+      prompt: String(row.prompt ?? ""), voice: String(row.voice ?? ""),
+      assetId: row.asset_id == null ? null : String(row.asset_id),
       taskId: row.task_id == null ? null : String(row.task_id), confirmed: Boolean(row.confirmed),
     };
   }
@@ -1150,6 +1397,11 @@ export class AppDatabase {
   setStoryboardCharacterPrompt(characterId: string, prompt: string) {
     this.db.prepare("UPDATE conversation_characters SET prompt = ?, updated_at = ? WHERE id = ?")
       .run(prompt, now(), characterId);
+  }
+
+  setStoryboardCharacterVoice(characterId: string, voice: string) {
+    this.db.prepare("UPDATE conversation_characters SET voice = ?, updated_at = ? WHERE id = ?")
+      .run(voice, now(), characterId);
   }
 
   setStoryboardScenePrompt(sceneId: string, prompt: string) {
@@ -1187,18 +1439,53 @@ export class AppDatabase {
   listStoryboardShots(conversationId: string): StoryboardShot[] {
     const rows = this.db.prepare(`
       SELECT s.*, t.status AS task_status, t.error_message AS task_error,
-             (SELECT a.id FROM assets a WHERE a.task_id = s.task_id ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1) AS result_asset_id
+             vt.status AS video_task_status, vt.error_message AS video_task_error,
+             nt.status AS voice_task_status, nt.error_message AS voice_task_error,
+             (SELECT a.id FROM assets a WHERE a.task_id = s.task_id ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1) AS result_asset_id,
+             (SELECT a.id FROM assets a WHERE a.task_id = s.video_task_id ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1) AS video_result_asset_id,
+             (SELECT a.id FROM assets a WHERE a.task_id = s.voice_task_id ORDER BY a.created_at ASC, a.rowid ASC LIMIT 1) AS voice_result_asset_id
       FROM conversation_shots s
       LEFT JOIN tasks t ON t.id = s.task_id
+      LEFT JOIN tasks vt ON vt.id = s.video_task_id
+      LEFT JOIN tasks nt ON nt.id = s.voice_task_id
       WHERE s.conversation_id = ?
       ORDER BY s.shot_index ASC
     `).all(conversationId) as DbRow[];
-    return rows.map((row) => {
-      const taskId = row.task_id == null ? null : String(row.task_id);
-      const taskStatus = row.task_status == null ? null : String(row.task_status) as TaskStatus;
-      const status = taskId && taskStatus ? taskStatus as StoryboardShotStatus : "planned";
-      const assetId = row.result_asset_id == null ? null : String(row.result_asset_id);
+    const resolve = (taskIdValue: unknown, statusValue: unknown, errorValue: unknown, assetIdValue: unknown) => {
+      const id = taskIdValue == null ? null : String(taskIdValue);
+      const taskStatus = statusValue == null ? null : String(statusValue) as TaskStatus;
+      const assetId = assetIdValue == null ? null : String(assetIdValue);
       const assetRow = assetId ? this.getAsset(assetId) : null;
+      return {
+        taskId: id,
+        status: (id && taskStatus ? taskStatus : "planned") as StoryboardShotStatus,
+        assetId: assetRow ? String(assetRow.id) : null,
+        asset: assetRow ? this.assetView(assetRow) : null,
+        errorMessage: errorValue == null ? null : String(errorValue),
+      };
+    };
+    const resolveImage = (value: unknown): { id: string | null; asset: Asset | null } => {
+      const id = value == null ? null : String(value);
+      if (!id) return { id: null, asset: null };
+      const asset = this.getAsset(id);
+      return asset && isImageAsset(asset)
+        ? { id: String(asset.id), asset: this.assetView(asset) }
+        : { id: null, asset: null };
+    };
+    return rows.map((row) => {
+      const image = resolve(row.task_id, row.task_status, row.task_error, row.result_asset_id);
+      const video = resolve(row.video_task_id, row.video_task_status, row.video_task_error, row.video_result_asset_id);
+      const voice = resolve(row.voice_task_id, row.voice_task_status, row.voice_task_error, row.voice_result_asset_id);
+      const firstFrame = resolveImage(row.first_frame_asset_id);
+      const lastFrame = resolveImage(row.last_frame_asset_id);
+      const referenceAssetIds: string[] = [];
+      const referenceAssets: Asset[] = [];
+      for (const id of stringArrayFromJson(row.reference_asset_ids)) {
+        const resolved = resolveImage(id);
+        if (!resolved.id || !resolved.asset) continue;
+        referenceAssetIds.push(resolved.id);
+        referenceAssets.push(resolved.asset);
+      }
       return {
         id: String(row.id), conversationId: String(row.conversation_id),
         index: Number(row.shot_index),
@@ -1208,10 +1495,26 @@ export class AppDatabase {
         scene: String(row.scene_name ?? ""),
         kind: String(row.kind) === "video" ? "video" as const : "image" as const,
         aspectRatio: String(row.aspect_ratio ?? ""),
-        taskId, status,
-        assetId: assetRow ? String(assetRow.id) : null,
-        asset: assetRow ? this.assetView(assetRow) : null,
-        errorMessage: row.task_error == null ? null : String(row.task_error),
+        dialogue: String(row.dialogue ?? ""),
+        speaker: String(row.speaker ?? ""),
+        shotSize: String(row.shot_size ?? ""),
+        cameraMove: String(row.camera_move ?? ""),
+        soundEffect: String(row.sound_effect ?? ""),
+        durationSeconds: Number(row.duration_seconds ?? 5),
+        videoPrompt: String(row.video_prompt ?? ""),
+        voice: String(row.voice ?? "Kore"),
+        videoMode: (row.video_mode === "first-last-frame" || row.video_mode === "reference"
+          ? row.video_mode : "first-frame") as StoryboardVideoMode,
+        firstFrameAssetId: firstFrame.id, firstFrameAsset: firstFrame.asset,
+        lastFrameAssetId: lastFrame.id, lastFrameAsset: lastFrame.asset,
+        referenceAssetIds, referenceAssets,
+        parentShotId: row.parent_shot_id == null ? null : String(row.parent_shot_id),
+        taskId: image.taskId, status: image.status,
+        assetId: image.assetId, asset: image.asset, errorMessage: image.errorMessage,
+        videoTaskId: video.taskId, videoStatus: video.status,
+        videoAssetId: video.assetId, videoAsset: video.asset, videoErrorMessage: video.errorMessage,
+        voiceTaskId: voice.taskId, voiceStatus: voice.status,
+        voiceAssetId: voice.assetId, voiceAsset: voice.asset, voiceErrorMessage: voice.errorMessage,
         createdAt: String(row.created_at), updatedAt: String(row.updated_at),
       };
     });
@@ -1225,18 +1528,31 @@ export class AppDatabase {
 
   updateStoryboardShot(
     id: string,
-    patch: Partial<Pick<StoryboardShot, "prompt" | "sourceText" | "character" | "scene" | "kind" | "aspectRatio" | "taskId">>,
+    patch: Partial<Pick<StoryboardShot,
+      | "prompt" | "sourceText" | "character" | "scene" | "kind" | "aspectRatio"
+      | "dialogue" | "speaker" | "shotSize" | "cameraMove" | "soundEffect"
+      | "durationSeconds" | "videoPrompt" | "voice" | "videoMode"
+      | "firstFrameAssetId" | "lastFrameAssetId" | "referenceAssetIds" | "parentShotId"
+      | "taskId" | "videoTaskId" | "voiceTaskId">>,
   ): StoryboardShot | null {
     const fields: string[] = [];
-    const values: Array<string | null> = [];
+    const values: Array<string | number | null> = [];
     const mapping: Record<string, string> = {
       prompt: "prompt", sourceText: "source_text", character: "character_name", scene: "scene_name",
       kind: "kind", aspectRatio: "aspect_ratio", taskId: "task_id",
+      dialogue: "dialogue", speaker: "speaker", shotSize: "shot_size", cameraMove: "camera_move",
+      soundEffect: "sound_effect", durationSeconds: "duration_seconds", videoPrompt: "video_prompt",
+      voice: "voice", videoMode: "video_mode",
+      firstFrameAssetId: "first_frame_asset_id", lastFrameAssetId: "last_frame_asset_id",
+      referenceAssetIds: "reference_asset_ids", parentShotId: "parent_shot_id",
+      videoTaskId: "video_task_id", voiceTaskId: "voice_task_id",
     };
     for (const [key, column] of Object.entries(mapping)) {
       if (!(key in patch)) continue;
       fields.push(`${column} = ?`);
-      values.push(((patch as Record<string, unknown>)[key] ?? null) as string | null);
+      const value = (patch as Record<string, unknown>)[key];
+      if (Array.isArray(value)) values.push(JSON.stringify(value));
+      else values.push(typeof value === "number" ? value : (value ?? null) as string | null);
     }
     if (!fields.length) return this.getStoryboardShot(id);
     fields.push("updated_at = ?");
@@ -1257,6 +1573,50 @@ export class AppDatabase {
     return Number(row?.count ?? 0);
   }
 
+  /** 镜头图里用户拖动过的节点坐标；没记录的节点继续走自动布局 */
+  listStoryboardGraphPositions(conversationId: string): Record<string, { x: number; y: number }> {
+    const rows = this.db.prepare(
+      "SELECT node_id, x, y FROM conversation_graph_positions WHERE conversation_id = ?",
+    ).all(conversationId) as DbRow[];
+    const result: Record<string, { x: number; y: number }> = {};
+    for (const row of rows) {
+      result[String(row.node_id)] = { x: Number(row.x), y: Number(row.y) };
+    }
+    return result;
+  }
+
+  saveStoryboardGraphPositions(
+    conversationId: string,
+    positions: Array<{ id: string; x: number; y: number }>,
+  ): void {
+    if (!positions.length) return;
+    const at = now();
+    const upsert = this.db.prepare(`
+      INSERT INTO conversation_graph_positions (conversation_id, node_id, x, y, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id, node_id) DO UPDATE SET
+        x = excluded.x, y = excluded.y, updated_at = excluded.updated_at
+    `);
+    this.db.exec("BEGIN");
+    try {
+      for (const position of positions) {
+        upsert.run(conversationId, position.id, position.x, position.y, at);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
+  }
+
+  clearStoryboardGraphPositions(conversationId: string): number {
+    const result = this.db.prepare(
+      "DELETE FROM conversation_graph_positions WHERE conversation_id = ?",
+    ).run(conversationId);
+    return Number(result.changes ?? 0);
+  }
+
   /** 分镜的角色参考设置。auto = 用第一个已完成的图片镜头，manual = 用指定产物，off = 不用 */
   getStoryboardReference(conversationId: string): { assetId: string | null; mode: "auto" | "manual" | "off" } {
     const row = this.db.prepare(
@@ -1274,6 +1634,9 @@ export class AppDatabase {
 
   deleteStoryboard(conversationId: string): number {
     const result = this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(conversationId);
+    this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(conversationId);
+    this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(conversationId);
+    this.db.prepare("DELETE FROM conversation_graph_positions WHERE conversation_id = ?").run(conversationId);
     return Number(result.changes ?? 0);
   }
 
@@ -1285,6 +1648,10 @@ export class AppDatabase {
    */
   addStoryboardShot(conversationId: string, input: {
     prompt?: string; character?: string; scene?: string; aspectRatio?: string;
+    dialogue?: string; speaker?: string; shotSize?: string; cameraMove?: string;
+    soundEffect?: string; durationSeconds?: number; videoPrompt?: string; voice?: string;
+    videoMode?: StoryboardVideoMode; firstFrameAssetId?: string | null; lastFrameAssetId?: string | null;
+    referenceAssetIds?: string[]; parentShotId?: string | null;
   } = {}): StoryboardShot {
     const last = this.db.prepare(
       "SELECT shot_index, aspect_ratio FROM conversation_shots WHERE conversation_id = ? ORDER BY shot_index DESC LIMIT 1",
@@ -1295,11 +1662,18 @@ export class AppDatabase {
     const at = now();
     this.db.prepare(`
       INSERT INTO conversation_shots
-      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio, task_id, created_at, updated_at)
-      VALUES (?, ?, ?, '', ?, ?, ?, 'image', ?, NULL, ?, ?)
+      (id, conversation_id, shot_index, source_text, prompt, character_name, scene_name, kind, aspect_ratio,
+       dialogue, speaker, shot_size, camera_move, sound_effect, duration_seconds, video_prompt, voice,
+       video_mode, first_frame_asset_id, last_frame_asset_id, reference_asset_ids, parent_shot_id,
+       task_id, video_task_id, voice_task_id, created_at, updated_at)
+      VALUES (?, ?, ?, '', ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
     `).run(
       id, conversationId, index, input.prompt ?? "", input.character ?? "", input.scene ?? "",
-      aspectRatio, at, at,
+      aspectRatio, input.dialogue ?? "", input.speaker ?? "", input.shotSize ?? "", input.cameraMove ?? "",
+      input.soundEffect ?? "", input.durationSeconds ?? 5, input.videoPrompt ?? "", input.voice ?? "Kore",
+      input.videoMode ?? "first-frame", input.firstFrameAssetId ?? null, input.lastFrameAssetId ?? null,
+      JSON.stringify(input.referenceAssetIds ?? []), input.parentShotId ?? null,
+      at, at,
     );
     if (input.character) this.upsertStoryboardCharacters(conversationId, [input.character]);
     if (input.scene) this.upsertStoryboardScenes(conversationId, [input.scene]);
@@ -1323,6 +1697,12 @@ export class AppDatabase {
     const at = now();
     this.db.prepare("DELETE FROM conversation_shots WHERE id = ?").run(shotId);
     this.db.prepare(
+      "DELETE FROM conversation_graph_positions WHERE conversation_id = ? AND node_id IN (?, ?, ?)",
+    ).run(conversationId, `shot:${shotId}`, `video:${shotId}`, `voice:${shotId}`);
+    this.db.prepare(
+      "UPDATE conversation_shots SET parent_shot_id = NULL WHERE conversation_id = ? AND parent_shot_id = ?",
+    ).run(conversationId, shotId);
+    this.db.prepare(
       "UPDATE conversation_shots SET shot_index = shot_index - 1 WHERE conversation_id = ? AND shot_index > ?",
     ).run(conversationId, index);
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
@@ -1344,6 +1724,9 @@ export class AppDatabase {
     const name = String(row.name);
     const at = now();
     this.db.prepare("DELETE FROM conversation_characters WHERE id = ?").run(characterId);
+    this.db.prepare(
+      "DELETE FROM conversation_graph_positions WHERE conversation_id = ? AND node_id = ?",
+    ).run(conversationId, `character:${characterId}`);
 
     const shots = this.db.prepare(
       "SELECT id, character_name FROM conversation_shots WHERE conversation_id = ?",
@@ -1370,6 +1753,9 @@ export class AppDatabase {
     const name = String(row.name);
     const at = now();
     this.db.prepare("DELETE FROM conversation_scenes WHERE id = ?").run(sceneId);
+    this.db.prepare(
+      "DELETE FROM conversation_graph_positions WHERE conversation_id = ? AND node_id = ?",
+    ).run(conversationId, `scene:${sceneId}`);
     this.db.prepare(
       "UPDATE conversation_shots SET scene_name = '', updated_at = ? WHERE conversation_id = ? AND scene_name = ?",
     ).run(at, conversationId, name);
@@ -1437,6 +1823,11 @@ export class AppDatabase {
    * 否则素材目录里会静默地留下一堆永远看不见的文件。
    */
   deleteConversation(id: string): { assets: StoredFileRef[] } {
+    // 无限画布线程的生命周期跟着板走，不能从对话删除入口直接删
+    const kindRow = this.db.prepare("SELECT kind FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
+    if (kindRow && String(kindRow.kind) === "board") {
+      throw new Error("无限画布线程不能按对话删除");
+    }
     const uploads = this.db.prepare(`
       SELECT DISTINCT tasks.id AS id FROM messages
       JOIN assets ON assets.id = messages.asset_id
@@ -1452,7 +1843,17 @@ export class AppDatabase {
       JOIN assets ON assets.id = s.asset_id
       JOIN tasks ON tasks.id = assets.task_id
       WHERE s.conversation_id = ? AND tasks.origin = 'upload'
-    `).all(id, id, id) as DbRow[];
+      UNION
+      SELECT DISTINCT tasks.id AS id FROM conversation_shots s
+      JOIN assets ON assets.id IN (s.first_frame_asset_id, s.last_frame_asset_id)
+      JOIN tasks ON tasks.id = assets.task_id
+      WHERE s.conversation_id = ? AND tasks.origin = 'upload'
+      UNION
+      SELECT DISTINCT tasks.id AS id FROM conversation_shots s
+      JOIN assets ON s.reference_asset_ids LIKE '%' || assets.id || '%'
+      JOIN tasks ON tasks.id = assets.task_id
+      WHERE s.conversation_id = ? AND tasks.origin = 'upload'
+    `).all(id, id, id, id, id) as DbRow[];
 
     const assets: StoredFileRef[] = [];
     for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
@@ -1461,9 +1862,487 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM conversation_graph_positions WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };
+  }
+
+  // ── 无限画布（FREE_CANVAS_PLAN.md） ─────────────────────────────────────────
+
+  private boardFromRow(row: DbRow): BoardRecord {
+    let doc: BoardDoc;
+    try {
+      // 坏文档退回空板，不让一块坏数据把整个工作区打不开
+      doc = parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc()));
+    } catch {
+      doc = createEmptyBoardDoc();
+    }
+    return {
+      id: String(row.id),
+      title: String(row.title),
+      doc,
+      viewport: parseBoardViewport(parseJson(row.viewport_json, {})),
+      selection: parseBoardSelection(parseJson(row.selection_json, [])),
+      uiState: parseBoardUiState(parseJson(row.ui_state_json, {})),
+      version: Number(row.version),
+      threadId: String(row.thread_conversation_id),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  createCanvasTemplate(input: {
+    id: string;
+    name: string;
+    description: string;
+    source: CanvasTemplate["source"];
+    conversationId?: string | null;
+    doc: BoardDoc;
+  }): CanvasTemplate {
+    const at = now();
+    this.db.prepare(`
+      INSERT INTO canvas_templates (id, name, description, source, conversation_id, doc_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id, input.name, input.description, input.source,
+      input.conversationId ?? null, JSON.stringify(input.doc), at,
+    );
+    return {
+      id: input.id,
+      name: input.name,
+      description: input.description,
+      source: input.source,
+      doc: input.doc,
+      createdAt: at,
+    };
+  }
+
+  getCanvasTemplate(id: string): CanvasTemplate | null {
+    const row = this.db.prepare("SELECT * FROM canvas_templates WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      description: String(row.description ?? ""),
+      source: String(row.source ?? "agent") as CanvasTemplate["source"],
+      doc: parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc())),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  findCanvasTemplateByConversation(conversationId: string, source?: CanvasTemplate["source"]): CanvasTemplate | null {
+    const row = this.db.prepare(`
+      SELECT id FROM canvas_templates
+      WHERE conversation_id = ? ${source ? "AND source = ?" : ""}
+      ORDER BY created_at DESC LIMIT 1
+    `).get(...(source ? [conversationId, source] : [conversationId])) as DbRow | undefined;
+    return row ? this.getCanvasTemplate(String(row.id)) : null;
+  }
+
+  updateCanvasTemplate(id: string, patch: { name?: string; description?: string }): CanvasTemplate | null {
+    const current = this.getCanvasTemplate(id);
+    if (!current) return null;
+    const name = patch.name?.trim() ? patch.name.trim().slice(0, 80) : current.name;
+    const description = patch.description === undefined ? current.description : patch.description.trim().slice(0, 500);
+    this.db.prepare("UPDATE canvas_templates SET name = ?, description = ? WHERE id = ?")
+      .run(name, description, id);
+    return this.getCanvasTemplate(id);
+  }
+
+  deleteCanvasTemplate(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM canvas_templates WHERE id = ?").run(id);
+    return Number(result.changes) > 0;
+  }
+
+  listCanvasTemplateSummaries(limit = 50): CanvasTemplateSummary[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM canvas_templates ORDER BY created_at DESC LIMIT ?",
+    ).all(Math.min(200, Math.max(1, limit))) as DbRow[];
+    return rows.map((row) => {
+      const doc = parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc()));
+      return {
+        id: String(row.id),
+        name: String(row.name),
+        description: String(row.description ?? ""),
+        source: String(row.source ?? "agent") as CanvasTemplate["source"],
+        nodeCount: doc.nodes.length,
+        groupCount: boardGroups(doc).length,
+        createdAt: String(row.created_at),
+      };
+    });
+  }
+
+  listStoryboardConversationIds(): string[] {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT conversation_id FROM conversation_shots ORDER BY conversation_id",
+    ).all() as DbRow[];
+    return rows.map((row) => String(row.conversation_id));
+  }
+
+  getStoryboardMigration(conversationId: string): {
+    conversationId: string; boardId: string; templateId: string; version: number; createdAt: string;
+  } | null {
+    const row = this.db.prepare(
+      "SELECT * FROM storyboard_migrations WHERE conversation_id = ?",
+    ).get(conversationId) as DbRow | undefined;
+    if (!row) return null;
+    return {
+      conversationId: String(row.conversation_id),
+      boardId: String(row.board_id),
+      templateId: String(row.template_id),
+      version: Number(row.version ?? 1),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  listStoryboardMigrations(): Array<{
+    conversationId: string; boardId: string; templateId: string; version: number; createdAt: string;
+  }> {
+    const rows = this.db.prepare("SELECT * FROM storyboard_migrations ORDER BY created_at ASC").all() as DbRow[];
+    return rows.map((row) => ({
+      conversationId: String(row.conversation_id),
+      boardId: String(row.board_id),
+      templateId: String(row.template_id),
+      version: Number(row.version ?? 1),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  saveStoryboardMigration(input: {
+    conversationId: string; boardId: string; templateId: string; version: number;
+  }): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO storyboard_migrations
+      (conversation_id, board_id, template_id, version, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(input.conversationId, input.boardId, input.templateId, input.version, now());
+  }
+
+  createBoardRecord(input: {
+    id: string;
+    title: string;
+    threadConversationId: string;
+    doc?: BoardDoc;
+  }): BoardRecord {
+    const at = now();
+    const doc = input.doc ?? createEmptyBoardDoc();
+    const docJson = JSON.stringify(doc);
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`
+        INSERT INTO boards
+        (id, title, doc_json, viewport_json, selection_json, ui_state_json, version,
+         thread_conversation_id, created_at, updated_at)
+        VALUES (?, ?, ?, '', '[]', '', 1, ?, ?, ?)
+      `).run(input.id, input.title, docJson, input.threadConversationId, at, at);
+      // 初始版本也进历史：第一次编辑后可以撤销回空板
+      this.db.prepare(`
+        INSERT OR IGNORE INTO board_history (id, board_id, version, doc_json, reason, created_at)
+        VALUES (?, ?, 1, ?, 'create', ?)
+      `).run(crypto.randomUUID(), input.id, docJson, at);
+      this.replaceBoardAssetsUnsafe(input.id, doc);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getBoardRecord(input.id)!;
+  }
+
+  getBoardRecord(id: string): BoardRecord | null {
+    const row = this.db.prepare("SELECT * FROM boards WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? this.boardFromRow(row) : null;
+  }
+
+  listBoardRecords(): BoardRecord[] {
+    const rows = this.db.prepare("SELECT * FROM boards ORDER BY updated_at DESC").all() as DbRow[];
+    return rows.map((row) => this.boardFromRow(row));
+  }
+
+  listBoardSummaries(): BoardSummary[] {
+    return this.listBoardRecords().map((board) => ({
+      id: board.id,
+      title: board.title,
+      nodeCount: board.doc.nodes.length,
+      edgeCount: board.doc.edges.length,
+      updatedAt: board.updatedAt,
+      threadId: board.threadId,
+    }));
+  }
+
+  getBoardByThread(threadId: string): BoardRecord | null {
+    const row = this.db.prepare("SELECT * FROM boards WHERE thread_conversation_id = ?").get(threadId) as DbRow | undefined;
+    return row ? this.boardFromRow(row) : null;
+  }
+
+  updateBoardTitle(id: string, title: string): BoardRecord | null {
+    const at = now();
+    const board = this.getBoardRecord(id);
+    if (!board) return null;
+    this.db.prepare("UPDATE boards SET title = ?, updated_at = ? WHERE id = ?").run(title, at, id);
+    // 线程标题跟着板走，但线程本身不会出现在对话侧栏
+    this.db.prepare("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?").run(`无限画布 · ${title}`, at, board.threadId);
+    return this.getBoardRecord(id);
+  }
+
+  /** 保存一次新版本：旧版本进历史，新文档落库，素材索引重建 */
+  saveBoardSnapshot(input: {
+    boardId: string;
+    previousDoc: BoardDoc;
+    doc: BoardDoc;
+    viewport?: BoardViewport;
+    version: number;
+    reason: string;
+  }): void {
+    const at = now();
+    const docJson = JSON.stringify(input.doc);
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO board_history (id, board_id, version, doc_json, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        crypto.randomUUID(), input.boardId, input.version - 1,
+        JSON.stringify(input.previousDoc), input.reason, at,
+      );
+      if (input.viewport) {
+        this.db.prepare(`
+          UPDATE boards SET doc_json = ?, viewport_json = ?, version = ?, updated_at = ? WHERE id = ?
+        `).run(docJson, JSON.stringify(input.viewport), input.version, at, input.boardId);
+      } else {
+        this.db.prepare(`
+          UPDATE boards SET doc_json = ?, version = ?, updated_at = ? WHERE id = ?
+        `).run(docJson, input.version, at, input.boardId);
+      }
+      // 撤销后重新编辑：未来快照作废，避免重做跳回一条已经不存在的分支
+      this.db.prepare("DELETE FROM board_history WHERE board_id = ? AND version > ?")
+        .run(input.boardId, input.version);
+      // 新版本自身也要有快照，否则撤销到上一版之后没有东西可以重做。
+      // 用 REPLACE：撤销后重新编辑时，同一版本号可能已经有一条旧分支的快照。
+      this.db.prepare(`
+        INSERT OR REPLACE INTO board_history (id, board_id, version, doc_json, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(crypto.randomUUID(), input.boardId, input.version, docJson, input.reason, at);
+      this.replaceBoardAssetsUnsafe(input.boardId, input.doc);
+      this.trimBoardHistoryUnsafe(input.boardId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 撤销 / 重做：只移动版本指针，不动历史（未来版本要留给重做） */
+  moveBoardVersion(input: {
+    boardId: string;
+    version: number;
+    doc: BoardDoc;
+    viewport?: BoardViewport;
+  }): void {
+    const at = now();
+    this.db.exec("BEGIN");
+    try {
+      if (input.viewport) {
+        this.db.prepare("UPDATE boards SET doc_json = ?, viewport_json = ?, version = ?, updated_at = ? WHERE id = ?")
+          .run(JSON.stringify(input.doc), JSON.stringify(input.viewport), input.version, at, input.boardId);
+      } else {
+        this.db.prepare("UPDATE boards SET doc_json = ?, version = ?, updated_at = ? WHERE id = ?")
+          .run(JSON.stringify(input.doc), input.version, at, input.boardId);
+      }
+      this.replaceBoardAssetsUnsafe(input.boardId, input.doc);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listBoardHistoryVersions(boardId: string): number[] {
+    const rows = this.db.prepare(
+      "SELECT version FROM board_history WHERE board_id = ? ORDER BY version ASC",
+    ).all(boardId) as DbRow[];
+    return rows.map((row) => Number(row.version));
+  }
+
+  listBoardHistoryEntries(boardId: string): Array<{ version: number; reason: string; createdAt: string }> {
+    const rows = this.db.prepare(
+      "SELECT version, reason, created_at FROM board_history WHERE board_id = ? ORDER BY version DESC",
+    ).all(boardId) as DbRow[];
+    return rows.map((row) => ({
+      version: Number(row.version),
+      reason: String(row.reason ?? ""),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  getBoardHistoryDoc(boardId: string, version: number): BoardDoc | null {
+    const row = this.db.prepare(
+      "SELECT doc_json FROM board_history WHERE board_id = ? AND version = ?",
+    ).get(boardId, version) as DbRow | undefined;
+    if (!row) return null;
+    try {
+      return parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc()));
+    } catch {
+      return null;
+    }
+  }
+
+  saveBoardViewport(boardId: string, viewport: BoardViewport): void {
+    this.db.prepare("UPDATE boards SET viewport_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(viewport), now(), boardId);
+  }
+
+  /** 选中状态不碰 updated_at：点一下节点不该把无限画布顶到列表最前面 */
+  saveBoardSelection(boardId: string, selection: string[]): void {
+    this.db.prepare("UPDATE boards SET selection_json = ? WHERE id = ?")
+      .run(JSON.stringify(selection), boardId);
+  }
+
+  saveBoardUiState(boardId: string, uiState: BoardUiState): void {
+    this.db.prepare("UPDATE boards SET ui_state_json = ? WHERE id = ?")
+      .run(JSON.stringify(uiState), boardId);
+  }
+
+  listBoardAssets(boardId: string): Asset[] {
+    const rows = this.db.prepare(`
+      SELECT assets.* FROM board_assets
+      JOIN assets ON assets.id = board_assets.asset_id
+      WHERE board_assets.board_id = ?
+      ORDER BY assets.created_at ASC
+    `).all(boardId) as DbRow[];
+    const seen = new Set<string>();
+    const result: Asset[] = [];
+    for (const row of rows) {
+      const id = String(row.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      result.push(this.assetView(this.assetFromRow(row)));
+    }
+    return result;
+  }
+
+  /** 上传后、文档保存前的临时链接；下一次保存会按文档重建并覆盖掉它 */
+  insertBoardAssetLink(boardId: string, assetId: string, nodeId: string): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO board_assets (board_id, asset_id, node_id) VALUES (?, ?, ?)",
+    ).run(boardId, assetId, nodeId);
+  }
+
+  findBoardAssetRefs(assetId: string): Array<{ boardId: string; nodeId: string }> {
+    const rows = this.db.prepare(
+      "SELECT board_id, node_id FROM board_assets WHERE asset_id = ?",
+    ).all(assetId) as DbRow[];
+    return rows.map((row) => ({ boardId: String(row.board_id), nodeId: String(row.node_id) }));
+  }
+
+  deleteBoardCascade(boardId: string): { threadId: string } | null {
+    const board = this.getBoardRecord(boardId);
+    if (!board) return null;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM board_history WHERE board_id = ?").run(boardId);
+      this.db.prepare("DELETE FROM board_assets WHERE board_id = ?").run(boardId);
+      this.db.prepare("DELETE FROM board_tasks WHERE board_id = ?").run(boardId);
+      this.db.prepare("DELETE FROM boards WHERE id = ?").run(boardId);
+      this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversation_graph_positions WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(board.threadId);
+      this.db.prepare("DELETE FROM conversations WHERE id = ?").run(board.threadId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { threadId: board.threadId };
+  }
+
+  addBoardTaskRows(input: {
+    taskId: string;
+    boardId: string;
+    configNodeId: string;
+    resultNodeIds: string[];
+    kind: string;
+  }): void {
+    if (!input.resultNodeIds.length) return;
+    const at = now();
+    const insert = this.db.prepare(`
+      INSERT OR REPLACE INTO board_tasks
+      (task_id, board_id, config_node_id, result_node_id, kind, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    this.db.exec("BEGIN");
+    try {
+      for (const resultNodeId of input.resultNodeIds) {
+        insert.run(input.taskId, input.boardId, input.configNodeId, resultNodeId, input.kind, at);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listBoardTasksByTask(taskId: string): Array<{
+    taskId: string; boardId: string; configNodeId: string; resultNodeId: string; kind: string; createdAt: string;
+  }> {
+    const rows = this.db.prepare(
+      "SELECT * FROM board_tasks WHERE task_id = ? ORDER BY rowid ASC",
+    ).all(taskId) as DbRow[];
+    return rows.map((row) => ({
+      taskId: String(row.task_id),
+      boardId: String(row.board_id),
+      configNodeId: String(row.config_node_id),
+      resultNodeId: String(row.result_node_id),
+      kind: String(row.kind),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  listBoardTasksByBoard(boardId: string): Array<{
+    taskId: string; boardId: string; configNodeId: string; resultNodeId: string; kind: string; createdAt: string;
+  }> {
+    const rows = this.db.prepare(
+      "SELECT * FROM board_tasks WHERE board_id = ? ORDER BY created_at ASC, rowid ASC",
+    ).all(boardId) as DbRow[];
+    return rows.map((row) => ({
+      taskId: String(row.task_id),
+      boardId: String(row.board_id),
+      configNodeId: String(row.config_node_id),
+      resultNodeId: String(row.result_node_id),
+      kind: String(row.kind),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  deleteBoardTaskRows(taskId: string): void {
+    this.db.prepare("DELETE FROM board_tasks WHERE task_id = ?").run(taskId);
+  }
+
+  private replaceBoardAssetsUnsafe(boardId: string, doc: BoardDoc): void {
+    this.db.prepare("DELETE FROM board_assets WHERE board_id = ?").run(boardId);
+    const insert = this.db.prepare(
+      "INSERT OR REPLACE INTO board_assets (board_id, asset_id, node_id) VALUES (?, ?, ?)",
+    );
+    for (const node of doc.nodes) {
+      if ((node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId) {
+        insert.run(boardId, node.assetId, node.id);
+      }
+    }
+  }
+
+  private trimBoardHistoryUnsafe(boardId: string): void {
+    // 保留最新 50 个版本。offset 50 的那一行就是「第 51 新」，它及更老的都删
+    const cutoff = this.db.prepare(
+      "SELECT version FROM board_history WHERE board_id = ? ORDER BY version DESC LIMIT 1 OFFSET ?",
+    ).get(boardId, BOARD_LIMITS.maxHistory) as DbRow | undefined;
+    if (!cutoff) return;
+    this.db.prepare("DELETE FROM board_history WHERE board_id = ? AND version <= ?")
+      .run(boardId, Number(cutoff.version));
   }
 
   /**
@@ -1612,8 +2491,18 @@ export class AppDatabase {
       FROM conversation_shots s
       JOIN assets ON assets.task_id = s.task_id
       WHERE s.conversation_id = ?
-      ORDER BY s.shot_index ASC, assets.created_at ASC
-    `).all(conversationId) as DbRow[];
+      UNION ALL
+      SELECT assets.*, s.shot_index AS shot_index, s.video_prompt AS shot_prompt
+      FROM conversation_shots s
+      JOIN assets ON assets.task_id = s.video_task_id
+      WHERE s.conversation_id = ?
+      UNION ALL
+      SELECT assets.*, s.shot_index AS shot_index, s.dialogue AS shot_prompt
+      FROM conversation_shots s
+      JOIN assets ON assets.task_id = s.voice_task_id
+      WHERE s.conversation_id = ?
+      ORDER BY shot_index ASC, assets.created_at ASC
+    `).all(conversationId, conversationId, conversationId) as DbRow[];
     return rows.map((row) => ({ asset: this.assetFromRow(row), index: Number(row.shot_index), prompt: String(row.shot_prompt ?? "") }));
   }
 
@@ -1695,11 +2584,63 @@ export class AppDatabase {
       seen.add(entry.asset.id);
       entries.push({ asset: entry.asset, round: entry.index, prompt: entry.prompt, source: "storyboard" });
     }
+    // 视频输入图（首帧 / 尾帧 / 参考图）也要进会话素材：尾帧续写截出来的图、
+    // 手动指定的参考图都应该能在素材库和输入选择器里找得到。
+    const frameRows = this.db.prepare(`
+      SELECT assets.*, s.shot_index AS shot_index, '首帧' AS frame_label
+      FROM conversation_shots s JOIN assets ON assets.id = s.first_frame_asset_id
+      WHERE s.conversation_id = ?
+      UNION ALL
+      SELECT assets.*, s.shot_index AS shot_index, '尾帧' AS frame_label
+      FROM conversation_shots s JOIN assets ON assets.id = s.last_frame_asset_id
+      WHERE s.conversation_id = ?
+      ORDER BY shot_index ASC, created_at ASC
+    `).all(conversationId, conversationId) as DbRow[];
+    for (const row of frameRows) {
+      const asset = this.assetFromRow(row);
+      if (seen.has(asset.id)) continue;
+      seen.add(asset.id);
+      entries.push({
+        asset, round: Number(row.shot_index),
+        prompt: `第 ${Number(row.shot_index)} 镜${String(row.frame_label ?? "首帧")}`,
+        source: "storyboard",
+      });
+    }
+    const referenceRows = this.db.prepare(
+      "SELECT shot_index, reference_asset_ids FROM conversation_shots WHERE conversation_id = ? AND reference_asset_ids <> '[]'",
+    ).all(conversationId) as DbRow[];
+    for (const row of referenceRows) {
+      for (const assetId of stringArrayFromJson(row.reference_asset_ids)) {
+        if (seen.has(assetId)) continue;
+        const asset = this.getAsset(assetId);
+        if (!asset || !isImageAsset(asset)) continue;
+        seen.add(assetId);
+        entries.push({
+          asset, round: Number(row.shot_index),
+          prompt: `第 ${Number(row.shot_index)} 镜参考图`,
+          source: "storyboard",
+        });
+      }
+    }
     // 角色 / 场景设定图也进「本会话的图」：上传或生成之后，其它设定卡的下拉里也能选到
     for (const entry of this.listStoryboardSettingAssets(conversationId)) {
       if (seen.has(entry.asset.id)) continue;
       seen.add(entry.asset.id);
       entries.push({ asset: entry.asset, round: 0, prompt: entry.label, source: "setting" });
+    }
+    // 从无限画布桥接过来的参考图：没有消息行，也不属于分镜 / 设定，但只要还在
+    // canvasAssetIds 里就必须能被渲染、被 resolveAssetRef 认出来
+    const conversation = this.getConversation(conversationId);
+    for (const assetId of conversation?.canvasAssetIds ?? []) {
+      if (seen.has(assetId)) continue;
+      const asset = this.getAsset(assetId);
+      if (!asset || !isImageAsset(asset)) continue;
+      seen.add(assetId);
+      entries.push({
+        asset, round: 0,
+        prompt: "从无限画布加入的参考图",
+        source: "bridge",
+      });
     }
     return entries;
   }
@@ -1707,6 +2648,8 @@ export class AppDatabase {
   private conversationFromRow(row: DbRow): Conversation {
     return {
       id: String(row.id), title: String(row.title),
+      kind: (row.kind == null ? "chat" : String(row.kind)) as ConversationKind,
+      boardId: row.board_id == null ? null : String(row.board_id),
       brainChannelId: String(row.brain_channel_id), brainModel: String(row.brain_model),
       // JSON 坏了或者还是 NULL（没迁移到的老行）都当成空画布，别让一行坏数据炸掉整个会话列表
       canvasAssetIds: canvasIdsFromRow(row.canvas_asset_ids),

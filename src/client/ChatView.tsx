@@ -12,7 +12,7 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Clapperboard, Eye, EyeOff, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Eye, EyeOff, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -35,8 +35,8 @@ import { ModelPanel } from "./chat/ModelPanel";
 import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
-import { StoryboardPanel } from "./chat/StoryboardPanel";
 import { AssetLibrary } from "./chat/AssetLibrary";
+import { TemplateImportDialog } from "./board/TemplateImportDialog";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
 
@@ -120,8 +120,10 @@ export function ChatView({
     image: "", video: "", music: "", speech: "",
   });
   const [preview, setPreview] = useState<string | null>(null);
-  const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [templateImport, setTemplateImport] = useState<{
+    id: string; name: string; description?: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
@@ -373,10 +375,6 @@ export function ChatView({
             if (event.message.role === "assistant") { setReasoning(""); setDraft(""); }
             return { ...current, messages: upsert(current.messages, event.message) };
           });
-          // 刚拆完镜就把面板打开：用户下一步一定是看描述、点生成
-          if ((event.message.toolName === "create_storyboard" || event.message.toolName === "tag_storyboard_characters") && event.message.status === "ok") {
-            setStoryboardOpen(true);
-          }
           break;
         case "progress":
           setProgress((current) => ({ ...current, [event.taskId]: { status: event.status, progress: event.progress } }));
@@ -950,22 +948,12 @@ export function ChatView({
               <div className="chat-header-controls">
                 <button
                   type="button"
-                  className={`chat-control chat-toggle ${storyboardOpen ? "is-on" : ""}`}
-                  title={view.storyboardCount ? "展开分镜表：逐镜改描述、确认后生成" : "还没有分镜：上传剧本后让助手「拆成分镜」"}
-                  onClick={() => setStoryboardOpen((open) => !open)}
-                >
-                  <Clapperboard size={13} />
-                  分镜{view.storyboardCount ? ` ${view.storyboardCount}` : ""}
-                </button>
-
-                <button
-                  type="button"
                   className="chat-control chat-toggle"
                   title="打开素材库：筛选、搜索、批量选图，设为首帧 / 尾帧"
                   onClick={() => setLibraryOpen(true)}
                 >
                   <Images size={13} />
-                  素材 {sessionImages.length}
+                  素材 {mediaAssets.length}
                 </button>
 
                 <button
@@ -1046,6 +1034,8 @@ export function ChatView({
                     onPreview={setPreview}
                     onDiagnostics={onDiagnostics}
                     onToast={toast}
+                    onImportTemplate={(templateId, name, description) =>
+                      setTemplateImport({ id: templateId, name, description })}
                   />
                 );
               })}
@@ -1057,43 +1047,6 @@ export function ChatView({
               ) : null}
               </div>
             </div>
-
-            {/*
-              画布条默认收起（Codex 里根本没有这一条——它靠「接着上一张说」和「把图拖进输入框」
-              完成同一件事）。开关放在会话头，徽标上带着张数，需要挑图时点一下就有。
-              没有图的时候整条不出现：一条「还没有图」的空条只会占地方。
-            */}
-            {storyboardOpen ? (
-              <StoryboardPanel
-                conversationId={view.id}
-                refreshKey={
-                  // 消息数变化之外，拆分镜工具落定那一刻也要刷新：
-                  // 工具行先以 pending 落库、执行完再改成 ok，中间消息数不变
-                  view.messages.length
-                  + view.messages.filter((message) => (message.toolName === "create_storyboard" || message.toolName === "tag_storyboard_characters") && message.status === "ok").length
-                }
-                canvasIds={canvasImages.map((asset) => asset.id)}
-                images={sessionImages}
-                capabilities={capabilities}
-                defaultImageAlias={defaults.image}
-                onAssetsChanged={() => { if (activeId) void reloadView(activeId); }}
-                onClose={() => setStoryboardOpen(false)}
-                onToast={toast}
-                onAddToCanvas={(assetId) => {
-                  if (canvasImages.some((asset) => asset.id === assetId)) return;
-                  if (canvasImages.length >= MAX_CANVAS_IMAGES) {
-                    toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，先移出一张再加`);
-                    return;
-                  }
-                  writeCanvas([...canvasImages.map((asset) => asset.id), assetId]);
-                  toast("ok", "已加入画布");
-                }}
-                onTagCharacters={() => {
-                  void send("请根据当前分镜表，为每一镜标注出场角色和场景：同一个人物 / 同一个地点全片用同一个名字，多个人物用「、」连接；空镜、道具、字幕的角色留空，但场景尽量标。顺便给每个角色一句外貌/服装描述、每个场景一句空间/光线描述。用 tag_storyboard_characters 更新现有分镜，不要重新拆分，也不要重新生成。");
-                }}
-                tagCharactersDisabled={running}
-              />
-            ) : null}
 
             <Composer
               running={running}
@@ -1174,6 +1127,16 @@ export function ChatView({
           </>
         )}
       </section>
+
+      {templateImport ? (
+        <TemplateImportDialog
+          templateId={templateImport.id}
+          templateName={templateImport.name}
+          templateDescription={templateImport.description}
+          onClose={() => setTemplateImport(null)}
+          onToast={(kind, text) => toast(kind === "success" ? "ok" : "error", text)}
+        />
+      ) : null}
 
       <AssetLibrary
         open={libraryOpen}
