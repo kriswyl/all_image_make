@@ -1365,6 +1365,23 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
   margin: 0;
 }
 
+.media-input-group { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.media-input-group + .media-input-group { padding-top: 12px; border-top: 1px solid var(--line); }
+.media-input-group .field-block { min-width: 0; }
+.media-input-group .field-block input { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.media-upload-button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.media-upload-button:hover, .media-upload-button:focus-within { background: var(--surface-soft); border-color: var(--ink-soft); }
+.media-upload-button.is-loading { opacity: .65; cursor: wait; }
+.media-upload-button input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.media-file-chip { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink-soft); }
+.media-file-chip > svg, .media-audio-icon { flex: none; }
+.media-file-chip > span:not(.media-audio-icon) { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.media-file-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 12px; font-weight: 550; }
+.media-file-chip small, .media-input-note { color: var(--muted); font-size: 11px; }
+.media-file-chip button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.media-file-chip button:hover { background: var(--surface-soft); color: var(--ink); }
+.media-input-note { grid-column: 1 / -1; margin: 0; }
+
 .section-title.compact {
   margin: 0 0 2px;
 }

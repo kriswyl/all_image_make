@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle, CheckCircle2, ChevronRight, Clapperboard, Download, Eye, Film, ImagePlus, KeyRound,
   Link as LinkIcon, LoaderCircle, Plus, RotateCcw, Settings2, SlidersHorizontal, Square, Upload, X,
@@ -199,6 +199,10 @@ export function VideoGenerateView(props: {
   const [klingMultiShot, setKlingMultiShot] = usePersistentState("klingMultiShot", true);
   const [urlInputs, setUrlInputs] = usePersistentState<Record<VideoMediaType, string>>("urlInputs", {} as Record<VideoMediaType, string>);
   const [submitting, setSubmitting] = useState(false);
+  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [videoUpload, setVideoUpload] = useState<{ name: string; url: string; size: number; duration: number; target: "wan" | "kling" } | null>(null);
+  const [audioUpload, setAudioUpload] = useState<{ name: string; dataUri: string; size: number; duration: number } | null>(null);
+  const uploadEpoch = useRef(0);
 
   const references = props.references;
   const referenceImages = references.images;
@@ -226,6 +230,51 @@ export function VideoGenerateView(props: {
   // 可灵普通图生视频（含首尾帧）不认 aspect_ratio，Omni 才认
   const klingAspectRatio = !isKling || klingMode === "text-to-video" || isKlingOmni;
   const urlModeSpec = !isKling ? modeSpec as WanModeSpec | null : null;
+  useEffect(() => {
+    uploadEpoch.current += 1;
+    setUploadingVideo(false);
+    setAudioUpload(null);
+    setVideoUpload((old) => {
+      if (old?.target === "wan") setUrlInputs((current) => current.reference_video === old.url ? { ...current, reference_video: "" } : current);
+      if (old?.target === "kling") setKlingReferenceVideoUrl((current) => current === old.url ? "" : current);
+      return null;
+    });
+  }, [props.selectedChannelId, wanMode, klingMode]);
+
+  async function uploadVideo(file: File, target: "wan" | "kling") {
+    const epoch = uploadEpoch.current;
+    try {
+      if (!channel?.uploadEndpoint) throw new Error("该渠道未配置视频上传服务，请手动填写公网地址");
+      if (!['video/mp4', 'video/quicktime'].includes(file.type)) throw new Error("请选择 MP4 或 MOV 视频");
+      if (file.size > 100 * 1024 * 1024) throw new Error("视频不能超过 100 MB");
+      setUploadingVideo(true);
+      const seconds = await mediaDuration(file, "video");
+      const max = target === "kling" ? (klingCharacterOrientation === "image" ? 10 : 30) : 15;
+      const min = target === "kling" ? 3 : 1;
+      if (seconds < min || seconds > max) throw new Error(`视频时长需为 ${min}–${max} 秒`);
+      if (epoch !== uploadEpoch.current) return;
+      const result = await api.uploadReferenceVideo(channel.id, file);
+      if (epoch !== uploadEpoch.current) return;
+      if (target === "wan") setUrlInputs((current) => ({ ...current, reference_video: result.url }));
+      else setKlingReferenceVideoUrl(result.url);
+      setVideoUpload({ name: file.name, url: result.url, size: file.size, duration: seconds, target });
+    } catch (error) {
+      if (epoch === uploadEpoch.current) props.onToast("error", error instanceof Error ? error.message : "视频上传失败");
+    } finally { if (epoch === uploadEpoch.current) setUploadingVideo(false); }
+  }
+
+  async function selectAudio(file: File) {
+    const epoch = uploadEpoch.current;
+    try {
+      if (!['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-wav'].includes(file.type)) throw new Error("请选择 MP3、M4A、AAC 或 WAV 音频");
+      if (file.size > 15 * 1024 * 1024) throw new Error("音频不能超过 15 MB");
+      const duration = await mediaDuration(file, "audio");
+      if (duration > 15 || duration <= 0) throw new Error("音频时长需在 15 秒以内");
+      const dataUri = await fileToDataUrl(file);
+      if (dataUri.length > 15 * 1024 * 1024 * 0.9) throw new Error("音频过大，请换成更小的音频，为其他素材留出空间");
+      if (epoch === uploadEpoch.current) setAudioUpload({ name: file.name, dataUri, size: file.size, duration });
+    } catch (error) { if (epoch === uploadEpoch.current) props.onToast("error", error instanceof Error ? error.message : "音频读取失败"); }
+  }
   const drop = useFileDrop(maxReferenceImages > 0 && !submitting && referenceImages.length < maxReferenceImages, references.dropFiles);
   const pasteImages = useCallback((files: File[]) => {
     if (submitting || readingImage || maxReferenceImages <= 0) return;
@@ -290,6 +339,10 @@ export function VideoGenerateView(props: {
     }
 
     for (const slot of spec.urlSlots) {
+      if (slot.type === "reference_audio" && audioUpload) {
+        media.push({ type: slot.type, url: audioUpload.dataUri });
+        continue;
+      }
       const url = (urlInputs[slot.type] ?? "").trim();
       if (!url) {
         if (slot.required) return `请填写${slot.label}`;
@@ -360,6 +413,7 @@ export function VideoGenerateView(props: {
   }
 
   async function generate() {
+    if (uploadingVideo) return props.onToast("error", "视频上传中，请稍候");
     if (!channel || !caps) return props.onToast("error", "请先选择视频渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
@@ -545,7 +599,7 @@ export function VideoGenerateView(props: {
                     <label className="reference-add-tile" title="添加图片">
                       <input className="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple={maxReferenceImages > 1} onChange={references.select} disabled={readingImage || submitting || referenceImages.length >= maxReferenceImages} />
                       <span className="reference-icon">{readingImage ? <LoaderCircle className="spin" size={21} /> : <ImagePlus size={21} />}</span>
-                      <span className="reference-file"><strong>{drop.active ? "松开即可添加" : readingImage ? "读取中" : "添加图片"}</strong><small>点击选择、拖入或 Ctrl+V 粘贴 · PNG / JPEG / WebP · 单张最大 10 MB</small></span>
+                      <span className="reference-file"><strong>{drop.active ? "松开即可添加" : readingImage ? "读取中" : "添加图片"}</strong><small>点击选择、拖入或 Ctrl+V 粘贴 · PNG / JPEG / WebP · 单张最大 20 MB</small></span>
                       <Upload size={17} />
                     </label>
                     {referenceImages.map((item, index) => {
@@ -566,17 +620,19 @@ export function VideoGenerateView(props: {
               {isKling && klingCap?.needsReferenceVideo ? (
                 <div className="media-url-block">
                   <div className="section-title compact"><div><LinkIcon size={16} /><h2>参考视频</h2></div></div>
-                  <label className="field-block">
+                  <div className="media-input-group"><label className="field-block">
                     <span>视频地址<em className="required-mark">必填</em></span>
                     <input
                       value={klingReferenceVideoUrl}
-                      onChange={(event) => setKlingReferenceVideoUrl(event.target.value)}
+                      onChange={(event) => { setKlingReferenceVideoUrl(event.target.value); if (videoUpload?.target === "kling" && event.target.value !== videoUpload.url) setVideoUpload(null); }}
                       placeholder="https://…/motion.mp4"
                       spellCheck={false}
                     />
                   </label>
+                  {channel?.uploadEndpoint ? <label className={`media-upload-button ${uploadingVideo ? "is-loading" : ""}`}><Upload size={14} />{uploadingVideo ? "上传中…" : "选择视频"}<input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" disabled={uploadingVideo} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void uploadVideo(f, "kling"); }} /></label> : <p className="mode-hint">该渠道未配置上传地址，请手动填写公网地址。</p>}
+                  {videoUpload?.target === "kling" ? <div className="media-file-chip"><Film size={15} /><span><strong title={videoUpload.name}>{videoUpload.name}</strong><small>{videoUpload.duration.toFixed(1)} 秒 · {(videoUpload.size / 1024 / 1024).toFixed(1)} MB · 已上传</small></span><button type="button" aria-label="移除已上传视频" onClick={() => { setKlingReferenceVideoUrl(""); setVideoUpload(null); }}><X size={14} /></button></div> : null}</div>
                   <p className="mode-hint">
-                    只接受公网 http(s) 地址；本地视频转 base64 会超过中转约 1.4MB 的请求体上限。
+                    上传后文件可通过公网访问，请勿上传敏感内容。
                     角色朝向选「图片」时视频需 ≤10 秒，选「视频」时 ≤30 秒。
                   </p>
                 </div>
@@ -584,19 +640,24 @@ export function VideoGenerateView(props: {
 
               {urlModeSpec?.urlSlots.length ? (
                 <div className="media-url-block">
-                  <div className="section-title compact"><div><LinkIcon size={16} /><h2>素材地址</h2></div></div>
+                  <div className="section-title compact"><div><LinkIcon size={16} /><h2>参考素材</h2></div><span>支持文件或链接</span></div>
                   {urlModeSpec.urlSlots.map((slot) => (
-                    <label className="field-block" key={slot.type}>
+                    <div className="media-input-group" key={slot.type}><label className="field-block">
                       <span>{slot.label}{slot.required ? <em className="required-mark">必填</em> : null}</span>
                       <input
                         value={urlInputs[slot.type] ?? ""}
-                        onChange={(event) => setUrlInputs({ ...urlInputs, [slot.type]: event.target.value })}
+                        onChange={(event) => { setUrlInputs({ ...urlInputs, [slot.type]: event.target.value }); if (slot.type === "reference_video" && videoUpload?.target === "wan" && event.target.value !== videoUpload.url) setVideoUpload(null); }}
                         placeholder={slot.placeholder}
                         spellCheck={false}
                       />
                     </label>
+                    {slot.type === "reference_video" && channel?.uploadEndpoint ? <label className={`media-upload-button ${uploadingVideo ? "is-loading" : ""}`}><Upload size={14} />{uploadingVideo ? "上传中…" : "选择视频"}<input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" disabled={uploadingVideo} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void uploadVideo(f, "wan"); }} /></label> : null}
+                    {slot.type === "reference_video" && !channel?.uploadEndpoint ? <p className="mode-hint">该渠道未配置上传地址，请手动填写公网地址。</p> : null}
+                    {slot.type === "reference_video" && videoUpload?.target === "wan" ? <div className="media-file-chip"><Film size={15} /><span><strong title={videoUpload.name}>{videoUpload.name}</strong><small>{videoUpload.duration.toFixed(1)} 秒 · {(videoUpload.size / 1024 / 1024).toFixed(1)} MB · 已上传</small></span><button type="button" aria-label="移除已上传视频" onClick={() => { setUrlInputs((v) => ({ ...v, reference_video: "" })); setVideoUpload(null); }}><X size={14} /></button></div> : null}
+                    {slot.type === "reference_audio" ? <><label className="media-upload-button"><Upload size={14} />选择音频<input type="file" accept="audio/mpeg,audio/mp4,audio/aac,audio/wav,audio/x-wav,.mp3,.m4a,.aac,.wav" onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void selectAudio(f); }} /></label>{audioUpload ? <div className="media-file-chip"><span className="media-audio-icon">♫</span><span><strong title={audioUpload.name}>{audioUpload.name}</strong><small>{audioUpload.duration.toFixed(1)} 秒 · {(audioUpload.size / 1024 / 1024).toFixed(1)} MB · 优先于链接</small></span><button type="button" aria-label="移除已选择音频" onClick={() => setAudioUpload(null)}><X size={14} /></button></div> : <p className="media-input-note">MP3 / M4A / AAC / WAV · 最长 15 秒</p>}</> : null}
+                    </div>
                   ))}
-                  <p className="mode-hint">视频、音频与文档只接受公网地址或百炼的 oss:// 临时地址，不支持本地上传</p>
+                  <p className="mode-hint">视频上传后可通过公网访问，请勿上传敏感内容。音频支持本地文件或手动地址。</p>
                 </div>
               ) : null}
 
@@ -714,7 +775,7 @@ export function VideoGenerateView(props: {
 
             <div className="submit-row">
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : <span />}
-              <button className="primary-button generate-button" onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel}>
+              <button className="primary-button generate-button" onClick={generate} disabled={submitting || uploadingVideo || readingImage || !channel || !props.selectedModel}>
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Film size={18} />}
                 {modeSpec ? modeSpec.label : referenceImages.length ? "图生视频" : "文生视频"}
               </button>
@@ -909,7 +970,26 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-/** 万相的图片素材走 data URI，和视频/音频的公网 URL 混在同一个 media 数组里 */
+/** 图片和音频可使用 data URI。 */
+function mediaDuration(file: File, kind: "audio" | "video"): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const media = document.createElement(kind);
+    const url = URL.createObjectURL(file);
+    const timeout = window.setTimeout(() => finish(new Error("读取素材时长超时")), 15000);
+    function finish(error?: Error) {
+      const duration = media.duration;
+      window.clearTimeout(timeout);
+      URL.revokeObjectURL(url);
+      media.removeAttribute("src");
+      if (error) reject(error); else resolve(duration);
+    }
+    media.preload = "metadata";
+    media.onloadedmetadata = () => Number.isFinite(media.duration) ? finish() : finish(new Error("无法读取素材时长"));
+    media.onerror = () => finish(new Error("无法读取素材，请检查文件格式"));
+    media.src = url;
+  });
+}
+
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -919,8 +999,7 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-/** 中转站对请求体有硬上限：实测 1MB 能过、2MB 被网关掐断，且失败时只回含糊的
- *  502 / "fetch failed"。所以视频素材先压到长边 1280 的 JPEG（单张约 150~250KB）。 */
+/** 视频图片沿用长边 1280 的 JPEG 预处理，为其他素材留出空间。 */
 const VIDEO_IMAGE_MAX_EDGE = 1280;
 const VIDEO_IMAGE_QUALITY = 0.85;
 /** 小于这个体积的图原样发送，省掉一次无谓的有损重编码 */

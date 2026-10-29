@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
@@ -65,6 +66,63 @@ async function createBoard(app: ReturnType<typeof createApp>["app"], title = "�
 }
 
 describe("无限画布 API", () => {
+  it("视频上传使用渠道密钥和请求头，并保留上游失败信息", async () => {
+    const { app, context } = await tempApp();
+    const received: Array<{ auth?: string; user?: string; body: Buffer }> = [];
+    let status = 200;
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        received.push({ auth: req.headers.authorization, user: req.headers["new-api-user"] as string, body: Buffer.concat(chunks) });
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(status === 200 ? { url: "https://files.example.com/video.mp4" } : { error: "no" }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("server unavailable");
+    const channel = context.db.saveChannel({ name: "video", baseUrl: `http://127.0.0.1:${addr.port}`, adapterType: "wan-video", authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "", uploadEndpoint: `http://127.0.0.1:${addr.port}/upload`, uploadHeaders: { "New-Api-User": "1" }, models: ["model"], allowPrivateNetwork: true, enabled: true });
+    context.sessionKeys.set(channel.id, "test-secret");
+    const video = Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+    const send = () => request(app).post("/api/uploads/reference-video").field("channelId", channel.id).attach("file", video, { filename: "test.mp4", contentType: "video/mp4" });
+    const uploaded = await send().expect(201);
+    expect(uploaded.body.data.url).toBe("https://files.example.com/video.mp4");
+    expect(received[0]).toMatchObject({ auth: "Bearer test-secret", user: "1" });
+    expect(received[0].body.includes(video)).toBe(true);
+    status = 401;
+    const failed = await send().expect(502);
+    expect(failed.body.error.message).toContain("401");
+    expect(JSON.stringify(failed.body)).not.toContain("test-secret");
+    await request(app).post("/api/uploads/reference-video").field("channelId", channel.id)
+      .attach("file", video, { filename: "bad.webm", contentType: "video/webm" }).expect(400);
+  });
+  it("素材库接受不超过 20 MB 的图片并拒绝更大的图片", async () => {
+    const { app } = await tempApp();
+    const board = await createBoard(app);
+    const image = Buffer.alloc(20 * 1024 * 1024);
+    png.copy(image);
+    const upload = await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", image, { filename: "large.png", contentType: "image/png" }).expect(201);
+    expect(upload.body.data.byteSize).toBe(image.length);
+    const oversized = Buffer.concat([image, Buffer.alloc(1)]);
+    const rejected = await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", oversized, { filename: "too-large.png", contentType: "image/png" }).expect(400);
+    expect(rejected.body.error.message).toContain("20 MB");
+  });
+  it("允许桌面端预检画布保存请求", async () => {
+    const { app } = await tempApp();
+    for (const origin of ["http://tauri.localhost", "tauri://localhost"]) {
+      const response = await request(app).options("/api/boards/test")
+        .set("Origin", origin)
+        .set("Access-Control-Request-Method", "PUT")
+        .set("Access-Control-Request-Headers", "content-type")
+        .expect(204);
+      expect(response.headers["access-control-allow-origin"]).toBe(origin);
+      expect(response.headers["access-control-allow-methods"].split(",")).toContain("PUT");
+    }
+  });
   it("新建无限画布会同时建一条不出现在对话列表里的 Agent 线程", async () => {
     const { app, context } = await tempApp();
     addChatChannel(context.db);

@@ -68,7 +68,7 @@ export type VideoMediaType =
 
 export interface VideoMediaInput {
   type: VideoMediaType;
-  /** 公网 URL、OSS 临时 URL，或 data:{mime};base64,{data}（仅图像支持 base64） */
+  /** 公网 URL、OSS 临时 URL；图片和音频也可使用 data URI */
   url: string;
 }
 
@@ -120,7 +120,7 @@ export interface SeedanceMediaInput {
  * 可灵视频素材。
  *
  * `image` / `video` 只用于运动控制（角色图和参考动作视频），其余是生成素材。
- * 参考视频只接受公网地址：中转的请求体内联上限约 1.4MB，本地视频转 base64 必定超限。
+ * 参考视频使用公网地址，本地视频可先上传获取地址。
  */
 export type KlingMediaType = "first_frame" | "last_frame" | "reference_image" | "image" | "video";
 
@@ -169,6 +169,8 @@ export interface Channel {
   authHeaderName: string;
   secretEnv: string;
   endpoint: string;
+  uploadEndpoint?: string;
+  uploadHeaders?: Record<string, string>;
   models: string[];
   allowPrivateNetwork: boolean;
   enabled: boolean;
@@ -219,12 +221,12 @@ export const DEFAULT_IMAGE_SIZE: ImageSizeValue = "2K";
  * 前端放行、后端拒收，用户只会觉得这功能坏了。所以这里只留一份。
  */
 export const MAX_REFERENCE_IMAGES = 8;
-export const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 /**
  * 局部重绘蒙版的上限，来自 OpenAI Images edit 的官方约束：
- * 必须是 PNG、小于 4 MB、并且和底图同尺寸。
+ * 必须是 PNG、不超过 20 MB、并且和底图同尺寸。
  */
-export const MAX_MASK_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_MASK_IMAGE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
 
 /**
  * 画布最多放几张图。**和 `MAX_REFERENCE_IMAGES` 相等不是巧合，是同一笔账**：

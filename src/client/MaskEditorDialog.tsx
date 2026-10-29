@@ -214,7 +214,7 @@ export function MaskEditorDialog(props: {
 
       const blob = await canvasToBlob(maskCanvas);
       if (!blob || !blob.size) throw new Error("导出蒙版失败");
-      if (blob.size > MAX_MASK_IMAGE_BYTES) throw new Error("蒙版超过 4 MB，请缩小涂抹范围后重试");
+      if (blob.size > MAX_MASK_IMAGE_BYTES) throw new Error("蒙版超过 20 MB，请缩小涂抹范围后重试");
       const stem = props.sourceName.replace(/\.[^.]+$/, "").slice(0, 80) || "image";
       const file = new File([blob], `${stem}-mask.png`, { type: "image/png" });
       const previewUrl = await buildPreview(source, paint);

@@ -5,7 +5,7 @@
  *
  * 1. **大脑看图**：当前画布缩到 512px JPEG，塞进 `image_url` content part（§11.2）
  * 2. **当参考图**：把画布产物喂给生图渠道做图生图，必要时重新编码避开体积上限
- * 3. **当首帧**：视频生成的内联素材上限只有约 1.4MB 字符（`tasks.ts:40`），
+ * 3. **当首帧**：视频生成的内联素材总预算为 15 MiB 字符（`tasks.ts`），
  *    原图直接 base64 多半会撞线，必须先压
  *
  * 用 jimp 而不是客户端 canvas 回传：agent 的续跑是服务端驱动的，
@@ -17,6 +17,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Jimp, JimpMime } from "jimp";
+import { MAX_REFERENCE_IMAGE_BYTES } from "../shared/types.js";
 import type { AppDatabase, AssetRow } from "./db.js";
 
 /** 长边像素。512 实测 2000x1200 的 PNG 压到 36KB，base64 后约 48KB（§11.6） */
@@ -24,11 +25,10 @@ export const THUMB_MAX_EDGE = 512;
 export const THUMB_QUALITY = 80;
 
 /** 参考图入参上限，和 `tasks.ts` 的 MAX_REFERENCE_IMAGE_BYTES / app.ts 的 multer 限制对齐 */
-export const MAX_REFERENCE_BYTES = 10 * 1024 * 1024;
+export const MAX_REFERENCE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
 
 /**
- * 视频内联素材上限，取 `tasks.ts` 的 MAX_INLINE_MEDIA_CHARS 的约 2/3。
- * base64 后体积约是二进制的 1.34 倍，留出余量后仍在 1.4M 字符以内。
+ * 视频首帧保留原有压缩配置，为音频和其他素材留出空间。
  */
 export const MAX_INLINE_FRAME_BYTES = 900 * 1024;
 
@@ -45,7 +45,7 @@ export interface EncodeProfile {
   quality: number;
 }
 
-/** 图生图的参考图：画质优先，只在超过 10MB 时才动它 */
+/** 图生图的参考图：画质优先，只在超过 20MB 时才动它 */
 export const REFERENCE_PROFILE: EncodeProfile = { maxEdge: 2048, maxBytes: MAX_REFERENCE_BYTES, quality: 92 };
 
 /**
@@ -71,9 +71,9 @@ export const VIDEO_FRAME_PROFILE: EncodeProfile = { maxEdge: 1280, maxBytes: MAX
 /**
  * 多张图一起进视频请求体时的预算。
  *
- * `MAX_INLINE_MEDIA_CHARS` 是**所有** data URI 合计的上限（tasks.ts，约 1.4M 字符），
+ * `MAX_INLINE_MEDIA_CHARS` 是**所有** data URI 合计的上限（tasks.ts，15 MiB 字符），
  * 而每张图 base64 后还会膨胀约 4/3。首尾帧 / 参考生视频一次要发 2~8 张，
- * 沿用单帧的 900KB 预算会在第二张就撞线，上游只回一个含糊的 502。
+ * 这里继续使用保守的图片预算，避免改变图片预处理质量与行为。
  *
  * 这里按张数把总预算均分，并在图多时主动缩画幅；宁可每张糊一点，
  * 也不能让整个任务在提交前就失败。

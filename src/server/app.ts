@@ -11,6 +11,7 @@ import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import { AppDatabase, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
+import { uploadReferenceVideo } from "./reference-video.js";
 import { AppError, TaskRunner, extensionForMime, matchesImageSignature, normalizeError, type MaskImageUpload, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, displayFileName, redact, safeFileName } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
@@ -40,13 +41,13 @@ import {
 const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 const referenceImageMimeTypes = ["image/png", "image/jpeg", "image/webp"] as const;
-const MAX_REFERENCE_BASE64_CHARS = 14_000_000;
+const MAX_REFERENCE_BASE64_CHARS = Math.ceil(MAX_REFERENCE_IMAGE_BYTES / 3) * 4;
 /** 单个 media URL 的上限：图片 data URI 按 20MB 原始体积 base64 后约 27M 字符 */
 const MAX_MEDIA_URL_CHARS = 28_000_000;
 const referenceUpload = multer({
   storage: multer.memoryStorage(),
   // 8 张参考图 + 1 张局部重绘蒙版；payload 仍是唯一一个文本字段
-  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES, files: MAX_REFERENCE_IMAGES + 1, fields: 1 },
+  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_REFERENCE_IMAGES + 1, fields: 1 },
   fileFilter: (_req, file, callback) => {
     if (file.fieldname === "mask") {
       return file.mimetype === "image/png"
@@ -62,19 +63,25 @@ const referenceUpload = multer({
  * 对话框里自己上传的图（需求.md 问题 4）。
  *
  * 和生图工作台那个 `referenceUpload` 是两个入口，但**限额和校验是同一套**：
- * 单张 10MB、最多 8 张、PNG/JPEG/WebP。同一件事在两处给两种规矩，用户只会觉得坏了。
+ * 单张 20MB、最多 8 张、PNG/JPEG/WebP。同一件事在两处给两种规矩，用户只会觉得坏了。
  */
 const conversationUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES, files: MAX_REFERENCE_IMAGES, fields: 0 },
+  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_REFERENCE_IMAGES, fields: 0 },
   fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
     ? callback(null, true)
     : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 图片", 400)),
 });
-/** 画布素材包括本地视频和音频；图片仍按 10 MB 限制。 */
+/** 画布素材包括本地视频和音频；图片按 20 MB 限制。 */
 const boardUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 0 },
+});
+const referenceVideoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 + 1, files: 1, fields: 1 },
+  fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime"].includes(file.mimetype)
+    ? callback(null, true) : callback(new AppError("REFERENCE_VIDEO_INVALID", "仅支持 MP4 / MOV 视频", 400)),
 });
 
 const channelSchema = z.object({
@@ -85,6 +92,8 @@ const channelSchema = z.object({
   authHeaderName: z.string().trim().max(80).default(""),
   secretEnv: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$|^$/).default(""),
   endpoint: z.string().trim().max(300).default(""),
+  uploadEndpoint: z.string().trim().url().or(z.literal("")).default(""),
+  uploadHeaders: z.record(z.string(), z.string()).refine((headers) => Object.keys(headers).every((name) => !/authorization|cookie|token|secret|api[-_]?key|password/i.test(name)), "上传附加请求头不能包含密钥或鉴权信息").default({}),
   models: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
   allowPrivateNetwork: z.boolean().default(false),
   enabled: z.boolean().default(true),
@@ -341,7 +350,7 @@ const generationSchema = z.object({
       "file",
       "link",
     ]),
-    // 图片走 data URI（base64 后体积放大约 1/3），视频音频走公网或 oss 地址
+    // 图片和音频支持 data URI，视频走公网或 oss 地址。
     url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
   })).max(20).optional(),
   seedanceVideoMode: z.enum([
@@ -418,7 +427,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173") {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     }
     if (req.method === "OPTIONS") return res.status(204).end();
     next();
@@ -672,6 +681,14 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.get("/api/channels", (_req, res) => {
     res.json(ok(db.listChannels().map((channel) => publicChannel(channel, sessionKeys))));
   });
+
+  app.post("/api/uploads/reference-video", referenceVideoUpload.single("file"), asyncHandler(async (req, res) => {
+    const channel = db.getChannel(String(req.body.channelId ?? ""));
+    if (!channel) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在", 404);
+    if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到视频文件", 400);
+    const url = await uploadReferenceVideo(channel, sessionKeys, req.file);
+    res.status(201).json(ok({ url }));
+  }));
 
   app.post("/api/channels", asyncHandler(async (req, res) => {
     const input = channelSchema.parse(req.body);
@@ -1233,7 +1250,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (error instanceof multer.MulterError) {
       // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
       if (error.code === "LIMIT_FILE_SIZE") {
-        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 4 MB" : "单张参考图不能超过 10 MB";
+        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
         return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
       }
       if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {

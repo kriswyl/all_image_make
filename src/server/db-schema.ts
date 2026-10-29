@@ -14,6 +14,8 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         auth_header_name TEXT NOT NULL DEFAULT '',
         secret_env TEXT NOT NULL DEFAULT '',
         endpoint TEXT NOT NULL DEFAULT '',
+        upload_endpoint TEXT NOT NULL DEFAULT '',
+        upload_headers_json TEXT NOT NULL DEFAULT '{}',
         status_endpoint TEXT NOT NULL DEFAULT '',
         models_json TEXT NOT NULL DEFAULT '[]',
         allow_private_network INTEGER NOT NULL DEFAULT 0,
@@ -297,6 +299,15 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       );
       CREATE INDEX IF NOT EXISTS brain_calls_conv_idx ON brain_calls(conversation_id, created_at);
     `);
+    const channelColumns = db.prepare("PRAGMA table_info(channels)").all() as Array<{ name: string }>;
+    if (!channelColumns.some((col) => col.name === "upload_endpoint")) {
+      db.exec("ALTER TABLE channels ADD COLUMN upload_endpoint TEXT NOT NULL DEFAULT ''");
+      db.exec("UPDATE channels SET upload_endpoint = 'https://imageproxy.zhongzhuan.chat/api/upload' WHERE rtrim(base_url, '/') = 'https://api.tiantoken.com' AND adapter_type IN ('wan-video', 'kling-video')");
+    }
+    if (!channelColumns.some((col) => col.name === "upload_headers_json")) {
+      db.exec("ALTER TABLE channels ADD COLUMN upload_headers_json TEXT NOT NULL DEFAULT '{}'");
+      db.exec(`UPDATE channels SET upload_headers_json = '{"New-Api-User":"1"}' WHERE upload_endpoint = 'https://imageproxy.zhongzhuan.chat/api/upload'`);
+    }
     // Migration: add duration column to assets if it doesn't exist
     const columnsResult = db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
     const hasDuration = columnsResult.some((col) => col.name === "duration");

@@ -3,13 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppDatabase, AssetRow } from "./db.js";
 import { allocateNodeRef, BOARD_LIMITS, type BoardDoc, type BoardNode, type BoardView, type ImageBoardNode, type VideoBoardNode, type AudioBoardNode } from "../shared/board.js";
-import { MAX_CANVAS_IMAGES, type Asset } from "../shared/types.js";
+import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES, type Asset } from "../shared/types.js";
 import { AppError, extensionForMime, matchesImageSignature, type ReferenceImageUpload } from "./tasks.js";
 import { writeThumbnail } from "./vision.js";
 import { boardView, requireBoard } from "./board-core.js";
 
 const IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"] as const;
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
 const now = () => new Date().toISOString();
 
 function boardUploadExtension(bytes: Buffer, mime: string): string | null {
@@ -150,7 +150,7 @@ export async function storeBoardUpload(
 ): Promise<Asset> {
   requireBoard(db, boardId);
   const extension = boardUploadExtension(file.buffer, file.mimetype);
-  if (!extension) throw new AppError("BOARD_ASSET_INVALID", "文件格式不匹配或不受支持：图片支持 PNG / JPEG / WebP（10 MB 内），视频支持 MP4 / WebM，音频支持 MP3 / WAV / M4A / WebM（100 MB 内）", 400);
+  if (!extension) throw new AppError("BOARD_ASSET_INVALID", "文件格式不匹配或不受支持：图片支持 PNG / JPEG / WebP（20 MB 内），视频支持 MP4 / WebM，音频支持 MP3 / WAV / M4A / WebM（100 MB 内）", 400);
 
   const assetId = crypto.randomUUID();
   const taskId = crypto.randomUUID();

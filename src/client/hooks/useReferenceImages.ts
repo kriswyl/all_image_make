@@ -27,7 +27,7 @@ export function useReferenceImages(onToast: (kind: Toast["kind"], message: strin
     if (files.length > remaining) { onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`); return false; }
     const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
     if (prepared.some((item) => !item.mimeType)) { onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图"); return false; }
-    if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) { onToast("error", "单张参考图不能超过 10 MB"); return false; }
+    if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) { onToast("error", "单张参考图不能超过 20 MB"); return false; }
     const nextImages = prepared.map(({ file }) => {
       const previewUrl = URL.createObjectURL(file);
       referenceUrls.current.add(previewUrl);

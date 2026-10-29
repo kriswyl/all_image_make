@@ -11,6 +11,7 @@ export function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel 
     name: channel?.name ?? "", baseUrl: channel?.baseUrl ?? "", adapterType: channel?.adapterType ?? "openai-images" as AdapterType,
     authType: channel?.authType ?? "bearer" as ChannelInput["authType"], authHeaderName: channel?.authHeaderName ?? "",
     secretEnv: channel?.secretEnv ?? VECTORENGINE_KEY_ENV, endpoint: channel?.endpoint ?? "",
+    uploadEndpoint: channel?.uploadEndpoint ?? "", uploadHeaders: JSON.stringify(channel?.uploadHeaders ?? {}),
     modelsText: channel?.models.join("\n") ?? "", apiKey: "", allowPrivateNetwork: channel?.allowPrivateNetwork ?? false, enabled: channel?.enabled ?? true,
   }));
   const [saving, setSaving] = useState(false);
@@ -25,9 +26,12 @@ export function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel 
     setSaveError("");
     setSaving(true);
     try {
+      const uploadHeaders: unknown = JSON.parse(form.uploadHeaders || "{}");
+      if (!uploadHeaders || typeof uploadHeaders !== "object" || Array.isArray(uploadHeaders) || Object.values(uploadHeaders).some((value) => typeof value !== "string")) throw new Error("上传请求头必须是字符串键值的 JSON 对象");
       const saved = await api.saveChannel({
         name: form.name, baseUrl: form.baseUrl, adapterType: form.adapterType, authType: form.authType,
         authHeaderName: form.authHeaderName, secretEnv: form.secretEnv, endpoint: form.endpoint || defaults.endpoint,
+        uploadEndpoint: form.uploadEndpoint, uploadHeaders: uploadHeaders as Record<string, string>,
         models, apiKey: form.apiKey || undefined,
         allowPrivateNetwork: form.allowPrivateNetwork, enabled: form.enabled,
       }, channel?.id);
@@ -44,6 +48,7 @@ export function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel 
         <div className="modal-body">
           <div className="form-grid two"><label><span>名称</span><input required value={form.name} onChange={(event) => update("name", event.target.value)} placeholder="中转渠道" /></label><label><span>适配器</span><select value={form.adapterType} onChange={(event) => update("adapterType", event.target.value as AdapterType)}>{Object.entries(adapterLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
           <label><span>Base URL</span><input required type="url" value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://relay.example.com" /></label>
+          {(form.adapterType === "wan-video" || form.adapterType === "kling-video") ? <><label><span>视频上传地址（可选）</span><input type="url" value={form.uploadEndpoint} onChange={(event) => update("uploadEndpoint", event.target.value)} placeholder="https://…/api/upload" /></label><label><span>上传附加请求头（JSON）</span><input value={form.uploadHeaders} onChange={(event) => update("uploadHeaders", event.target.value)} placeholder={'{"New-Api-User":"1"}'} /></label></> : null}
           <div className="form-grid two"><label><span>生成路径</span><input value={form.endpoint} onChange={(event) => update("endpoint", event.target.value)} placeholder={defaults.endpoint} /></label><label><span>鉴权方式</span><select value={form.authType} onChange={(event) => update("authType", event.target.value as ChannelInput["authType"])}><option value="bearer">Bearer</option><option value="x-api-key">x-api-key</option><option value="custom-header">自定义 Header</option><option value="query">Query 参数</option><option value="none">无需鉴权</option></select></label></div>
           {form.authType !== "none" ? <div className="form-grid two"><label><span>环境变量</span><input value={form.secretEnv} onChange={(event) => update("secretEnv", event.target.value)} placeholder={VECTORENGINE_KEY_ENV} /></label><label><span>API Key</span><input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} placeholder={channel?.hasKey ? "已配置，留空不修改" : form.baseUrl.includes("vectorengine.cn") ? VECTORENGINE_KEY_PLACEHOLDER : "仅保存在本次服务会话"} /></label></div> : null}
           {form.authType === "custom-header" || form.authType === "query" ? <label><span>{form.authType === "query" ? "参数名" : "Header 名称"}</span><input value={form.authHeaderName} onChange={(event) => update("authHeaderName", event.target.value)} placeholder={form.authType === "query" ? "key" : "x-api-key"} /></label> : null}

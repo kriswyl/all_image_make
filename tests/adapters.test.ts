@@ -207,6 +207,15 @@ describe("wan video request building", () => {
     return { request, body: request.body as { input: Record<string, unknown>; parameters: Record<string, unknown> } };
   }
 
+  it("forwards inline audio while removing it from diagnostics", () => {
+    const audio = "data:audio/wav;base64,UklGRg==";
+    const { request, body } = wanBody({ wanVideoMode: "reference", wanVideoMedia: [{ type: "reference_audio", url: audio }] });
+    expect(body.input.media).toEqual([{ type: "reference_audio", url: audio }]);
+    const diagnostic = JSON.stringify(requestForDiagnostic(request));
+    expect(diagnostic).toContain("AUDIO_DATA");
+    expect(diagnostic).not.toContain(audio);
+  });
+
   it("enables async mode, which the upstream API requires", () => {
     const { request } = wanBody({});
     expect(request.headers["X-DashScope-Async"]).toBe("enable");

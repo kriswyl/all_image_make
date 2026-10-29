@@ -46,6 +46,14 @@ function upload(app: ReturnType<typeof createApp>["app"], conversationId: string
 }
 
 describe("对话里上传图片（需求.md 问题 4）", () => {
+  it("对话图片允许 20 MB，超过限制时拒绝", async () => {
+    const { app, conversationId } = await bootConversation("image-relay-upload-limit-");
+    const image = Buffer.alloc(20 * 1024 * 1024);
+    pngBytes.copy(image);
+    await upload(app, conversationId, "large.png", image).expect(201);
+    const rejected = await upload(app, conversationId, "too-large.png", Buffer.concat([image, Buffer.alloc(1)])).expect(400);
+    expect(rejected.body.error.message).toContain("20 MB");
+  });
   it("传进来就是一等素材：能当画布、有缩略图、不进生成历史、不占会话额度", async () => {
     const { app, context, conversationId } = await bootConversation("image-relay-upload-");
 

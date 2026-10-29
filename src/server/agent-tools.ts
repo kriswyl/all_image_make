@@ -639,7 +639,7 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   const uploads: ReferenceImageUpload[] = [];
 
   if (selection.assets.length) {
-    // 多张图一起发时要按张数均分请求体预算，否则第二张就容易撞 1.4MB 的内联上限
+    // 多张图一起发时按张数均分保守的图片预算，为其他素材留空间。
     const profile = videoInlineProfile(selection.assets.length);
     const prepared: Array<{ bytes: Buffer; mimeType: "image/png" | "image/jpeg" | "image/webp"; fileName: string }> = [];
     for (const [index, asset] of selection.assets.entries()) {

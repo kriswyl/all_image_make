@@ -627,7 +627,7 @@ export function ChatView({
     if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return null; }
     if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return null; }
     const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
-    if (oversized) { toast("error", `${oversized.name} 超过 10 MB`); return null; }
+    if (oversized) { toast("error", `${oversized.name} 超过 20 MB`); return null; }
 
     setUploading(true);
     try {

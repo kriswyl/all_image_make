@@ -51,7 +51,7 @@
 - **不要完全相信文档的「尾帧暂未开放」**：2026-10-22 实测 `kling-3.0` 与 `kling-3.0-turbo` 的 `/image-to-video` 都接受 `first_frame + last_frame`，3 秒 720p 任务成功；抽最后一帧与输入尾帧一致。所以非 Omni 也开放首尾帧
 - 参考图实测仍只属于 Omni：普通 `/image-to-video` 只传 `refer_image` 时返回 400 `content item of type 'first_frame' is required`
 - Omni 的参考图走 `refer_image`
-- 运动控制的参考视频只接受公网 http(s) 地址：本地视频转 base64 会超过中转约 1.4MB 的请求体上限
+- 运动控制参考视频支持手动填写公网 http(s) 地址，或通过渠道配置的图床上传本地 MP4/MOV；上传结果可通过公网访问。
 - Omni 文档里的 `element` / `voice` / `feature_video` / `base_video` 需要可灵素材库或额外视频输入，工作台暂未开放；参考图走 `refer_image`
 - `kling-3.0-turbo` 走同样的原生路径；默认打开音频，避免只配置了 `audio` 计费档时被拒
 - **Key 必须属于 `kling专属` 分组**。模型列表里能看到 Kling 不代表当前 Key 能调用；不在该分组时会报 `get_channel_failed ... 可用渠道不存在`
@@ -151,7 +151,12 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
    超限时不会返回有用的错误，只有含糊的 502 HTML 或 `fetch failed`，任务白等 5 分钟才失败。
 
-   根因是前端 `fileToDataUrl()` 直接 `readAsDataURL` 原样发送：一张 7.4MB 的 PNG 编码后是 9.4MB，远超上限。现在客户端压到长边 1280 的 JPEG（`fileToVideoDataUrl()` / `downscaleToJpeg()`，在 `VideoGenerateView.tsx`），单张约 150~250KB；服务端另加 1.4M 字符预算兜底（`tasks.ts` 的 `MAX_INLINE_MEDIA_CHARS` + `inlineMediaSize()`），直接调 API 传大图时会立刻报明确错误，而不是干等。
+   客户端继续将大图压到长边 1280 的 JPEG（`fileToVideoDataUrl()` / `downscaleToJpeg()`）；服务端对所有内联素材合计设置 15 MiB 字符预算，base64 大约放大三分之一。
+
+### 本地视频和音频素材
+
+- 万相参考视频和可灵运动控制支持本地 MP4/MOV 经渠道图床上传，也可手动输入 URL；图床链接是公开的。渠道上传地址和附加请求头可在渠道设置中配置。
+- 万相参考音频支持本地 MP3/M4A/AAC/WAV，最多 15 秒、15 MB，转成 data URI 后计入 15 MiB 字符总预算；上传音频优先于手动地址。
 
    注意只有 `data:` 开头的内联 base64 才算进这个预算，公网 / `oss://` 地址不占请求体。
 

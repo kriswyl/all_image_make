@@ -127,7 +127,7 @@ export function Composer({
       return;
     }
     const oversizedImage = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
-    if (oversizedImage) { setReject(`${oversizedImage.name} 超过 10 MB`); return; }
+    if (oversizedImage) { setReject(`${oversizedImage.name} 超过 20 MB`); return; }
     const oversizedDocument = documents.find((file) => file.size > MAX_SCRIPT_FILE_BYTES);
     if (oversizedDocument) { setReject(`${oversizedDocument.name} 超过 2 MB，请先拆分`); return; }
     setReject(null);

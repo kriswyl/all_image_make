@@ -31,9 +31,8 @@ const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 8000;
 const VIDEO_MAX_POLLS = 100;
 
-/** 中转站对请求体的实际上限在 1~2MB 之间（实测 1MB 通过、2MB 被网关掐断），
- *  且超限时只回含糊的 502 / fetch failed。内联 base64 素材超过这个字符数就提前拦下。 */
-const MAX_INLINE_MEDIA_CHARS = 1_400_000;
+/** 应用侧 15 MiB 字符预算，base64 约放大 4/3，原始素材约 11.25 MiB；不是上游硬限制。 */
+const MAX_INLINE_MEDIA_CHARS = 15 * 1024 * 1024;
 
 /** 轮询节奏可被环境变量覆盖，测试里用短间隔跑完整个提交流程 */
 const VIDEO_POLL_DELAY_MS = (() => {
@@ -200,7 +199,7 @@ export class TaskRunner {
     if (inlineMediaChars > MAX_INLINE_MEDIA_CHARS) {
       throw new AppError(
         "INVALID_INPUT",
-        `内联图片合计约 ${(inlineMediaChars / 1024 / 1024).toFixed(1)}MB，超出中转站约 1.4MB 的请求体上限，请改用更小的图片或公网图片地址`,
+        `内联素材合计约 ${(inlineMediaChars / 1024 / 1024).toFixed(1)} MB，超出 15 MB 预算，请使用更小的素材或公网地址`,
         400,
       );
     }
@@ -230,7 +229,7 @@ export class TaskRunner {
         throw new AppError("MASK_REFERENCE_COUNT", `局部重绘只支持 1 张参考图（当前 ${sources.length} 张）`, 400);
       }
       if (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png")) {
-        throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 4 MB（透明区域表示要重绘的部分）", 400);
+        throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
       }
     }
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
@@ -701,7 +700,7 @@ export class TaskRunner {
     }
     for (const source of sources) {
       if (!source.bytes.length || source.bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
-        throw new AppError("REFERENCE_IMAGE_TOO_LARGE", "单张参考图不能超过 10 MB", 400);
+        throw new AppError("REFERENCE_IMAGE_TOO_LARGE", "单张参考图不能超过 20 MB", 400);
       }
       if (!matchesImageSignature(source.bytes, source.mimeType)) {
         throw new AppError("REFERENCE_IMAGE_INVALID", "参考图格式与文件内容不匹配", 400);
@@ -709,7 +708,7 @@ export class TaskRunner {
     }
     // 蒙版也要在写第一张参考图之前验完，否则一张坏蒙版会留下孤儿参考图文件
     if (maskSource && (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png"))) {
-      throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 4 MB（透明区域表示要重绘的部分）", 400);
+      throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
     }
     const storedImages: StoredReferenceImage[] = [];
     for (const [index, source] of sources.entries()) {
@@ -773,7 +772,7 @@ export class TaskRunner {
         throw new AppError("MASK_IMAGE_MISSING", "蒙版文件不存在，请重新绘制", 400);
       }
       if (!bytes.length || bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(bytes, "image/png")) {
-        throw new AppError("MASK_INVALID", "蒙版文件无效或超过 4 MB，请重新绘制", 400);
+        throw new AppError("MASK_INVALID", "蒙版文件无效或超过 20 MB，请重新绘制", 400);
       }
       hydratedMask = { base64: bytes.toString("base64"), mimeType: "image/png", fileName: input.maskImage.fileName };
     }

@@ -16,6 +16,7 @@ import {
 } from "../../shared/video-capabilities";
 import type { Asset } from "../../shared/types";
 import { ModelPicker } from "../chat/ModelPicker";
+import { api } from "../api";
 
 export interface BoardImageAlias {
   alias: string;
@@ -132,6 +133,8 @@ export function BoardInspector({
     })),
   ];
   const videoHasImages = upstreamLinks.some((link) => link.node.type === "image" && link.node.assetId);
+  const videoCount = upstreamLinks.filter((link) => link.node.type === "video").length;
+  const audioCount = upstreamLinks.filter((link) => link.node.type === "audio").length;
   const generateBlocked = isGenerator
     && ((isVideo && !videoAliases.length)
       || (isAudio && !audioAliasList.length)
@@ -195,10 +198,10 @@ export function BoardInspector({
             <div className="board-inspector-thumb">
               {asset ? (
                 node.type === "video"
-                  ? <video src={`${asset.url}#t=0.1`} muted preload="metadata" playsInline />
+                  ? <video src={`${api.assetUrl(asset.url)}#t=0.1`} muted preload="metadata" playsInline />
                   : node.type === "audio"
                     ? <span className="board-inspector-audio"><AudioLines size={20} /><em>{asset.fileName}</em></span>
-                    : <img src={asset.thumbUrl ?? asset.url} alt="" />
+                    : <img src={api.assetUrl(asset.thumbUrl ?? asset.url)} alt="" />
               ) : (
                 <span>
                   {node.type === "audio" ? <AudioLines size={20} /> : <ImageIcon size={20} />}
@@ -240,6 +243,7 @@ export function BoardInspector({
                 <span>上游</span>
                 <em>
                   {upstreamText.length} 段文本 · {upstreamImages.length} 张图
+                  {videoCount ? ` · ${videoCount} 个视频` : ""}{audioCount ? ` · ${audioCount} 个音频` : ""}
                   {isVideo && videoHasImages ? " · 按角色分配" : ""}
                 </em>
               </div>
@@ -248,12 +252,16 @@ export function BoardInspector({
                   {upstreamLinks.map(({ edge, node: upstreamNode }) => (
                     <div key={edge.id} className="board-upstream-row">
                       <span className={`board-chip ${upstreamNode.type === "text" ? "is-text" : "is-image"}`}>
-                        {upstreamNode.ref} {upstreamNode.title || (upstreamNode.type === "text" ? "文本" : upstreamNode.type === "video" ? "视频" : "图片")}
+                        {upstreamNode.ref} {upstreamNode.title || (upstreamNode.type === "text" ? "文本" : upstreamNode.type === "video" ? "视频" : upstreamNode.type === "audio" ? "音频" : "图片")}
                       </span>
                       {upstreamNode.type === "text" ? (
                         <em className="board-upstream-role">提示词</em>
                       ) : upstreamNode.type === "video" ? (
-                        <em className="board-upstream-role is-warn">视频输入暂不支持</em>
+                        <em className={`board-upstream-role ${!["wan-video", "kling-video"].includes(effectiveAliasInfo?.adapterType ?? "") ? "is-warn" : ""}`}>{["wan-video", "kling-video"].includes(effectiveAliasInfo?.adapterType ?? "") ? "参考视频" : "当前渠道不支持"}</em>
+                      ) : upstreamNode.type === "audio" ? (
+                        <em className={`board-upstream-role ${effectiveAliasInfo?.adapterType !== "wan-video" ? "is-warn" : ""}`}>{effectiveAliasInfo?.adapterType === "wan-video" ? "参考音频" : "当前渠道不支持"}</em>
+                      ) : upstreamNode.type !== "image" ? (
+                        <em className="board-upstream-role is-warn">不支持的输入</em>
                       ) : (
                         <select
                           className="board-role-select"
@@ -272,8 +280,9 @@ export function BoardInspector({
                     </div>
                   ))}
                   {!upstreamLinks.length ? (
-                    <span className="board-inspector-hint">把文本 / 图片节点连到配置节点的左侧端口；首帧、尾帧在这里指定。</span>
+                    <span className="board-inspector-hint">连接文本、图片、视频或音频节点作为上游；支持情况取决于所选模型。</span>
                   ) : null}
+                  {videoCount ? <span className="board-inspector-hint">生成时参考视频将上传至渠道图床，上传后可通过公网访问。</span> : null}
                 </div>
               ) : (
                 <div className="board-inspector-chips">

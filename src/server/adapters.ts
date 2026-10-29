@@ -113,6 +113,9 @@ function appendFormValue(formData: FormData, key: string, value: unknown) {
 }
 
 function summarizeImageData(value: unknown): unknown {
+  if (typeof value === "string" && /^data:audio\/[^;]+;base64,/i.test(value)) {
+    return `[AUDIO_DATA ${Buffer.byteLength(value.slice(value.indexOf(",") + 1), "base64")} bytes]`;
+  }
   if (typeof value === "string" && /^data:image\/[^;]+;base64,/i.test(value)) {
     const base64 = value.slice(value.indexOf(",") + 1);
     return `[IMAGE_DATA ${Buffer.byteLength(base64, "base64")} bytes]`;

@@ -1,5 +1,5 @@
 import { BOARD_LIMITS, directInputLinks, type BoardDoc, type BoardEdgeRole, type BoardVideoMode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
-import { supportedVideoModes, VIDEO_CAPABILITIES, videoModeLabel, type ConversationVideoMode, type VideoAdapter } from "../shared/video-capabilities.js";
+import { klingModesForModel, supportedVideoModes, VIDEO_CAPABILITIES, videoModeLabel, type ConversationVideoMode, type VideoAdapter } from "../shared/video-capabilities.js";
 import type { ConversationVideoRole } from "../shared/agent-types.js";
 
 interface BoardVideoInput {
@@ -9,7 +9,7 @@ interface BoardVideoInput {
 }
 
 interface BoardVideoSelection {
-  mode: ConversationVideoMode;
+  mode: ConversationVideoMode | "motion-control";
   inputs: BoardVideoInput[];
 }
 
@@ -38,9 +38,7 @@ export function resolveBoardVideoSelection(input: {
 }): { selection?: BoardVideoSelection; error?: string } {
   const links = directInputLinks(input.doc, input.config.id);
   const videoSources = links.filter((link) => link.node.type === "video");
-  if (videoSources.length) {
-    return { error: "无限画布视频生成暂时只接图片输入，不支持把视频节点当素材" };
-  }
+  const audioSources = links.filter((link) => link.node.type === "audio");
   const images = links.filter(
     (link): link is { edge: typeof link.edge; node: ImageBoardNode } =>
       link.node.type === "image" && Boolean(link.node.assetId),
@@ -50,6 +48,23 @@ export function resolveBoardVideoSelection(input: {
     assetId: link.node.assetId!,
     role: edgeVideoRole(link.edge.role),
   }));
+
+  if (videoSources.length || audioSources.length) {
+    if (videoSources.length > 1 || audioSources.length > 1) return { error: "参考视频和参考音频各最多连接一个节点" };
+    if ([...videoSources, ...audioSources].some((link) => !('assetId' in link.node) || !link.node.assetId)) return { error: "上游音视频节点还没有素材，请先选择素材" };
+    if (input.adapterType === "kling-video") {
+      if (audioSources.length || videoSources.length !== 1 || withRole.length !== 1) return { error: "可灵运动控制需要连接一张角色图和一段参考视频，不支持音频" };
+      if (!klingModesForModel(input.model ?? "").includes("motion-control")) return { error: "当前可灵模型不支持运动控制，请选择支持运动控制的模型" };
+      if (input.modeOverride ?? input.config.videoMode) return { error: "可灵运动控制请将生成方式设置为自动" };
+      return { selection: { mode: "motion-control", inputs: [{ ...withRole[0]!, role: "reference_image" }] } };
+    }
+    if (input.adapterType !== "wan-video") return { error: "当前视频渠道暂不支持画布音视频素材，请选择万相或可灵" };
+    const requested = input.modeOverride ?? input.config.videoMode;
+    if (requested && requested !== "reference") return { error: "连接音视频时请选择参考生视频模式，或改为自动" };
+    if (withRole.length > Math.min(BOARD_LIMITS.maxUpstreamImages, VIDEO_CAPABILITIES["wan-video"].maxReferenceImages)) return { error: "连接的参考图数量超过上限" };
+    if (withRole.some((item) => item.role === "first_frame" || item.role === "last_frame")) return { error: "参考视频或音频与图片组合时，请将图片角色设为参考图或自动" };
+    return { selection: { mode: "reference", inputs: withRole.map((item) => ({ ...item, role: "reference_image" })) } };
+  }
 
   const adapter = input.adapterType as VideoAdapter;
   const capability = VIDEO_CAPABILITIES[adapter];

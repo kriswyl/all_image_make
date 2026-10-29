@@ -35,6 +35,13 @@ function message(role: MessageRole, overrides: Partial<ChatMessage> = {}): ChatM
 }
 
 describe("buildRows", () => {
+  it("隐藏上传提示，保留真实图文消息和普通文字", () => {
+    const notice = message("user", { content: "上传了图片 2.png", assetId: "a1" });
+    const actual = message("user", { content: "这是啥？", assetRefs: ["a1"] });
+    const plain = message("user", { content: "上传了图片 2.png" });
+    const rows = buildRows([notice, actual, plain]);
+    expect(rows.map((row) => row.message.id)).toEqual([actual.id, plain.id]);
+  });
   it("keeps plain conversation in order", () => {
     const rows = buildRows([
       message("user", { content: "画只猫" }),

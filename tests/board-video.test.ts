@@ -83,6 +83,14 @@ function videoDoc(input: {
 }
 
 describe("无限画布视频输入解析", () => {
+  it("可灵连接角色图和视频时选择运动控制，并拒绝不支持的模型", () => {
+    const { doc, config } = videoDoc({ images: [{ ref: "n3" }] });
+    const video = nodeBase("n4", "video", { assetId: "video", source: "upload", status: "succeeded" });
+    doc.nodes.push(video);
+    doc.edges.push({ id: "video", source: video.id, target: config.id, kind: "input" });
+    expect(resolveBoardVideoSelection({ doc, config, adapterType: "kling-video", model: "kling-3.0" }).selection?.mode).toBe("motion-control");
+    expect(resolveBoardVideoSelection({ doc, config, adapterType: "kling-video", model: "kling-3.0-turbo" }).error).toContain("不支持运动控制");
+  });
   it("单张自动角色图按首帧处理", () => {
     const { doc, config } = videoDoc({ images: [{ ref: "n3" }] });
     const resolved = resolveBoardVideoSelection({ doc, config, adapterType: "wan-video", model: "wan-test" });
@@ -140,6 +148,11 @@ async function mockWanVideo(): Promise<{ baseUrl: string; requests: Array<{ url?
       const body = Buffer.concat(chunks).toString("utf8");
       requests.push({ url: req.url, body });
       const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      if (req.url === "/upload" && req.method === "POST") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ url: "https://files.example.com/reference.mp4" }));
+        return;
+      }
       if (req.url === "/api/v1/services/aigc/video-generation/video-synthesis" && req.method === "POST") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ output: { task_id: "video-task-1", task_status: "PENDING" } }));
@@ -193,6 +206,48 @@ async function waitForTask(app: ReturnType<typeof createApp>["app"], taskId: str
 }
 
 describe("无限画布视频生成", () => {
+  it("可灵画布视频与角色图组合成运动控制请求", async () => {
+    const { app, context } = await tempApp();
+    const mock = await mockWanVideo();
+    context.db.saveChannel({ name: "Kling", baseUrl: mock.baseUrl, adapterType: "kling-video", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "", uploadEndpoint: `${mock.baseUrl}/upload`, uploadHeaders: {}, models: ["kling-3.0"], allowPrivateNetwork: true, enabled: true });
+    const boardId = (await request(app).post("/api/boards").send({ title: "运动控制" }).expect(201)).body.data.id as string;
+    const video = (await request(app).post(`/api/boards/${boardId}/assets`).attach("file", Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]), { filename: "clip.mp4", contentType: "video/mp4" }).expect(201)).body.data;
+    const image = (await request(app).post(`/api/boards/${boardId}/assets`).attach("file", Buffer.from(pngBase64, "base64"), { filename: "person.png", contentType: "image/png" }).expect(201)).body.data;
+    const target = nodeBase("n1", "video", { assetId: null, source: "upload", status: "empty", prompt: "跟随动作", model: "kling-3.0" });
+    const v = nodeBase("n2", "video", { assetId: video.id, source: "upload", status: "succeeded" });
+    const p = nodeBase("n3", "image", { assetId: image.id, source: "upload", status: "succeeded" });
+    const doc: BoardDoc = { version: 1, nextRef: 4, nodes: [target, v, p], edges: [{ id: "v", source: v.id, target: target.id, kind: "input" }, { id: "p", source: p.id, target: target.id, kind: "input" }] };
+    await request(app).put(`/api/boards/${boardId}`).send({ doc, baseVersion: 1 }).expect(200);
+    const result = await request(app).post(`/api/boards/${boardId}/generate`).send({ nodeId: target.id }).expect(202);
+    const input = JSON.parse(context.db.getTaskRow(result.body.data.task.id)!.inputJson);
+    expect(input.klingVideoMode).toBe("motion-control");
+    expect(input.klingVideoMedia).toContainEqual({ type: "video", url: "https://files.example.com/reference.mp4" });
+    expect(input.klingVideoMedia.some((item: { type: string; url: string }) => item.type === "image" && item.url.startsWith("data:image/"))).toBe(true);
+    await waitForTask(app, result.body.data.task.id);
+  });
+  for (const targetType of ["config", "video"] as const) it(`${targetType} 节点从连线读取视频和音频并提交万相`, async () => {
+    const { app, context } = await tempApp();
+    const mock = await mockWanVideo();
+    const channel = addVideoChannel(context.db, mock.baseUrl);
+    context.db.saveChannel({ ...channel, uploadEndpoint: `${mock.baseUrl}/upload`, uploadHeaders: {} }, channel.id);
+    const boardId = (await request(app).post("/api/boards").send({ title: "多媒体" }).expect(201)).body.data.id as string;
+    const videoBytes = Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+    const audioBytes = Buffer.from("RIFFxxxxWAVEfmt ");
+    const video = (await request(app).post(`/api/boards/${boardId}/assets`).attach("file", videoBytes, { filename: "clip.mp4", contentType: "video/mp4" }).expect(201)).body.data;
+    const audio = (await request(app).post(`/api/boards/${boardId}/assets`).attach("file", audioBytes, { filename: "voice.wav", contentType: "audio/wav" }).expect(201)).body.data;
+    const target = nodeBase("n1", targetType, targetType === "config" ? { mode: "video", prompt: "电影感", useUpstreamText: true, count: 1, model: "wan-test", status: "idle" } : { assetId: null, source: "upload", status: "empty", prompt: "电影感", model: "wan-test" });
+    const v = nodeBase("n2", "video", { assetId: video.id, source: "upload", status: "succeeded" });
+    const a = nodeBase("n3", "audio", { assetId: audio.id, source: "upload", status: "succeeded", audioKind: "speech" });
+    const doc: BoardDoc = { version: 1, nextRef: 4, nodes: [target, v, a], edges: [{ id: "v", source: v.id, target: target.id, kind: "input" }, { id: "a", source: a.id, target: target.id, kind: "input" }] };
+    await request(app).put(`/api/boards/${boardId}`).send({ doc, baseVersion: 1 }).expect(200);
+    const generated = await request(app).post(`/api/boards/${boardId}/generate`).send({ nodeId: target.id }).expect(202);
+    await waitForTask(app, generated.body.data.task.id);
+    expect(mock.requests.some((item) => item.url === "/upload")).toBe(true);
+    const submit = mock.requests.find((item) => item.url?.includes("video-synthesis"));
+    const body = JSON.parse(submit!.body);
+    expect(body.input.media).toContainEqual({ type: "reference_video", url: "https://files.example.com/reference.mp4" });
+    expect(body.input.media).toContainEqual({ type: "reference_audio", url: `data:audio/wav;base64,${audioBytes.toString("base64")}` });
+  });
   it("按首帧提交视频任务、创建视频结果节点，并允许把视频写回文档", async () => {
     const { app, context } = await tempApp();
     const mock = await mockWanVideo();

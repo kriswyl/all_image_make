@@ -35,6 +35,23 @@ function writeCurrentBoard(id: string) {
   try { window.localStorage.setItem(CURRENT_BOARD_KEY, id); } catch { /* 忽略 */ }
 }
 
+function readMediaDuration(url: string, kind: "audio" | "video"): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const element = document.createElement(kind);
+    const timer = window.setTimeout(() => finish(new Error("读取素材时长超时")), 15000);
+    function finish(error?: Error) {
+      const duration = element.duration;
+      window.clearTimeout(timer);
+      element.removeAttribute("src");
+      if (error) reject(error); else resolve(duration);
+    }
+    element.preload = "metadata";
+    element.onloadedmetadata = () => Number.isFinite(element.duration) ? finish() : finish(new Error("无法读取素材时长"));
+    element.onerror = () => finish(new Error("无法读取素材，请检查文件是否有效"));
+    element.src = api.assetUrl(url);
+  });
+}
+
 function historyReasonLabel(reason: string): string {
   if (!reason || reason === "manual" || reason === "update") return reason === "update" ? "编辑节点" : "手动保存";
   if (reason === "import") return "导入";
@@ -594,7 +611,25 @@ export function BoardWorkspace({
     const label = kind === "video" ? "视频" : kind === "audio" ? "音频" : kind === "text" ? "文本" : "图片";
     const count = target.type === "config" && kind === "image" ? target.count : 1;
     const model = target.model?.trim() || "当前默认模型";
-    if (!confirmGeneration({ kind: `${label}生成`, model, detail: count > 1 ? `请求数量：${count} 张` : undefined })) return;
+    if (kind === "video" && board.view) {
+      const alias = videoAliases.find((item) => item.alias === (target.model || defaultVideoAlias)) ?? videoAliases[0];
+      const nodes = board.view.doc.edges.filter((edge) => edge.kind === "input" && edge.target === nodeId)
+        .map((edge) => board.view!.doc.nodes.find((item) => item.id === edge.source))
+        .filter((item): item is Extract<BoardNode, { type: "audio" | "video" }> => Boolean(item && (item.type === "audio" || item.type === "video")));
+      try {
+        for (const item of nodes) {
+          const asset = item.assetId ? assets.get(item.assetId) : undefined;
+          if (!asset) throw new Error(`节点 ${item.ref} 没有可用素材`);
+          const duration = await readMediaDuration(asset.url, item.type);
+          const min = item.type === "audio" ? 0 : alias?.adapterType === "kling-video" ? 3 : 1;
+          const max = item.type === "audio" ? 15 : alias?.adapterType === "kling-video" ? 30 : 15;
+          if (duration <= 0 || duration < min || duration > max) throw new Error(`节点 ${item.ref} 的${item.type === "audio" ? "音频" : "视频"}时长须为 ${min}–${max} 秒`);
+        }
+      } catch (error) { onToast("error", error instanceof Error ? error.message : "读取素材失败"); return; }
+    }
+    const hasReferenceVideo = kind === "video" && board.view?.doc.edges.some((edge) => edge.kind === "input" && edge.target === nodeId && board.view?.doc.nodes.some((item) => item.id === edge.source && item.type === "video" && item.assetId));
+    const detail = hasReferenceVideo ? "参考视频将上传到渠道图床，上传后可通过公网访问。" : count > 1 ? `请求数量：${count} 张` : undefined;
+    if (!confirmGeneration({ kind: `${label}生成`, model, detail })) return;
     const inPlace = target.type !== "config";
     const result = await board.generate(nodeId);
     if (!result) return;
@@ -609,7 +644,7 @@ export function BoardWorkspace({
     } else {
       onToast("success", `已提交 ${result.resultNodeIds.length} 张，结果会出现在配置节点右侧`);
     }
-  }, [board, onToast]);
+  }, [board, onToast, assets, videoAliases, defaultVideoAlias]);
 
   const deleteNode = useCallback((nodeId: string) => {
     const node = board.view?.doc.nodes.find((item) => item.id === nodeId);

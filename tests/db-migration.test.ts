@@ -39,6 +39,21 @@ function newDb(dir: string) {
   return db;
 }
 
+it("为旧词元流墟视频渠道迁移上传配置且不覆盖用户清空的设置", async () => {
+  const dir = await tempDir();
+  const db = newDb(dir);
+  const channel = db.saveChannel({ name: "wan", baseUrl: "https://api.tiantoken.com", adapterType: "wan-video", authType: "bearer", authHeaderName: "", secretEnv: "", endpoint: "", models: ["wan"], allowPrivateNetwork: false, enabled: true });
+  db.close();
+  const raw = new DatabaseSync(path.join(dir, "app.db"));
+  raw.exec("ALTER TABLE channels DROP COLUMN upload_endpoint; ALTER TABLE channels DROP COLUMN upload_headers_json");
+  raw.close();
+  const migrated = newDb(dir);
+  expect(migrated.getChannel(channel.id)).toMatchObject({ uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload", uploadHeaders: { "New-Api-User": "1" } });
+  migrated.saveChannel({ ...migrated.getChannel(channel.id)!, uploadEndpoint: "", uploadHeaders: {} }, channel.id);
+  migrated.close();
+  expect(newDb(dir).getChannel(channel.id)?.uploadEndpoint).toBe("");
+});
+
 /**
  * 把库改回「加列之前」的样子：丢掉 `canvas_asset_ids`、给 `current_asset_id` 写上老值。
  *

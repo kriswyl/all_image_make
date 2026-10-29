@@ -5,7 +5,9 @@
  * P0 不包含生成；配置节点的图片生成在 P1 接进来，仍然复用 TaskRunner。
  */
 import crypto from "node:crypto";
-import type { AppDatabase, BoardRecord } from "./db.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { AppDatabase, BoardRecord, DbChannel } from "./db.js";
 import {
   allocateNodeRef, boardGroups, BoardValidationError, BOARD_LIMITS, composeConfigPrompt, directInputLinks,
   directUpstreamImages,
@@ -33,6 +35,7 @@ import { BRAIN_RETRY_MAX_TOKENS, callBrain } from "./brain.js";
 import type { KeyStore } from "./key-store.js";
 import { boardView, requireBoard } from "./board-core.js";
 import { resolveBoardVideoSelection } from "./board-video-selection.js";
+import { uploadReferenceVideo } from "./reference-video.js";
 export { resolveBoardVideoSelection } from "./board-video-selection.js";
 export { addAssetsToBoard, appendConversationCanvasAssets, storeBoardUpload, removeBoardAsset, detachAssetFromBoards, listBoardAssets, linkBoardAsset } from "./board-assets.js";
 export type { BoardBridgeItem } from "./board-assets.js";
@@ -474,6 +477,46 @@ function requireBoardTask(db: AppDatabase, boardId: string, taskId: string) {
   return rows;
 }
 
+/** 视频节点经渠道图床上传，音频节点作为内联素材；生成确认中会提示公网上传。 */
+async function appendBoardMediaInputs(db: AppDatabase, keys: KeyStore, channel: DbChannel, doc: BoardDoc, nodeId: string, generation: GenerationInput): Promise<void> {
+  const links = directInputLinks(doc, nodeId);
+  const audioNode = links.find((link) => link.node.type === "audio")?.node;
+  const videoNode = links.find((link) => link.node.type === "video")?.node;
+  const readAsset = async (assetId: string, kind: "audio" | "video") => {
+    const asset = db.getAsset(assetId);
+    if (!asset || !asset.mimeType.startsWith(`${kind}/`)) throw new AppError("BOARD_ASSET_INVALID", `${kind === "audio" ? "音频" : "视频"}素材不存在或类型不匹配`, 400);
+    const base = path.resolve(asset.baseDir);
+    const file = path.resolve(base, asset.relativePath);
+    if (!file.startsWith(base + path.sep)) throw new AppError("BOARD_ASSET_INVALID", "素材路径无效", 400);
+    const limit = (kind === "audio" ? 15 : 100) * 1024 * 1024;
+    const stat = await fs.stat(file).catch(() => null);
+    if (!stat || !stat.isFile()) throw new AppError("BOARD_ASSET_INVALID", "素材文件不存在", 400);
+    if (stat.size > limit) throw new AppError("BOARD_ASSET_INVALID", `${kind === "audio" ? "音频不能超过 15 MB" : "视频不能超过 100 MB"}`, 400);
+    if (asset.duration && (kind === "audio" ? asset.duration > 15 : asset.duration < (channel.adapterType === "kling-video" ? 3 : 1) || asset.duration > (channel.adapterType === "kling-video" ? 30 : 15))) throw new AppError("BOARD_ASSET_INVALID", `${kind === "audio" ? "音频时长不能超过 15 秒" : "视频时长不符合当前模型要求"}`, 400);
+    return { asset, bytes: await fs.readFile(file) };
+  };
+  if (audioNode?.type === "audio" && audioNode.assetId) {
+    const { asset, bytes } = await readAsset(audioNode.assetId, "audio");
+    if (!["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/wav", "audio/x-wav"].includes(asset.mimeType)) throw new AppError("BOARD_ASSET_INVALID", "参考音频仅支持 MP3、M4A、AAC 或 WAV", 400);
+    const media = { type: "reference_audio" as const, url: `data:${asset.mimeType};base64,${bytes.toString("base64")}` };
+    if (media.url.length + (generation.wanVideoMedia ?? []).reduce((sum, item) => sum + (item.url.startsWith("data:") ? item.url.length : 0), 0) > 15 * 1024 * 1024) throw new AppError("BOARD_ASSET_INVALID", "音频和图片合计超过 15 MB 内联预算，请使用较小的素材", 400);
+    generation.wanVideoMedia = [...(generation.wanVideoMedia ?? []), media];
+    generation.wanVideoMode = "reference";
+  }
+  if (videoNode?.type === "video" && videoNode.assetId) {
+    const { asset, bytes } = await readAsset(videoNode.assetId, "video");
+    const url = await uploadReferenceVideo(channel, keys, { buffer: bytes, mimetype: asset.mimeType, originalname: asset.fileName });
+    if (channel.adapterType === "kling-video") {
+      generation.klingVideoMode = "motion-control";
+      generation.klingVideoMedia = [...(generation.klingVideoMedia ?? []), { type: "video", url }];
+      generation.klingCharacterOrientation = "video";
+    } else {
+      generation.wanVideoMode = "reference";
+      generation.wanVideoMedia = [...(generation.wanVideoMedia ?? []), { type: "reference_video", url }];
+    }
+  }
+}
+
 export function cancelBoardTask(db: AppDatabase, runner: TaskRunner, boardId: string, taskId: string): Task {
   requireBoardTask(db, boardId, taskId);
   return runner.cancel(taskId);
@@ -501,6 +544,7 @@ export async function retryBoardTask(input: {
 async function generateBoardVideo(input: {
   db: AppDatabase;
   runner: TaskRunner;
+  keys: KeyStore;
   boardId: string;
   board: BoardRecord;
   config: ConfigBoardNode;
@@ -601,7 +645,7 @@ async function generateBoardVideo(input: {
         generation.seedanceVideoMode = selection.mode as SeedanceVideoMode;
         if (selection.mode === "first-frame" || selection.mode === "first-last-frame") generation.ratio = "adaptive";
       } else if (channel.adapterType === "kling-video") {
-        generation.klingVideoMedia = media.map((item) => ({ type: item.role as KlingMediaType, url: item.url }));
+        generation.klingVideoMedia = media.map((item) => ({ type: selection.mode === "motion-control" ? "image" : item.role as KlingMediaType, url: item.url }));
         generation.klingVideoMode = selection.mode;
         generation.aspectRatio = generation.aspectRatio ?? "16:9";
       } else {
@@ -618,6 +662,7 @@ async function generateBoardVideo(input: {
     generation.aspectRatio = generation.aspectRatio ?? "16:9";
   }
 
+  await appendBoardMediaInputs(db, input.keys, channel, board.doc, config.id, generation);
   const task = await runner.create(generation, uploads);
 
   const at = now();
@@ -1047,6 +1092,7 @@ export async function generateBoardConfig(input: {
     return generateBoardMediaNode({
       db,
       runner,
+      keys: input.keys,
       boardId: input.boardId,
       board,
       node: media,
@@ -1072,7 +1118,7 @@ export async function generateBoardConfig(input: {
 
   if (config.mode === "video") {
     return generateBoardVideo({
-      db, runner,
+      db, runner, keys: input.keys,
       boardId: input.boardId,
       board,
       config,
@@ -1292,6 +1338,7 @@ export async function generateBoardConfig(input: {
 async function generateBoardMediaNode(input: {
   db: AppDatabase;
   runner: TaskRunner;
+  keys: KeyStore;
   boardId: string;
   board: BoardRecord;
   node: ImageBoardNode | VideoBoardNode | AudioBoardNode;
@@ -1453,7 +1500,7 @@ async function generateBoardMediaNode(input: {
           generation.seedanceVideoMode = selection.mode as SeedanceVideoMode;
           if (selection.mode === "first-frame" || selection.mode === "first-last-frame") generation.ratio = "adaptive";
         } else if (channel.adapterType === "kling-video") {
-          generation.klingVideoMedia = media.map((item) => ({ type: item.role as KlingMediaType, url: item.url }));
+          generation.klingVideoMedia = media.map((item) => ({ type: selection.mode === "motion-control" ? "image" : item.role as KlingMediaType, url: item.url }));
           generation.klingVideoMode = selection.mode;
           generation.aspectRatio = generation.aspectRatio ?? "16:9";
         } else {
@@ -1469,6 +1516,7 @@ async function generateBoardMediaNode(input: {
       generation.klingVideoMode = "text-to-video";
       generation.aspectRatio = generation.aspectRatio ?? "16:9";
     }
+    await appendBoardMediaInputs(db, input.keys, channel, board.doc, node.id, generation);
     task = await runner.create(generation, uploads);
     kind = "video";
     modelAlias = resolution.alias;
@@ -1477,7 +1525,7 @@ async function generateBoardMediaNode(input: {
       ...patch,
       model: resolution.alias,
       channelId: channel.id,
-      videoMode: selection.mode,
+      ...(selection.mode === "motion-control" ? {} : { videoMode: selection.mode }),
       durationSeconds: duration,
       resolution: resolutionValue,
       audio,

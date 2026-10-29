@@ -26,6 +26,8 @@ export interface ProviderPreset {
   label: string;
   baseUrl: string;
   keyHint?: string;
+  uploadEndpoint?: string;
+  uploadHeaders?: Record<string, string>;
   /** 站点品牌图标（public/ 下的路径）；没有就退回通用 Server 图标 */
   logo?: string;
   units: ChannelUnitPreset[];
@@ -161,6 +163,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     id: "tiantoken-wan-video",
     label: "词元流墟-万相视频",
     baseUrl: "https://api.tiantoken.com",
+    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    uploadHeaders: { "New-Api-User": "1" },
     logo: "/logo-tiantoken.svg",
     units: [
       {
@@ -215,6 +219,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     id: "tiantoken-kling-video",
     label: "词元流墟-可灵视频",
     baseUrl: "https://api.tiantoken.com",
+    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    uploadHeaders: { "New-Api-User": "1" },
     logo: "/logo-tiantoken.svg",
     units: [
       {
@@ -319,6 +325,7 @@ export function buildChannelDrafts(preset: ProviderPreset, selections: UnitSelec
         authHeaderName: "",
         secretEnv: selection.secretEnv || unit.secretEnv,
         endpoint: unit.endpoint ?? defaults.endpoint,
+        ...(preset.uploadEndpoint ? { uploadEndpoint: preset.uploadEndpoint, uploadHeaders: preset.uploadHeaders ?? {} } : {}),
         models,
         allowPrivateNetwork: false,
         enabled: true,

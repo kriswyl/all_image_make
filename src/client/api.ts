@@ -96,6 +96,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  uploadReferenceVideo: (channelId: string, file: File) => {
+    const form = new FormData();
+    form.append("channelId", channelId);
+    form.append("file", file, file.name);
+    return request<{ url: string }>("/api/uploads/reference-video", { method: "POST", body: form });
+  },
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
   saveChannel: (input: ChannelInput, id?: string) => request<Channel>(id ? `/api/channels/${id}` : "/api/channels", {
     method: id ? "PATCH" : "POST",

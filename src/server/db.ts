@@ -31,6 +31,8 @@ export interface DbChannel {
   authHeaderName: string;
   secretEnv: string;
   endpoint: string;
+  uploadEndpoint?: string;
+  uploadHeaders?: Record<string, string>;
   models: string[];
   allowPrivateNetwork: boolean;
   enabled: boolean;
@@ -241,6 +243,8 @@ export class AppDatabase {
       input.authHeaderName ?? "",
       input.secretEnv ?? "",
       input.endpoint ?? "",
+      input.uploadEndpoint ?? "",
+      JSON.stringify(input.uploadHeaders ?? {}),
       "",
       JSON.stringify(input.models ?? []),
       input.allowPrivateNetwork ? 1 : 0,
@@ -250,13 +254,13 @@ export class AppDatabase {
     ];
     this.db.prepare(`
       INSERT INTO channels
-      (id, name, base_url, adapter_type, auth_type, auth_header_name, secret_env, endpoint, status_endpoint,
+      (id, name, base_url, adapter_type, auth_type, auth_header_name, secret_env, endpoint, upload_endpoint, upload_headers_json, status_endpoint,
        models_json, allow_private_network, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name=excluded.name, base_url=excluded.base_url, adapter_type=excluded.adapter_type,
         auth_type=excluded.auth_type, auth_header_name=excluded.auth_header_name, secret_env=excluded.secret_env,
-        endpoint=excluded.endpoint, status_endpoint=excluded.status_endpoint, models_json=excluded.models_json,
+        endpoint=excluded.endpoint, upload_endpoint=excluded.upload_endpoint, upload_headers_json=excluded.upload_headers_json, status_endpoint=excluded.status_endpoint, models_json=excluded.models_json,
         allow_private_network=excluded.allow_private_network, enabled=excluded.enabled, updated_at=excluded.updated_at
     `).run(...values);
     return this.getChannel(id)!;
@@ -2006,7 +2010,7 @@ export class AppDatabase {
     return {
       id: String(row.id), name: String(row.name), baseUrl: String(row.base_url), adapterType: String(row.adapter_type) as AdapterType,
       authType: String(row.auth_type) as AuthType, authHeaderName: String(row.auth_header_name ?? ""), secretEnv: String(row.secret_env ?? ""),
-      endpoint: String(row.endpoint ?? ""), models: parseJson(row.models_json, []),
+      endpoint: String(row.endpoint ?? ""), uploadEndpoint: String(row.upload_endpoint ?? ""), uploadHeaders: parseJson(row.upload_headers_json, {}), models: parseJson(row.models_json, []),
       allowPrivateNetwork: Boolean(row.allow_private_network), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     };
   }

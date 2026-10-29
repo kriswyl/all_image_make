@@ -13,6 +13,7 @@ import type {
   AudioBoardNode, BoardNode, ConfigBoardNode, ImageBoardNode, TextBoardNode, VideoBoardNode,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
+import { api } from "../api";
 
 export interface BoardNodeViewProps {
   node: BoardNode;
@@ -34,7 +35,7 @@ export interface BoardNodeViewProps {
 }
 
 function assetSrc(asset: Asset, thumb = true): string {
-  return asset.thumbUrl && thumb ? asset.thumbUrl : asset.url;
+  return api.assetUrl(asset.thumbUrl && thumb ? asset.thumbUrl : asset.url);
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -313,7 +314,7 @@ function VideoNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage
         >
           {asset ? (
             <>
-              <video src={`${asset.url}#t=0.1`} muted preload="metadata" playsInline />
+              <video src={`${api.assetUrl(asset.url)}#t=0.1`} muted preload="metadata" playsInline />
               <span className="board-video-play"><Play size={14} /></span>
             </>
           ) : (

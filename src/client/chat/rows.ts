@@ -30,7 +30,13 @@ export function buildRows(messages: ChatMessage[]): Row[] {
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message) continue;
-    if (message.role === "user") { rows.push({ kind: "user", message }); continue; }
+    if (message.role === "user") {
+      // 图片上传会落一条内部记录供会话素材和模型上下文引用；实际发言会携带 assetRefs。
+      // 隐藏这条上传提示，避免和随后发送的图文气泡重复显示。
+      if (message.assetId && message.content?.startsWith("上传了图片 ") && !message.assetRefs?.length && !message.documents?.length) continue;
+      rows.push({ kind: "user", message });
+      continue;
+    }
     if (message.role === "system") { rows.push({ kind: "note", message }); continue; }
     if (message.role === "tool") {
       // 已经被上一张卡折走；没被折走就自己和自己配对，好歹显示出来
