@@ -7,10 +7,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  AudioLines, Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, LoaderCircle, Menu,
+  Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, LoaderCircle, Menu,
   Pencil, Plus, Redo2, Trash2, Undo2, Upload, X,
 } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
+import { confirmGeneration } from "../generation-confirm";
 import { AssetLightbox } from "../chat/AssetLightbox";
 import {
   createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
@@ -19,6 +20,7 @@ import type { CanvasTemplateSummary } from "../../shared/canvas-template";
 import type { Asset } from "../../shared/types";
 import { BoardAgentPanel } from "./BoardAgentPanel";
 import { BoardCanvas } from "./BoardCanvas";
+import { BoardMaterialDialog } from "./BoardMaterialDialog";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "./CrossModeBridgeDialog";
 import { BoardInspector, type BoardImageAlias, type BoardVideoAlias } from "./BoardInspector";
 import { useBoard } from "./useBoard";
@@ -141,6 +143,9 @@ export function BoardWorkspace({
   const [agentOpen, setAgentOpen] = useState(true);
   const [agentUi, setAgentUi] = useState<BoardAgentUiState | undefined>(undefined);
   const [assetDrawerOpen, setAssetDrawerOpen] = useState(false);
+  const [assetTargetId, setAssetTargetId] = useState<string | null>(null);
+  const [assetSearch, setAssetSearch] = useState("");
+  const [assetType, setAssetType] = useState<"all" | "image" | "video" | "audio">("all");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [templateDrawerOpen, setTemplateDrawerOpen] = useState(false);
@@ -361,9 +366,17 @@ export function BoardWorkspace({
   }, [assets, board.view?.doc]);
 
   const pickImage = useCallback((nodeId: string | null) => {
+    if (nodeId) {
+      setAssetTargetId(nodeId);
+      setAssetSearch("");
+      const node = board.view?.doc.nodes.find((item) => item.id === nodeId);
+      setAssetType(node?.type === "video" || node?.type === "audio" ? node.type : "image");
+      setAssetDrawerOpen(true);
+      return;
+    }
     uploadTargetRef.current = nodeId;
     fileInputRef.current?.click();
-  }, []);
+  }, [board.view]);
 
   const handleFiles = useCallback(async (files: File[], position?: { x: number; y: number }) => {
     if (!files.length || !currentId) return;
@@ -576,7 +589,13 @@ export function BoardWorkspace({
 
   const generateNode = useCallback(async (nodeId: string) => {
     const target = board.view?.doc.nodes.find((node) => node.id === nodeId);
-    const inPlace = Boolean(target && target.type !== "config" && target.type !== "text");
+    if (!target || target.type === "text") return;
+    const kind = target.type === "config" ? target.mode : target.type;
+    const label = kind === "video" ? "视频" : kind === "audio" ? "音频" : kind === "text" ? "文本" : "图片";
+    const count = target.type === "config" && kind === "image" ? target.count : 1;
+    const model = target.model?.trim() || "当前默认模型";
+    if (!confirmGeneration({ kind: `${label}生成`, model, detail: count > 1 ? `请求数量：${count} 张` : undefined })) return;
+    const inPlace = target.type !== "config";
     const result = await board.generate(nodeId);
     if (!result) return;
     if (result.kind === "text") {
@@ -599,6 +618,13 @@ export function BoardWorkspace({
     }
     board.removeNodes([nodeId]);
   }, [board]);
+
+  const retryBoardTask = useCallback(async (taskId: string) => {
+    try {
+      const task = await api.task(taskId);
+      if (confirmGeneration({ kind: "生成", model: task.model, channel: task.channelName, retry: true })) await board.retryTask(taskId);
+    } catch (error) { onToast("error", error instanceof Error ? error.message : "读取任务失败"); }
+  }, [board, onToast]);
 
   const rename = useCallback(() => {
     const value = titleDraft.trim();
@@ -680,40 +706,41 @@ export function BoardWorkspace({
           </span>
           <button
             type="button"
-            className={`secondary-button compact ${assetDrawerOpen ? "is-on" : ""}`}
+            className={`secondary-button compact board-action-primary ${assetDrawerOpen ? "is-on" : ""}`}
             onClick={() => {
               setHistoryOpen(false);
               setTemplateDrawerOpen(false);
+              setAssetTargetId(null);
               setAssetDrawerOpen((open) => !open);
             }}
             title="查看这块无限画布用到的素材"
           >
             <ImageIcon size={12} /><span>素材{boardAssets.length ? ` ${boardAssets.length}` : ""}</span>
           </button>
-          <button type="button" className="secondary-button compact" onClick={() => pickImage(null)} title="上传图片到无限画布">
+          <button type="button" className="secondary-button compact board-action-primary" onClick={() => pickImage(null)} title="上传图片到无限画布">
             <Upload size={12} /><span>上传图片</span>
           </button>
           <button
             type="button"
-            className="icon-button compact"
+            className="secondary-button compact"
             title="导入无限画布（JSON）"
             aria-label="导入无限画布"
             onClick={() => importInputRef.current?.click()}
           >
-            <FileUp size={13} />
+            <FileUp size={13} /><span>导入</span>
           </button>
           <button
             type="button"
-            className="icon-button compact"
+            className="secondary-button compact"
             title="导出无限画布（JSON）"
             aria-label="导出无限画布"
             onClick={() => void exportBoard()}
           >
-            <Download size={13} />
+            <Download size={13} /><span>导出</span>
           </button>
           <button
             type="button"
-            className={`secondary-button compact ${agentOpen ? "is-on" : ""}`}
+            className={`secondary-button compact board-action-primary ${agentOpen ? "is-on" : ""}`}
             onClick={() => setAgentOpen((open) => !open)}
             title={agentOpen ? "收起无限画布助手" : "打开无限画布助手"}
           >
@@ -731,7 +758,7 @@ export function BoardWorkspace({
           onPreviewAsset={setPreview}
           onGenerate={(nodeId) => void generateNode(nodeId)}
           onStopTask={(taskId) => void board.cancelTask(taskId)}
-          onRetryTask={(taskId) => void board.retryTask(taskId)}
+          onRetryTask={(taskId) => void retryBoardTask(taskId)}
         />
         {selectedNode ? (
           <BoardInspector
@@ -754,7 +781,7 @@ export function BoardWorkspace({
             onRemoveAsset={(nodeId) => board.updateNode(nodeId, { assetId: null, status: "empty" } as Partial<BoardNode>)}
             onGenerate={(nodeId) => void generateNode(nodeId)}
             onStopTask={(taskId) => void board.cancelTask(taskId)}
-            onRetryTask={(taskId) => void board.retryTask(taskId)}
+            onRetryTask={(taskId) => void retryBoardTask(taskId)}
             onClose={() => board.setSelection([])}
           />
         ) : null}
@@ -975,69 +1002,7 @@ export function BoardWorkspace({
         </aside>
       ) : null}
 
-      {assetDrawerOpen ? (
-        <aside className="board-asset-drawer" aria-label="无限画布素材">
-          <header className="board-asset-head">
-            <div>
-              <strong>素材</strong>
-              <span>{boardAssets.length} 个文件 · 只显示画板正在用的素材</span>
-            </div>
-            <button type="button" className="icon-button compact" aria-label="关闭素材抽屉" onClick={() => setAssetDrawerOpen(false)}>
-              <X size={14} />
-            </button>
-          </header>
-          <div className="board-asset-list">
-            {boardAssets.map((asset) => {
-              const video = asset.mimeType.startsWith("video/");
-              const audio = asset.mimeType.startsWith("audio/");
-              return (
-                <article key={asset.id} className="board-asset-card">
-                  <button
-                    type="button"
-                    className="board-asset-thumb"
-                    title="预览"
-                    onClick={() => setPreview(asset)}
-                  >
-                    {video
-                      ? <video src={`${asset.url}#t=0.1`} muted preload="metadata" playsInline />
-                      : audio
-                        ? <span className="board-asset-audio"><AudioLines size={20} /></span>
-                        : <img src={asset.thumbUrl ?? asset.url} alt="" loading="lazy" />}
-                  </button>
-                  <div className="board-asset-meta">
-                    <strong title={asset.fileName}>{asset.fileName}</strong>
-                    <span>{video ? "视频" : audio ? "音频" : "图片"} · {(asset.byteSize / 1024).toFixed(0)} KB</span>
-                  </div>
-                  <div className="board-asset-actions">
-                    {video || audio ? null : (
-                      <button
-                        type="button"
-                        className="secondary-button compact"
-                        onClick={() => board.addImageNode(asset, undefined, asset.fileName.replace(/\.[^.]+$/, ""))}
-                      >
-                        插入画布
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="secondary-button compact is-danger"
-                      onClick={() => {
-                        if (!window.confirm("从这块无限画布移除这个素材？引用它的节点会被清空，素材文件本身不会删除。")) return;
-                        void board.removeAsset(asset.id);
-                      }}
-                    >
-                      移除
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-            {!boardAssets.length ? (
-              <p className="board-asset-empty">还没有素材。上传图片或生成结果后，它们会出现在这里。</p>
-            ) : null}
-          </div>
-        </aside>
-      ) : null}
+      {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId} onPreview={setPreview} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); }} onToast={onToast} /> : null}
 
       {preview ? (
         <AssetLightbox

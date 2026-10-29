@@ -4,6 +4,7 @@ import {
   SlidersHorizontal, Square, Disc3,
 } from "lucide-react";
 import { api } from "./api";
+import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import {
@@ -143,6 +144,7 @@ export function MusicGenerateView(props: {
       return props.onToast("error", "高级参数必须是 JSON 对象");
     }
 
+    if (!confirmGeneration({ kind: "音乐生成", model: props.selectedModel, channel: channel.name, detail: "一次生成两首" })) return;
     setSubmitting(true);
     try {
       const task = await api.generate({
@@ -444,6 +446,7 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 
   async function retry() {
     if (!task) return;
+    if (!confirmGeneration({ kind: "音乐生成", model: task.model, channel: task.channelName, detail: "一次生成两首", retry: true })) return;
     try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
     catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }

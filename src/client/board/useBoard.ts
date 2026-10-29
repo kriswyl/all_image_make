@@ -134,6 +134,7 @@ export interface UseBoardResult {
   restoreVersion: (version: number) => Promise<void>;
   importTemplate: (templateId: string) => Promise<number | null>;
   flush: () => Promise<void>;
+  ensureSaved: () => Promise<boolean>;
 }
 
 export function useBoard(
@@ -336,7 +337,7 @@ export function useBoard(
           const now = Date.now();
           if (retryFailuresRef.current >= 2 && now - retryToastAtRef.current > 20_000) {
             retryToastAtRef.current = now;
-            toastRef.current("error", "连接中断，正在重试保存…");
+            toastRef.current("error", error instanceof ApiError ? `保存暂未成功：${error.message}，正在重试…` : "无法连接本地服务，正在重试保存…");
           }
         } else {
           retryPendingRef.current = false;
@@ -361,6 +362,22 @@ export function useBoard(
   }, [reload, setView]);
 
   flushRef.current = flush;
+
+  /** 外部操作前等待在途保存结束；失败时保留本地改动，不允许后续操作覆盖它。 */
+  const ensureSaved = useCallback(async (): Promise<boolean> => {
+    const boardId = boardIdRef.current;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && boardIdRef.current === boardId) {
+      if (savingRef.current) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+        continue;
+      }
+      if (!pendingRef.current) return true;
+      await flush();
+      if (retryPendingRef.current) return false;
+    }
+    return false;
+  }, [flush]);
 
   const scheduleSave = useCallback((immediate = false) => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
@@ -1084,11 +1101,12 @@ export function useBoard(
     restoreVersion,
     importTemplate,
     flush,
+    ensureSaved,
   }), [
     view, loading, saving, retrying, selection, viewport,
     reload, applyDelta, setSelection, setViewport, addNode, addImageNode, updateNode, updateNodeSilently,
     removeNodes, duplicateNodes, autoLayout, moveNodes, addEdge, updateEdge, removeEdges,
     createGroup, updateGroup, ungroup, generate, cancelTask, retryTask,
-    uploadAsset, removeAsset, rename, undo, redo, restoreVersion, importTemplate, flush,
+    uploadAsset, removeAsset, rename, undo, redo, restoreVersion, importTemplate, flush, ensureSaved,
   ]);
 }

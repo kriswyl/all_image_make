@@ -688,7 +688,7 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
 
   input.timeoutMs = IMAGE_TASK_TIMEOUT_MS;
   try {
-    const created = await ctx.runner.create(input, uploads);
+    const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
     const imagePart = selection.assets.length
@@ -804,7 +804,7 @@ async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise
   };
 
   try {
-    const created = await ctx.runner.create(input);
+    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
     const modeLabel: Record<string, string> = {
@@ -896,7 +896,7 @@ async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promi
   };
 
   try {
-    const created = await ctx.runner.create(input);
+    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const task = await ctx.runner.waitFor(created.id, { timeoutMs: 360_000, signal: ctx.signal });
     const asset = task.assets.find((item) => item.mimeType.startsWith("audio/"));
@@ -1040,7 +1040,7 @@ async function generateImage(
   for (let attempt = 0; ; attempt += 1) {
     let taskId: string;
     try {
-      const created = await ctx.runner.create(input, uploads);
+      const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id);
       taskId = created.id;
       ctx.emit({ type: "progress", taskId, status: created.status, progress: created.progress });
     } catch (error) {

@@ -93,7 +93,7 @@ export function BoardAgentPanel({
   const [reasoning, setReasoning] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
-  const [ui, setUi] = useState<BoardAgentUiState>(() => clampUi({ ...defaultUi(), ...(initialUiState ?? {}) }));
+  const [ui, setUi] = useState<BoardAgentUiState>(() => clampUi({ ...defaultUi(), ...(initialUiState ?? {}), collapsed: true, bubbleX: viewportSize().width - 60, bubbleY: 102 }));
   const [unread, setUnread] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);

@@ -29,7 +29,7 @@ import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard.j
 import {
   addAssetsToBoard, appendConversationCanvasAssets,
   cancelBoardTask, createBoard, deleteBoard, detachAssetFromBoards, generateBoardConfig, getBoard,
-  importBoard, listBoardAssets, listBoardHistory, listBoards, redoBoard, removeBoardAsset, renameBoard,
+  importBoard, listBoardAssets, listBoardHistory, listBoards, linkBoardAsset, redoBoard, removeBoardAsset, renameBoard,
   restoreBoardVersion, retryBoardTask, saveBoard,
   saveBoardSelection, saveBoardUiState, saveBoardViewport, storeBoardUpload, undoBoard,
 } from "./board.js";
@@ -70,6 +70,11 @@ const conversationUpload = multer({
   fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
     ? callback(null, true)
     : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 图片", 400)),
+});
+/** 画布素材包括本地视频和音频；图片仍按 10 MB 限制。 */
+const boardUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 0 },
 });
 
 const channelSchema = z.object({
@@ -583,7 +588,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(listBoardAssets(db, routeParam(req.params.id))));
   });
 
-  app.post("/api/boards/:id/assets", conversationUpload.single("file"), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:id/assets", boardUpload.single("file"), asyncHandler(async (req, res) => {
     if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
     const asset = await storeBoardUpload(db, routeParam(req.params.id), {
       buffer: req.file.buffer,
@@ -592,6 +597,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     });
     res.status(201).json(ok(asset));
   }));
+
+  app.post("/api/boards/:id/assets/:assetId/link", (req, res) => {
+    res.json(ok(linkBoardAsset(db, routeParam(req.params.id), routeParam(req.params.assetId))));
+  });
 
   app.delete("/api/boards/:id/assets/:assetId", (req, res) => {
     res.json(ok(removeBoardAsset(db, routeParam(req.params.id), routeParam(req.params.assetId))));
@@ -741,6 +750,26 @@ export function createApp(options: { dataDir?: string } = {}) {
       res.status(202).json(ok(task));
   }));
 
+  app.get("/api/library", (req, res) => {
+    if (req.query.limit === undefined) return res.json(ok(db.listLibraryTaskViews()));
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(req.query.limit) || 60)));
+    const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+    const kind = req.query.kind === "image" || req.query.kind === "video" || req.query.kind === "audio" ? req.query.kind : "all";
+    const mode = req.query.mode === "assets" || req.query.mode === "records" ? req.query.mode : "all";
+    const items = db.listLibraryTaskViews({ limit: limit + 1, offset, query: String(req.query.q ?? "").slice(0, 200), kind, mode });
+    res.json(ok({ items: items.slice(0, limit), hasMore: items.length > limit }));
+  });
+
+  app.post("/api/generations/batch-delete", asyncHandler(async (req, res) => {
+    const input = z.object({ ids: z.array(z.string().min(1).max(80)).max(50000), keepFiles: z.boolean().default(false) }).parse(req.body);
+    const ids = [...new Set(input.ids)].filter((id) => db.getTaskRow(id));
+    if (ids.some((id) => db.taskHasConversationReferences(id))) throw new AppError("ASSET_SHARED", "所选记录中有素材仍被对话引用，请先解除引用后再删除。", 409);
+    for (const id of ids) for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
+    const removed = db.deleteTasks(ids, { keepFiles: input.keepFiles });
+    await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
+    res.json(ok({ deleted: removed.deleted.length, keepFiles: input.keepFiles }));
+  }));
+
   app.get("/api/generations", (req, res) => {
     const limit = Math.max(1, Math.min(100, Number(req.query.limit ?? 40)));
     res.json(ok(db.listTaskViews(limit)));
@@ -802,7 +831,7 @@ export function createApp(options: { dataDir?: string } = {}) {
         ...(input.label?.trim() ? { label: input.label.trim() } : {}),
       },
       timeoutMs: 180_000,
-    });
+    }, [], undefined, parent.libraryScope === "conversation" || (parent.libraryScope === "legacy" && db.taskHasConversationReferences(parent.id)) ? "conversation" : "public", parent.ownerConversationId ?? undefined);
     res.status(202).json(ok(task));
   }));
 
@@ -817,6 +846,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const id = routeParam(req.params.id);
     if (!db.getTaskRow(id)) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
     const keepFiles = req.query.keepFiles === "1";
+    if (db.taskHasConversationReferences(id)) throw new AppError("ASSET_SHARED", "该记录仍被对话引用，请先解除引用，避免影响对话素材。", 409);
     // 无限画布节点也引用这份素材；先摘掉引用，再删任务和文件
     for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
     const removed = db.deleteTask(id, { keepFiles });
@@ -845,6 +875,7 @@ export function createApp(options: { dataDir?: string } = {}) {
         .filter((row) => scope === "all" || db.taskKindRow(row, adapterByChannel) === scope)
         .map((row) => row.id);
     }
+    if (targets.some((id) => db.taskHasConversationReferences(id))) throw new AppError("ASSET_SHARED", "所选记录中有素材仍被对话引用，请先解除引用后再删除。", 409);
     for (const id of targets) {
       for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
     }
@@ -986,6 +1017,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === assetId);
     if (!belongs) throw new AppError("ASSET_NOT_FOUND", "这张图不属于当前会话", 404);
+    const asset = db.getAsset(assetId);
+    if (asset && (db.getTaskRow(asset.taskId)?.libraryScope === "public" || db.findBoardAssetRefs(assetId).length > 0 || db.assetHasOtherConversationReferences(assetId, id))) {
+      throw new AppError("ASSET_SHARED", "该素材也属于公共素材或被画布引用，请先在相应位置处理，避免影响其他作品。", 409);
+    }
     const removed = db.deleteConversationAsset(id, assetId);
     if (!removed) throw new AppError("ASSET_NOT_FOUND", "图片不存在", 404);
     await removeStoredFiles(removed.files, removed.inputs, db.inputsDir);
@@ -1063,7 +1098,7 @@ export function createApp(options: { dataDir?: string } = {}) {
       const thumbPath = await writeThumbnail(db, assetId, file.buffer);
       db.createTask({
         id: taskId, channelId: "", model: "", prompt: "上传图片",
-        input: {}, origin: "upload", status: "succeeded",
+        input: {}, origin: "upload", libraryScope: "conversation", ownerConversationId: id, status: "succeeded",
       });
       db.insertAsset({
         id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
@@ -1193,12 +1228,12 @@ export function createApp(options: { dataDir?: string } = {}) {
     app.get("*path", (_req, res) => res.sendFile(path.join(clientDir, "index.html")));
   }
 
-  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = crypto.randomUUID();
     if (error instanceof multer.MulterError) {
       // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
       if (error.code === "LIMIT_FILE_SIZE") {
-        const message = error.field === "mask" ? "蒙版不能超过 4 MB" : "单张参考图不能超过 10 MB";
+        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 4 MB" : "单张参考图不能超过 10 MB";
         return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
       }
       if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {

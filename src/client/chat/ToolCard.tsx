@@ -8,6 +8,7 @@
 import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
 import { LazyVideoThumb } from "../LazyVideoThumb";
 import { ParamChips } from "../ParamChips";
@@ -171,10 +172,11 @@ export function ToolCard({
 
   async function midjourneyAct(button: MidjourneyButton) {
     if (!mjTaskId || mjBusy) return;
+    if (!confirmGeneration({ kind: `Midjourney ${midjourneyButtonLabel(button)}`, model: "Midjourney" })) return;
     setMjBusy(true);
     try {
       await api.midjourneyAction(mjTaskId, button.customId, midjourneyButtonLabel(button));
-      onToast?.("ok", `已提交「${midjourneyButtonLabel(button)}」，到「历史记录」查看结果`);
+      onToast?.("ok", `已提交「${midjourneyButtonLabel(button)}」，任务在后台继续`);
     } catch (error) {
       onToast?.("error", error instanceof Error ? error.message : "Midjourney 操作提交失败");
     } finally {

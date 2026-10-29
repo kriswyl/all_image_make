@@ -78,6 +78,8 @@
   align-items: center;
   gap: 7px;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 .board-topbar-actions .secondary-button {
   flex: 0 0 auto;
@@ -1439,18 +1441,16 @@
   max-height: min(320px, calc(100vh - 24px));
 }
 
-/* 顶栏在默认窗口宽度下不要被最后一排按钮撑出窗口：
-   小于 1500px 时只留图标（tooltip 还在），标题也一起收窄 */
+/* 默认窗口保留操作文字；更窄时可横向滚动，不丢失入口。 */
 @media (max-width: 1560px) {
   .board-topbar { gap: 8px; }
   .board-title { width: min(260px, 28vw); }
   .board-topbar-actions { gap: 5px; }
-  .board-topbar-actions .secondary-button > span { display: none; }
   .board-topbar-actions .secondary-button { padding-inline: 8px; }
-  .board-save-state { display: none; }
 }
 @media (max-width: 1100px) {
   .board-title { width: min(190px, 24vw); }
+  .board-topbar-actions .secondary-button:not(.board-action-primary) > span { display: none; }
 }
 
 /* 有结果后提示词默认收起，把高度让给图片；展开按钮留在右下角 */

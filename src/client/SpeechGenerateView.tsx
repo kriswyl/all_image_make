@@ -3,6 +3,7 @@ import {
   AlertCircle, AudioLines, Download, Eye, KeyRound, LoaderCircle, Mic, Plus, RotateCcw, Square,
 } from "lucide-react";
 import { api } from "./api";
+import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import {
@@ -53,6 +54,7 @@ export function SpeechGenerateView(props: {
       return props.onToast("error", "双人对话正文需要用「A：」「B：」标出两段台词");
     }
 
+    if (!confirmGeneration({ kind: "语音生成", model: props.selectedModel, channel: channel.name })) return;
     setSubmitting(true);
     try {
       const task = await api.generate({
@@ -243,6 +245,7 @@ function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, o
 
   async function retry() {
     if (!task) return;
+    if (!confirmGeneration({ kind: "语音生成", model: task.model, channel: task.channelName, retry: true })) return;
     try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
     catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }

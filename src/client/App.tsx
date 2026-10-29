@@ -550,17 +550,17 @@ export function App() {
   }
 
   /** 清空指定类型的历史：图片、视频、音乐或全部 */
-  function requestClearTasks(scope: ClearScope = "all") {
-    const target = scope === "image" ? imageTasks
+  function requestClearTasks(scope: ClearScope = "all", allRecords?: Task[]) {
+    const target = allRecords ?? (scope === "image" ? imageTasks
       : scope === "video" ? videoTasks
       : scope === "audio" ? audioTasks
-      : tasks;
+      : tasks);
     if (!target.length) return;
     const label = scope === "image" ? "生图记录"
       : scope === "video" ? "视频记录"
       : scope === "audio" ? "音频记录"
       : "记录";
-    setClearRequest({ mode: "scope", scope, count: target.length, label, tasks: target });
+    setClearRequest({ mode: "selection", count: target.length, label, tasks: target });
   }
 
   /** 弹窗里选完之后真正执行删除。keepFiles 为真时磁盘上的图片视频原地保留 */
@@ -755,7 +755,7 @@ export function App() {
           <NavButton active={view === "video"} icon={<Film size={16} />} label="视频生成" onClick={() => { dismissWelcome(); switchView("video"); }} />
           <NavButton active={view === "music"} icon={<Music size={16} />} label="音乐生成" onClick={() => { dismissWelcome(); switchView("music"); }} />
           <NavButton active={view === "speech"} icon={<Mic size={16} />} label="语音生成" onClick={() => { dismissWelcome(); switchView("speech"); }} />
-          <NavButton active={view === "history"} icon={<History size={16} />} label="历史记录" unread={historyUnread} onClick={() => { dismissWelcome(); switchView("history"); }} />
+          <NavButton active={view === "history"} icon={<History size={16} />} label="素材管理" unread={historyUnread} onClick={() => { dismissWelcome(); switchView("history"); }} />
           <NavButton active={view === "channels"} icon={<Plug size={16} />} label="模型设置" onClick={() => { dismissWelcome(); switchView("channels"); }} />
         </nav>
 

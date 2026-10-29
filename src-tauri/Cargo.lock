@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "image_relay_studio"
-version = "2.2.6"
+version = "2.2.7"
 dependencies = [
  "log",
  "serde",

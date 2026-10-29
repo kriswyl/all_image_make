@@ -370,6 +370,7 @@ export interface Asset {
 
 export interface Task {
   id: string;
+  origin?: "generate" | "upload";
   channelId: string;
   channelName: string;
   model: string;

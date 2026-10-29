@@ -45,6 +45,31 @@ async function setup() {
 }
 
 describe("素材库删除图片", () => {
+  it("被画布引用的对话上传素材不能被会话删除；删除会话也保留素材", async () => {
+    const { app, db, conversationId, assetId } = await setup();
+    const board = (await request(app).post("/api/boards").send({ title: "共享" }).expect(201)).body.data;
+    await request(app).post(`/api/boards/${board.id}/bridge/assets`).send({ items: [{ assetId }] }).expect(200);
+    await request(app).delete(`/api/conversations/${conversationId}/assets/${assetId}`).expect(409);
+    await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+    expect(db.getAsset(assetId)).not.toBeNull();
+    expect(db.findBoardAssetRefs(assetId).some((ref) => ref.boardId === board.id)).toBe(true);
+  });
+
+  it("对话引用的素材不能从公共生成记录删除", async () => {
+    const { app, db, assetId, taskId } = await setup();
+    await request(app).delete(`/api/generations/${taskId}`).expect(409);
+    expect(db.getAsset(assetId)).not.toBeNull();
+  });
+
+  it("显式标记的对话素材在删除会话后仍不会变成公共素材", async () => {
+    const { app, db, conversationId } = await setup();
+    const taskId = crypto.randomUUID();
+    db.createTask({ id: taskId, channelId: "", model: "", prompt: "私有生成", input: {}, status: "succeeded", libraryScope: "conversation" });
+    db.appendMessage({ conversationId, role: "assistant", content: "结果", taskId });
+    expect((await request(app).get("/api/library").expect(200)).body.data.some((task: { id: string }) => task.id === taskId)).toBe(false);
+    await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+    expect((await request(app).get("/api/library").expect(200)).body.data.some((task: { id: string }) => task.id === taskId)).toBe(false);
+  });
   it("删掉任务、消息引用、画布和分镜 / 设定图指针", async () => {
     const { app, db, conversationId, assetId, taskId } = await setup();
     const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data as {

@@ -3,9 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset, TaskKind } from "../shared/types.js";
 import { isAudioAsset, isImageAsset } from "../shared/types.js";
-import { taskKindFor } from "../shared/kinds.js";
+import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
+import { initializeSchema } from "./db-schema.js";
+import { BoardRepository } from "./db-board.js";
 import type {
   AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
@@ -15,8 +17,8 @@ import {
   type StoryboardShot, type StoryboardShotKind, type StoryboardShotStatus, type StoryboardVideoMode,
 } from "../shared/storyboard.js";
 import {
-  BOARD_LIMITS, boardGroups, createEmptyBoardDoc, parseBoardDoc, parseBoardSelection, parseBoardUiState, parseBoardViewport,
-  type BoardDoc, type BoardSummary, type BoardUiState, type BoardViewport,
+  boardGroups, createEmptyBoardDoc, parseBoardDoc,
+  type BoardDoc, type BoardUiState, type BoardViewport,
 } from "../shared/board.js";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template.js";
 
@@ -111,6 +113,7 @@ export class AppDatabase {
   readonly defaultAssetsDir: string;
   private currentAssetsDir: string;
   private readonly db: DatabaseSync;
+  private readonly boards: BoardRepository;
 
   /** 产物目录可以在运行时改，所以是 getter 而不是 readonly 字段 */
   get assetsDir(): string {
@@ -128,475 +131,9 @@ export class AppDatabase {
     fs.mkdirSync(this.thumbsDir, { recursive: true });
     this.filePath = path.join(dataDir, "app.db");
     this.db = new DatabaseSync(this.filePath);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS channels (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        base_url TEXT NOT NULL,
-        adapter_type TEXT NOT NULL,
-        auth_type TEXT NOT NULL,
-        auth_header_name TEXT NOT NULL DEFAULT '',
-        secret_env TEXT NOT NULL DEFAULT '',
-        endpoint TEXT NOT NULL DEFAULT '',
-        status_endpoint TEXT NOT NULL DEFAULT '',
-        models_json TEXT NOT NULL DEFAULT '[]',
-        allow_private_network INTEGER NOT NULL DEFAULT 0,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
-        channel_id TEXT NOT NULL,
-        model TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        status TEXT NOT NULL,
-        progress REAL,
-        remote_task_id TEXT,
-        remote_meta TEXT NOT NULL DEFAULT '',
-        input_json TEXT NOT NULL,
-        effective_json TEXT,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        error_code TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL,
-        started_at TEXT,
-        finished_at TEXT,
-        -- 'generate' 是正常生成；'upload' 是用户在对话框里自己传的图（需求.md 问题 4），
-        -- 它借这条表占一个 task_id 给 assets 指，但**不是**一次生成
-        origin TEXT NOT NULL DEFAULT 'generate'
-      );
-      CREATE INDEX IF NOT EXISTS tasks_created_idx ON tasks(created_at DESC);
-      CREATE INDEX IF NOT EXISTS tasks_remote_idx ON tasks(channel_id, remote_task_id);
-      CREATE TABLE IF NOT EXISTS assets (
-        id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
-        file_name TEXT NOT NULL,
-        mime_type TEXT NOT NULL,
-        byte_size INTEGER NOT NULL,
-        relative_path TEXT NOT NULL,
-        base_dir TEXT NOT NULL DEFAULT '',
-        sha256 TEXT NOT NULL,
-        duration REAL,
-        -- 音乐产物的歌名 / 歌词 / 曲风 / Suno custom_id；图片/视频为空
-        title TEXT NOT NULL DEFAULT '',
-        lyrics TEXT NOT NULL DEFAULT '',
-        tags TEXT NOT NULL DEFAULT '',
-        remote_clip_id TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL
-      );
-      -- 列表里每个任务都要按 task_id 取产物，没有索引会退化成全表扫描
-      CREATE INDEX IF NOT EXISTS assets_task_idx ON assets(task_id);
-      CREATE TABLE IF NOT EXISTS diagnostics (
-        id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
-        request_json TEXT,
-        response_json TEXT,
-        http_status INTEGER,
-        duration_ms INTEGER,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-      -- 对话式 Agent（AGENT_PLAN.md §5）。产物不复制，靠 task_id / asset_id 指向现有表
-      CREATE TABLE IF NOT EXISTS conversations (
-        id                   TEXT PRIMARY KEY,
-        title                TEXT NOT NULL,
-        -- chat = 对话创作；board = 无限画布的 Agent 线程，不出现在侧栏
-        kind                 TEXT NOT NULL DEFAULT 'chat',
-        -- 无限画布线程指向的板 id；普通对话为 NULL
-        board_id             TEXT,
-        brain_channel_id     TEXT NOT NULL,
-        brain_model          TEXT NOT NULL,
-        -- 已废弃：老版本的单图画布指针。只被下面那次回填读一次，新代码不读也不写。
-        -- 留着这列的另一个原因：回填要 SELECT 它，从建表语句里删掉的话，新库上跑回填会直接 no such column
-        current_asset_id     TEXT,
-        -- 画布：有序产物 id 的 JSON 数组（[0] 是主图，上限见 MAX_CANVAS_IMAGES）。
-        -- NULL 是「还没迁移过」（只可能出现在加列之前就存在的老会话上），'[]' 才是「画布是空的」
-        canvas_asset_ids     TEXT,
-        status               TEXT NOT NULL DEFAULT 'idle',
-        video_confirm_policy TEXT NOT NULL DEFAULT 'auto_only',
-        vision_enabled       INTEGER NOT NULL DEFAULT 1,
-        verbatim_prompt      INTEGER NOT NULL DEFAULT 0,
-        -- 分镜的角色参考：auto = 用第一个已完成的图片镜头；manual = 指定产物；off = 不用
-        storyboard_reference_asset_id TEXT,
-        storyboard_reference_mode     TEXT NOT NULL DEFAULT 'auto',
-        auto_continue_count  INTEGER NOT NULL DEFAULT 0,
-        created_at           TEXT NOT NULL,
-        updated_at           TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        id               TEXT PRIMARY KEY,
-        conversation_id  TEXT NOT NULL,
-        seq              INTEGER NOT NULL,
-        role             TEXT NOT NULL,
-        content          TEXT,
-        plan_json        TEXT,
-        tool_name        TEXT,
-        tool_args_json   TEXT,
-        tool_result_json TEXT,
-        confirm_json     TEXT,
-        task_id          TEXT,
-        asset_id         TEXT,
-        -- 这条消息附带的脚本文档（[{id,name,charCount}]）；全文存在 conversation_documents 里
-        documents_json   TEXT,
-        status           TEXT NOT NULL DEFAULT 'ok',
-        error_message    TEXT,
-        created_at       TEXT NOT NULL
-      );
-      -- 用户上传的脚本文档。全文只在这一轮喂给大脑，后续靠分镜表的 source_text 回溯
-      CREATE TABLE IF NOT EXISTS conversation_documents (
-        id               TEXT PRIMARY KEY,
-        conversation_id  TEXT NOT NULL,
-        file_name        TEXT NOT NULL,
-        content          TEXT NOT NULL,
-        char_count       INTEGER NOT NULL,
-        created_at       TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS conversation_documents_conv_idx
-        ON conversation_documents(conversation_id, created_at);
-      -- 会话内分镜表：一个会话一张，镜号从 1 开始。
-      -- task_id 只指向**最近一次**生成；重跑会覆盖它，旧产物仍在生成历史里
-      CREATE TABLE IF NOT EXISTS conversation_shots (
-        id               TEXT PRIMARY KEY,
-        conversation_id  TEXT NOT NULL,
-        shot_index       INTEGER NOT NULL,
-        source_text      TEXT NOT NULL DEFAULT '',
-        prompt           TEXT NOT NULL DEFAULT '',
-        -- 出场角色名；空串 = 空镜 / 道具 / 字幕，不带角色参考
-        character_name   TEXT NOT NULL DEFAULT '',
-        -- 场景名；空串 = 没有场景设定
-        scene_name       TEXT NOT NULL DEFAULT '',
-        kind             TEXT NOT NULL DEFAULT 'image',
-        aspect_ratio     TEXT NOT NULL DEFAULT '',
-        dialogue         TEXT NOT NULL DEFAULT '',
-        speaker          TEXT NOT NULL DEFAULT '',
-        shot_size        TEXT NOT NULL DEFAULT '',
-        camera_move      TEXT NOT NULL DEFAULT '',
-        sound_effect     TEXT NOT NULL DEFAULT '',
-        duration_seconds INTEGER NOT NULL DEFAULT 5,
-        video_prompt     TEXT NOT NULL DEFAULT '',
-        voice            TEXT NOT NULL DEFAULT 'Kore',
-        -- 视频输入：首帧默认用本镜分镜图；这里存用户主动覆盖的首帧 / 尾帧 / 参考图
-        video_mode           TEXT NOT NULL DEFAULT 'first-frame',
-        first_frame_asset_id TEXT,
-        last_frame_asset_id  TEXT,
-        reference_asset_ids  TEXT NOT NULL DEFAULT '[]',
-        -- 尾帧续写出来的镜头指向来源镜头；普通镜头为 NULL
-        parent_shot_id       TEXT,
-        task_id          TEXT,
-        video_task_id    TEXT,
-        voice_task_id    TEXT,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS conversation_shots_conv_idx
-        ON conversation_shots(conversation_id, shot_index);
-      -- 分镜里的角色和各自绑定的参考图。名字由助手标注或用户手动输入
-      CREATE TABLE IF NOT EXISTS conversation_characters (
-        id               TEXT PRIMARY KEY,
-        conversation_id  TEXT NOT NULL,
-        name             TEXT NOT NULL,
-        -- 设定图提示词（外貌 / 服装 / 年龄…）
-        prompt           TEXT NOT NULL DEFAULT '',
-        -- 角色固定音色；空串 = 用镜头 / 默认音色
-        voice            TEXT NOT NULL DEFAULT '',
-        asset_id         TEXT,
-        task_id          TEXT,
-        confirmed        INTEGER NOT NULL DEFAULT 0,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL,
-        UNIQUE(conversation_id, name)
-      );
-      CREATE INDEX IF NOT EXISTS conversation_characters_conv_idx
-        ON conversation_characters(conversation_id, name);
-      -- 场景设定图：同一套「先生成、确认、再进分镜」的流程
-      CREATE TABLE IF NOT EXISTS conversation_scenes (
-        id               TEXT PRIMARY KEY,
-        conversation_id  TEXT NOT NULL,
-        name             TEXT NOT NULL,
-        prompt           TEXT NOT NULL DEFAULT '',
-        asset_id         TEXT,
-        task_id          TEXT,
-        confirmed        INTEGER NOT NULL DEFAULT 0,
-        created_at       TEXT NOT NULL,
-        updated_at       TEXT NOT NULL,
-        UNIQUE(conversation_id, name)
-      );
-      CREATE INDEX IF NOT EXISTS conversation_scenes_conv_idx
-        ON conversation_scenes(conversation_id, name);
-      -- 镜头图的手动布局。节点本身仍由分镜现算，这里只记用户拖过的坐标；
-      -- 镜头的增删不会让这一行变成新数据源，找不到对应节点的行直接忽略。
-      CREATE TABLE IF NOT EXISTS conversation_graph_positions (
-        conversation_id TEXT NOT NULL,
-        node_id         TEXT NOT NULL,
-        x               REAL NOT NULL,
-        y               REAL NOT NULL,
-        updated_at      TEXT NOT NULL,
-        PRIMARY KEY (conversation_id, node_id)
-      );
-      -- 无限画布：独立于会话的自由节点画布（FREE_CANVAS_PLAN.md）
-      CREATE TABLE IF NOT EXISTS boards (
-        id                     TEXT PRIMARY KEY,
-        title                  TEXT NOT NULL,
-        doc_json               TEXT NOT NULL,
-        viewport_json          TEXT NOT NULL DEFAULT '',
-        selection_json         TEXT NOT NULL DEFAULT '[]',
-        ui_state_json          TEXT NOT NULL DEFAULT '',
-        version                INTEGER NOT NULL DEFAULT 1,
-        thread_conversation_id TEXT NOT NULL,
-        created_at             TEXT NOT NULL,
-        updated_at             TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS boards_updated_idx ON boards(updated_at DESC);
-      -- 每次保存前的快照；撤销 / 重做只移动当前版本指针，不删未来快照
-      CREATE TABLE IF NOT EXISTS board_history (
-        id         TEXT PRIMARY KEY,
-        board_id   TEXT NOT NULL,
-        version    INTEGER NOT NULL,
-        doc_json   TEXT NOT NULL,
-        reason     TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL,
-        UNIQUE(board_id, version)
-      );
-      CREATE INDEX IF NOT EXISTS board_history_board_idx
-        ON board_history(board_id, version DESC);
-      -- 派生索引：文档里引用了哪些素材；保存时重建，删素材时按它找节点
-      CREATE TABLE IF NOT EXISTS board_assets (
-        board_id  TEXT NOT NULL,
-        asset_id  TEXT NOT NULL,
-        node_id   TEXT NOT NULL,
-        PRIMARY KEY (board_id, node_id)
-      );
-      CREATE INDEX IF NOT EXISTS board_assets_asset_idx
-        ON board_assets(board_id, asset_id);
-      -- 任务 → 结果节点映射；完成事件和重启恢复都靠它回写
-      CREATE TABLE IF NOT EXISTS board_tasks (
-        task_id        TEXT NOT NULL,
-        board_id       TEXT NOT NULL,
-        config_node_id TEXT NOT NULL,
-        result_node_id TEXT NOT NULL,
-        kind           TEXT NOT NULL,
-        created_at     TEXT NOT NULL,
-        -- 一个任务可能产出多张图（count > 1），所以主键必须是「任务 + 结果节点」
-        PRIMARY KEY (task_id, result_node_id)
-      );
-      CREATE INDEX IF NOT EXISTS board_tasks_board_idx
-        ON board_tasks(board_id, created_at DESC);
-      -- 对话里生成、可反复导入无限画布的模板（分镜 / 提示词链 / 自由布局）
-      CREATE TABLE IF NOT EXISTS canvas_templates (
-        id              TEXT PRIMARY KEY,
-        name            TEXT NOT NULL,
-        description     TEXT NOT NULL DEFAULT '',
-        source          TEXT NOT NULL DEFAULT 'agent',
-        conversation_id TEXT,
-        doc_json        TEXT NOT NULL,
-        created_at      TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS canvas_templates_created_idx
-        ON canvas_templates(created_at DESC);
-      -- 旧分镜迁移记录：每个会话只迁移一次，避免重复生成画布
-      CREATE TABLE IF NOT EXISTS storyboard_migrations (
-        conversation_id TEXT PRIMARY KEY,
-        board_id        TEXT NOT NULL,
-        template_id     TEXT NOT NULL,
-        version         INTEGER NOT NULL DEFAULT 1,
-        created_at      TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
-      CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
-      CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
-      -- 一次大脑调用的 token 用量。单独一张表而不是塞进 messages：
-      -- 解析重试、身份纠正这些「同一个消息对应的额外调用」也要算进账里，
-      -- 挂在消息上反而得在一堆执行路径里手动累加。
-      CREATE TABLE IF NOT EXISTS brain_calls (
-        id                TEXT PRIMARY KEY,
-        conversation_id   TEXT NOT NULL,
-        prompt_tokens     INTEGER NOT NULL,
-        completion_tokens INTEGER NOT NULL,
-        reasoning_tokens  INTEGER NOT NULL,
-        created_at        TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS brain_calls_conv_idx ON brain_calls(conversation_id, created_at);
-    `);
-    // Migration: add duration column to assets if it doesn't exist
-    const columnsResult = this.db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
-    const hasDuration = columnsResult.some((col) => col.name === "duration");
-    if (!hasDuration) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN duration REAL");
-    }
-    // Migration: 每条产物记住自己所在的目录，用户改素材目录后旧历史仍然可读
-    const hasBaseDir = columnsResult.some((col) => col.name === "base_dir");
-    if (!hasBaseDir) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN base_dir TEXT NOT NULL DEFAULT ''");
-    }
-    // 新生成的记录自带 base_dir；加列前留下的行回填成默认目录
-    this.db.prepare("UPDATE assets SET base_dir = ? WHERE base_dir = ''").run(this.defaultAssetsDir);
-    // Migration: 看图改（AGENT_PLAN.md §11）用的缩略图。存的是相对 thumbs/ 的文件名，
-    // 不是绝对路径——数据目录被搬走时它跟着走
-    const hasThumbPath = columnsResult.some((col) => col.name === "thumb_path");
-    if (!hasThumbPath) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN thumb_path TEXT NOT NULL DEFAULT ''");
-    }
-    // 音乐产物的歌名；老行默认空串，不影响图片/视频
-    if (!columnsResult.some((col) => col.name === "title")) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN title TEXT NOT NULL DEFAULT ''");
-    }
-    if (!columnsResult.some((col) => col.name === "lyrics")) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN lyrics TEXT NOT NULL DEFAULT ''");
-    }
-    if (!columnsResult.some((col) => col.name === "tags")) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
-    }
-    // Suno 的 custom_id：翻唱 / 混音要引用已有歌曲，必须存下来
-    if (!columnsResult.some((col) => col.name === "remote_clip_id")) {
-      this.db.exec("ALTER TABLE assets ADD COLUMN remote_clip_id TEXT NOT NULL DEFAULT ''");
-    }
-    // messages 建表早于「视频确认卡片」，补上待确认计划的列（§13.6 ①）
-    const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
-    if (!messageColumns.some((col) => col.name === "confirm_json")) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN confirm_json TEXT");
-    }
-    // 一条用户消息可以引用**多张**已有产物（从画布或消息里拖进输入框的那几张）。
-    // asset_id 是个单列，装不下，所以单开一个 JSON 数组；老行读出来就是空数组。
-    if (!messageColumns.some((col) => col.name === "asset_refs")) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN asset_refs TEXT");
-    }
-    // 脚本文档：气泡上只显示文件条，全文在 conversation_documents 里
-    if (!messageColumns.some((col) => col.name === "documents_json")) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN documents_json TEXT");
-    }
-    // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
-    // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
-    const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
-    if (!taskColumns.some((col) => col.name === "origin")) {
-      this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'generate'");
-    }
-    // 上游任务的附加元数据（Midjourney 的按钮等）；空串表示没有
-    if (!taskColumns.some((col) => col.name === "remote_meta")) {
-      this.db.exec("ALTER TABLE tasks ADD COLUMN remote_meta TEXT NOT NULL DEFAULT ''");
-    }
-    // 画布从一根指针改成一组图（有序列表）：加列 + 把老指针搬进来
-    const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
-    if (!conversationColumns.some((col) => col.name === "canvas_asset_ids")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN canvas_asset_ids TEXT");
-    }
-    // 「原话直发」：有时候用户就是要自己那句话原样发出去，不许大脑润色（需求.md 问题 1）
-    if (!conversationColumns.some((col) => col.name === "verbatim_prompt")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN verbatim_prompt INTEGER NOT NULL DEFAULT 0");
-    }
-    const shotColumns = this.db.prepare("PRAGMA table_info(conversation_shots)").all() as Array<{ name: string }>;
-    if (!shotColumns.some((col) => col.name === "character_name")) {
-      this.db.exec("ALTER TABLE conversation_shots ADD COLUMN character_name TEXT NOT NULL DEFAULT ''");
-    }
-    if (!shotColumns.some((col) => col.name === "scene_name")) {
-      this.db.exec("ALTER TABLE conversation_shots ADD COLUMN scene_name TEXT NOT NULL DEFAULT ''");
-    }
-    // 分镜从「只有画面描述」升级成「台词 + 景别 / 运镜 + 视频提示词」；
-    // 老数据库按列幂等补，历史镜头读到空串 / 默认时长，不会损坏原数据。
-    for (const [column, ddl] of [
-      ["dialogue", "ALTER TABLE conversation_shots ADD COLUMN dialogue TEXT NOT NULL DEFAULT ''"],
-      ["speaker", "ALTER TABLE conversation_shots ADD COLUMN speaker TEXT NOT NULL DEFAULT ''"],
-      ["shot_size", "ALTER TABLE conversation_shots ADD COLUMN shot_size TEXT NOT NULL DEFAULT ''"],
-      ["camera_move", "ALTER TABLE conversation_shots ADD COLUMN camera_move TEXT NOT NULL DEFAULT ''"],
-      ["sound_effect", "ALTER TABLE conversation_shots ADD COLUMN sound_effect TEXT NOT NULL DEFAULT ''"],
-      ["duration_seconds", "ALTER TABLE conversation_shots ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 5"],
-      ["video_prompt", "ALTER TABLE conversation_shots ADD COLUMN video_prompt TEXT NOT NULL DEFAULT ''"],
-      ["voice", "ALTER TABLE conversation_shots ADD COLUMN voice TEXT NOT NULL DEFAULT 'Kore'"],
-      ["video_mode", "ALTER TABLE conversation_shots ADD COLUMN video_mode TEXT NOT NULL DEFAULT 'first-frame'"],
-      ["first_frame_asset_id", "ALTER TABLE conversation_shots ADD COLUMN first_frame_asset_id TEXT"],
-      ["last_frame_asset_id", "ALTER TABLE conversation_shots ADD COLUMN last_frame_asset_id TEXT"],
-      ["reference_asset_ids", "ALTER TABLE conversation_shots ADD COLUMN reference_asset_ids TEXT NOT NULL DEFAULT '[]'"],
-      ["parent_shot_id", "ALTER TABLE conversation_shots ADD COLUMN parent_shot_id TEXT"],
-      ["video_task_id", "ALTER TABLE conversation_shots ADD COLUMN video_task_id TEXT"],
-      ["voice_task_id", "ALTER TABLE conversation_shots ADD COLUMN voice_task_id TEXT"],
-    ] as const) {
-      if (!shotColumns.some((col) => col.name === column)) this.db.exec(ddl);
-    }
-    const characterColumns = this.db.prepare("PRAGMA table_info(conversation_characters)").all() as Array<{ name: string }>;
-    for (const [column, ddl] of [
-      ["prompt", "ALTER TABLE conversation_characters ADD COLUMN prompt TEXT NOT NULL DEFAULT ''"],
-      ["voice", "ALTER TABLE conversation_characters ADD COLUMN voice TEXT NOT NULL DEFAULT ''"],
-      ["task_id", "ALTER TABLE conversation_characters ADD COLUMN task_id TEXT"],
-      ["confirmed", "ALTER TABLE conversation_characters ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0"],
-    ] as const) {
-      if (!characterColumns.some((item) => item.name === column)) this.db.exec(ddl);
-    }
-    // 分镜角色参考：老会话默认走 auto（第一个已完成的图片镜头）
-    if (!conversationColumns.some((col) => col.name === "storyboard_reference_asset_id")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_asset_id TEXT");
-    }
-    if (!conversationColumns.some((col) => col.name === "storyboard_reference_mode")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN storyboard_reference_mode TEXT NOT NULL DEFAULT 'auto'");
-    }
-    // 无限画布线程：普通对话默认 chat；board 线程不出现在侧栏
-    if (!conversationColumns.some((col) => col.name === "kind")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'");
-    }
-    if (!conversationColumns.some((col) => col.name === "board_id")) {
-      this.db.exec("ALTER TABLE conversations ADD COLUMN board_id TEXT");
-    }
-    // 一块板只能有一条 Agent 线程；必须在 kind / board_id 都加完之后再建
-    this.db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS conversations_board_thread_idx
-        ON conversations(board_id) WHERE kind = 'board' AND board_id IS NOT NULL
-    `);
-    // P0 的 board_tasks 是 task_id 单主键，装不下 count>1 的多个结果节点。
-    // P1 接入前这张表还没有任何行，所以旧表直接重建；有数据就保留旧表不动。
-    const boardTaskColumns = this.db.prepare("PRAGMA table_info(board_tasks)").all() as Array<{ name: string; pk: number }>;
-    const hasCompositeTaskPk = boardTaskColumns.some((column) => column.name === "result_node_id" && column.pk > 0);
-    if (boardTaskColumns.length && !hasCompositeTaskPk) {
-      const rows = this.db.prepare("SELECT COUNT(*) AS total FROM board_tasks").get() as DbRow;
-      if (Number(rows.total) === 0) {
-        this.db.exec(`
-          DROP TABLE board_tasks;
-          CREATE TABLE board_tasks (
-            task_id        TEXT NOT NULL,
-            board_id       TEXT NOT NULL,
-            config_node_id TEXT NOT NULL,
-            result_node_id TEXT NOT NULL,
-            kind           TEXT NOT NULL,
-            created_at     TEXT NOT NULL,
-            PRIMARY KEY (task_id, result_node_id)
-          );
-          CREATE INDEX IF NOT EXISTS board_tasks_board_idx
-            ON board_tasks(board_id, created_at DESC);
-        `);
-      }
-    }
-    /**
-     * 回填**键在 `IS NULL` 上，而不是键在「刚加完列」上**，两个原因：
-     *
-     * 1. 这个项目没有 git 兜底。万一 ALTER 成功、回填跑到一半进程被杀，下次启动还得能补上。
-     * 2. 一旦写成 `[]` 就再也不会被回填——所以用户清空画布之后重启，老指针**不会**把画布复活。
-     *
-     * JSON 在 JS 这边拼，不用 SQLite 的 json_array()：省一个对 JSON1 扩展的依赖，
-     * 也和文件里 parseJson 的读写方向对称。
-     */
-    const legacyCanvas = this.db
-      .prepare("SELECT id, current_asset_id FROM conversations WHERE canvas_asset_ids IS NULL")
-      .all() as Array<{ id: string; current_asset_id: string | null }>;
-    const writeCanvas = this.db.prepare("UPDATE conversations SET canvas_asset_ids = ? WHERE id = ?");
-    for (const row of legacyCanvas) {
-      writeCanvas.run(JSON.stringify(row.current_asset_id ? [row.current_asset_id] : []), row.id);
-    }
-
-    // 分镜迁移从 v1（只有镜头节点）升级到 v2（含角色 / 场景设定参考）
-    const storyboardMigrationColumns = this.db.prepare("PRAGMA table_info(storyboard_migrations)").all() as Array<{ name: string }>;
-    if (!storyboardMigrationColumns.some((column) => column.name === "version")) {
-      this.db.exec("ALTER TABLE storyboard_migrations ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
-    }
-
-    // 产品名从「创作板」改成「无限画布」：只改默认标题和 Agent 线程前缀，
-    // 用户自己改过的板名不动。
-    this.db.prepare("UPDATE boards SET title = '未命名无限画布' WHERE title = '未命名创作板'").run();
-    this.db.prepare(`
-      UPDATE conversations SET title = replace(title, '创作板', '无限画布')
-      WHERE kind = 'board' AND board_id IS NOT NULL AND title LIKE '创作板%'
-    `).run();
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+    initializeSchema(this.db, this.defaultAssetsDir);
+    this.boards = new BoardRepository(this.db, (row) => this.assetFromRow(row), (asset) => this.assetView(asset));
 
     // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
     // 否则面板里会出现一个「林小满、老陈」的卡片，谁都没法单独绑设定图。
@@ -955,16 +492,18 @@ export class AppDatabase {
     id: string; channelId: string; model: string; prompt: string; input: unknown;
     /** 默认就是一次正常生成；上传素材那条传 `"upload"` */
     origin?: TaskOrigin;
+    libraryScope?: "public" | "conversation";
+    ownerConversationId?: string;
     /** 上传的图生下来就是完成的，没有排队这一步 */
     status?: TaskStatus;
   }): TaskRow {
     const createdAt = now();
     this.db.prepare(`
-      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at, origin)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at, origin, library_scope, owner_conversation_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id, input.channelId, input.model, input.prompt,
-      input.status ?? "queued", JSON.stringify(input.input), createdAt, input.origin ?? "generate",
+      input.status ?? "queued", JSON.stringify(input.input), createdAt, input.origin ?? "generate", input.libraryScope ?? (input.origin === "upload" ? "legacy" : "public"), input.ownerConversationId ?? null,
     );
     return this.getTaskRow(input.id)!;
   }
@@ -972,6 +511,26 @@ export class AppDatabase {
   getTaskRow(id: string): TaskRow | null {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as DbRow | undefined;
     return row ? this.taskFromRow(row) : null;
+  }
+
+  taskHasConversationReferences(taskId: string): boolean {
+    const assetIds = this.listAssets(taskId).map((asset) => asset.id);
+    const direct = this.db.prepare(`SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'chat' AND m.task_id = ? LIMIT 1`).get(taskId);
+    if (direct) return true;
+    for (const assetId of assetIds) {
+      if (this.db.prepare(`SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'chat' AND (m.asset_id = ? OR m.asset_refs LIKE ?) LIMIT 1`).get(assetId, `%${assetId}%`)) return true;
+      if (this.db.prepare(`SELECT 1 FROM conversations WHERE kind = 'chat' AND (current_asset_id = ? OR canvas_asset_ids LIKE ? OR storyboard_reference_asset_id = ?) LIMIT 1`).get(assetId, `%${assetId}%`, assetId)) return true;
+      if (this.db.prepare(`SELECT 1 FROM conversation_shots WHERE first_frame_asset_id = ? OR last_frame_asset_id = ? OR reference_asset_ids LIKE ? OR task_id = ? OR video_task_id = ? OR voice_task_id = ? LIMIT 1`).get(assetId, assetId, `%${assetId}%`, taskId, taskId, taskId)) return true;
+      if (this.db.prepare(`SELECT 1 FROM conversation_characters WHERE asset_id = ? OR task_id = ? UNION ALL SELECT 1 FROM conversation_scenes WHERE asset_id = ? OR task_id = ? LIMIT 1`).get(assetId, taskId, assetId, taskId)) return true;
+    }
+    return false;
+  }
+
+  assetHasOtherConversationReferences(assetId: string, conversationId: string): boolean {
+    if (this.db.prepare(`SELECT 1 FROM messages WHERE conversation_id <> ? AND (asset_id = ? OR asset_refs LIKE ?) LIMIT 1`).get(conversationId, assetId, `%${assetId}%`)) return true;
+    if (this.db.prepare(`SELECT 1 FROM conversations WHERE id <> ? AND (current_asset_id = ? OR canvas_asset_ids LIKE ? OR storyboard_reference_asset_id = ?) LIMIT 1`).get(conversationId, assetId, `%${assetId}%`, assetId)) return true;
+    if (this.db.prepare(`SELECT 1 FROM conversation_shots WHERE conversation_id <> ? AND (first_frame_asset_id = ? OR last_frame_asset_id = ? OR reference_asset_ids LIKE ?) LIMIT 1`).get(conversationId, assetId, assetId, `%${assetId}%`)) return true;
+    return Boolean(this.db.prepare(`SELECT 1 FROM conversation_characters WHERE conversation_id <> ? AND asset_id = ? UNION ALL SELECT 1 FROM conversation_scenes WHERE conversation_id <> ? AND asset_id = ? LIMIT 1`).get(conversationId, assetId, conversationId, assetId));
   }
 
   listTaskRows(limit = 40): TaskRow[] {
@@ -1856,7 +1415,12 @@ export class AppDatabase {
     `).all(id, id, id, id, id) as DbRow[];
 
     const assets: StoredFileRef[] = [];
-    for (const row of uploads) assets.push(...this.deleteTask(String(row.id)).assets);
+    for (const row of uploads) {
+      const taskId = String(row.id);
+      const task = this.getTaskRow(taskId);
+      if (task?.libraryScope === "public" || this.listAssets(taskId).some((asset) => this.findBoardAssetRefs(asset.id).length > 0 || this.assetHasOtherConversationReferences(asset.id, id))) continue;
+      assets.push(...this.deleteTask(taskId).assets);
+    }
     this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(id);
@@ -1869,28 +1433,6 @@ export class AppDatabase {
   }
 
   // ── 无限画布（FREE_CANVAS_PLAN.md） ─────────────────────────────────────────
-
-  private boardFromRow(row: DbRow): BoardRecord {
-    let doc: BoardDoc;
-    try {
-      // 坏文档退回空板，不让一块坏数据把整个工作区打不开
-      doc = parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc()));
-    } catch {
-      doc = createEmptyBoardDoc();
-    }
-    return {
-      id: String(row.id),
-      title: String(row.title),
-      doc,
-      viewport: parseBoardViewport(parseJson(row.viewport_json, {})),
-      selection: parseBoardSelection(parseJson(row.selection_json, [])),
-      uiState: parseBoardUiState(parseJson(row.ui_state_json, {})),
-      version: Number(row.version),
-      threadId: String(row.thread_conversation_id),
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
-    };
-  }
 
   createCanvasTemplate(input: {
     id: string;
@@ -2019,338 +1561,29 @@ export class AppDatabase {
     `).run(input.conversationId, input.boardId, input.templateId, input.version, now());
   }
 
-  createBoardRecord(input: {
-    id: string;
-    title: string;
-    threadConversationId: string;
-    doc?: BoardDoc;
-  }): BoardRecord {
-    const at = now();
-    const doc = input.doc ?? createEmptyBoardDoc();
-    const docJson = JSON.stringify(doc);
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare(`
-        INSERT INTO boards
-        (id, title, doc_json, viewport_json, selection_json, ui_state_json, version,
-         thread_conversation_id, created_at, updated_at)
-        VALUES (?, ?, ?, '', '[]', '', 1, ?, ?, ?)
-      `).run(input.id, input.title, docJson, input.threadConversationId, at, at);
-      // 初始版本也进历史：第一次编辑后可以撤销回空板
-      this.db.prepare(`
-        INSERT OR IGNORE INTO board_history (id, board_id, version, doc_json, reason, created_at)
-        VALUES (?, ?, 1, ?, 'create', ?)
-      `).run(crypto.randomUUID(), input.id, docJson, at);
-      this.replaceBoardAssetsUnsafe(input.id, doc);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.getBoardRecord(input.id)!;
-  }
+  createBoardRecord = (...args: Parameters<BoardRepository["createBoardRecord"]>): ReturnType<BoardRepository["createBoardRecord"]> => this.boards.createBoardRecord(...args);
+  getBoardRecord = (...args: Parameters<BoardRepository["getBoardRecord"]>): ReturnType<BoardRepository["getBoardRecord"]> => this.boards.getBoardRecord(...args);
+  listBoardRecords = (...args: Parameters<BoardRepository["listBoardRecords"]>): ReturnType<BoardRepository["listBoardRecords"]> => this.boards.listBoardRecords(...args);
+  listBoardSummaries = (...args: Parameters<BoardRepository["listBoardSummaries"]>): ReturnType<BoardRepository["listBoardSummaries"]> => this.boards.listBoardSummaries(...args);
+  getBoardByThread = (...args: Parameters<BoardRepository["getBoardByThread"]>): ReturnType<BoardRepository["getBoardByThread"]> => this.boards.getBoardByThread(...args);
+  updateBoardTitle = (...args: Parameters<BoardRepository["updateBoardTitle"]>): ReturnType<BoardRepository["updateBoardTitle"]> => this.boards.updateBoardTitle(...args);
+  saveBoardSnapshot = (...args: Parameters<BoardRepository["saveBoardSnapshot"]>): ReturnType<BoardRepository["saveBoardSnapshot"]> => this.boards.saveBoardSnapshot(...args);
+  moveBoardVersion = (...args: Parameters<BoardRepository["moveBoardVersion"]>): ReturnType<BoardRepository["moveBoardVersion"]> => this.boards.moveBoardVersion(...args);
+  listBoardHistoryVersions = (...args: Parameters<BoardRepository["listBoardHistoryVersions"]>): ReturnType<BoardRepository["listBoardHistoryVersions"]> => this.boards.listBoardHistoryVersions(...args);
+  listBoardHistoryEntries = (...args: Parameters<BoardRepository["listBoardHistoryEntries"]>): ReturnType<BoardRepository["listBoardHistoryEntries"]> => this.boards.listBoardHistoryEntries(...args);
+  getBoardHistoryDoc = (...args: Parameters<BoardRepository["getBoardHistoryDoc"]>): ReturnType<BoardRepository["getBoardHistoryDoc"]> => this.boards.getBoardHistoryDoc(...args);
+  saveBoardViewport = (...args: Parameters<BoardRepository["saveBoardViewport"]>): ReturnType<BoardRepository["saveBoardViewport"]> => this.boards.saveBoardViewport(...args);
+  saveBoardSelection = (...args: Parameters<BoardRepository["saveBoardSelection"]>): ReturnType<BoardRepository["saveBoardSelection"]> => this.boards.saveBoardSelection(...args);
+  saveBoardUiState = (...args: Parameters<BoardRepository["saveBoardUiState"]>): ReturnType<BoardRepository["saveBoardUiState"]> => this.boards.saveBoardUiState(...args);
+  listBoardAssets = (...args: Parameters<BoardRepository["listBoardAssets"]>): ReturnType<BoardRepository["listBoardAssets"]> => this.boards.listBoardAssets(...args);
+  insertBoardAssetLink = (...args: Parameters<BoardRepository["insertBoardAssetLink"]>): ReturnType<BoardRepository["insertBoardAssetLink"]> => this.boards.insertBoardAssetLink(...args);
+  findBoardAssetRefs = (...args: Parameters<BoardRepository["findBoardAssetRefs"]>): ReturnType<BoardRepository["findBoardAssetRefs"]> => this.boards.findBoardAssetRefs(...args);
+  deleteBoardCascade = (...args: Parameters<BoardRepository["deleteBoardCascade"]>): ReturnType<BoardRepository["deleteBoardCascade"]> => this.boards.deleteBoardCascade(...args);
+  addBoardTaskRows = (...args: Parameters<BoardRepository["addBoardTaskRows"]>): ReturnType<BoardRepository["addBoardTaskRows"]> => this.boards.addBoardTaskRows(...args);
+  listBoardTasksByTask = (...args: Parameters<BoardRepository["listBoardTasksByTask"]>): ReturnType<BoardRepository["listBoardTasksByTask"]> => this.boards.listBoardTasksByTask(...args);
+  listBoardTasksByBoard = (...args: Parameters<BoardRepository["listBoardTasksByBoard"]>): ReturnType<BoardRepository["listBoardTasksByBoard"]> => this.boards.listBoardTasksByBoard(...args);
+  deleteBoardTaskRows = (...args: Parameters<BoardRepository["deleteBoardTaskRows"]>): ReturnType<BoardRepository["deleteBoardTaskRows"]> => this.boards.deleteBoardTaskRows(...args);
 
-  getBoardRecord(id: string): BoardRecord | null {
-    const row = this.db.prepare("SELECT * FROM boards WHERE id = ?").get(id) as DbRow | undefined;
-    return row ? this.boardFromRow(row) : null;
-  }
-
-  listBoardRecords(): BoardRecord[] {
-    const rows = this.db.prepare("SELECT * FROM boards ORDER BY updated_at DESC").all() as DbRow[];
-    return rows.map((row) => this.boardFromRow(row));
-  }
-
-  listBoardSummaries(): BoardSummary[] {
-    return this.listBoardRecords().map((board) => ({
-      id: board.id,
-      title: board.title,
-      nodeCount: board.doc.nodes.length,
-      edgeCount: board.doc.edges.length,
-      updatedAt: board.updatedAt,
-      threadId: board.threadId,
-    }));
-  }
-
-  getBoardByThread(threadId: string): BoardRecord | null {
-    const row = this.db.prepare("SELECT * FROM boards WHERE thread_conversation_id = ?").get(threadId) as DbRow | undefined;
-    return row ? this.boardFromRow(row) : null;
-  }
-
-  updateBoardTitle(id: string, title: string): BoardRecord | null {
-    const at = now();
-    const board = this.getBoardRecord(id);
-    if (!board) return null;
-    this.db.prepare("UPDATE boards SET title = ?, updated_at = ? WHERE id = ?").run(title, at, id);
-    // 线程标题跟着板走，但线程本身不会出现在对话侧栏
-    this.db.prepare("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?").run(`无限画布 · ${title}`, at, board.threadId);
-    return this.getBoardRecord(id);
-  }
-
-  /** 保存一次新版本：旧版本进历史，新文档落库，素材索引重建 */
-  saveBoardSnapshot(input: {
-    boardId: string;
-    previousDoc: BoardDoc;
-    doc: BoardDoc;
-    viewport?: BoardViewport;
-    version: number;
-    reason: string;
-  }): void {
-    const at = now();
-    const docJson = JSON.stringify(input.doc);
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare(`
-        INSERT OR IGNORE INTO board_history (id, board_id, version, doc_json, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        crypto.randomUUID(), input.boardId, input.version - 1,
-        JSON.stringify(input.previousDoc), input.reason, at,
-      );
-      if (input.viewport) {
-        this.db.prepare(`
-          UPDATE boards SET doc_json = ?, viewport_json = ?, version = ?, updated_at = ? WHERE id = ?
-        `).run(docJson, JSON.stringify(input.viewport), input.version, at, input.boardId);
-      } else {
-        this.db.prepare(`
-          UPDATE boards SET doc_json = ?, version = ?, updated_at = ? WHERE id = ?
-        `).run(docJson, input.version, at, input.boardId);
-      }
-      // 撤销后重新编辑：未来快照作废，避免重做跳回一条已经不存在的分支
-      this.db.prepare("DELETE FROM board_history WHERE board_id = ? AND version > ?")
-        .run(input.boardId, input.version);
-      // 新版本自身也要有快照，否则撤销到上一版之后没有东西可以重做。
-      // 用 REPLACE：撤销后重新编辑时，同一版本号可能已经有一条旧分支的快照。
-      this.db.prepare(`
-        INSERT OR REPLACE INTO board_history (id, board_id, version, doc_json, reason, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(crypto.randomUUID(), input.boardId, input.version, docJson, input.reason, at);
-      this.replaceBoardAssetsUnsafe(input.boardId, input.doc);
-      this.trimBoardHistoryUnsafe(input.boardId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  /** 撤销 / 重做：只移动版本指针，不动历史（未来版本要留给重做） */
-  moveBoardVersion(input: {
-    boardId: string;
-    version: number;
-    doc: BoardDoc;
-    viewport?: BoardViewport;
-  }): void {
-    const at = now();
-    this.db.exec("BEGIN");
-    try {
-      if (input.viewport) {
-        this.db.prepare("UPDATE boards SET doc_json = ?, viewport_json = ?, version = ?, updated_at = ? WHERE id = ?")
-          .run(JSON.stringify(input.doc), JSON.stringify(input.viewport), input.version, at, input.boardId);
-      } else {
-        this.db.prepare("UPDATE boards SET doc_json = ?, version = ?, updated_at = ? WHERE id = ?")
-          .run(JSON.stringify(input.doc), input.version, at, input.boardId);
-      }
-      this.replaceBoardAssetsUnsafe(input.boardId, input.doc);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  listBoardHistoryVersions(boardId: string): number[] {
-    const rows = this.db.prepare(
-      "SELECT version FROM board_history WHERE board_id = ? ORDER BY version ASC",
-    ).all(boardId) as DbRow[];
-    return rows.map((row) => Number(row.version));
-  }
-
-  listBoardHistoryEntries(boardId: string): Array<{ version: number; reason: string; createdAt: string }> {
-    const rows = this.db.prepare(
-      "SELECT version, reason, created_at FROM board_history WHERE board_id = ? ORDER BY version DESC",
-    ).all(boardId) as DbRow[];
-    return rows.map((row) => ({
-      version: Number(row.version),
-      reason: String(row.reason ?? ""),
-      createdAt: String(row.created_at),
-    }));
-  }
-
-  getBoardHistoryDoc(boardId: string, version: number): BoardDoc | null {
-    const row = this.db.prepare(
-      "SELECT doc_json FROM board_history WHERE board_id = ? AND version = ?",
-    ).get(boardId, version) as DbRow | undefined;
-    if (!row) return null;
-    try {
-      return parseBoardDoc(parseJson(row.doc_json, createEmptyBoardDoc()));
-    } catch {
-      return null;
-    }
-  }
-
-  saveBoardViewport(boardId: string, viewport: BoardViewport): void {
-    this.db.prepare("UPDATE boards SET viewport_json = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(viewport), now(), boardId);
-  }
-
-  /** 选中状态不碰 updated_at：点一下节点不该把无限画布顶到列表最前面 */
-  saveBoardSelection(boardId: string, selection: string[]): void {
-    this.db.prepare("UPDATE boards SET selection_json = ? WHERE id = ?")
-      .run(JSON.stringify(selection), boardId);
-  }
-
-  saveBoardUiState(boardId: string, uiState: BoardUiState): void {
-    this.db.prepare("UPDATE boards SET ui_state_json = ? WHERE id = ?")
-      .run(JSON.stringify(uiState), boardId);
-  }
-
-  listBoardAssets(boardId: string): Asset[] {
-    const rows = this.db.prepare(`
-      SELECT assets.* FROM board_assets
-      JOIN assets ON assets.id = board_assets.asset_id
-      WHERE board_assets.board_id = ?
-      ORDER BY assets.created_at ASC
-    `).all(boardId) as DbRow[];
-    const seen = new Set<string>();
-    const result: Asset[] = [];
-    for (const row of rows) {
-      const id = String(row.id);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      result.push(this.assetView(this.assetFromRow(row)));
-    }
-    return result;
-  }
-
-  /** 上传后、文档保存前的临时链接；下一次保存会按文档重建并覆盖掉它 */
-  insertBoardAssetLink(boardId: string, assetId: string, nodeId: string): void {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO board_assets (board_id, asset_id, node_id) VALUES (?, ?, ?)",
-    ).run(boardId, assetId, nodeId);
-  }
-
-  findBoardAssetRefs(assetId: string): Array<{ boardId: string; nodeId: string }> {
-    const rows = this.db.prepare(
-      "SELECT board_id, node_id FROM board_assets WHERE asset_id = ?",
-    ).all(assetId) as DbRow[];
-    return rows.map((row) => ({ boardId: String(row.board_id), nodeId: String(row.node_id) }));
-  }
-
-  deleteBoardCascade(boardId: string): { threadId: string } | null {
-    const board = this.getBoardRecord(boardId);
-    if (!board) return null;
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare("DELETE FROM board_history WHERE board_id = ?").run(boardId);
-      this.db.prepare("DELETE FROM board_assets WHERE board_id = ?").run(boardId);
-      this.db.prepare("DELETE FROM board_tasks WHERE board_id = ?").run(boardId);
-      this.db.prepare("DELETE FROM boards WHERE id = ?").run(boardId);
-      this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversation_shots WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversation_characters WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversation_graph_positions WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(board.threadId);
-      this.db.prepare("DELETE FROM conversations WHERE id = ?").run(board.threadId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return { threadId: board.threadId };
-  }
-
-  addBoardTaskRows(input: {
-    taskId: string;
-    boardId: string;
-    configNodeId: string;
-    resultNodeIds: string[];
-    kind: string;
-  }): void {
-    if (!input.resultNodeIds.length) return;
-    const at = now();
-    const insert = this.db.prepare(`
-      INSERT OR REPLACE INTO board_tasks
-      (task_id, board_id, config_node_id, result_node_id, kind, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    this.db.exec("BEGIN");
-    try {
-      for (const resultNodeId of input.resultNodeIds) {
-        insert.run(input.taskId, input.boardId, input.configNodeId, resultNodeId, input.kind, at);
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  listBoardTasksByTask(taskId: string): Array<{
-    taskId: string; boardId: string; configNodeId: string; resultNodeId: string; kind: string; createdAt: string;
-  }> {
-    const rows = this.db.prepare(
-      "SELECT * FROM board_tasks WHERE task_id = ? ORDER BY rowid ASC",
-    ).all(taskId) as DbRow[];
-    return rows.map((row) => ({
-      taskId: String(row.task_id),
-      boardId: String(row.board_id),
-      configNodeId: String(row.config_node_id),
-      resultNodeId: String(row.result_node_id),
-      kind: String(row.kind),
-      createdAt: String(row.created_at),
-    }));
-  }
-
-  listBoardTasksByBoard(boardId: string): Array<{
-    taskId: string; boardId: string; configNodeId: string; resultNodeId: string; kind: string; createdAt: string;
-  }> {
-    const rows = this.db.prepare(
-      "SELECT * FROM board_tasks WHERE board_id = ? ORDER BY created_at ASC, rowid ASC",
-    ).all(boardId) as DbRow[];
-    return rows.map((row) => ({
-      taskId: String(row.task_id),
-      boardId: String(row.board_id),
-      configNodeId: String(row.config_node_id),
-      resultNodeId: String(row.result_node_id),
-      kind: String(row.kind),
-      createdAt: String(row.created_at),
-    }));
-  }
-
-  deleteBoardTaskRows(taskId: string): void {
-    this.db.prepare("DELETE FROM board_tasks WHERE task_id = ?").run(taskId);
-  }
-
-  private replaceBoardAssetsUnsafe(boardId: string, doc: BoardDoc): void {
-    this.db.prepare("DELETE FROM board_assets WHERE board_id = ?").run(boardId);
-    const insert = this.db.prepare(
-      "INSERT OR REPLACE INTO board_assets (board_id, asset_id, node_id) VALUES (?, ?, ?)",
-    );
-    for (const node of doc.nodes) {
-      if ((node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId) {
-        insert.run(boardId, node.assetId, node.id);
-      }
-    }
-  }
-
-  private trimBoardHistoryUnsafe(boardId: string): void {
-    // 保留最新 50 个版本。offset 50 的那一行就是「第 51 新」，它及更老的都删
-    const cutoff = this.db.prepare(
-      "SELECT version FROM board_history WHERE board_id = ? ORDER BY version DESC LIMIT 1 OFFSET ?",
-    ).get(boardId, BOARD_LIMITS.maxHistory) as DbRow | undefined;
-    if (!cutoff) return;
-    this.db.prepare("DELETE FROM board_history WHERE board_id = ? AND version <= ?")
-      .run(boardId, Number(cutoff.version));
-  }
-
-  /**
-   * 记一次大脑调用的 token 用量。
-   *
-   * 只记拿到 usage 的调用：中转站没回这个字段时（部分站点忽略 stream_options）
-   * 不写 0，否则「记过 3 次」会变成一句假话。
-   */
   recordBrainCall(conversationId: string, usage: { promptTokens: number; completionTokens: number; reasoningTokens: number }) {
     this.db.prepare(`
       INSERT INTO brain_calls (id, conversation_id, prompt_tokens, completion_tokens, reasoning_tokens, created_at)
@@ -2705,6 +1938,35 @@ export class AppDatabase {
     return this.listTaskRows(limit).map((task) => this.taskView(task));
   }
 
+  listLibraryTaskViews(options?: { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records" }): Task[] {
+    const videoTypes = VIDEO_ADAPTER_TYPES.map((value) => `'${value}'`).join(",");
+    const audioTypes = AUDIO_ADAPTER_TYPES.map((value) => `'${value}'`).join(",");
+    const kindSql = `(CASE WHEN channels.adapter_type IN (${videoTypes}) THEN 'video' WHEN channels.adapter_type IN (${audioTypes}) THEN 'audio' WHEN channels.adapter_type IS NOT NULL THEN 'image' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'audio/%') THEN 'audio' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'video/%') THEN 'video' ELSE 'image' END)`;
+    const query = options?.query.trim().toLowerCase() ?? "";
+    const rows = this.db.prepare(`
+      SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name,
+             channels.adapter_type AS channel_adapter_type
+      FROM tasks LEFT JOIN channels ON channels.id = tasks.channel_id
+      WHERE (tasks.library_scope = 'public' OR (tasks.library_scope = 'legacy' AND (
+        EXISTS (SELECT 1 FROM board_tasks bt WHERE bt.task_id = tasks.id)
+        OR EXISTS (SELECT 1 FROM assets a JOIN board_assets ba ON ba.asset_id = a.id WHERE a.task_id = tasks.id)
+        OR (tasks.origin = 'upload' AND tasks.prompt = '无限画布上传')
+        OR (tasks.origin = 'generate'
+          AND NOT EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND (m.task_id = tasks.id OR a.task_id = tasks.id))
+          AND NOT EXISTS (SELECT 1 FROM conversation_shots s WHERE s.task_id = tasks.id OR s.video_task_id = tasks.id OR s.voice_task_id = tasks.id)
+          AND NOT EXISTS (SELECT 1 FROM conversation_characters c WHERE c.task_id = tasks.id OR c.asset_id IN (SELECT id FROM assets WHERE task_id = tasks.id))
+          AND NOT EXISTS (SELECT 1 FROM conversation_scenes s WHERE s.task_id = tasks.id OR s.asset_id IN (SELECT id FROM assets WHERE task_id = tasks.id))
+        )
+      )))
+      AND (? = 'all' OR ${kindSql} = ?)
+      AND (? <> 'records' OR tasks.origin = 'generate')
+      AND (? <> 'assets' OR EXISTS (SELECT 1 FROM assets a WHERE a.task_id = tasks.id))
+      AND (? = '' OR instr(lower(tasks.prompt || ' ' || tasks.model || ' ' || COALESCE(channels.name, '')), ?) > 0 OR EXISTS (SELECT 1 FROM assets a WHERE a.task_id = tasks.id AND instr(lower(a.file_name || ' ' || a.title), ?) > 0))
+      ORDER BY tasks.created_at DESC, tasks.id DESC LIMIT ? OFFSET ?
+    `).all(options?.kind ?? "all", options?.kind ?? "all", options?.mode ?? "all", options?.mode ?? "all", query, query, query, options?.limit ?? -1, options?.offset ?? 0) as DbRow[];
+    return rows.map((row) => this.taskView(this.taskFromRow(row)));
+  }
+
   private taskView(task: TaskRow): Task {
     // 工作台也要「看得见」（需求.md 问题 1 D）：核对用的是任务自己落库的两份原料——
     // input_json 是请求时写的，effective_json 是**发送前**就存下的脱敏请求体。
@@ -2713,7 +1975,7 @@ export class AppDatabase {
       ? auditParameters(task.channelAdapterType, parseJson<Record<string, unknown>>(task.inputJson, {}), parseJson<Record<string, unknown> | null>(task.effectiveJson, null))
       : [];
     return {
-      id: task.id, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
+      id: task.id, origin: task.origin, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
       status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
@@ -2761,6 +2023,8 @@ export class AppDatabase {
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
       createdAt: String(row.created_at), startedAt: row.started_at == null ? null : String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at),
       origin: (row.origin == null ? "generate" : String(row.origin)) as TaskOrigin,
+      libraryScope: (row.library_scope == null ? "legacy" : String(row.library_scope)) as TaskLibraryScope,
+      ownerConversationId: row.owner_conversation_id == null ? null : String(row.owner_conversation_id),
     };
   }
 }
@@ -2771,6 +2035,7 @@ export class AppDatabase {
  * 所以历史列表、清空历史、诊断入口都按 `generate` 过滤。
  */
 export type TaskOrigin = "generate" | "upload";
+export type TaskLibraryScope = "public" | "conversation" | "legacy";
 
 export interface TaskRow {
   id: string; channelId: string; channelName: string | null;
@@ -2784,6 +2049,8 @@ export interface TaskRow {
   inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;
   errorMessage: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
   origin: TaskOrigin;
+  libraryScope: TaskLibraryScope;
+  ownerConversationId: string | null;
 }
 
 export interface AssetRow {

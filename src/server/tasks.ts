@@ -188,7 +188,7 @@ export class TaskRunner {
     });
   }
 
-  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload): Promise<Task> {
+  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
@@ -234,7 +234,7 @@ export class TaskRunner {
       }
     }
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
-    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput });
+    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId });
     queueMicrotask(() => void this.run(id));
     return this.db.getTaskView(id)!;
   }
@@ -317,7 +317,8 @@ export class TaskRunner {
   async retry(taskId: string) {
     const task = this.requireTask(taskId);
     const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
-    return this.create(input);
+    const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
+    return this.create(input, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
   }
 
   /**

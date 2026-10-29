@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, Eye, Film, FolderOpen, History, Image as ImageIcon, LoaderCircle, Music, RefreshCw, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { Download, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, LoaderCircle, Music, RefreshCw, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { CrossModeBridgeDialog, type BridgeAssetItem } from "../board/CrossModeBridgeDialog";
 import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
 import { StatusBadge, formatTime } from "../task-ui";
@@ -13,34 +14,73 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   onRefresh: () => void;
   onDelete: (task: Task) => void;
   onDeleteSelected: (tasks: Task[]) => void;
-  onClear: (scope?: ClearScope) => void;
+  onClear: (scope: ClearScope, records: Task[]) => void;
   onOpenAssetSettings: () => void;
   onDiagnostics: (task: Task) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
   const [filter, setFilter] = useState<"all" | "image" | "video" | "audio">("all");
+  const [mode, setMode] = useState<"assets" | "records">("records");
+  const [query, setQuery] = useState("");
+  const [visibleCount, setVisibleCount] = useState(60);
+  const [library, setLibrary] = useState<Task[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const requestId = useRef(0);
   const [preview, setPreview] = useState<Task | null>(null);
+  const [previewIndex, setPreviewIndex] = useState(0);
+  const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
-  const imageTasks = tasks.filter((task) => taskKind(task, channels) === "image");
-  const videoTasks = tasks.filter((task) => taskKind(task, channels) === "video");
-  const audioTasks = tasks.filter((task) => taskKind(task, channels) === "audio");
+  useEffect(() => {
+    const current = ++requestId.current;
+    setLoading(true);
+    setLibrary([]);
+    setHasMore(false);
+    const timer = window.setTimeout(() => {
+      void api.libraryPage({ query, kind: filter, mode }).then((page) => {
+        if (current === requestId.current) { setLibrary(page.items); setHasMore(page.hasMore); setLoadError(""); }
+      }).catch((error) => { if (current === requestId.current) setLoadError(error instanceof Error ? error.message : "加载素材失败"); })
+        .finally(() => { if (current === requestId.current) setLoading(false); });
+    }, query ? 250 : 0);
+    return () => { window.clearTimeout(timer); requestId.current++; };
+  }, [tasks, query, filter, mode]);
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    const current = requestId.current;
+    setLoading(true);
+    try {
+      const page = await api.libraryPage({ offset: library.length, query, kind: filter, mode });
+      if (current === requestId.current) { setLibrary((items) => [...items, ...page.items]); setHasMore(page.hasMore); setVisibleCount((count) => count + 60); setLoadError(""); }
+    } catch (error) { if (current === requestId.current) setLoadError(error instanceof Error ? error.message : "加载素材失败"); }
+    finally { if (current === requestId.current) setLoading(false); }
+  }
+  const records = library.filter((task) => task.origin !== "upload");
+  const searchable = library.filter((task) => `${task.prompt} ${task.model} ${task.channelName} ${task.assets.map((asset) => `${asset.fileName} ${asset.title ?? ""}`).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const imageTasks = searchable.filter((task) => taskKind(task, channels) === "image");
+  const videoTasks = searchable.filter((task) => taskKind(task, channels) === "video");
+  const audioTasks = searchable.filter((task) => taskKind(task, channels) === "audio");
   const filtered = filter === "image" ? imageTasks
     : filter === "video" ? videoTasks
     : filter === "audio" ? audioTasks
-    : tasks;
-  const selectedTasks = tasks.filter((task) => selected.has(task.id));
-  const allFilteredSelected = filtered.length > 0 && filtered.every((task) => selected.has(task.id));
+    : searchable;
+  const filteredRecords = filtered.filter((task) => task.origin !== "upload");
+  const visibleRecords = filteredRecords.slice(0, visibleCount);
+  const filteredAssets = filtered.flatMap((task) => task.assets.map((asset, index) => ({ task, asset, index })));
+  const visibleAssets = filteredAssets.slice(0, visibleCount);
+  const selectedTasks = records.filter((task) => selected.has(task.id));
+  const allFilteredSelected = visibleRecords.length > 0 && visibleRecords.every((task) => selected.has(task.id));
 
   // 列表刷新后，已经被删掉/过期的勾选要跟着清掉，否则「已选 N 条」和实际能删的对不上
   useEffect(() => {
     setSelected((current) => {
       if (!current.size) return current;
-      const alive = new Set(tasks.map((task) => task.id));
+      const alive = new Set(library.map((task) => task.id));
       const next = new Set([...current].filter((id) => alive.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [tasks]);
+  }, [library]);
 
   // 半选状态只能通过 DOM 属性设置，React 没有对应的 prop
   useEffect(() => {
@@ -50,11 +90,12 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   /** 换筛选时清空勾选：勾中的可能已经不在眼前，留着会出现「看不见却被删掉」 */
   function changeFilter(next: "all" | "image" | "video" | "audio") {
     setFilter(next);
+    setVisibleCount(60);
     setSelected(new Set());
   }
 
   function toggleAll() {
-    setSelected(allFilteredSelected ? new Set() : new Set(filtered.map((task) => task.id)));
+    setSelected(allFilteredSelected ? new Set() : new Set(visibleRecords.map((task) => task.id)));
   }
 
   function toggleOne(id: string) {
@@ -78,13 +119,13 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   return (
     <div className="page">
       <div className="page-header">
-        <div><h1>历史记录</h1><span className="page-kicker">GENERATIONS</span></div>
+        <div><h1>素材管理</h1><span className="page-kicker">ASSETS & HISTORY</span></div>
         <div className="header-actions">
           <div className="filter-tabs">
-            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部 ({tasks.length})</button>
-            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片 ({imageTasks.length})</button>
-            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频 ({videoTasks.length})</button>
-            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频 ({audioTasks.length})</button>
+            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部</button>
+            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片</button>
+            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频</button>
+            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频</button>
           </div>
           {selected.size ? (
             <div className="selection-bar">
@@ -93,26 +134,38 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
               <button className="secondary-button" onClick={() => setSelected(new Set())}>取消选择</button>
             </div>
           ) : null}
-          {filtered.length ? <button className="secondary-button" title={`清空${filter === "all" ? "全部" : filter === "image" ? "图片" : filter === "video" ? "视频" : "音频"}记录`} onClick={() => onClear(filter)}><Trash2 size={16} />清空</button> : null}
+          {mode === "records" ? <button className="secondary-button" title="清空对应类型的全部公共生成记录，不受搜索影响" onClick={() => void api.library().then((items) => onClear(filter, items.filter((task) => task.origin !== "upload" && (filter === "all" || taskKind(task, channels) === filter)))).catch((error) => onToast("error", error instanceof Error ? error.message : "加载记录失败"))}><Trash2 size={16} />清空记录</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
           <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
         </div>
       </div>
+      <div className="library-toolbar">
+        <div className="filter-tabs"><button className={mode === "assets" ? "active" : ""} onClick={() => { setMode("assets"); setVisibleCount(60); setSelected(new Set()); }}>素材</button><button className={mode === "records" ? "active" : ""} onClick={() => { setMode("records"); setVisibleCount(60); setSelected(new Set()); }}>生成记录</button></div>
+        <input value={query} onChange={(event) => { setQuery(event.target.value); setVisibleCount(60); setSelected(new Set()); }} placeholder="搜索提示词、文件名、模型或渠道" aria-label="搜索素材和记录" />
+      </div>
+      {loadError ? <p role="alert">素材加载失败：{loadError}</p> : null}
+      {mode === "assets" ? <div className="library-grid">
+        {visibleAssets.map(({task, asset, index}) => <button type="button" className="library-card" key={asset.id} onClick={() => { setPreviewIndex(index); setPreview(task); }}>
+          <span className="library-card-media">{asset.mimeType.startsWith("video/") ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt="视频预览" /> : asset.mimeType.startsWith("audio/") ? asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" loading="lazy" /> : <Music size={32} /> : <img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</span>
+          <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
+        </button>)}
+        {!loading && !filtered.some((task) => task.assets.length) && !loadError ? <div className="table-empty"><ImageIcon size={28} /><span>没有符合条件的素材</span></div> : null}
+      </div> :
       <div className="data-table-wrap">
         <table className="data-table history-table">
           <thead><tr>
-            <th className="history-select"><input ref={selectAllRef} type="checkbox" checked={allFilteredSelected} disabled={!filtered.length} onChange={toggleAll} aria-label="全选当前列表" /></th>
+            <th className="history-select"><input ref={selectAllRef} type="checkbox" checked={allFilteredSelected} disabled={!visibleRecords.length} onChange={toggleAll} aria-label="全选已显示的记录" /></th>
             <th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" />
           </tr></thead>
-          <tbody>{filtered.map((task) => {
+          <tbody>{visibleRecords.map((task) => {
             const kind = taskKind(task, channels);
             const first = task.assets[0];
             return (
               <tr key={task.id} className={selected.has(task.id) ? "selected" : ""}>
                 <td className="history-select"><input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /></td>
                 <td>
-                  <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => task.assets.length && setPreview(task)}>
+                  <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>
                     {first
                       ? kind === "video"
                         ? <LazyVideoThumb src={api.assetUrl(first.url)} alt="生成结果缩略图" />
@@ -125,7 +178,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
                     {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
                   </button>
                 </td>
-                <td><button className="prompt-cell" title={task.assets.length ? "查看详情" : task.prompt} onClick={() => task.assets.length ? setPreview(task) : undefined}>{task.prompt}</button></td>
+                <td><button className="prompt-cell" title={task.assets.length ? "查看详情" : task.prompt} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>{task.prompt}</button></td>
                 <td>{task.channelName}</td><td>{task.model}</td>
                 <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
                 <td><div className="table-actions">
@@ -136,21 +189,26 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             );
           })}</tbody>
         </table>
-        {!filtered.length ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
-      </div>
-      {preview ? <HistoryPreview task={preview} channels={channels} references={references} onClose={() => setPreview(null)} onToast={onToast} /> : null}
+        {!loading && !filteredRecords.length && !loadError ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
+      </div>}
+      {loading ? <div className="table-empty"><LoaderCircle size={18} className="spin" /><span>加载中…</span></div> : null}
+      {!loading && visibleCount < (mode === "assets" ? filteredAssets.length : filteredRecords.length) ? <button type="button" className="secondary-button" onClick={() => setVisibleCount((count) => count + 60)}>显示更多</button> : !loading && hasMore ? <button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button> : null}
+      {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onToast={onToast} /> : null}
+      {bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
     </div>
   );
 }
 
-function HistoryPreview({ task, channels, references, onClose, onToast }: {
+function HistoryPreview({ task, initialIndex, channels, references, onClose, onSendToBoard, onToast }: {
   task: Task;
+  initialIndex: number;
   channels: Channel[];
   references: ReferenceController;
   onClose: () => void;
+  onSendToBoard: (asset: import("../../shared/types").Asset) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
-  const [index, setIndex] = useState(0);
+  const [index, setIndex] = useState(initialIndex);
   const [downloading, setDownloading] = useState(false);
   const kind = taskKind(task, channels);
   const isVideo = kind === "video";
@@ -193,6 +251,7 @@ function HistoryPreview({ task, channels, references, onClose, onToast }: {
         )}
         <div className="history-preview-bar">
           <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
+          <button type="button" className="secondary-button" onClick={() => onSendToBoard(asset)}><LayoutGrid size={16} />加入画布</button>
           {!isVideo && kind !== "audio" ? <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button> : null}
           {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => {
             const thumbIsVideo = item.mimeType.startsWith("video/");

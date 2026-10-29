@@ -81,8 +81,8 @@ export function CrossModeBridgeDialog({
     setBusy(target.id);
     try {
       const result = await api.addAssetsToBoard(target.id, items);
-      const skipped = result.skipped ? `，跳过 ${result.skipped} 张（已在画布或素材不可用）` : "";
-      onToast("success", `已加入《${target.title}》：新增 ${result.added.length} 个图片节点${skipped}`);
+      const skipped = result.skipped ? `，跳过 ${result.skipped} 个（已在画布或素材不可用）` : "";
+      onToast("success", `已加入《${target.title}》：新增 ${result.added.length} 个素材节点${skipped}`);
       onDone?.(result.board.id);
       onClose();
     } catch (error) {
@@ -95,9 +95,9 @@ export function CrossModeBridgeDialog({
   const createAndSend = async () => {
     setBusy("__new__");
     try {
-      const board = await api.createBoard({ title: "分镜参考" });
+      const board = await api.createBoard({ title: "素材画布" });
       const result = await api.addAssetsToBoard(board.id, items);
-      onToast("success", `已新建《${board.title}》，加入 ${result.added.length} 个图片节点`);
+      onToast("success", `已新建《${board.title}》，加入 ${result.added.length} 个素材节点`);
       onDone?.(board.id);
       onClose();
     } catch (error) {
@@ -124,7 +124,7 @@ export function CrossModeBridgeDialog({
 
   const title = mode === "to-board" ? "加入无限画布" : "加入参考图组";
   const hint = mode === "to-board"
-    ? "会把选中的分镜图作为图片节点放进无限画布，保留镜头标题和提示词。"
+    ? "将素材作为节点加入无限画布，并保留标题和提示词。"
     : "会把选中的图片追加到对话的参考图组，最多 8 张。";
 
   return createPortal(
@@ -148,7 +148,7 @@ export function CrossModeBridgeDialog({
 
         <div className="board-bridge-summary">
           <ImageIcon size={13} />
-          <span>将加入 {items.length} 张图片</span>
+          <span>将加入 {items.length} 个素材</span>
         </div>
 
         <div className="board-bridge-list">

@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-这是一个 Windows 桌面图片 / 视频生成客户端（当前版本 `2.2.5`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
+这是一个 Windows 桌面图片 / 视频生成客户端（当前源码版本 `2.2.7`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
 
 ## 当前架构
 
@@ -97,7 +97,11 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/server/app.ts`：Express 路由和请求校验。
 - `src/server/adapters.ts`：各渠道请求适配。
 - `src/server/tasks.ts`：任务执行、视频轮询与重启恢复、产物落盘。
-- `src/server/db.ts`：SQLite 表结构、迁移与查询（含产物目录设置）。
+- `src/server/db.ts`：数据库连接、任务 / 会话查询与产物目录设置，画布存储委托给独立仓储。
+- `src/server/db-schema.ts`：数据库建表和兼容迁移；启动时由 `AppDatabase` 顺序调用。
+- `src/server/db-board.ts`：画布文档、历史版本、素材链接和任务关联的数据库仓储，与 `AppDatabase` 共用 SQLite 连接。
+- `src/server/board-core.ts` / `board-assets.ts` / `board-video-selection.ts`：画布基础视图、素材操作和视频输入解析；`board.ts` 继续兼容原有导出。
+- `src/client/board/BoardMaterialDialog.tsx`、`BoardMinimap.tsx`、`useBoardMinimap.ts`、`board-geometry.ts`：画布素材弹窗、小地图和几何计算。
 - `src/server/key-store.ts`：渠道 API Key 的本地持久化。
 - `src/shared/provider-presets.ts`：添加渠道向导的站点与模型组预设。
 - `src/client/channels/`：渠道列表、编辑弹窗和添加渠道向导。
@@ -149,7 +153,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/chatcanvas-v2.2.5-portable-win-x64/` 和 `artifacts/chatcanvas-v2.2.5-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
+输出位于 `artifacts/chatcanvas-v2.2.7-portable-win-x64/` 和 `artifacts/chatcanvas-v2.2.7-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
 
 生成用于换电脑继续开发的源码包：
 
@@ -157,7 +161,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/chatcanvas-v2.2.5-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/chatcanvas-v2.2.7-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 

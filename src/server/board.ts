@@ -5,39 +5,38 @@
  * P0 不包含生成；配置节点的图片生成在 P1 接进来，仍然复用 TaskRunner。
  */
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import type { AppDatabase, AssetRow, BoardRecord } from "./db.js";
+import type { AppDatabase, BoardRecord } from "./db.js";
 import {
   allocateNodeRef, boardGroups, BoardValidationError, BOARD_LIMITS, composeConfigPrompt, directInputLinks,
   directUpstreamImages,
   parseBoardDoc, parseBoardExport, parseBoardSelection, parseBoardUiState, parseBoardViewport,
-  type BoardDelta, type BoardDoc, type BoardEdge, type BoardEdgeRole, type BoardGeneratorNode, type BoardGroup,
+  type BoardDelta, type BoardDoc, type BoardEdge, type BoardGeneratorNode, type BoardGroup,
   type BoardNode, type BoardSummary, type BoardUiState, type BoardView, type BoardViewport,
   type BoardVideoMode, type BoardAudioKind,
   type AudioBoardNode, type ConfigBoardNode, type ImageBoardNode, type VideoBoardNode,
 } from "../shared/board.js";
 import { AppError } from "./tasks.js";
 import {
-  extensionForMime, matchesImageSignature, type ReferenceImageUpload, type TaskRunner,
+  type ReferenceImageUpload, type TaskRunner,
 } from "./tasks.js";
-import { prepareImageBytes, REFERENCE_PROFILE, videoInlineProfile, writeThumbnail } from "./vision.js";
+import { prepareImageBytes, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
 import type {
-  Asset, GenerationInput, KlingMediaType, SeedanceVideoMode, Task, VideoMediaType, WanVideoMode,
+  GenerationInput, KlingMediaType, SeedanceVideoMode, Task, VideoMediaType, WanVideoMode,
 } from "../shared/types.js";
-import { MAX_CANVAS_IMAGES } from "../shared/types.js";
 import {
-  supportedVideoModes, VIDEO_CAPABILITIES, VIDEO_DEFAULTS, videoModeLabel,
-  type ConversationVideoMode, type VideoAdapter,
+  VIDEO_CAPABILITIES, VIDEO_DEFAULTS, type VideoAdapter,
 } from "../shared/video-capabilities.js";
-import type { ConversationVideoRole } from "../shared/agent-types.js";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import { pickBrainChannel, readAgentDefaults } from "./agent-settings.js";
 import { BRAIN_RETRY_MAX_TOKENS, callBrain } from "./brain.js";
 import type { KeyStore } from "./key-store.js";
+import { boardView, requireBoard } from "./board-core.js";
+import { resolveBoardVideoSelection } from "./board-video-selection.js";
+export { resolveBoardVideoSelection } from "./board-video-selection.js";
+export { addAssetsToBoard, appendConversationCanvasAssets, storeBoardUpload, removeBoardAsset, detachAssetFromBoards, listBoardAssets, linkBoardAsset } from "./board-assets.js";
+export type { BoardBridgeItem } from "./board-assets.js";
 
-const IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"] as const;
 const DEFAULT_BOARD_TITLE = "未命名无限画布";
 
 function now() {
@@ -90,24 +89,6 @@ function placeResultNode(
   return { x: Math.round(maxRight + 160), y: Math.round(preferredY) };
 }
 
-function boardView(db: AppDatabase, board: BoardRecord): BoardView {
-  const versions = db.listBoardHistoryVersions(board.id);
-  const nodeIds = new Set(board.doc.nodes.map((node) => node.id));
-  return {
-    id: board.id,
-    title: board.title,
-    doc: board.doc,
-    viewport: board.viewport,
-    // 撤销 / 外部修改后，选中集合里可能还留着已经被删掉的节点
-    selection: board.selection.filter((id) => nodeIds.has(id)),
-    uiState: board.uiState,
-    version: board.version,
-    threadId: board.threadId,
-    canUndo: versions.some((version) => version < board.version),
-    canRedo: versions.some((version) => version > board.version),
-  };
-}
-
 /**
  * 计算两份文档的增量。
  *
@@ -144,12 +125,6 @@ export function buildBoardDelta(
     removedEdgeIds: edges.removed,
     removedGroupIds: groups.removed,
   };
-}
-
-function requireBoard(db: AppDatabase, id: string): BoardRecord {
-  const board = db.getBoardRecord(id);
-  if (!board) throw new AppError("BOARD_NOT_FOUND", "无限画布不存在", 404);
-  return board;
 }
 
 function parseDocOrThrow(value: unknown): BoardDoc {
@@ -521,131 +496,6 @@ export async function retryBoardTask(input: {
     kind: rows[0]!.kind,
   });
   return { task, resultNodeIds, configNodeId: rows[0]!.configNodeId };
-}
-
-interface BoardVideoInput {
-  node: ImageBoardNode;
-  assetId: string;
-  role: ConversationVideoRole;
-}
-
-interface BoardVideoSelection {
-  mode: ConversationVideoMode;
-  inputs: BoardVideoInput[];
-}
-
-type BoardEdgeVideoRole = ConversationVideoRole | "auto";
-
-/** 没有 role 的连线是「自动」；显式选了参考图才按参考图算 */
-function edgeVideoRole(role: BoardEdgeRole | undefined): BoardEdgeVideoRole {
-  if (role === "first-frame") return "first_frame";
-  if (role === "last-frame") return "last_frame";
-  if (role === "reference") return "reference_image";
-  return "auto";
-}
-
-/**
- * 把配置节点的上游连线解析成「哪种视频模式 + 每张图的角色」。
- *
- * 角色优先看连线（用户 / Agent 在检查器里设的 first-frame / last-frame），
- * 没有角色时才按模式与图片数量推断。任何模糊组合都直接报错，不悄悄丢图。
- */
-export function resolveBoardVideoSelection(input: {
-  doc: BoardDoc;
-  config: Pick<ConfigBoardNode, "id" | "videoMode">;
-  adapterType: string;
-  model?: string;
-  modeOverride?: BoardVideoMode;
-}): { selection?: BoardVideoSelection; error?: string } {
-  const links = directInputLinks(input.doc, input.config.id);
-  const videoSources = links.filter((link) => link.node.type === "video");
-  if (videoSources.length) {
-    return { error: "无限画布视频生成暂时只接图片输入，不支持把视频节点当素材" };
-  }
-  const images = links.filter(
-    (link): link is { edge: typeof link.edge; node: ImageBoardNode } =>
-      link.node.type === "image" && Boolean(link.node.assetId),
-  );
-  const withRole = images.map((link) => ({
-    node: link.node,
-    assetId: link.node.assetId!,
-    role: edgeVideoRole(link.edge.role),
-  }));
-
-  const adapter = input.adapterType as VideoAdapter;
-  const capability = VIDEO_CAPABILITIES[adapter];
-  if (!capability) return { error: "当前模型不是视频模型，请换一个视频渠道" };
-  const supported = supportedVideoModes(input.adapterType, input.model);
-  const cap = Math.min(BOARD_LIMITS.maxUpstreamImages, capability.maxReferenceImages);
-
-  const firsts = withRole.filter((item) => item.role === "first_frame");
-  const lasts = withRole.filter((item) => item.role === "last_frame");
-  const explicitRefs = withRole.filter((item) => item.role === "reference_image");
-  const autoRoles = withRole.filter((item) => item.role === "auto");
-  const requested = input.modeOverride ?? input.config.videoMode;
-  let mode: ConversationVideoMode | undefined = requested;
-
-  if (!mode) {
-    if (!withRole.length) {
-      mode = "text-to-video";
-    } else if (lasts.length && !firsts.length) {
-      return { error: "有尾帧但没有首帧：把其中一张连线的角色改成首帧，或改用参考图模式" };
-    } else if (firsts.length > 1 || lasts.length > 1) {
-      return { error: "首帧和尾帧各只能有一张，请检查连线的角色" };
-    } else if (firsts.length === 1 && lasts.length === 1) {
-      if (withRole.length !== 2) return { error: "首尾帧模式正好需要两张图，其它连线请改成参考图或断开" };
-      mode = "first-last-frame";
-    } else if (firsts.length === 1) {
-      if (withRole.length !== 1) return { error: "首帧模式只接受一张图；其它图片请断开，或把角色改成参考图并选择参考生视频" };
-      mode = "first-frame";
-    } else if (explicitRefs.length) {
-      mode = "reference";
-    } else if (autoRoles.length === 1) {
-      // 单张图不指定方式时，按惯例当作首帧；多张交给参考生视频
-      mode = "first-frame";
-    } else {
-      mode = "reference";
-    }
-  }
-
-  if (!supported.includes(mode)) {
-    return { error: `这个视频模型不支持${videoModeLabel(mode, input.adapterType)}。它支持：${supported.map((item) => videoModeLabel(item, input.adapterType)).join("、")}` };
-  }
-
-  if (mode === "text-to-video") {
-    if (withRole.length) {
-      return { error: "文生视频不会带图：请断开图片连线，或在检查器里换成首帧 / 首尾帧 / 参考图模式" };
-    }
-    return { selection: { mode, inputs: [] } };
-  }
-  if (mode === "first-frame") {
-    if (withRole.length !== 1) return { error: `首帧生视频只接受 1 张图（现在连了 ${withRole.length} 张）` };
-    return { selection: { mode, inputs: [{ ...withRole[0]!, role: "first_frame" }] } };
-  }
-  if (mode === "first-last-frame") {
-    if (withRole.length !== 2) return { error: `首尾帧生视频必须正好 2 张图（现在连了 ${withRole.length} 张）` };
-    const first = firsts[0] ?? withRole[0]!;
-    const last = lasts[0] ?? withRole.find((item) => item.node.id !== first.node.id);
-    if (!last || first.node.id === last.node.id) return { error: "首尾帧需要两张不同的图" };
-    return {
-      selection: {
-        mode,
-        inputs: [
-          { ...first, role: "first_frame" },
-          { ...last, role: "last_frame" },
-        ],
-      },
-    };
-  }
-
-  if (!withRole.length) return { error: "参考生视频至少需要 1 张参考图" };
-  if (withRole.length > cap) return { error: `这个视频模型最多用 ${cap} 张参考图（现在连了 ${withRole.length} 张）` };
-  return {
-    selection: {
-      mode: "reference",
-      inputs: withRole.map((item) => ({ ...item, role: "reference_image" })),
-    },
-  };
 }
 
 async function generateBoardVideo(input: {
@@ -1431,223 +1281,6 @@ export async function generateBoardConfig(input: {
     referenceCount: references.length,
     modelAlias: resolution.alias,
   };
-}
-
-export interface BoardBridgeItem {
-  assetId: string;
-  title?: string;
-  prompt?: string;
-}
-
-/** 把已有素材（分镜图等）放进无限画布：建图片节点、挂 board_assets，一次保存 */
-export function addAssetsToBoard(
-  db: AppDatabase,
-  boardId: string,
-  items: BoardBridgeItem[],
-): {
-  board: BoardView;
-  added: Array<{ assetId: string; nodeRef: string }>;
-  skipped: number;
-} {
-  const board = requireBoard(db, boardId);
-  const existingAssetIds = new Set(
-    board.doc.nodes
-      .filter((node): node is ImageBoardNode => node.type === "image" && Boolean(node.assetId))
-      .map((node) => node.assetId!),
-  );
-  const room = BOARD_LIMITS.maxNodes - board.doc.nodes.length;
-  const accepted: Array<{ asset: AssetRow; title: string; prompt?: string }> = [];
-  let skipped = 0;
-  for (const item of items) {
-    if (accepted.length >= room) { skipped += 1; continue; }
-    if (existingAssetIds.has(item.assetId)) { skipped += 1; continue; }
-    const asset = db.getAsset(item.assetId);
-    if (!asset || !asset.mimeType.startsWith("image/")) { skipped += 1; continue; }
-    existingAssetIds.add(item.assetId);
-    accepted.push({
-      asset,
-      title: (item.title?.trim() || asset.fileName.replace(/\.[^.]+$/, "") || "图片").slice(0, 80),
-      ...(item.prompt?.trim() ? { prompt: item.prompt.trim() } : {}),
-    });
-  }
-  if (!accepted.length) {
-    return { board: boardView(db, board), added: [], skipped };
-  }
-
-  const at = now();
-  const existing = board.doc.nodes;
-  const startX = existing.length
-    ? Math.max(...existing.map((node) => node.x + node.width)) + 160
-    : 160;
-  const startY = existing.length
-    ? Math.min(...existing.map((node) => node.y))
-    : 160;
-  const nodes: BoardNode[] = [];
-  let nextRef = board.doc.nextRef;
-  const added: Array<{ assetId: string; nodeRef: string }> = [];
-  for (const [index, item] of accepted.entries()) {
-    const allocated = allocateNodeRef({ nodes: [...existing, ...nodes], nextRef });
-    nextRef = allocated.nextRef;
-    const node: ImageBoardNode = {
-      id: `node-${crypto.randomUUID()}`,
-      ref: allocated.ref,
-      type: "image",
-      x: startX + (index % 2) * 320,
-      y: startY + Math.floor(index / 2) * 240,
-      width: 280,
-      height: 210,
-      title: item.title,
-      createdAt: at,
-      updatedAt: at,
-      assetId: item.asset.id,
-      source: "library",
-      status: "succeeded",
-      ...(item.prompt ? { prompt: item.prompt } : {}),
-    };
-    nodes.push(node);
-    added.push({ assetId: item.asset.id, nodeRef: node.ref });
-    db.insertBoardAssetLink(boardId, item.asset.id, node.id);
-  }
-  const doc: BoardDoc = {
-    ...board.doc,
-    nextRef,
-    nodes: [...board.doc.nodes, ...nodes],
-  };
-  db.saveBoardSnapshot({
-    boardId,
-    previousDoc: board.doc,
-    doc,
-    version: board.version + 1,
-    reason: "bridge:assets",
-  });
-  return { board: boardView(db, requireBoard(db, boardId)), added, skipped };
-}
-
-/** 把图片追加到某个对话的参考图组；去重，超过上限的部分跳过 */
-export function appendConversationCanvasAssets(
-  db: AppDatabase,
-  conversationId: string,
-  assetIds: string[],
-): { conversationId: string; canvasAssetIds: string[]; added: string[]; skipped: number } {
-  const conversation = db.getConversation(conversationId);
-  if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-  if (conversation.kind !== "chat") {
-    throw new AppError("CONVERSATION_NOT_CHAT", "只能把图片加入普通对话的参考图组", 400);
-  }
-  const next = [...conversation.canvasAssetIds];
-  const seen = new Set(next);
-  const added: string[] = [];
-  let skipped = 0;
-  for (const assetId of assetIds) {
-    if (seen.has(assetId)) { skipped += 1; continue; }
-    if (next.length >= MAX_CANVAS_IMAGES) { skipped += 1; continue; }
-    const asset = db.getAsset(assetId);
-    if (!asset || !asset.mimeType.startsWith("image/")) { skipped += 1; continue; }
-    seen.add(assetId);
-    next.push(assetId);
-    added.push(assetId);
-  }
-  if (added.length) db.updateConversation(conversationId, { canvasAssetIds: next });
-  return { conversationId, canvasAssetIds: next, added, skipped };
-}
-
-/** 上传一张图到无限画布；不写聊天消息，返回素材给客户端插节点 */
-export async function storeBoardUpload(
-  db: AppDatabase,
-  boardId: string,
-  file: { buffer: Buffer; mimetype: string; originalname: string },
-): Promise<Asset> {
-  requireBoard(db, boardId);
-  if (!IMAGE_MIME.includes(file.mimetype as typeof IMAGE_MIME[number])) {
-    throw new AppError("BOARD_ASSET_INVALID", "无限画布只支持 PNG、JPEG、WebP 图片", 400);
-  }
-  if (!matchesImageSignature(file.buffer, file.mimetype as ReferenceImageUpload["mimeType"])) {
-    throw new AppError("BOARD_ASSET_INVALID", "图片格式与文件内容不匹配", 400);
-  }
-
-  const assetId = crypto.randomUUID();
-  const taskId = crypto.randomUUID();
-  const fileName = `${taskId}-1.${extensionForMime(file.mimetype)}`;
-  const baseDir = db.assetsDir;
-  await fs.promises.writeFile(path.join(baseDir, fileName), file.buffer);
-  const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
-  const thumbPath = await writeThumbnail(db, assetId, file.buffer);
-  db.createTask({
-    id: taskId, channelId: "", model: "", prompt: "无限画布上传",
-    input: {}, origin: "upload", status: "succeeded",
-  });
-  db.insertAsset({
-    id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
-    relativePath: fileName, baseDir, sha256, thumbPath,
-  });
-  // 文档保存前先挂一条临时链接，保存时会按节点重建
-  db.insertBoardAssetLink(boardId, assetId, `pending:${assetId}`);
-  return db.assetView(db.getAsset(assetId)!);
-}
-
-function clearAssetRefs(doc: BoardDoc, assetId: string): { doc: BoardDoc; changed: boolean } {
-  let changed = false;
-  const at = now();
-  const nodes = doc.nodes.map((node): BoardNode => {
-    if ((node.type !== "image" && node.type !== "video" && node.type !== "audio") || node.assetId !== assetId) return node;
-    changed = true;
-    return {
-      ...node,
-      assetId: null,
-      status: "empty",
-      updatedAt: at,
-      error: undefined,
-    } as BoardNode;
-  });
-  return { doc: changed ? { ...doc, nodes } : doc, changed };
-}
-
-/**
- * 从无限画布移除一张素材：节点清空并标成「素材已删除」，文件不删。
- *
- * 文件保留让撤销可以恢复引用；真正的全局删除在生成历史里做。
- */
-export function removeBoardAsset(db: AppDatabase, boardId: string, assetId: string): BoardView {
-  const board = requireBoard(db, boardId);
-  const linked = db.findBoardAssetRefs(assetId).some((ref) => ref.boardId === boardId);
-  if (!linked) throw new AppError("BOARD_ASSET_NOT_FOUND", "这张素材不在当前无限画布里", 404);
-  const cleared = clearAssetRefs(board.doc, assetId);
-  if (!cleared.changed) {
-    // 只有临时链接、还没插节点：把文档原样存一次，重建索引即可移掉链接
-    db.saveBoardSnapshot({
-      boardId, previousDoc: board.doc, doc: board.doc,
-      version: board.version + 1, reason: "asset:removed",
-    });
-  } else {
-    db.saveBoardSnapshot({
-      boardId, previousDoc: board.doc, doc: cleared.doc,
-      version: board.version + 1, reason: "asset:removed",
-    });
-  }
-  return boardView(db, requireBoard(db, boardId));
-}
-
-/**
- * 全局素材被删时调用：把所有无限画布里引用它的节点清空。
- *
- * P0 的无限画布素材删除走 removeBoardAsset；这个函数留给生成历史的全局删除，
- * 避免以后忘了无限画布也是素材的引用方。
- */
-export function detachAssetFromBoards(db: AppDatabase, assetId: string): void {
-  const refs = db.findBoardAssetRefs(assetId);
-  const boardIds = [...new Set(refs.map((ref) => ref.boardId))];
-  for (const boardId of boardIds) {
-    try {
-      removeBoardAsset(db, boardId, assetId);
-    } catch {
-      // 板已经被删 / 素材链接已经不在了：没有可清理的东西
-    }
-  }
-}
-
-export function listBoardAssets(db: AppDatabase, boardId: string): Asset[] {
-  requireBoard(db, boardId);
-  return db.listBoardAssets(boardId);
 }
 
 /**

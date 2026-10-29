@@ -118,6 +118,11 @@ export const api = {
   },
   task: (id: string) => request<Task>(`/api/generations/${id}`),
   tasks: () => request<Task[]>("/api/generations"),
+  library: () => request<Task[]>("/api/library"),
+  libraryPage: (options: { offset?: number; query?: string; kind?: string; mode?: string }) => {
+    const params = new URLSearchParams({ limit: "60", offset: String(options.offset ?? 0), q: options.query ?? "", kind: options.kind ?? "all", mode: options.mode ?? "all" });
+    return request<{ items: Task[]; hasMore: boolean }>(`/api/library?${params}`);
+  },
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
   midjourneyAction: (id: string, customId: string, label?: string) =>
@@ -134,8 +139,8 @@ export const api = {
   ),
   /** 只删勾选的那些记录：和清空历史同一个接口，用 ids 指定范围 */
   deleteTasks: (ids: string[], keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
-    `/api/generations?ids=${encodeURIComponent(ids.join(","))}&keepFiles=${keepFiles ? "1" : "0"}`,
-    { method: "DELETE" },
+    "/api/generations/batch-delete",
+    { method: "POST", body: JSON.stringify({ ids, keepFiles }) },
   ),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   settings: () => request<Settings>("/api/settings"),
@@ -358,6 +363,7 @@ export const api = {
       { method: "POST" },
     ),
   boardAssets: (id: string) => request<Asset[]>(`/api/boards/${id}/assets`),
+  linkBoardAsset: (id: string, assetId: string) => request<Asset>(`/api/boards/${id}/assets/${assetId}/link`, { method: "POST" }),
   addAssetsToBoard: (id: string, items: Array<{ assetId: string; title?: string; prompt?: string }>) =>
     request<{
       board: BoardView;

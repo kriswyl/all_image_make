@@ -4,6 +4,7 @@ import {
   Link as LinkIcon, LoaderCircle, Plus, RotateCcw, Settings2, SlidersHorizontal, Square, Upload, X,
 } from "lucide-react";
 import { api } from "./api";
+import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import { LazyVideoThumb } from "./LazyVideoThumb";
@@ -394,6 +395,7 @@ export function VideoGenerateView(props: {
         klingVideoMedia = built.length ? built : undefined;
       }
 
+      if (!confirmGeneration({ kind: "视频生成", model: props.selectedModel, channel: channel.name, detail: `时长：${caps.durations.fixed ?? duration} 秒 · 分辨率：${resolution}` })) return;
       const task = await api.generate({
         channelId: channel.id,
         model: props.selectedModel,
@@ -766,6 +768,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 
   async function retry() {
     if (!task) return;
+    if (!confirmGeneration({ kind: "视频生成", model: task.model, channel: task.channelName, retry: true })) return;
     try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
     catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }

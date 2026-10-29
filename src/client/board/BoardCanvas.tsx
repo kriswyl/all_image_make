@@ -14,11 +14,14 @@ import {
 } from "lucide-react";
 import {
   boardGroups, BOARD_LIMITS, directUpstreamImages, directUpstreamText,
-  type BoardEdge, type BoardGroup, type BoardNode, type BoardNodeType,
+  type BoardGroup, type BoardNode, type BoardNodeType,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
 import type { UseBoardResult } from "./useBoard";
 import { BoardNodeView } from "./BoardNodeView";
+import { BoardMinimap } from "./BoardMinimap";
+import { useBoardMinimap } from "./useBoardMinimap";
+import { clampScale, edgePath, edgeClass, rectsIntersect, nodesBounds } from "./board-geometry";
 
 interface PositionPatch {
   x?: number;
@@ -85,49 +88,6 @@ interface GroupDragState {
   moved: boolean;
 }
 
-const MIN_SCALE = 0.05;
-const MAX_SCALE = 3;
-
-function clampScale(value: number) {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
-}
-
-function edgePath(source: BoardNode, target: BoardNode): string {
-  const sx = source.x + source.width;
-  const sy = source.y + source.height / 2;
-  const tx = target.x;
-  const ty = target.y + target.height / 2;
-  const bend = Math.max(30, Math.abs(tx - sx) * 0.42);
-  return `M ${sx} ${sy} C ${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}`;
-}
-
-function edgeClass(edge: BoardEdge): string {
-  if (edge.kind === "result") return "is-result";
-  if (edge.role === "text") return "is-text";
-  if (edge.role === "first-frame") return "is-first";
-  if (edge.role === "last-frame") return "is-last";
-  return "is-reference";
-}
-
-function rectsIntersect(
-  a: { x: number; y: number; width: number; height: number },
-  b: { x: number; y: number; width: number; height: number },
-) {
-  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
-}
-
-function nodesBounds(nodes: BoardNode[]): { x: number; y: number; width: number; height: number } | null {
-  if (!nodes.length) return null;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const node of nodes) {
-    minX = Math.min(minX, node.x);
-    minY = Math.min(minY, node.y);
-    maxX = Math.max(maxX, node.x + node.width);
-    maxY = Math.max(maxY, node.y + node.height);
-  }
-  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
-}
-
 export function BoardCanvas({
   board, assets, onPickImage, onUploadFiles, onPreviewAsset, onGenerate, onStopTask, onRetryTask,
 }: {
@@ -148,6 +108,7 @@ export function BoardCanvas({
   const [spacePressed, setSpacePressed] = useState(false);
   const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [connect, setConnect] = useState<ConnectState | null>(null);
+  const [connectMenu, setConnectMenu] = useState<{ x: number; y: number; worldX: number; worldY: number; sourceId: string; sourceType: BoardNode["type"] } | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [minimapOpen, setMinimapOpen] = useState(true);
@@ -216,49 +177,7 @@ export function BoardCanvas({
     () => Math.max(900, size.height, ...nodes.map((node) => node.y + node.height + 900)),
     [nodes, size.height],
   );
-  /** 适应窗口只看真实节点范围；按世界画布 1600×1000 去缩会把两个节点缩成芝麻 */
-  const contentBounds = useMemo(() => {
-    if (!nodes.length) return null;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const node of nodes) {
-      minX = Math.min(minX, node.x);
-      minY = Math.min(minY, node.y);
-      maxX = Math.max(maxX, node.x + node.width);
-      maxY = Math.max(maxY, node.y + node.height);
-    }
-    return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
-  }, [nodes]);
-
-  /** 小地图的世界范围：内容 + 当前视口，保证视口框永远在图上 */
-  const minimapBounds = useMemo(() => {
-    const scale = viewport.scale || 1;
-    const viewRect = {
-      x: -viewport.x / scale,
-      y: -viewport.y / scale,
-      width: Math.max(1, size.width / scale),
-      height: Math.max(1, size.height / scale),
-    };
-    const rects = contentBounds ? [contentBounds, viewRect] : [viewRect];
-    const minX = Math.min(...rects.map((rect) => rect.x));
-    const minY = Math.min(...rects.map((rect) => rect.y));
-    const maxX = Math.max(...rects.map((rect) => rect.x + rect.width));
-    const maxY = Math.max(...rects.map((rect) => rect.y + rect.height));
-    const pad = 80;
-    return { x: minX - pad, y: minY - pad, width: maxX - minX + pad * 2, height: maxY - minY + pad * 2, viewRect };
-  }, [contentBounds, size.height, size.width, viewport]);
-
-  const minimapLayout = useMemo(() => {
-    const width = 176;
-    const height = 118;
-    const scale = Math.min(width / minimapBounds.width, height / minimapBounds.height);
-    return {
-      width,
-      height,
-      scale,
-      offsetX: (width - minimapBounds.width * scale) / 2,
-      offsetY: (height - minimapBounds.height * scale) / 2,
-    };
-  }, [minimapBounds]);
+  const { contentBounds, minimapBounds, minimapLayout } = useBoardMinimap(nodes, viewport, size);
 
   const fit = useCallback(() => {
     const element = containerRef.current;
@@ -447,6 +366,7 @@ export function BoardCanvas({
         board.setSelection([]);
         setSelectedEdgeId(null);
         setConnect(null);
+        setConnectMenu(null);
         connectRef.current = null;
         setMarquee(null);
         marqueeRef.current = null;
@@ -491,6 +411,7 @@ export function BoardCanvas({
   const beginCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
     setAddMenuOpen(false);
     setContextMenu(null);
+    if (!(event.target as HTMLElement).closest(".board-context-menu")) setConnectMenu(null);
     if (event.button === 2) return;
     const target = event.target as HTMLElement;
     const overNode = Boolean(target.closest("[data-board-node], [data-board-group]"));
@@ -757,6 +678,7 @@ export function BoardCanvas({
   const beginConnect = (event: ReactPointerEvent<HTMLSpanElement>, node: BoardNode) => {
     event.preventDefault();
     event.stopPropagation();
+    setConnectMenu(null);
     const pointer = toWorld(event.clientX, event.clientY);
     const state: ConnectState = {
       pointerId: event.pointerId,
@@ -791,7 +713,17 @@ export function BoardCanvas({
       ?.closest<HTMLElement>("[data-board-node]");
     const targetId = target?.getAttribute("data-board-node-id");
     const targetNode = targetId ? nodeMap.get(targetId) : null;
-    if (!targetNode || targetNode.type === "text") return;
+    if (!targetNode) {
+      if (event.type !== "pointercancel" && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        if (event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) {
+          const point = toWorld(event.clientX, event.clientY);
+          setConnectMenu({ x: Math.max(0, Math.min(event.clientX - rect.left, rect.width - 200)), y: Math.max(0, Math.min(event.clientY - rect.top, rect.height - 220)), worldX: point.x, worldY: point.y, sourceId: state.sourceId, sourceType: state.sourceType });
+        }
+      }
+      return;
+    }
+    if (targetNode.type === "text") return;
     // 音频只吃文本；把图片拖过去直接不连，避免服务端拒绝一次后整份文档重载
     if (targetNode.type === "audio" && state.sourceType !== "text") return;
     // 视频 / 配置视频的图片连线默认「自动」角色，由服务端按张数 / 后续选择推断；生图则固定参考图
@@ -982,6 +914,7 @@ export function BoardCanvas({
                 onCancelEdit={() => setEditingTextId(null)}
                 onUpdateNode={(patch) => board.updateNode(node.id, patch)}
                 onPreview={onPreviewAsset}
+                onSelect={() => board.setSelection([node.id])}
                 onPickImage={onPickImage}
                 onRemoveAsset={(nodeId) => {
                   const item = nodeMap.get(nodeId);
@@ -1092,46 +1025,26 @@ export function BoardCanvas({
         </div>
       ) : null}
 
-      {minimapOpen ? (
-        <div className="board-minimap" onPointerDown={(event) => event.stopPropagation()}>
-          <svg
-            width={minimapLayout.width}
-            height={minimapLayout.height}
-            viewBox={`0 0 ${minimapLayout.width} ${minimapLayout.height}`}
-            role="img"
-            aria-label="无限画布小地图"
-            onPointerDown={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
-              const worldX = minimapBounds.x + (event.clientX - rect.left - minimapLayout.offsetX) / minimapLayout.scale;
-              const worldY = minimapBounds.y + (event.clientY - rect.top - minimapLayout.offsetY) / minimapLayout.scale;
-              board.setViewport({
-                ...viewport,
-                x: size.width / 2 - worldX * viewport.scale,
-                y: size.height / 2 - worldY * viewport.scale,
-              });
-            }}
-          >
-            <rect width={minimapLayout.width} height={minimapLayout.height} className="board-minimap-bg" />
-            {nodes.map((node) => (
-              <rect
-                key={node.id}
-                className={`board-minimap-node is-${node.type}`}
-                x={minimapLayout.offsetX + (node.x - minimapBounds.x) * minimapLayout.scale}
-                y={minimapLayout.offsetY + (node.y - minimapBounds.y) * minimapLayout.scale}
-                width={Math.max(2, node.width * minimapLayout.scale)}
-                height={Math.max(2, node.height * minimapLayout.scale)}
-                rx={1.5}
-              />
-            ))}
-            <rect
-              className="board-minimap-view"
-              x={minimapLayout.offsetX + (minimapBounds.viewRect.x - minimapBounds.x) * minimapLayout.scale}
-              y={minimapLayout.offsetY + (minimapBounds.viewRect.y - minimapBounds.y) * minimapLayout.scale}
-              width={Math.max(3, minimapBounds.viewRect.width * minimapLayout.scale)}
-              height={Math.max(3, minimapBounds.viewRect.height * minimapLayout.scale)}
-              rx={2}
-            />
-          </svg>
+      {minimapOpen ? <BoardMinimap nodes={nodes} bounds={minimapBounds} layout={minimapLayout} viewport={viewport} size={size} onViewportChange={board.setViewport} /> : null}
+
+      {connectMenu ? (
+        <div className="board-context-menu" style={{ left: connectMenu.x, top: connectMenu.y }} role="menu" aria-label="添加并连接节点" onPointerDown={(event) => event.stopPropagation()}>
+          {([
+            ...(connectMenu.sourceType === "config" ? [["text", "文本"]] as const : []),
+            ["image", "图片"], ["video", "视频"],
+            ...(connectMenu.sourceType === "text" || connectMenu.sourceType === "config" ? [["audio", "音频"]] as const : []),
+            ...(connectMenu.sourceType !== "config" ? [["config", "配置"]] as const : []),
+          ] as ReadonlyArray<readonly ["text" | "image" | "video" | "audio" | "config", string]>).map(([type, label]) => (
+            <button type="button" role="menuitem" key={type} onClick={() => {
+              const node = board.addNode(type, { x: connectMenu.worldX, y: connectMenu.worldY });
+              if (node) {
+                const kind = connectMenu.sourceType === "config" ? "result" : "input";
+                const role = kind === "result" ? undefined : connectMenu.sourceType === "text" ? "text" : connectMenu.sourceType === "image" && type !== "video" ? "reference" : undefined;
+                if (board.addEdge(connectMenu.sourceId, node.id, kind, role)) board.setSelection([node.id]);
+              }
+              setConnectMenu(null);
+            }}><Plus size={13} /><span>{label}</span></button>
+          ))}
         </div>
       ) : null}
 

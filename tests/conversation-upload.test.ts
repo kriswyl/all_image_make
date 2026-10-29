@@ -88,10 +88,14 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
 
     // 上传**不是**一次生成：历史里没有它，也不占会话的任务额度
     expect((await request(app).get("/api/generations").expect(200)).body.data).toHaveLength(0);
+    const library = (await request(app).get("/api/library").expect(200)).body.data;
+    expect(library).toHaveLength(0);
     expect(view.taskCount).toBe(0);
     expect(context.db.listTaskRows()).toHaveLength(0);
     // 但给 assets.task_id 撑腰的那条行确实存在，并且标了来源
     expect(context.db.getTaskRow(context.db.getAsset(assetId)!.taskId)?.origin).toBe("upload");
+    expect(context.db.getTaskRow(context.db.getAsset(assetId)!.taskId)?.libraryScope).toBe("conversation");
+    expect(context.db.getTaskRow(context.db.getAsset(assetId)!.taskId)?.ownerConversationId).toBe(conversationId);
   });
 
   it("大脑能用它改图：上传的图真的当参考图发到了生图接口上", async () => {

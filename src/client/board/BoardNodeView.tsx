@@ -24,6 +24,7 @@ export interface BoardNodeViewProps {
   onCancelEdit: () => void;
   onUpdateNode: (patch: Partial<BoardNode>) => void;
   onPreview: (asset: Asset) => void;
+  onSelect: () => void;
   onPickImage: (nodeId: string) => void;
   onRemoveAsset: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
@@ -222,11 +223,12 @@ function TextNodeView({ node, editing, onStartEdit, onCommitText, onCancelEdit }
   );
 }
 
-function ImageNodeView({ node, asset, upstream, onPreview, onPickImage, onRemoveAsset, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
+function ImageNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage, onRemoveAsset, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
   node: ImageBoardNode;
   asset: Asset | null;
   upstream: { textCount: number; imageCount: number };
   onPreview: (asset: Asset) => void;
+  onSelect: () => void;
   onPickImage: (nodeId: string) => void;
   onRemoveAsset: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
@@ -241,9 +243,10 @@ function ImageNodeView({ node, asset, upstream, onPreview, onPickImage, onRemove
         <button
           type="button"
           className={`board-image-body ${asset ? "has-asset" : ""}`}
-          title={asset ? "点开看大图" : "还没有图片，可以写提示词生成或上传"}
+          title={asset ? "点击查看设置，双击预览" : "还没有图片，可以写提示词生成或上传"}
           disabled={!asset}
-          onClick={() => { if (asset) onPreview(asset); }}
+          onClick={onSelect}
+          onDoubleClick={() => { if (asset) onPreview(asset); }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           {asset ? (
@@ -256,7 +259,7 @@ function ImageNodeView({ node, asset, upstream, onPreview, onPickImage, onRemove
           )}
           {node.status === "loading" ? <span className="board-image-loading"><LoaderCircle size={18} className="spin" /></span> : null}
         </button>
-        <MediaPrompt
+        {(!node.assetId || node.status === "loading") && <MediaPrompt
           node={node}
           upstream={upstream}
           hasAsset={Boolean(asset)}
@@ -264,7 +267,7 @@ function ImageNodeView({ node, asset, upstream, onPreview, onPickImage, onRemove
           onGenerate={onGenerate}
           onStopTask={onStopTask}
           onRetryTask={onRetryTask}
-        />
+        />}
       </div>
       <div className="board-node-tools">
         <button type="button" title="上传 / 替换图片" onClick={() => onPickImage(node.id)} onPointerDown={(event) => event.stopPropagation()}>
@@ -283,11 +286,13 @@ function ImageNodeView({ node, asset, upstream, onPreview, onPickImage, onRemove
   );
 }
 
-function VideoNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
+function VideoNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
   node: VideoBoardNode;
   asset: Asset | null;
   upstream: { textCount: number; imageCount: number };
   onPreview: (asset: Asset) => void;
+  onSelect: () => void;
+  onPickImage: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
   onUpdateNode: (patch: Partial<BoardNode>) => void;
   onGenerate: (nodeId: string) => void;
@@ -300,9 +305,10 @@ function VideoNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
         <button
           type="button"
           className={`board-image-body ${asset ? "has-asset" : ""}`}
-          title={asset ? "播放视频" : node.status === "loading" ? "视频生成中…" : "写提示词生成视频"}
+          title={asset ? "点击查看设置，双击播放" : node.status === "loading" ? "视频生成中…" : "写提示词生成视频"}
           disabled={!asset}
-          onClick={() => { if (asset) onPreview(asset); }}
+          onClick={onSelect}
+          onDoubleClick={() => { if (asset) onPreview(asset); }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           {asset ? (
@@ -318,7 +324,7 @@ function VideoNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
           )}
           {node.status === "loading" ? <span className="board-image-loading"><LoaderCircle size={18} className="spin" /></span> : null}
         </button>
-        <MediaPrompt
+        {(!node.assetId || node.status === "loading") && <MediaPrompt
           node={node}
           upstream={upstream}
           hasAsset={Boolean(asset)}
@@ -326,9 +332,10 @@ function VideoNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
           onGenerate={onGenerate}
           onStopTask={onStopTask}
           onRetryTask={onRetryTask}
-        />
+        />}
       </div>
       <div className="board-node-tools">
+        <button type="button" title="选择素材" onClick={() => onPickImage(node.id)} onPointerDown={(event) => event.stopPropagation()}><Upload size={12} /></button>
         <button type="button" title="删除节点" onClick={() => onDelete(node.id)} onPointerDown={(event) => event.stopPropagation()}>
           <Trash2 size={12} />
         </button>
@@ -337,11 +344,13 @@ function VideoNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
   );
 }
 
-function AudioNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
+function AudioNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage, onDelete, onUpdateNode, onGenerate, onStopTask, onRetryTask }: {
   node: AudioBoardNode;
   asset: Asset | null;
   upstream: { textCount: number; imageCount: number };
   onPreview: (asset: Asset) => void;
+  onSelect: () => void;
+  onPickImage: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
   onUpdateNode: (patch: Partial<BoardNode>) => void;
   onGenerate: (nodeId: string) => void;
@@ -355,9 +364,10 @@ function AudioNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
         <button
           type="button"
           className={`board-audio-body ${asset ? "has-asset" : ""}`}
-          title={asset ? "播放音频" : node.status === "loading" ? "正在生成音频…" : `写提示词生成${kindLabel}`}
+          title={asset ? "点击查看设置，双击播放" : node.status === "loading" ? "正在生成音频…" : `写提示词生成${kindLabel}`}
           disabled={!asset}
-          onClick={() => { if (asset) onPreview(asset); }}
+          onClick={onSelect}
+          onDoubleClick={() => { if (asset) onPreview(asset); }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           <span className="board-audio-icon">
@@ -374,7 +384,7 @@ function AudioNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
           </span>
           {asset ? <Play size={14} className="board-audio-play" /> : null}
         </button>
-        <MediaPrompt
+        {(!node.assetId || node.status === "loading") && <MediaPrompt
           node={node}
           upstream={upstream}
           hasAsset={Boolean(asset)}
@@ -382,9 +392,10 @@ function AudioNodeView({ node, asset, upstream, onPreview, onDelete, onUpdateNod
           onGenerate={onGenerate}
           onStopTask={onStopTask}
           onRetryTask={onRetryTask}
-        />
+        />}
       </div>
       <div className="board-node-tools">
+        <button type="button" title="选择素材" onClick={() => onPickImage(node.id)} onPointerDown={(event) => event.stopPropagation()}><Upload size={12} /></button>
         <button type="button" title="删除节点" onClick={() => onDelete(node.id)} onPointerDown={(event) => event.stopPropagation()}>
           <Trash2 size={12} />
         </button>
@@ -490,7 +501,7 @@ function ConfigNodeView({ node, upstream, onUpdateNode, onDelete, onGenerate, on
 
 export function BoardNodeView({
   node, asset, editing, upstream, onStartEdit, onCommitText, onCancelEdit, onUpdateNode,
-  onPreview, onPickImage, onRemoveAsset, onDelete, onGenerate, onStopTask, onRetryTask,
+  onPreview, onSelect, onPickImage, onRemoveAsset, onDelete, onGenerate, onStopTask, onRetryTask,
 }: BoardNodeViewProps) {
   return (
     <>
@@ -519,6 +530,7 @@ export function BoardNodeView({
           asset={asset}
           upstream={upstream}
           onPreview={onPreview}
+          onSelect={onSelect}
           onPickImage={onPickImage}
           onRemoveAsset={onRemoveAsset}
           onDelete={onDelete}
@@ -534,7 +546,9 @@ export function BoardNodeView({
           asset={asset}
           upstream={upstream}
           onPreview={onPreview}
+          onSelect={onSelect}
           onDelete={onDelete}
+          onPickImage={onPickImage}
           onUpdateNode={onUpdateNode}
           onGenerate={onGenerate}
           onStopTask={onStopTask}
@@ -547,7 +561,9 @@ export function BoardNodeView({
           asset={asset}
           upstream={upstream}
           onPreview={onPreview}
+          onSelect={onSelect}
           onDelete={onDelete}
+          onPickImage={onPickImage}
           onUpdateNode={onUpdateNode}
           onGenerate={onGenerate}
           onStopTask={onStopTask}

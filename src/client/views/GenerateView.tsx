@@ -5,6 +5,7 @@ import {
   Sparkles, Square, Upload, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
+import { confirmGeneration } from "../generation-confirm";
 import { copyImageToClipboard } from "../clipboard";
 import { ChannelPicker } from "../chat/ChannelPicker";
 import { ModelPicker } from "../chat/ModelPicker";
@@ -128,6 +129,7 @@ export function GenerateView(props: {
     } catch {
       return props.onToast("error", "高级参数必须是 JSON 对象");
     }
+    if (!confirmGeneration({ kind: "图片生成", model: props.selectedModel, channel: channel.name, detail: `请求数量：${count} 张` })) return;
     setSubmitting(true);
     try {
       const task = await api.generate({
@@ -483,6 +485,7 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
   }
   async function retry() {
     if (!task) return;
+    if (!confirmGeneration({ kind: "图片生成", model: task.model, channel: task.channelName, retry: true })) return;
     try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }
   async function download(asset: Asset) {
@@ -499,6 +502,7 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
 
   async function midjourneyAct(button: MidjourneyButton) {
     if (!task || actingCustomId) return;
+    if (!confirmGeneration({ kind: `Midjourney ${midjourneyButtonLabel(button)}`, model: task.model, channel: task.channelName })) return;
     setActingCustomId(button.customId);
     try {
       const next = await api.midjourneyAction(task.id, button.customId, midjourneyButtonLabel(button));

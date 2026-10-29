@@ -210,11 +210,9 @@ export function BoardInspector({
               {asset ? (
                 <button type="button" className="secondary-button compact" onClick={() => onPreview(asset)}>预览</button>
               ) : null}
-              {node.type === "image" ? (
-                <button type="button" className="secondary-button compact" onClick={() => onPickImage(node.id)}>
-                  <Upload size={12} />{asset ? "替换" : "上传"}
-                </button>
-              ) : null}
+              <button type="button" className="secondary-button compact" onClick={() => onPickImage(node.id)}>
+                <Upload size={12} />{asset ? "替换素材" : "选择素材"}
+              </button>
               {node.assetId ? (
                 <button type="button" className="secondary-button compact" onClick={() => onRemoveAsset(node.id)}>
                   <X size={12} />移除
@@ -781,6 +779,7 @@ export function BoardInspector({
                 >
                   {node.status === "loading"
                     ? "生成中…"
+                    : !isConfig && !isText && node.assetId ? "重新生成"
                     : isVideo ? "生成视频"
                       : isText ? "生成文本"
                         : isAudio ? (audioKind === "music" ? "生成音乐" : "生成配音")

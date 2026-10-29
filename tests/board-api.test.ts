@@ -155,6 +155,7 @@ describe("无限画布 API", () => {
       .expect(201);
     const asset = upload.body.data;
     expect(asset.mimeType).toBe("image/png");
+    expect((await request(app).get("/api/library").expect(200)).body.data.flatMap((task: { assets: Array<{ id: string }> }) => task.assets).map((item: { id: string }) => item.id)).toContain(asset.id);
 
     const doc: BoardDoc = {
       version: 1,
@@ -171,9 +172,26 @@ describe("无限画布 API", () => {
     const removed = await request(app).delete(`/api/boards/${board.id}/assets/${asset.id}`).expect(200);
     expect(removed.body.data.doc.nodes[0].assetId).toBeNull();
     expect(removed.body.data.doc.nodes[0].status).toBe("empty");
+    expect((await request(app).get("/api/library").expect(200)).body.data.flatMap((task: { assets: Array<{ id: string }> }) => task.assets).map((item: { id: string }) => item.id)).toContain(asset.id);
     // 素材文件还在，撤销能恢复引用
     const undone = await request(app).post(`/api/boards/${board.id}/undo`).send({ baseVersion: removed.body.data.version }).expect(200);
     expect(undone.body.data.doc.nodes[0].assetId).toBe(asset.id);
+  });
+
+  it("素材库支持上传视频和音频并拒绝伪造文件类型", async () => {
+    const { app } = await tempApp();
+    const board = await createBoard(app);
+    const video = await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]), { filename: "clip.mp4", contentType: "video/mp4" }).expect(201);
+    const audio = await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", Buffer.from("RIFFxxxxWAVEfmt "), { filename: "voice.wav", contentType: "audio/wav" }).expect(201);
+    expect(video.body.data.mimeType).toBe("video/mp4");
+    expect(audio.body.data.mimeType).toBe("audio/wav");
+    await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", Buffer.from("not media"), { filename: "bad.mp4", contentType: "video/mp4" }).expect(400);
+    const library = await request(app).get("/api/library").query({ limit: 20, mode: "assets" }).expect(200);
+    const ids = library.body.data.items.flatMap((task: { assets: Array<{ id: string }> }) => task.assets.map((asset) => asset.id));
+    expect(ids).toEqual(expect.arrayContaining([video.body.data.id, audio.body.data.id]));
   });
 
   it("拒绝跨无限画布引用素材", async () => {

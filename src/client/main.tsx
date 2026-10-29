@@ -17,6 +17,7 @@ import "./select-menu.css";
 import "./asset-library.css";
 // 无限画布（独立自由画布）：节点、连线、浮动 Agent 的样式
 import "./board/board.css";
+import "./board/board-material.css";
 // 最后加载的全局打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版
 import "./ui-polish.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里
