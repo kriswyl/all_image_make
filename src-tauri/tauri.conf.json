@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "ChatCanvas",
-  "version": "2.2.9",
+  "version": "2.3.0",
   "identifier": "com.imagerelay.studio",
   "build": {
     "frontendDist": "../dist/client",
@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:17892; img-src 'self' data: blob: http://127.0.0.1:17892; media-src 'self' blob: http://127.0.0.1:17892; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:17892; frame-src http://127.0.0.1:17892; img-src 'self' data: blob: http://127.0.0.1:17892; media-src 'self' blob: http://127.0.0.1:17892; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     }
   },
   "bundle": {

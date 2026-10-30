@@ -1,11 +1,56 @@
 /**
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
-import { AlertCircle, FileText, Info, Maximize2 } from "lucide-react";
+import { AlertCircle, Check, Copy, FileText, Info, Maximize2, Play, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
+
+function CodeBlock({ text, language }: { text: string; language: string }) {
+  const [copied, setCopied] = useState(false);
+  const [preview, setPreview] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const isHtml = /^(html|htm)$/i.test(language) || /^\s*<!doctype html|^\s*<html[\s>]/i.test(text);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch { setError("复制失败，请手动选择代码复制。"); }
+  }
+  async function run() {
+    setLoading(true); setError("");
+    try {
+      const result = await api.createHtmlPreview(text);
+      setPreview(api.assetUrl(`/api/html-previews/${result.id}`));
+    } catch { setError("预览启动失败，请重试。"); }
+    finally { setLoading(false); }
+  }
+  return <div className="chat-code-block">
+    <div className="chat-code-toolbar"><span>{language || "代码"}</span><div>
+      {isHtml ? <button type="button" onClick={() => void run()} disabled={loading}><Play size={13} />{loading ? "准备中…" : "运行预览"}</button> : null}
+      <button type="button" onClick={() => void copy()}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? "已复制" : "复制"}</button>
+    </div></div>
+    <pre><code>{text}</code></pre>
+    {error ? <small role="alert" className="chat-code-error">{error}</small> : null}
+    {preview ? <div className="chat-html-preview"><div><strong>运行预览</strong><button type="button" onClick={() => setPreview("")} aria-label="关闭预览"><X size={15} /></button></div><iframe title="HTML 运行预览" sandbox="allow-scripts" src={preview} /></div> : null}
+  </div>;
+}
+
+const markdownComponents: Components = {
+  pre({ node }) {
+    const code = node?.children.find((child) => child.type === "element" && child.tagName === "code");
+    if (!code || code.type !== "element") return <pre />;
+    const text = code.children.map((child) => child.type === "text" ? child.value : "").join("").replace(/\n$/, "");
+    const classes = code.properties?.className;
+    const classNames = Array.isArray(classes) ? classes.join(" ") : String(classes ?? "");
+    return <CodeBlock text={text} language={/language-([^\s]+)/.exec(classNames)?.[1] ?? ""} />;
+  },
+};
 
 /**
  * 用户自己传的那条消息（需求.md 问题 4）。
@@ -92,7 +137,7 @@ export function AssistantBubble({
     <div className="chat-row chat-row-assistant">
       {message.content?.trim() ? (
         <div className={`chat-bubble chat-bubble-assistant ${message.status === "error" ? "is-error" : ""}`}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown>
         </div>
       ) : null}
       {options.length ? (
@@ -174,17 +219,27 @@ function liveSay(content: string): string | null {
  */
 export function StreamingBubble({ reasoning, content, plain = false }: { reasoning: string; content: string; plain?: boolean }) {
   const say = content ? liveSay(content) : null;
+  const reasoningRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef(true);
+  useLayoutEffect(() => {
+    const element = reasoningRef.current;
+    if (element && followRef.current) element.scrollTop = element.scrollHeight;
+  }, [reasoning]);
+  useEffect(() => { if (!reasoning) followRef.current = true; }, [reasoning]);
   return (
     <div className="chat-row chat-row-assistant">
       {reasoning ? (
         <details className={`chat-reasoning ${content ? "" : "is-live"}`} open={!content}>
-          <summary>{content ? "思考过程" : "思考中…"}</summary>
-          <div className="chat-reasoning-body">{reasoning}</div>
+          <summary>{content ? "思考过程" : <>思考中<span className="thinking-dots" aria-label="…"><i /><i /><i /></span></>}</summary>
+          <div ref={reasoningRef} className="chat-reasoning-body" onScroll={(event) => {
+            const element = event.currentTarget;
+            followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+          }}>{reasoning}</div>
         </details>
       ) : null}
       {content ? (
         <div className="chat-bubble chat-bubble-assistant">
-          {plain ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown> : say ?? <span className="chat-typing">正在准备生成…</span>}
+          {plain ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{content}</ReactMarkdown> : say ?? <span className="chat-typing">正在准备生成…</span>}
           <span className="chat-caret" aria-hidden="true" />
         </div>
       ) : reasoning ? null : (

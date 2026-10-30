@@ -407,6 +407,7 @@ export class AgentService {
       await this.brain.prepareCompression(turnConversation, controller, turnAttachmentIds);
       if (plain) {
         const built = await this.brain.buildBrainMessages(turnConversation, turnAttachmentIds);
+        let plainMessages = built.messages;
         let result: BrainResult;
         try {
           result = await this.brain.callBrainRaw(turnConversation, built.messages, controller, conversationId, { plain: true });
@@ -416,12 +417,46 @@ export class AgentService {
           this.broadcast(conversationId, { type: "reset" });
           this.brain.degradeVision(turnConversation, error);
           const retry = await this.brain.buildBrainMessages({ ...turnConversation, visionEnabled: false }, turnAttachmentIds);
+          plainMessages = retry.messages;
           result = await this.brain.callBrainRaw(turnConversation, retry.messages, controller, conversationId, { plain: true });
         }
         if (controller.signal.aborted) return this.finishInterrupted(conversationId);
-        const content = result.content.trim() || "（模型没有返回内容，请再试一次。）";
-        const message = this.db.appendMessage({ conversationId, role: "assistant", content, status: result.content.trim() ? "ok" : "error" });
+        let content = result.content;
+        let continuationNotice = "";
+        const maxContinuations = turnConversation.chatAutoContinueLimit ?? 20;
+        let continuations = 0;
+        while (result.truncated && content.trim() && continuations < maxContinuations) {
+          continuations += 1;
+          let streamed = "";
+          try {
+            result = await this.brain.callBrainRaw(turnConversation, [
+              ...plainMessages,
+              { role: "assistant", content },
+              { role: "user", content: "请从刚才截断的位置直接继续，不要重复已有内容，不要解释或添加开场白。" },
+            ], controller, conversationId, { plain: true, onContent: (text) => { streamed += text; } });
+            content += result.content;
+            if (!result.content.trim()) {
+              continuationNotice = "自动续写没有返回正文，已保留之前的内容；可以发送消息要求继续。";
+              break;
+            }
+          } catch (error) {
+            content += streamed;
+            continuationNotice = controller.signal.aborted
+              ? "已停止自动续写，已生成的内容已保留。"
+              : "自动续写未完成，已保留生成的内容；可以发送消息要求继续。";
+            break;
+          }
+        }
+        if (!continuationNotice && result.truncated) continuationNotice = content.trim()
+          ? "回答达到输出上限，已保留现有内容；可以发送消息要求继续，或增加自动续写次数。"
+          : "模型达到输出上限但没有返回正文，可能将额度用于思考；请重试或更换模型。";
+        const hasContent = Boolean(content.trim());
+        const message = this.db.appendMessage({ conversationId, role: "assistant", content: hasContent ? content : "（模型没有返回内容，请再试一次。）", status: hasContent ? "ok" : "error" });
         this.broadcast(conversationId, { type: "message", message });
+        if (continuationNotice) {
+          const notice = this.db.appendMessage({ conversationId, role: "system", content: continuationNotice });
+          this.broadcast(conversationId, { type: "message", message: notice });
+        }
         this.setStatus(conversationId, "idle");
         this.broadcast(conversationId, { type: "done", status: "idle" });
         return;

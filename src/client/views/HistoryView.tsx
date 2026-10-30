@@ -28,6 +28,9 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const requestId = useRef(0);
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
+  const filterKeyRef = useRef("");
   const [preview, setPreview] = useState<Task | null>(null);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
@@ -35,11 +38,23 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const selectAllRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const current = ++requestId.current;
+    const filterKey = JSON.stringify([query, filter, mode]);
+    const changingFilter = filterKeyRef.current !== filterKey;
+    filterKeyRef.current = filterKey;
+    const targetCount = changingFilter ? 60 : Math.max(60, libraryRef.current.length);
     setLoading(true);
-    setLibrary([]);
-    setHasMore(false);
+    if (changingFilter) { setLibrary([]); setHasMore(false); }
     const timer = window.setTimeout(() => {
-      void api.libraryPage({ query, kind: filter, mode }).then((page) => {
+      void (async () => {
+        const items: Task[] = [];
+        let more = true;
+        while (more && items.length < targetCount && current === requestId.current) {
+          const page = await api.libraryPage({ offset: items.length, query, kind: filter, mode });
+          items.push(...page.items);
+          more = page.hasMore && page.items.length > 0;
+        }
+        return { items, hasMore: more };
+      })().then((page) => {
         if (current === requestId.current) { setLibrary(page.items); setHasMore(page.hasMore); setLoadError(""); }
       }).catch((error) => { if (current === requestId.current) setLoadError(error instanceof Error ? error.message : "加载素材失败"); })
         .finally(() => { if (current === requestId.current) setLoading(false); });
@@ -152,6 +167,9 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         </button><button type="button" className="library-card-delete" title="删除素材" aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
           if (!window.confirm("确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
           void api.deleteLibraryAsset(asset.id).then(() => {
+            // 作废删除前开始的分页请求，避免旧结果把刚删掉的素材重新带回列表。
+            requestId.current++;
+            setLoading(false);
             setLibrary((items) => items.map((item) => item.id === task.id ? { ...item, assets: item.assets.filter((entry) => entry.id !== asset.id) } : item));
             onRefresh();
             onToast("success", "素材已删除");

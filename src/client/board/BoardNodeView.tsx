@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import {
-  AlertCircle, AudioLines, ChevronDown, ChevronUp, Image as ImageIcon, LoaderCircle, Play, RefreshCw,
+  AlertCircle, AudioLines, ChevronDown, ChevronUp, Image as ImageIcon, LoaderCircle, Pencil, Play, RefreshCw,
   Sparkles, Square, Trash2, Upload, Video, X,
 } from "lucide-react";
 import type {
@@ -511,6 +511,7 @@ export function BoardNodeView({
           {node.type === "text" ? "文本" : node.type === "config" ? "配置" : node.type === "video" ? "视频" : node.type === "audio" ? "音频" : "图片"}
         </span>
         <strong className="board-node-title" title={node.title}>{node.title || node.ref}</strong>
+        {node.type === "text" && !editing ? <button type="button" className="board-text-edit-button" title="编辑文本" aria-label="编辑文本" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(); onStartEdit(); }}><Pencil size={13} /></button> : null}
         {node.type === "image" || node.type === "video" || node.type === "audio"
           ? <StatusBadge status={node.status} />
           : null}

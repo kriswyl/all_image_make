@@ -4,7 +4,7 @@
 >
 > **一次性迁移**：2.2.0 及更早版本以 `ezcanvas` 安装（安装目录可能被用户改到别处）。升级到 2.2.1 时 NSIS 会按新名字装到新的默认目录，旧 `ezcanvas` 那份不会被自动删除——安装新版后手动卸载旧的 `ezcanvas` 即可，用户数据不会丢。
 
-当前源码版本为 `2.2.9`，实际发布版本以发布页为准。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
+当前源码版本为 `2.3.0`，实际发布版本以发布页为准。发布包不包含真实 API Key；新建的数据目录不预置任何渠道，首次启动后需要用“添加渠道”向导创建渠道并填入自己的密钥，或在启动前设置对应的环境变量（如 `VECTORENGINE_API_KEY`）。
 
 ## 环境准备
 
@@ -33,8 +33,8 @@ npm run release:portable
 命令会依次运行测试、前端和 Node 服务端构建、Tauri sidecar 准备以及压缩。输出位置：
 
 ```text
-artifacts/chatcanvas-v2.2.9-portable-win-x64/
-artifacts/chatcanvas-v2.2.9-portable-win-x64.zip
+artifacts/chatcanvas-v2.3.0-portable-win-x64/
+artifacts/chatcanvas-v2.3.0-portable-win-x64.zip
 ```
 
 目录名里的版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，改版本号后自动跟着变。
@@ -52,7 +52,7 @@ npm run release:installer
 便于分发的安装程序输出为：
 
 ```text
-artifacts/chatcanvas-v2.2.9-win-x64-setup.exe
+artifacts/chatcanvas-v2.3.0-win-x64-setup.exe
 ```
 
 Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`。
@@ -92,13 +92,13 @@ https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json
 不要改成 `releases/latest/download/`：只要最新那个 Release 恰好缺 Windows 资产，全体用户的检查更新就会一起 404。
 
 ```powershell
-npm run version:set -- 2.2.10
+npm run version:set -- 2.3.1
 npm test
 git add -A
-git commit -m "Release 2.2.9: ..."
+git commit -m "Release 2.3.0: ..."
 git push
-git tag v2.2.9
-git push origin v2.2.9
+git tag v2.3.0
+git push origin v2.3.0
 ```
 
 ### 客户端行为
@@ -114,7 +114,7 @@ git push origin v2.2.9
 不要只改一个文件。使用版本脚本会同步 `package.json`、`package-lock.json`、Tauri 配置、Cargo 配置和共享版本常量：
 
 ```powershell
-npm run version:set -- 2.2.9
+npm run version:set -- 2.3.0
 ```
 
 然后重新运行测试和对应的发布命令。发布前检查：

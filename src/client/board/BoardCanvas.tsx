@@ -900,13 +900,19 @@ export function BoardCanvas({
               onPointerMove={moveNodeDrag}
               onPointerUp={endNodeDrag}
               onPointerCancel={endNodeDrag}
+              onDoubleClick={(event) => {
+                if (node.type !== "text" || (event.target as HTMLElement).closest("button, textarea, [data-board-port], [data-board-resize]")) return;
+                event.stopPropagation();
+                board.setSelection([node.id]);
+                setEditingTextId(node.id);
+              }}
             >
               <BoardNodeView
                 node={node}
                 asset={asset}
                 editing={editingTextId === node.id}
                 upstream={upstream}
-                onStartEdit={() => setEditingTextId(node.id)}
+                onStartEdit={() => { board.setSelection([node.id]); setEditingTextId(node.id); }}
                 onCommitText={(text) => {
                   board.updateNode(node.id, { text } as Partial<BoardNode>);
                   setEditingTextId(null);

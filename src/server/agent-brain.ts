@@ -54,7 +54,7 @@ export class BrainRunner {
     messages: BrainMessage[],
     controller: AbortController,
     conversationId: string,
-    options: { silent?: boolean; maxTokens?: number; plain?: boolean } = {},
+    options: { silent?: boolean; maxTokens?: number; plain?: boolean; onContent?: (text: string) => void } = {},
   ): Promise<BrainResult> {
     const { channel, key } = this.requireBrain(conversation);
     const result = await callBrain({
@@ -63,7 +63,10 @@ export class BrainRunner {
       signal: controller.signal,
       onDelta: options.silent ? undefined : (delta) => {
         if (delta.reasoning) this.host.broadcast(conversationId, { type: "reasoning", text: delta.reasoning });
-        if (delta.content) this.host.broadcast(conversationId, { type: options.plain ? "text_token" : "token", text: delta.content });
+        if (delta.content) {
+          options.onContent?.(delta.content);
+          this.host.broadcast(conversationId, { type: options.plain ? "text_token" : "token", text: delta.content });
+        }
       },
     });
     // 解析重试、身份纠正这些额外调用也走这里，所以记在这里就是「真实花了多少」

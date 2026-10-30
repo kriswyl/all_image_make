@@ -100,6 +100,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         verbatim_prompt      INTEGER NOT NULL DEFAULT 0,
         chat_mode            TEXT NOT NULL DEFAULT 'creative',
         context_budget       INTEGER NOT NULL DEFAULT 350000,
+        chat_auto_continue_limit INTEGER NOT NULL DEFAULT 20,
         context_summary      TEXT NOT NULL DEFAULT '',
         context_summary_seq  INTEGER NOT NULL DEFAULT 0,
         context_anchors      TEXT NOT NULL DEFAULT '[]',
@@ -403,11 +404,16 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     }
     for (const [name, ddl] of [
       ["context_budget", "INTEGER NOT NULL DEFAULT 350000"],
+      ["chat_auto_continue_limit", "INTEGER NOT NULL DEFAULT 20"],
       ["context_summary", "TEXT NOT NULL DEFAULT ''"],
       ["context_summary_seq", "INTEGER NOT NULL DEFAULT 0"],
       ["context_anchors", "TEXT NOT NULL DEFAULT '[]'"],
     ]) {
       if (!conversationColumns.some((col) => col.name === name)) db.exec(`ALTER TABLE conversations ADD COLUMN ${name} ${ddl}`);
+    }
+    if (!db.prepare("SELECT value FROM settings WHERE key = ?").get("chatAutoContinueDefault20")) {
+      db.exec("UPDATE conversations SET chat_auto_continue_limit = 20 WHERE chat_auto_continue_limit = 3");
+      db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("chatAutoContinueDefault20", "1");
     }
     // 旧版本的默认值迁移一次；其他自定义预算保留。
     if (!db.prepare("SELECT value FROM settings WHERE key = ?").get("contextBudgetDefault350k")) {

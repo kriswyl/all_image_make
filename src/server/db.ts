@@ -701,8 +701,8 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO conversations
       (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
-       video_confirm_policy, vision_enabled, verbatim_prompt, context_budget, auto_continue_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 0, ?, ?)
+       video_confirm_policy, vision_enabled, verbatim_prompt, context_budget, chat_auto_continue_limit, auto_continue_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 20, 0, ?, ?)
     `).run(
       id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
       input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, at, at,
@@ -1348,6 +1348,7 @@ export class AppDatabase {
       videoConfirmPolicy: "video_confirm_policy",
       chatMode: "chat_mode",
       contextBudget: "context_budget",
+      chatAutoContinueLimit: "chat_auto_continue_limit",
     };
     for (const [key, column] of Object.entries(mapping)) {
       if (!(key in patch)) continue;
@@ -1971,6 +1972,7 @@ export class AppDatabase {
       verbatimPrompt: Boolean(row.verbatim_prompt),
       chatMode: row.kind === "board" ? "creative" : row.chat_mode === "chat" ? "chat" : "creative",
       contextBudget: Number(row.context_budget) || 350000,
+      chatAutoContinueLimit: row.chat_auto_continue_limit == null ? 20 : Number(row.chat_auto_continue_limit),
       autoContinueCount: Number(row.auto_continue_count),
       taskCount: this.countConversationTasks(String(row.id)),
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),

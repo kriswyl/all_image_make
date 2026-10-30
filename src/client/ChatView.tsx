@@ -1135,17 +1135,16 @@ export function ChatView({
                     <PenLine size={13} />
                     原话直发
                   </button>
-                  <label className="chat-control" title="生成视频前要不要先问一句">
-                    <Film size={13} />
-                    <select
-                      value={view.videoConfirmPolicy}
-                      onChange={(event) => void patch({ videoConfirmPolicy: event.target.value as VideoConfirmPolicy })}
-                    >
-                      {VIDEO_CONFIRM_POLICIES.map((policy) => (
-                        <option key={policy} value={policy}>{videoConfirmPolicyLabels[policy]}</option>
-                      ))}
-                    </select>
-                  </label>
+                  <SelectMenu
+                    className="chat-mode-select"
+                    ariaLabel="视频生成确认方式"
+                    title="选择生成视频前是否需要确认"
+                    leading={<Film size={13} />}
+                    minWidth={180}
+                    value={view.videoConfirmPolicy}
+                    options={VIDEO_CONFIRM_POLICIES.map((policy) => ({ value: policy, label: videoConfirmPolicyLabels[policy] }))}
+                    onChange={(policy) => void patch({ videoConfirmPolicy: policy as VideoConfirmPolicy })}
+                  />
                   </> : null}
                 </>
               )}
@@ -1159,7 +1158,7 @@ export function ChatView({
                   }}
                 />
               )}
-              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onCompress={() => {
+              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onAutoContinueChange={(chatAutoContinueLimit) => void patch({ chatAutoContinueLimit })} onCompress={() => {
                 if (!activeId) return;
                 setCompressing(true);
                 void api.compressConversation(activeId).then(() => { setCompressing(false); void reloadView(activeId); }).catch((error) => { setCompressing(false); toastError(error); });

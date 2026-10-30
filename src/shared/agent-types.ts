@@ -514,6 +514,7 @@ export interface Conversation {
   verbatimPrompt: boolean;
   chatMode?: "creative" | "chat";
   contextBudget?: number;
+  chatAutoContinueLimit?: number;
   autoContinueCount: number;
   /** 本会话已经提交过的生成任务数，用于 §16 的任务软上限 */
   taskCount: number;
@@ -640,6 +641,7 @@ export interface ConversationInput {
 
 export interface ConversationPatch {
   contextBudget?: number;
+  chatAutoContinueLimit?: number;
   chatMode?: "creative" | "chat";
   title?: string;
   brainChannelId?: string;

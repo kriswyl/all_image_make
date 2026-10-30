@@ -137,6 +137,7 @@ const conversationCreateSchema = z.object({
 
 const conversationPatchSchema = z.object({
   contextBudget: z.number().int().min(4000).max(2000000).optional(),
+  chatAutoContinueLimit: z.number().int().min(0).max(100).optional(),
   chatMode: z.enum(["creative", "chat"]).optional(),
   title: z.string().trim().min(1).max(120).optional(),
   brainChannelId: z.string().uuid().optional(),
@@ -448,6 +449,24 @@ export function createApp(options: { dataDir?: string } = {}) {
   });
 
   app.get("/api/health", (_req, res) => res.json(ok({ status: "ok", version: APP_VERSION })));
+
+  // 预览仅存在内存里，随机地址配合 iframe 沙箱与独立 CSP 隔离生成代码。
+  const htmlPreviews = new Map<string, { html: string; expires: number }>();
+  app.post("/api/html-previews", (req, res) => {
+    const { html } = z.object({ html: z.string().min(1).max(2_000_000) }).parse(req.body);
+    const now = Date.now();
+    for (const [id, entry] of htmlPreviews) if (entry.expires < now) htmlPreviews.delete(id);
+    while (htmlPreviews.size >= 20) htmlPreviews.delete(htmlPreviews.keys().next().value!);
+    const id = crypto.randomUUID();
+    htmlPreviews.set(id, { html, expires: now + 30 * 60_000 });
+    res.json(ok({ id }));
+  });
+  app.get("/api/html-previews/:id", (req, res) => {
+    const preview = htmlPreviews.get(routeParam(req.params.id));
+    if (!preview || preview.expires < Date.now()) return res.status(404).send("预览已过期，请重新运行。");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; sandbox allow-scripts");
+    res.type("html").send(preview.html);
+  });
 
   app.get("/api/bootstrap", (_req, res) => {
     res.json(ok({

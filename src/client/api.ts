@@ -97,6 +97,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  createHtmlPreview: (html: string) => request<{ id: string }>("/api/html-previews", { method: "POST", body: JSON.stringify({ html }) }),
   uploadReferenceVideo: (channelId: string, file: File) => {
     const form = new FormData();
     form.append("channelId", channelId);

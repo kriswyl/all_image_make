@@ -347,6 +347,11 @@ describe("conversational turn, end to end", () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-agent-e2e-"));
     const { app, context } = createApp({ dataDir });
     cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const preview = await request(app).post("/api/html-previews").send({ html: "<script>document.body.textContent='ok'</script>" }).expect(200);
+    const rendered = await request(app).get(`/api/html-previews/${preview.body.data.id}`).expect(200);
+    expect(rendered.headers["content-security-policy"]).toContain("sandbox allow-scripts");
+    expect(rendered.headers["content-security-policy"]).toContain("default-src 'none'");
+    expect(rendered.text).toContain("document.body.textContent");
 
     const brain = (await request(app).post("/api/channels").send({
       name: "Brain", baseUrl: base, adapterType: "openai-chat", authType: "bearer",
@@ -1081,6 +1086,38 @@ describe("原话直发", () => {
 });
 
 describe("普通聊天模式", () => {
+  it("仅在长度截断时按会话设置自动续写并保存完整正文", async () => {
+    const requests: any[] = [];
+    const mock = http.createServer((req, res) => {
+      let data = "";
+      req.on("data", (chunk) => { data += chunk; });
+      req.on("end", () => {
+        requests.push(JSON.parse(data));
+        const index = requests.length;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: index === 1 ? "第一段" : "第二段" }, finish_reason: index === 1 ? "length" : "stop" }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "plain-continuation-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const brain = (await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions", models: ["mock"], allowPrivateNetwork: true, enabled: true }).expect(201)).body.data;
+    const id = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock" }).expect(201)).body.data.id;
+    await request(app).patch(`/api/conversations/${id}`).send({ chatMode: "chat", chatAutoContinueLimit: 1 }).expect(200);
+    expect(context.db.getConversation(id)?.chatAutoContinueLimit).toBe(1);
+    await request(app).post(`/api/conversations/${id}/messages`).send({ text: "写长文" }).expect(202);
+    for (let i = 0; i < 100 && context.db.getConversation(id)?.status !== "idle"; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.some((message: any) => message.role === "assistant" && message.content === "第一段")).toBe(true);
+    expect(context.db.listMessagesAfter(id, 0).some((message) => message.role === "assistant" && message.content === "第一段第二段")).toBe(true);
+    await request(app).patch(`/api/conversations/${id}`).send({ chatAutoContinueLimit: 0 }).expect(200);
+    expect(context.db.getConversation(id)?.chatAutoContinueLimit).toBe(0);
+    await request(app).patch(`/api/conversations/${id}`).send({ chatAutoContinueLimit: 101 }).expect(400);
+  });
   it("保留待确认操作，纯文本不执行工具，并在切换后正确回放历史", async () => {
     const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
     let imageCalls = 0;

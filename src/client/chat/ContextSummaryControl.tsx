@@ -3,9 +3,10 @@ import { X } from "lucide-react";
 import type { ConversationView } from "../../shared/agent-types";
 
 /** 保留原始聊天记录；这里只查看发送给模型的历史摘要。 */
-export function ContextSummaryControl({ view, onBudgetChange, onCompress, compressing, disabled }: {
+export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onCompress, compressing, disabled }: {
   view: ConversationView;
   onBudgetChange: (budget: number) => void;
+  onAutoContinueChange?: (limit: number) => void;
   onCompress: () => void;
   compressing?: boolean;
   disabled?: boolean;
@@ -16,6 +17,8 @@ export function ContextSummaryControl({ view, onBudgetChange, onCompress, compre
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(view.contextBudget ?? 350000));
+  const [continuationValue, setContinuationValue] = useState(String(view.chatAutoContinueLimit ?? 20));
+  const [editingContinuation, setEditingContinuation] = useState(false);
   const budget = view.contextBudget ?? 350000;
   function save() {
     const parsed = Number(value);
@@ -27,10 +30,21 @@ export function ContextSummaryControl({ view, onBudgetChange, onCompress, compre
     setEditing(false);
     if (parsed !== budget) onBudgetChange(parsed);
   }
+  function saveContinuation() {
+    const parsed = Number(continuationValue);
+    const current = view.chatAutoContinueLimit ?? 20;
+    setEditingContinuation(false);
+    if (!continuationValue.trim() || !Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
+      setContinuationValue(String(current));
+      return;
+    }
+    if (parsed !== current) onAutoContinueChange?.(parsed);
+  }
   useEffect(() => {
     if (!open) return;
     const closeFromOutside = () => {
       if (editing) save();
+      if (editingContinuation) saveContinuation();
       setOpen(false);
     };
     const onPointerDown = (event: PointerEvent) => {
@@ -43,7 +57,7 @@ export function ContextSummaryControl({ view, onBudgetChange, onCompress, compre
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown, true);
     return () => { document.removeEventListener("pointerdown", onPointerDown, true); document.removeEventListener("keydown", onKeyDown, true); };
-  }, [open, editing, value, budget, onBudgetChange]);
+  }, [open, editing, value, budget, onBudgetChange, editingContinuation, continuationValue, view.chatAutoContinueLimit, onAutoContinueChange]);
   return (
     <div ref={rootRef} className="context-summary-control">
       <button ref={triggerRef} type="button" className="context-summary-trigger" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((value) => !value)} title="查看摘要与设置上下文预算">{view.contextSummary ? "已压缩 · 查看摘要" : "上下文设置"}</button>
@@ -59,6 +73,17 @@ export function ContextSummaryControl({ view, onBudgetChange, onCompress, compre
             onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
           <span>tokens</span>
         </label>
+        {onAutoContinueChange && view.chatMode === "chat" ? <>
+          <label>自动续写次数
+            <input aria-label="自动续写次数" type="number" min={0} max={100} step={1} disabled={disabled}
+              value={editingContinuation ? continuationValue : String(view.chatAutoContinueLimit ?? 20)}
+              onFocus={() => { setContinuationValue(String(view.chatAutoContinueLimit ?? 20)); setEditingContinuation(true); }}
+              onChange={(event) => setContinuationValue(event.target.value)} onBlur={saveContinuation}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+            <span>次</span>
+          </label>
+          <small>设为 0 关闭；回答达到输出上限时自动接续，每次续写都会产生模型用量。</small>
+        </> : null}
         <button type="button" className="secondary-button compact context-compress-button" onClick={onCompress} disabled={disabled || compressing}>
           {compressing ? "正在压缩…" : "立即压缩"}
         </button>
