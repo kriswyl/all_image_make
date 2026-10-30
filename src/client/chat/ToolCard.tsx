@@ -5,9 +5,10 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { StoryboardReview } from "./StoryboardReview";
 import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
 import { LazyVideoThumb } from "../LazyVideoThumb";
@@ -42,6 +43,14 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   board_read: Eye,
   board_apply: SlidersHorizontal,
   board_generate: Sparkles,
+  board_generate_batch: Sparkles,
+  board_check: CheckCircle2,
+  board_storyboard: Clapperboard,
+  board_storyboard_update: Clapperboard,
+  board_assets: Layers,
+  board_versions: HistoryIcon,
+  board_view_images: Eye,
+  board_extract_frame: Film,
   ask: Sparkles,
   reply: Sparkles,
 };
@@ -111,6 +120,7 @@ export function ToolCard({
   onImportTemplate?: (templateId: string, name: string, description?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [mjBusy, setMjBusy] = useState(false);
   const tool = message.toolName ?? "reply";
@@ -153,6 +163,7 @@ export function ToolCard({
   );
   const mjTaskId = typeof payload?.data?.midjourneyTaskId === "string"
     ? payload.data.midjourneyTaskId : result?.taskId;
+  const storyboardProjectId = typeof payload?.data?.storyboardProjectId === "string" ? payload.data.storyboardProjectId : null;
   const templateId = typeof payload?.data?.templateId === "string" ? payload.data.templateId : null;
   const templateName = typeof payload?.data?.templateName === "string" ? payload.data.templateName : "画布模板";
   const templateDescription = typeof payload?.data?.templateDescription === "string"
@@ -228,11 +239,11 @@ export function ToolCard({
               type="button"
               className="secondary-button compact"
               disabled={!onImportTemplate}
-              onClick={() => onImportTemplate?.(templateId, templateName, templateDescription)}
+              onClick={() => storyboardProjectId ? setReviewOpen(true) : onImportTemplate?.(templateId, templateName, templateDescription)}
             >
-              <LayoutGrid size={12} />导入无限画布
+              <LayoutGrid size={12} />{storyboardProjectId ? "审阅分镜" : "导入无限画布"}
             </button>
-            <span>只创建节点和提示词，不会自动生成</span>
+            <span>{storyboardProjectId ? "核对并选择镜头后导入，不会自动生成" : "只创建节点和提示词，不会自动生成"}</span>
           </div>
         ) : null}
 
@@ -340,6 +351,7 @@ export function ToolCard({
           />
         ) : null}
       </div>
+      {reviewOpen && storyboardProjectId && onImportTemplate ? <StoryboardReview id={storyboardProjectId} onClose={() => setReviewOpen(false)} onToast={onToast} onImport={onImportTemplate} /> : null}
     </div>
   );
 }

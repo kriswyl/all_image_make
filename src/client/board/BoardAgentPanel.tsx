@@ -1,3 +1,4 @@
+import { ContextSummaryControl } from "../chat/ContextSummaryControl";
 /**
  * 无限画布的浮动 Agent。
  *
@@ -77,28 +78,33 @@ function clampUi(ui: BoardAgentUiState): BoardAgentUiState {
 }
 
 export function BoardAgentPanel({
-  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onBeforeSend, onClose,
+  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onClose,
 }: {
   threadId: string;
   initialUiState?: BoardAgentUiState;
   onUiStateChange: (state: BoardAgentUiState) => void;
   onToast: Toast;
   onBoardDelta: (delta?: BoardDelta) => void;
+  onFrameRequest: (request: { boardId: string; requestId: string; videoAssetId: string }) => void;
   onBeforeSend: () => Promise<void>;
   onClose: () => void;
 }) {
   const [view, setView] = useState<(ConversationView & { running: boolean }) | null>(null);
   const [status, setStatus] = useState<ConversationStatus>("idle");
   const [draft, setDraft] = useState("");
+  const [compressing, setCompressing] = useState(false);
   const [reasoning, setReasoning] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
+  const [batchProgress, setBatchProgress] = useState("");
   const [ui, setUi] = useState<BoardAgentUiState>(() => clampUi({ ...defaultUi(), ...(initialUiState ?? {}), collapsed: true, bubbleX: viewportSize().width - 60, bubbleY: 102 }));
   const [unread, setUnread] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   /** onToast 的引用会随 App 重渲染变化，不能让它触发 SSE 重连 */
   const toastRef = useRef(onToast);
+  const frameRequestRef = useRef(onFrameRequest);
+  useEffect(() => { frameRequestRef.current = onFrameRequest; }, [onFrameRequest]);
   useEffect(() => { toastRef.current = onToast; }, [onToast]);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; width: number; height: number } | null>(null);
@@ -154,6 +160,13 @@ export function BoardAgentPanel({
   useEffect(() => {
     const onEvent = (event: AgentStreamEvent) => {
       switch (event.type) {
+        case "context_compression":
+          setCompressing(event.status === "started");
+          if (event.status === "finished") toastRef.current(/失败|不完整/.test(event.message) ? "error" : "success", event.message);
+          break;
+        case "context_summary":
+          setView((current) => current ? { ...current, contextSummary: { text: event.text, throughSeq: event.throughSeq } } : current);
+          break;
         case "reasoning": setReasoning((current) => current + event.text); break;
         case "token": setDraft((current) => current + event.text); break;
         case "reset": setReasoning(""); setDraft(""); break;
@@ -169,6 +182,10 @@ export function BoardAgentPanel({
         case "progress":
           setProgress((current) => ({ ...current, [event.taskId]: { status: event.status, progress: event.progress } }));
           break;
+        case "board_batch_progress": setBatchProgress(event.text); break;
+        case "board_frame_request":
+          frameRequestRef.current(event);
+          break;
         case "board":
           onBoardDelta(event.delta);
           break;
@@ -177,6 +194,7 @@ export function BoardAgentPanel({
           break;
         case "error": toastRef.current("error", event.message); break;
         case "done":
+          setBatchProgress("");
           setStatus(event.status);
           setReasoning("");
           setDraft("");
@@ -195,7 +213,7 @@ export function BoardAgentPanel({
   const hasStream = Boolean(reasoning || draft);
   const awaitingConfirmation = status === "awaiting_confirmation";
   const running = status === "running" || status === "waiting_task";
-  const composerLocked = busy || running || awaitingConfirmation;
+  const composerLocked = busy || running || compressing || awaitingConfirmation;
 
   // 滚动跟随
   useEffect(() => {
@@ -505,6 +523,7 @@ export function BoardAgentPanel({
         })}
 
         {hasStream ? <StreamingBubble reasoning={reasoning} content={draft} /> : null}
+        {batchProgress ? <div className="chat-note"><LoaderCircle className="spin" size={13} />{batchProgress}</div> : null}
       </div>
 
       {view && !view.brainChannelId ? (
@@ -528,7 +547,13 @@ export function BoardAgentPanel({
           onPointerDown={(event) => event.stopPropagation()}
         />
         <div className="board-agent-composer-foot">
-          <span>Enter 发送 · Shift+Enter 换行</span>
+          <span>{compressing ? "正在压缩上下文…" : "Enter 发送 · Shift+Enter 换行"}</span>
+          {view ? <ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={busy || running} onCompress={() => {
+            setCompressing(true);
+            void api.compressConversation(threadId).then(() => { setCompressing(false); void load(); }).catch((error) => { setCompressing(false); toastRef.current("error", error instanceof Error ? error.message : "压缩失败"); });
+          }} onBudgetChange={(contextBudget) => {
+            void api.updateConversation(threadId, { contextBudget }).then(() => setView((current) => current ? { ...current, contextBudget } : current)).catch((error) => toastRef.current("error", error instanceof Error ? error.message : "设置保存失败"));
+          }} /> : null}
           {running ? (
             <button type="button" className="board-agent-send is-stop" title="停止" onClick={() => void stop()}>
               <Square size={13} />

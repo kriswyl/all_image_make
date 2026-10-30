@@ -41,6 +41,7 @@ export function AssetLibrary({
   open,
   assets,
   canvasIds,
+  chatSelection = false,
   onClose,
   onPreview,
   onToggleCanvas,
@@ -52,6 +53,7 @@ export function AssetLibrary({
   open: boolean;
   assets: CanvasAsset[];
   canvasIds: string[];
+  chatSelection?: boolean;
   onClose: () => void;
   onPreview: (assetId: string) => void;
   /** 点一下就是加入 / 移出画布 */
@@ -169,7 +171,7 @@ export function AssetLibrary({
     { id: "setting", label: "设定", count: counts.setting },
     { id: "upload", label: "上传", count: counts.upload },
     { id: "bridge", label: "无限画布", count: counts.bridge },
-    { id: "canvas", label: "画布", count: counts.canvas },
+    { id: "canvas", label: chatSelection ? "已选" : "画布", count: counts.canvas },
   ];
 
   return (
@@ -180,8 +182,8 @@ export function AssetLibrary({
           <div className="asset-library-title">
             <Layers size={16} />
             <div>
-              <h2>素材库</h2>
-              <p>共 {assets.length} 张图 · 点图加入 / 移出画布，双击看大图</p>
+              <h2>{chatSelection ? "选择素材图片" : "素材库"}</h2>
+              <p>{chatSelection ? `本会话共 ${assets.length} 张图 · 点击选择本轮附件` : `共 ${assets.length} 张图 · 点图加入 / 移出画布，双击看大图`}</p>
             </div>
           </div>
           <button type="button" className="icon-button compact" title="关闭" onClick={onClose}><X size={15} /></button>
@@ -235,14 +237,14 @@ export function AssetLibrary({
                   className="asset-library-thumb"
                   onClick={() => focusAndToggle(entry.asset.id)}
                   onDoubleClick={() => onPreview(entry.asset.id)}
-                  title={`${assetRef(entry.asset.id)} · ${inCanvas ? `画布第 ${position + 1} 张（${roleLabel(position)}）` : "单击加入画布，双击看大图"}`}
+                  title={chatSelection ? `${assetRef(entry.asset.id)} · ${inCanvas ? "已选为附件" : "点击选为附件"}` : `${assetRef(entry.asset.id)} · ${inCanvas ? `画布第 ${position + 1} 张（${roleLabel(position)}）` : "单击加入画布，双击看大图"}`}
                 >
                   <img src={api.assetUrl(entry.asset.thumbUrl ?? entry.asset.url)} alt=""
                     loading="lazy" onError={(event) => { if (entry.asset.thumbUrl) fallbackToFull(event, entry.asset); }} />
                   <span className="asset-library-origin">{origin}</span>
                   {inCanvas ? (
                     <span className={`asset-library-order is-${roleLabel(position) === "参考" ? "ref" : roleLabel(position) === "尾帧" ? "last" : "first"}`}>
-                      {position + 1} · {roleLabel(position)}
+                      {chatSelection ? `已选 ${position + 1}` : `${position + 1} · ${roleLabel(position)}`}
                     </span>
                   ) : null}
                 </button>
@@ -262,12 +264,12 @@ export function AssetLibrary({
 
         <footer className="asset-library-foot">
           <span className="asset-library-selected">
-            {focused
+            {chatSelection ? `已选择 ${canvasIds.length} 张图片` : focused
               ? `已选：${focusedEntry?.asset.fileName ?? "这张图"}`
               : "点图加入 / 移出画布，双击看大图"}
           </span>
           <div className="asset-library-actions">
-            {focused ? (
+            {chatSelection ? <button type="button" className="primary-button compact" onClick={onClose}>完成</button> : focused ? (
               <>
                 <button type="button" className="secondary-button compact" onClick={() => onPreview(focused)}>
                   <ImageIcon size={13} />预览
@@ -316,7 +318,7 @@ export function AssetLibrary({
               role="menuitem"
               onClick={() => { setMenu(null); onToggleCanvas(menu.assetId); }}
             >
-              <Layers size={13} />{inCanvas ? "移出画布" : "加入画布"}
+              <Layers size={13} />{chatSelection ? (inCanvas ? "移除附件" : "选择为附件") : (inCanvas ? "移出画布" : "加入画布")}
             </button>
             <button
               type="button"

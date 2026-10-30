@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LayoutGrid, LoaderCircle, Mic, Minus, Moon, Music, Paintbrush, PanelLeft, PanelLeftClose, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  ImagePlus, KeyRound, LayoutGrid, LoaderCircle, Mic, Minus, Moon, Music, Paintbrush, PanelLeft, PanelLeftClose, Pin, PinOff, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
   Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Sun, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -34,7 +33,7 @@ import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isI
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
 import { useInpaintMask, useReferenceImages } from "./hooks/useReferenceImages";
-import { usePolling } from "./hooks/usePolling";
+import { useImageTaskEvents, usePolling } from "./hooks/usePolling";
 import { ClearHistoryDialog, HistoryView } from "./views/HistoryView";
 import { SettingsDialog } from "./dialogs/SettingsDialog";
 import { DiagnosticDialog } from "./dialogs/DiagnosticDialog";
@@ -65,46 +64,10 @@ export function App() {
   const [view, setView] = useState<View>("generate");
   const theme = useTheme();
 
-  /**
-   * 切工作区。
-   *
-   * 支持 View Transitions 的内核（WebView2 / Chrome 111+）走整页快照：旧页轻微
-   * 上移、新页从下方托起，比单纯闪一下有方向感；快照层做 transform 不会影响
-   * 页面里 position:fixed 的弹层。旧内核和「减少动态效果」退回普通切换。
-   *
-   * `flushSync` 不能省：startViewTransition 的回调必须同步完成 DOM 更新，
-   * 否则新快照拍到的还是旧页面。
-   */
+  /** 切换工作区直接提交状态，不为整页截图和动画等待渲染。 */
   function switchView(next: View, extra?: () => void) {
-    if (next === view) { extra?.(); return; }
-    const doc = document as Document & { startViewTransition?: (callback: () => void) => unknown };
-    if (!doc.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setView(next);
-      extra?.();
-      return;
-    }
-    let applied = false;
-    const apply = () => {
-      if (applied) return;
-      applied = true;
-      flushSync(() => { setView(next); extra?.(); });
-    };
-    try {
-      const transition = doc.startViewTransition(apply) as { skipTransition?: () => void } | undefined;
-      // 窗口最小化 / 后台标签页里 rAF 会被节流，快照回调可能迟迟不来。
-      // 等 200ms 还没切换就直接切，页面功能不能被动画卡住。
-      window.setTimeout(() => {
-        if (applied) return;
-        applied = true;
-        try { transition?.skipTransition?.(); } catch { /* 已结束 */ }
-        setView(next);
-        extra?.();
-      }, 200);
-    } catch {
-      // 快照被取消 / 内核实现异常时不能把用户卡在原页面
-      setView(next);
-      extra?.();
-    }
+    if (next !== view) setView(next);
+    extra?.();
   }
   /**
    * 新用户向导：一个渠道都没有时占住主区，直到用户真的配好渠道、
@@ -186,25 +149,52 @@ export function App() {
    * 收起后主区左上角会留一个展开按钮——不能只靠 Ctrl+B，否则忘了快捷键的人
    * 会以为界面坏了。状态存本机，下次打开还是上次的样子。
    */
-  const [sidebarHidden, setSidebarHidden] = usePersistentState("sidebarHidden", false);
-  const toggleSidebar = () => setSidebarHidden((hidden) => !hidden);
-
-  /** 无限画布是整页画布：进去时默认收起侧栏，把空间留给画布 */
+  const [sidebarHiddenPreference, setSidebarHiddenPreference] = usePersistentState("sidebarHidden", false);
+  const [boardSidebarPinned, setBoardSidebarPinned] = usePersistentState("boardSidebarPinned", false);
+  const [boardSidebarOpen, setBoardSidebarOpen] = useState(false);
+  const boardSidebarPinnedRef = useRef(boardSidebarPinned);
+  boardSidebarPinnedRef.current = boardSidebarPinned;
+  const onBoardSelected = useCallback(() => { if (!boardSidebarPinnedRef.current) setBoardSidebarOpen(false); }, []);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarHidden = view === "board" ? !boardSidebarOpen : sidebarHiddenPreference;
+  const boardOverlay = view === "board" && boardSidebarOpen && !boardSidebarPinned;
+  const toggleSidebar = useCallback(() => {
+    if (view === "board") setBoardSidebarOpen((open) => !open);
+    else setSidebarHiddenPreference((hidden) => !hidden);
+  }, [view, setSidebarHiddenPreference]);
+  const closeSidebar = () => view === "board" ? setBoardSidebarOpen(false) : setSidebarHiddenPreference(true);
+  const openSidebar = () => view === "board" ? setBoardSidebarOpen(true) : setSidebarHiddenPreference(false);
   function enterBoard() {
     dismissWelcome();
-    setSidebarHidden(true);
+    if (view !== "board") setBoardSidebarOpen(boardSidebarPinned);
+    else setBoardSidebarOpen((open) => !open);
     switchView("board");
   }
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && view === "board" && boardSidebarOpen && !boardSidebarPinned) {
+        setBoardSidebarOpen(false);
+        return;
+      }
       if (!event.ctrlKey || event.altKey || event.metaKey) return;
       if (event.key.toLowerCase() !== "b") return;
       event.preventDefault();
-      setSidebarHidden((hidden) => !hidden);
+      toggleSidebar();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setSidebarHidden]);
+  }, [view, boardSidebarOpen, boardSidebarPinned, toggleSidebar]);
+  useEffect(() => {
+    if (!boardOverlay) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || sidebarRef.current?.contains(target)) return;
+      if (target.closest("[data-sidebar-toggle]")) return;
+      setBoardSidebarOpen(false);
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [boardOverlay]);
 
   /**
    * 自绘标题栏（decorations: false 之后）。
@@ -409,7 +399,7 @@ export function App() {
   }, []);
 
   // 图片与视频任务各自轮询，切换视图也不会中断
-  usePolling(activeTask, setTasks);
+  useImageTaskEvents(imageTasks, setTasks);
   usePolling(activeVideoTask, setTasks);
   usePolling(activeMusicTask, setTasks);
 
@@ -591,7 +581,7 @@ export function App() {
 
   return (
     <div
-      className={`app-shell ${sidebarHidden ? "is-sidebar-hidden" : ""} ${customChrome ? "has-custom-chrome" : ""}`}
+      className={`app-shell ${sidebarHidden ? "is-sidebar-hidden" : ""} ${boardOverlay ? "is-board-sidebar-overlay" : ""} ${customChrome ? "has-custom-chrome" : ""}`}
       style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
     >
       {/* decorations:false 之后自己画的标题栏。开关放在这里，和 Codex 一样在窗口左上角 */}
@@ -600,6 +590,7 @@ export function App() {
           <button
             type="button"
             className="titlebar-toggle"
+            data-sidebar-toggle
             title={sidebarHidden ? "展开侧边栏（Ctrl+B）" : "收起侧边栏（Ctrl+B）"}
             aria-label={sidebarHidden ? "展开侧边栏" : "收起侧边栏"}
             onClick={toggleSidebar}
@@ -645,7 +636,7 @@ export function App() {
         </div>
       ) : null}
 
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         {/* 头部对齐 Codex：粗体工作区名 + 一个下拉箭头，右边是搜索——箭头点开是真菜单，不是装饰 */}
         <div className="sidebar-workspace" ref={workspaceMenuRef}>
           <div className="sidebar-head">
@@ -656,7 +647,7 @@ export function App() {
                 className="icon-button compact sidebar-collapse"
                 title="收起侧边栏（Ctrl+B）"
                 aria-label="收起侧边栏"
-                onClick={() => setSidebarHidden(true)}
+                onClick={closeSidebar}
               >
                 <PanelLeftClose size={15} />
               </button>
@@ -695,6 +686,12 @@ export function App() {
             >
               <ChevronDown size={14} />
             </button>
+            {view === "board" ? <button type="button" className={`icon-button compact sidebar-pin ${boardSidebarPinned ? "is-on" : ""}`}
+              aria-label={boardSidebarPinned ? "取消固定侧边栏" : "固定侧边栏"}
+              title={boardSidebarPinned ? "取消固定侧边栏" : "固定侧边栏"}
+              onClick={() => setBoardSidebarPinned((pinned) => !pinned)}>
+              {boardSidebarPinned ? <PinOff size={14} /> : <Pin size={14} />}
+            </button> : null}
             <button
               className={`icon-button compact ${searchOpen ? "is-on" : ""}`}
               title="搜索会话"
@@ -727,7 +724,7 @@ export function App() {
             className="sidebar-search"
             autoFocus
             value={searchQuery}
-            placeholder="搜索会话标题或内容"
+            placeholder={view === "board" ? "搜索我的画布" : "搜索会话标题或内容"}
             onChange={(event) => setSearchQuery(event.target.value)}
           />
         ) : null}
@@ -742,7 +739,7 @@ export function App() {
           <NavButton
             active={view === "chat"}
             icon={<SquarePen size={16} />}
-            label="对话创作"
+            label="新建对话"
             onClick={() => { dismissWelcome(); switchView("chat", () => setNewChatSignal((value) => value + 1)); }}
           />
           <NavButton
@@ -793,13 +790,13 @@ export function App() {
       </aside>
 
       <main className={`workspace ${sidebarHidden ? "is-sidebar-hidden" : ""}`}>
-        {sidebarHidden && !customChrome ? (
+        {sidebarHidden && !customChrome && view !== "board" ? (
           <button
             type="button"
             className="sidebar-expand"
             title="展开侧边栏（Ctrl+B）"
             aria-label="展开侧边栏"
-            onClick={() => setSidebarHidden(false)}
+            onClick={openSidebar}
           >
             <PanelLeft size={16} />
           </button>
@@ -842,7 +839,10 @@ export function App() {
         {!loading && view === "board" ? (
           <BoardWorkspace
             sidebarHost={sidebarRecentEl}
-            onOpenMenu={() => setSidebarHidden(false)}
+            onOpenMenu={toggleSidebar}
+            onBoardSelected={onBoardSelected}
+            sidebarOpen={boardSidebarOpen}
+            sidebarFilter={searchOpen ? searchQuery : ""}
             onToast={showToast}
           />
         ) : null}

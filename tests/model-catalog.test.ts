@@ -85,7 +85,8 @@ describe("model catalog", () => {
     const group = findModelGroup("tiantoken-gpt:gpt")!;
     const draft = draftForGroup(group, ["gpt-image-2"], "TIANTOKEN_GPT_API_KEY")!;
     expect(duplicateFor(draft, [makeChannel({})])?.id).toBe("channel-1");
-    expect(duplicateFor(draft, [makeChannel({ baseUrl: "https://api.vectorengine.cn" })])).toBeUndefined();
+    expect(duplicateFor(draft, [makeChannel({ baseUrl: "https://api.vectorengine.cn" })])?.id).toBe("channel-1");
+    expect(duplicateFor(draft, [makeChannel({ name: "其他", baseUrl: "https://api.vectorengine.cn" })])).toBeUndefined();
     expect(duplicateFor(draft, [makeChannel({ name: "另一个渠道", models: ["gemini-3-pro-image"] })])).toBeUndefined();
   });
 });

@@ -46,6 +46,7 @@ describe("provider presets", () => {
     expect(chat.baseUrl).toBe("https://api.tiantoken.com");
     expect(chat.units.map((unit) => unit.adapterType)).toEqual(["openai-chat"]);
     expect(chat.units[0].secretEnv).toBe("TIANTOKEN_CHAT_API_KEY");
+    expect(chat.units[0].models).toEqual(["deepseek-v4.1-flash-1017", "gemini-3.8-flash", "gpt-6.1-sol", "claude-sonnet-5-5"]);
     // 大脑默认路径必须和 openai-chat 服务端默认值一致，否则渠道建出来会打错地址
     expect(chat.units[0].endpoint ?? adapterDefaultEndpoint("openai-chat").endpoint).toBe("/v1/chat/completions");
   });
@@ -180,6 +181,16 @@ describe("conflict detection", () => {
       makeChannel({ id: "other", name: "词元流墟-gpt-image-2", models: ["gpt-image-2"] }),
     ];
     expect(findConflictChannels(gptDraft, channels).map((channel) => channel.id)).toEqual(["own"]);
+  });
+
+  it("优先同名渠道，并在多个同名渠道中优先相同站点和协议", () => {
+    const channels = [
+      makeChannel({ id: "model-overlap", name: "旧渠道", models: ["gpt-image-2"] }),
+      makeChannel({ id: "same-name-other-host", name: gptDraft.name, baseUrl: "https://other.example.com" }),
+      makeChannel({ id: "same-name-same-host", name: gptDraft.name, models: ["unrelated"] }),
+    ];
+    expect(findConflictChannels(gptDraft, channels).map((channel) => channel.id)).toEqual(["same-name-same-host", "same-name-other-host"]);
+    expect(findConflictChannels(gptDraft, channels.slice(0, 2))[0]?.id).toBe("same-name-other-host");
   });
 
   it("ignores other adapters, other hosts and non-overlapping models", () => {

@@ -61,6 +61,26 @@ describe("素材库删除图片", () => {
     expect(db.getAsset(assetId)).not.toBeNull();
   });
 
+  it("公共素材按单个产物删除并保留生成记录，已被画布或对话引用时拒绝", async () => {
+    const { app, db, assetId: privateAsset } = await setup();
+    await request(app).delete(`/api/assets/${privateAsset}`).expect(409);
+    const taskId = crypto.randomUUID();
+    db.createTask({ id: taskId, channelId: "", model: "", prompt: "公共图片", input: {}, status: "succeeded", libraryScope: "public" });
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    for (const id of [first, second]) db.insertAsset({
+      id, taskId, fileName: `${id}.png`, mimeType: "image/png", byteSize: 1,
+      relativePath: `${id}.png`, baseDir: db.assetsDir, sha256: "x", thumbPath: "",
+    });
+    const board = (await request(app).post("/api/boards").send({ title: "引用" }).expect(201)).body.data;
+    await request(app).post(`/api/boards/${board.id}/bridge/assets`).send({ items: [{ assetId: first }] }).expect(200);
+    await request(app).delete(`/api/assets/${first}`).expect(409);
+    await request(app).delete(`/api/assets/${second}`).expect(200);
+    expect(db.getAsset(second)).toBeNull();
+    expect(db.getAsset(first)).not.toBeNull();
+    expect(db.getTaskView(taskId)).not.toBeNull();
+  });
+
   it("显式标记的对话素材在删除会话后仍不会变成公共素材", async () => {
     const { app, db, conversationId } = await setup();
     const taskId = crypto.randomUUID();

@@ -56,6 +56,7 @@ export const templateNodeSchema = z.object({
   width: z.number().finite().min(BOARD_LIMITS.minNodeWidth).max(BOARD_LIMITS.maxNodeWidth).optional(),
   height: z.number().finite().min(BOARD_LIMITS.minNodeHeight).max(BOARD_LIMITS.maxNodeHeight).optional(),
   title: z.string().max(BOARD_LIMITS.maxTitleChars).optional(),
+  storyboard: z.object({ projectId: z.string().min(1).max(80), shotId: z.string().min(1).max(80), role: z.enum(["text", "image", "video", "audio"]) }).optional(),
   text: z.string().max(BOARD_LIMITS.maxTextChars).optional(),
   config: templateConfigSchema.optional(),
 });

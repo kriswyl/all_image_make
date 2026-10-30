@@ -121,12 +121,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       <div className="page-header">
         <div><h1>素材管理</h1><span className="page-kicker">ASSETS & HISTORY</span></div>
         <div className="header-actions">
-          <div className="filter-tabs">
-            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部</button>
-            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片</button>
-            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频</button>
-            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频</button>
-          </div>
+          <div className="filter-tabs"><button className={mode === "assets" ? "active" : ""} onClick={() => { setMode("assets"); setVisibleCount(60); setSelected(new Set()); }}>素材</button><button className={mode === "records" ? "active" : ""} onClick={() => { setMode("records"); setVisibleCount(60); setSelected(new Set()); }}>生成记录</button></div>
           {selected.size ? (
             <div className="selection-bar">
               <span>已选 <strong>{selected.size}</strong> 条</span>
@@ -141,15 +136,27 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         </div>
       </div>
       <div className="library-toolbar">
-        <div className="filter-tabs"><button className={mode === "assets" ? "active" : ""} onClick={() => { setMode("assets"); setVisibleCount(60); setSelected(new Set()); }}>素材</button><button className={mode === "records" ? "active" : ""} onClick={() => { setMode("records"); setVisibleCount(60); setSelected(new Set()); }}>生成记录</button></div>
+          <div className="filter-tabs">
+            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部</button>
+            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片</button>
+            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频</button>
+            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频</button>
+          </div>
         <input value={query} onChange={(event) => { setQuery(event.target.value); setVisibleCount(60); setSelected(new Set()); }} placeholder="搜索提示词、文件名、模型或渠道" aria-label="搜索素材和记录" />
       </div>
       {loadError ? <p role="alert">素材加载失败：{loadError}</p> : null}
       {mode === "assets" ? <div className="library-grid">
-        {visibleAssets.map(({task, asset, index}) => <button type="button" className="library-card" key={asset.id} onClick={() => { setPreviewIndex(index); setPreview(task); }}>
+        {visibleAssets.map(({task, asset, index}) => <div className="library-card-wrap" key={asset.id}><button type="button" className="library-card" onClick={() => { setPreviewIndex(index); setPreview(task); }}>
           <span className="library-card-media">{asset.mimeType.startsWith("video/") ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt="视频预览" /> : asset.mimeType.startsWith("audio/") ? asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" loading="lazy" /> : <Music size={32} /> : <img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</span>
           <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
-        </button>)}
+        </button><button type="button" className="library-card-delete" title="删除素材" aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
+          if (!window.confirm("确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
+          void api.deleteLibraryAsset(asset.id).then(() => {
+            setLibrary((items) => items.map((item) => item.id === task.id ? { ...item, assets: item.assets.filter((entry) => entry.id !== asset.id) } : item));
+            onRefresh();
+            onToast("success", "素材已删除");
+          }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除素材失败"));
+        }}><Trash2 size={16} /></button></div>)}
         {!loading && !filtered.some((task) => task.assets.length) && !loadError ? <div className="table-empty"><ImageIcon size={28} /><span>没有符合条件的素材</span></div> : null}
       </div> :
       <div className="data-table-wrap">

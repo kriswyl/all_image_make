@@ -56,7 +56,10 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   const titles = producedAssets
     .map((asset) => asset.title)
     .filter((title): title is string => Boolean(title));
-  const summary = ok && produced
+  const boardRef = typeof pending.toolResult?.data?.nodeRef === "string" ? pending.toolResult.data.nodeRef : "";
+  const summary = conversation.kind === "board" && boardRef
+    ? ok ? `画布节点 ${boardRef} 的${kind === "image" ? "图片" : kind === "video" ? "视频" : "音频"}任务已完成，结果将由画布回填。` : `画布节点 ${boardRef} 的生成失败：${event.task.errorMessage ?? event.task.errorCode ?? "上游没有返回结果"}`
+    : ok && produced
     ? kind === "audio"
       ? `音乐生成完成（${event.task.model}），共 ${producedAssets.length} 首${titles.length ? `：${titles.join(" / ")}` : ""}。`
       : `视频生成完成（${event.task.model}），产物 ${assetRef(produced.id)}${produced.duration ? `，约 ${produced.duration} 秒` : ""}。`
@@ -90,6 +93,12 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   // 画布只跟着图片走：视频/音乐做完了，画布仍是那张原图
   if (conversation.status !== "waiting_task") return;
   if (host.hasActiveTurn(conversation.id)) return;
+
+  if (conversation.kind === "chat" && conversation.chatMode === "chat") {
+    db.setConversationStatus(conversation.id, "idle", { touch: false });
+    host.broadcast(conversation.id, { type: "done", status: "idle" });
+    return;
+  }
 
   if (conversation.autoContinueCount >= MAX_AUTO_CONTINUE) {
     const note = db.appendMessage({

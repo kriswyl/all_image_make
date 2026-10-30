@@ -161,7 +161,7 @@ export function toBrainMessage(message: ChatMessage): BrainMessage | null {
       };
     }
     const text = message.content?.trim();
-    return text ? { role: "assistant", content: text } : null;
+    return text ? { role: "assistant", content: `[普通聊天或历史回复，以下为正文而非工具调用]\n${text}` } : null;
   }
   // 工具结果回灌成 user 消息：chat completions 没有工具角色可用
   const result = message.toolResult;
@@ -169,6 +169,27 @@ export function toBrainMessage(message: ChatMessage): BrainMessage | null {
     ? `${result.ok ? "成功" : "失败"}：${result.summary}`
     : (message.content ?? "");
   return { role: "user", content: `[工具结果 ${message.toolName ?? ""}] ${body}` };
+}
+
+/** 普通聊天只回放可读事实，绝不回放工具协议。 */
+export function toPlainChatMessage(message: ChatMessage): BrainMessage | null {
+  if (message.role === "system") return null;
+  if (message.role === "user") return toBrainMessage(message);
+  if (message.role === "assistant") {
+    if (message.confirm) return { role: "assistant", content: `[有一项操作等待用户确认：${message.content || message.toolName || "生成任务"}]` };
+    if (message.toolName && !["reply", "ask"].includes(message.toolName)) {
+      if (message.status === "error" && message.errorMessage) return { role: "assistant", content: `[操作未完成：${message.errorMessage}]` };
+      if (message.status === "pending" && !message.toolResult) return { role: "assistant", content: `[操作正在处理：${message.content || message.toolName}]` };
+      if (message.toolResult) return { role: "assistant", content: `[${message.toolResult.async ? "任务进行中" : message.toolResult.ok ? "操作完成" : "操作失败"}：${message.toolResult.summary}]` };
+      return message.content ? { role: "assistant", content: message.content } : null;
+    }
+    const text = message.content || (message.plan?.args?.text as string | undefined) || message.plan?.say;
+    return text ? { role: "assistant", content: text } : null;
+  }
+  const result = message.toolResult;
+  const status = result?.async ? "任务进行中" : result?.ok ? "操作完成" : message.status === "pending" ? "任务进行中" : "操作失败";
+  const text = result?.summary || message.content || message.errorMessage || message.toolName || "操作";
+  return { role: "assistant", content: `[${status}：${text}]` };
 }
 
 /**

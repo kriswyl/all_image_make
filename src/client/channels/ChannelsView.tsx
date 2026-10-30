@@ -78,9 +78,9 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
                     <X size={14} />
                   </button>
                 </div>
-                <img src="/tiantoken-wechat.png" alt="词元流墟官方企业微信二维码，客服主管小向" />
+                <img src="/tiantoken-wechat.png" alt="词元流墟官方企业微信二维码，客服主管泡泡" />
                 <p>
-                  扫码添加客服「小向」 · 成都天相科技
+                  扫码添加客服「泡泡」 · 成都天相科技
                   <span>词元流墟官方联系方式，非作者联系方式</span>
                 </p>
               </div>

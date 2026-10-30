@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { APP_VERSION } from "../shared/app-config";
 import { isTauriRuntime } from "./api";
 import { copyTextToClipboard } from "./clipboard";
+import { openExternal } from "./external";
 import {
   checkForUpdate, downloadUpdate, installUpdate, isPortableBuild, prepareForUpdate, relaunchApp,
 } from "./updater";
@@ -11,7 +12,10 @@ import type { UpdateInfo } from "./updater";
 type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error";
 type CopyState = "idle" | "copied" | "error";
 
-/** 作者联系方式；发布页入口已移除，用户需要新版本或反馈问题时走这里 */
+/** 发布页始终指向版本列表，避免未来版本仍跳到旧版本。 */
+const GITEE_RELEASES_URL = "https://gitee.com/cqgsdx_0/chatcanvas-releases/releases";
+
+/** 作者联系方式 */
 const AUTHOR_EMAIL = "1413803765@qq.com";
 
 function ContactButton({ copied, onClick }: { copied: boolean; onClick: () => void }) {
@@ -46,6 +50,7 @@ export function UpdateStatus() {
   const [portable, setPortable] = useState(false);
   const [open, setOpen] = useState(false);
   const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [linkError, setLinkError] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const desktop = isTauriRuntime();
 
@@ -160,7 +165,7 @@ export function UpdateStatus() {
               {info.notes ? <div className="update-notes">{info.notes}</div> : null}
               {portable ? (
                 <>
-                  <p className="update-note">便携版不会自动覆盖安装。需要新版本请联系作者。</p>
+                  <p className="update-note">便携版不会自动覆盖安装，可通过下方 Gitee 发布页下载新版本。</p>
                   <div className="update-actions">
                     <ContactButton copied={copyState === "copied"} onClick={() => void copyAuthorEmail()} />
                     <button type="button" className="update-secondary" onClick={() => setOpen(false)}>稍后</button>
@@ -208,6 +213,16 @@ export function UpdateStatus() {
               </button>
             </div>
           )}
+          {desktop ? (
+            <div className="update-manual-download">
+              <button type="button" className="update-secondary" onClick={() => {
+                setLinkError(false);
+                void openExternal(GITEE_RELEASES_URL).catch(() => setLinkError(true));
+              }}><ExternalLink size={14} />前往 Gitee 下载</button>
+              <p className="update-note">在发布页选择适合系统的安装包，下载后手动安装。</p>
+              {linkError ? <p className="update-note update-error">打开失败，请在浏览器访问：{GITEE_RELEASES_URL}</p> : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

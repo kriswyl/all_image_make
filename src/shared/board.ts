@@ -131,6 +131,7 @@ const baseNodeShape = {
   width: z.number().finite().min(BOARD_LIMITS.minNodeWidth).max(BOARD_LIMITS.maxNodeWidth),
   height: z.number().finite().min(BOARD_LIMITS.minNodeHeight).max(BOARD_LIMITS.maxNodeHeight),
   title: titleSchema,
+  storyboard: z.object({ projectId: nodeIdSchema, shotId: nodeIdSchema, role: z.enum(["text", "image", "video", "audio"]) }).optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 };

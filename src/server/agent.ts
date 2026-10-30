@@ -31,7 +31,7 @@ import {
   resolveAlias,
 } from "./capabilities.js";
 import {
-  resolveAssetRef, resolveImageRefs, resolveVideoSelection,
+  resolveAssetRef, resolveImageRefs, resolveVideoSelection, TOOL_SCHEMAS,
   type ToolContext, type ToolOutcome, type VideoSelection,
 } from "./agent-tools.js";
 import { assetThumbDataUri } from "./vision.js";
@@ -77,8 +77,9 @@ import {
   describeBrainFailure, isBrainDown, isBrainTimeout, isFatalBrainError, isVisionError,
 } from "./agent-brain-errors.js";
 import { buildSystemPrompt } from "./agent-prompt.js";
+import { inspectBoardGeneration } from "./board-assistant.js";
 import { previewBoardOps } from "./board-agent.js";
-import { boardApplySchema } from "../shared/board-ops.js";
+import { boardApplySchema, boardGenerateSchema } from "../shared/board-ops.js";
 import { BatchExecutor, type BatchOutcome } from "./agent-batch.js";
 import { isVisionBlocked, observeImages } from "./agent-vision.js";
 import { handleTaskEvent } from "./agent-task-events.js";
@@ -193,8 +194,9 @@ export class AgentService {
     });
     return {
       ...conversation,
+      contextSummary: this.db.getContextSummary(conversationId),
       // 老消息里没有 MJ 按钮；读视图时从任务 meta 补上，历史结果也能直接继续 U/V/R
-      messages: this.db.listMessages(conversationId).map((message) => this.withMidjourneyButtons(message)),
+      messages: this.db.listMessagesAfter(conversationId, 0).map((message) => this.withMidjourneyButtons(message)),
       // token 账本：状态行显示「上下文多大 / 这个会话一共花了多少 token」
       usage: this.db.conversationUsage(conversationId),
       // 当前画布那一组，顺序同 canvasAssetIds（不能按时间重排——第一张是画布序号 1）。
@@ -241,7 +243,7 @@ export class AgentService {
     }
     const controller = new AbortController();
     this.activeTurns.set(conversationId, controller);
-    void this.turn(conversationId, text, trigger, controller, assetRefs)
+    void this.turn(conversationId, text, trigger, controller, assetRefs, conversation)
       .catch((error) => this.reportTurnFailure(conversationId, error))
       .finally(() => {
         this.activeTurns.delete(conversationId);
@@ -262,6 +264,23 @@ export class AgentService {
           this.settleFinishedTasks(conversationId);
         }
       });
+  }
+
+  /** 手动压缩只整理历史，不启动创作循环或提交生成任务。 */
+  async compressNow(conversationId: string) {
+    const conversation = this.db.getConversation(conversationId);
+    if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    if (this.activeTurns.has(conversationId)) throw new AppError("TURN_IN_FLIGHT", "当前会话正在处理，请稍候", 409);
+    if (conversation.status === "waiting_task") throw new AppError("TASK_IN_FLIGHT", "当前有任务等待自动续跑，请等任务结束后再手动压缩", 409);
+    const controller = new AbortController();
+    this.activeTurns.set(conversationId, controller);
+    try {
+      return await this.brain.prepareCompression(conversation, controller, [], true);
+    } finally {
+      this.activeTurns.delete(conversationId);
+      const latest = this.db.getConversation(conversationId);
+      if (latest) this.broadcast(conversationId, { type: "done", status: latest.status });
+    }
   }
 
   /**
@@ -308,7 +327,10 @@ export class AgentService {
       // 真有也别悄悄套上去：那些字段对生图没有意义，套上去等于编造一份「用户改过的参数」
       void this.approveBatch(conversationId, message.id, batch, batchController, message.plan?.consistency)
         .catch((error) => this.reportTurnFailure(conversationId, error))
-        .finally(() => this.activeTurns.delete(conversationId));
+        .finally(() => {
+          this.activeTurns.delete(conversationId);
+          if (this.db.getConversation(conversationId)?.status === "waiting_task") this.settleFinishedTasks(conversationId);
+        });
       return;
     }
 
@@ -332,7 +354,10 @@ export class AgentService {
 
     void this.approve(conversationId, message.id, tool, args, controller)
       .catch((error) => this.reportTurnFailure(conversationId, error))
-      .finally(() => this.activeTurns.delete(conversationId));
+      .finally(() => {
+          this.activeTurns.delete(conversationId);
+          if (this.db.getConversation(conversationId)?.status === "waiting_task") this.settleFinishedTasks(conversationId);
+        });
   }
 
   // ── 主循环 ─────────────────────────────────────────────────────────────────
@@ -360,7 +385,9 @@ export class AgentService {
     trigger: TurnTrigger,
     controller: AbortController,
     assetRefs: string[] = [],
+    turnConversation: Conversation,
   ) {
+    const plain = turnConversation.kind === "chat" && turnConversation.chatMode === "chat";
     let userMessage: ChatMessage | null = null;
     // 这一轮附带的图只算一次：工具执行到最后一条消息已经是助手计划行，
     // 再回头扫数据库找不到用户那几条，所以必须在这里锁住并一路传下去
@@ -373,15 +400,38 @@ export class AgentService {
       this.broadcast(conversationId, { type: "message", message: userMessage });
       this.nameFromFirstMessage(conversationId, text);
       this.db.resetAutoContinue(conversationId);
-      this.supersedePendingConfirmations(conversationId);
+      if (!plain) this.supersedePendingConfirmations(conversationId);
     }
     this.setStatus(conversationId, "running");
     try {
+      await this.brain.prepareCompression(turnConversation, controller, turnAttachmentIds);
+      if (plain) {
+        const built = await this.brain.buildBrainMessages(turnConversation, turnAttachmentIds);
+        let result: BrainResult;
+        try {
+          result = await this.brain.callBrainRaw(turnConversation, built.messages, controller, conversationId, { plain: true });
+        } catch (error) {
+          if (controller.signal.aborted) return this.finishInterrupted(conversationId);
+          if (!built.visionAttached || !isVisionError(error)) throw error;
+          this.broadcast(conversationId, { type: "reset" });
+          this.brain.degradeVision(turnConversation, error);
+          const retry = await this.brain.buildBrainMessages({ ...turnConversation, visionEnabled: false }, turnAttachmentIds);
+          result = await this.brain.callBrainRaw(turnConversation, retry.messages, controller, conversationId, { plain: true });
+        }
+        if (controller.signal.aborted) return this.finishInterrupted(conversationId);
+        const content = result.content.trim() || "（模型没有返回内容，请再试一次。）";
+        const message = this.db.appendMessage({ conversationId, role: "assistant", content, status: result.content.trim() ? "ok" : "error" });
+        this.broadcast(conversationId, { type: "message", message });
+        this.setStatus(conversationId, "idle");
+        this.broadcast(conversationId, { type: "done", status: "idle" });
+        return;
+      }
       await this.runLoop(conversationId, trigger, controller, 0, turnAttachmentIds);
     } catch (error) {
+      if (controller.signal.aborted) return this.finishInterrupted(conversationId);
       // §15 直通模式。只在「这一轮什么也没发生」时才降级：如果大脑已经跑了几轮、
       // 图也画了，那问题就不在「大脑连不上」，再兜一次只会让上下文更乱。
-      if (userMessage && isBrainDown(error) && !controller.signal.aborted
+      if (!plain && userMessage && isBrainDown(error) && !controller.signal.aborted
         && this.nothingHappenedSince(conversationId, userMessage.seq)) {
         this.offerPassthrough(conversationId, userMessage, error);
         return;
@@ -463,6 +513,11 @@ export class AgentService {
       this.broadcast(conversationId, { type: "done", status: "waiting_task" });
       return;
     }
+    if (this.db.getConversation(conversationId)?.chatMode === "chat" && conversation.kind === "chat") {
+      this.setStatus(conversationId, "idle");
+      this.broadcast(conversationId, { type: "done", status: "idle" });
+      return;
+    }
     try {
       await this.runLoop(conversationId, "confirmation", controller, 1);
     } catch (error) {
@@ -500,6 +555,11 @@ export class AgentService {
     if (outcome.terminal) {
       this.setStatus(conversationId, "waiting_task");
       this.broadcast(conversationId, { type: "done", status: "waiting_task" });
+      return;
+    }
+    if (this.db.getConversation(conversationId)?.chatMode === "chat" && conversation.kind === "chat") {
+      this.setStatus(conversationId, "idle");
+      this.broadcast(conversationId, { type: "done", status: "idle" });
       return;
     }
     try {
@@ -552,7 +612,8 @@ export class AgentService {
       const conversation = this.db.getConversation(conversationId);
       if (!conversation) return;
 
-      const outcome = await this.runOneRound(conversation, trigger, round, controller, turnAttachmentIds);
+      const turnConversation = conversation.kind === "chat" ? { ...conversation, chatMode: "creative" as const } : conversation;
+      const outcome = await this.runOneRound(turnConversation, trigger, round, controller, turnAttachmentIds);
       if (outcome === "stop") return;
     }
 
@@ -661,6 +722,47 @@ export class AgentService {
      * 而是先看一眼。看图不生成、不花钱，但每看一次要多一趟大脑请求，
      * 所以有次数上限；超了就停下让用户重说，而不是无限循环。
      */
+    if (plan.tool === "board_view_images" && conversation.kind === "board") {
+      if (visionReads >= MAX_VISION_READS_PER_ROUND) {
+        const note = this.db.appendMessage({ conversationId, role: "system", status: "error", content: "本轮看图次数已达上限，请缩小检查范围后继续。" });
+        this.broadcast(conversationId, { type: "message", message: note });
+        this.setStatus(conversationId, "idle"); this.broadcast(conversationId, { type: "done", status: "idle" }); return "stop";
+      }
+      const board = conversation.boardId ? this.db.getBoardRecord(conversation.boardId) : null;
+      const parsed = TOOL_SCHEMAS.board_view_images.safeParse(plan.args);
+      const refs = parsed.success ? [...new Set(parsed.data.nodeRefs)].slice(0, MAX_VISION_IMAGES) : [];
+      const parts: BrainContentPart[] = [];
+      const seen: string[] = []; const missed: string[] = [];
+      if (!parsed.success || !board || !conversation.visionEnabled || isVisionBlocked(this.db, conversation)) {
+        parts.push({ type: "text", text: "[画布看图失败] 参数无效、当前画布不存在或模型视觉不可用。没有看过任何图片，不能声称看过。" });
+      } else {
+        for (const ref of refs) {
+          const node = board.doc.nodes.find((item) => item.ref === ref);
+          const asset = node?.type === "image" && node.assetId ? this.db.getAsset(node.assetId) : null;
+          const uri = asset ? await assetThumbDataUri(this.db, asset) : null;
+          if (!uri) { missed.push(ref); continue; }
+          parts.push({ type: "text", text: `画布图片 ${ref}「${node?.title ?? ""}」` });
+          parts.push({ type: "image_url", image_url: { url: uri } }); seen.push(ref);
+        }
+        if (parsed.success) {
+          const taskIds = new Set(this.db.listBoardTasksByBoard(board.id).map((item) => item.taskId));
+          for (const id of [...new Set(parsed.data.assetIds)]) {
+            const asset = this.db.getAsset(id);
+            const task = asset && this.db.getTaskRow(asset.taskId);
+            const isPublic = task?.libraryScope === "public" || (task?.libraryScope === "legacy" && this.db.listLibraryTaskViews().some((item) => item.id === task.id));
+            const permitted = asset && (isPublic || taskIds.has(asset.taskId) || this.db.findBoardAssetRefs(id).some((item) => item.boardId === board.id));
+            const uri = permitted && asset?.mimeType.startsWith("image/") ? await assetThumbDataUri(this.db, asset) : null;
+            if (!uri) { missed.push(`素材 ${id}`); continue; }
+            parts.push({ type: "text", text: `素材 ${id}（生成历史或公共素材）` });
+            parts.push({ type: "image_url", image_url: { url: uri } }); seen.push(`素材 ${id}`);
+          }
+        }
+        parts.unshift({ type: "text", text: `[画布看图] 实际附图：${seen.join("、") || "无"}；未能读取：${missed.join("、") || "无"}。只评价实际附图，未读取或未选中的图片不能声称看过。` });
+      }
+      this.broadcast(conversationId, { type: "reset" });
+      return this.runRoundWithMessages(conversation, trigger, round, controller, { messages: [...built.messages, { role: "assistant", content: JSON.stringify({ tool: plan.tool, args: plan.args }) }, { role: "user", content: parts }], visionAttached: built.visionAttached || seen.length > 0 }, turnAttachmentIds, visionReads + 1);
+    }
+
     if (plan.tool === "view_images") {
       if (visionReads >= MAX_VISION_READS_PER_ROUND) {
         const note = this.db.appendMessage({
@@ -773,9 +875,39 @@ export class AgentService {
         }
       })()
       : null;
+    const board = conversation.kind === "board" && conversation.boardId ? this.db.getBoardRecord(conversation.boardId) : null;
+    const boardGeneration = board && calls.length === 1 && calls[0]!.tool === "board_generate" ? (() => {
+      const args = boardGenerateSchema.safeParse(calls[0]!.args); if (!args.success) return null;
+      const check = inspectBoardGeneration(this.db, board, buildCapabilityAliases(this.db.listChannels()), this.defaultAliases(), [args.data.nodeRef], args.data.overrides)[0];
+      if (!check || check.errors.length || check.kind === "text") return null;
+      const node = board.doc.nodes.find((item) => item.ref === args.data.nodeRef);
+      const count = node?.type === "config" && node.mode === "image" ? (args.data.overrides?.count ?? node.count) : 1;
+      calls[0]!.args = { ...calls[0]!.args, expectedBoardVersion: board.version };
+      return { message: `将在节点 ${check.ref} 提交 1 个${check.kind === "video" ? "视频" : check.kind === "audio" ? "音频" : "图片"}生成任务${count > 1 ? `，请求 ${count} 张结果` : ""}；模型：${check.model}。${check.warnings.length ? `注意：${check.warnings.join("；")}。` : ""}实际费用由渠道决定。`, summary: `${check.ref} · 1 个任务` };
+    })() : null;
+    const batchGeneration = board && calls.length === 1 && calls[0]!.tool === "board_generate_batch" ? (() => {
+      const args = TOOL_SCHEMAS.board_generate_batch.safeParse(calls[0]!.args); if (!args.success) return null;
+      const checks = inspectBoardGeneration(this.db, board, buildCapabilityAliases(this.db.listChannels()), this.defaultAliases(), args.data.nodeRefs);
+      if (checks.some((check) => check.errors.length || check.kind === "text")) return null;
+      calls[0]!.args = { ...calls[0]!.args, expectedBoardVersion: board.version };
+      const lines = checks.map((check) => { const node = board.doc.nodes.find((item) => item.ref === check.ref); const count = node?.type === "config" && node.mode === "image" ? node.count : 1; return `${check.ref}（${check.kind}，${check.model}${count > 1 ? `，请求 ${count} 张` : ""}）${check.warnings.length ? `：${check.warnings.join("、")}` : ""}`; }).join("；");
+      return { message: `将提交 ${checks.length} 个生成任务：${lines}。实际费用由渠道决定，已生成节点可能被覆盖。`, summary: `${checks.length} 个节点 · ${checks.length} 个任务` };
+    })() : null;
+    const projectUpdate = board && calls.length === 1 && calls[0]!.tool === "board_storyboard_update" ? (() => {
+      const input = TOOL_SCHEMAS.board_storyboard_update.safeParse(calls[0]!.args); if (!input.success) return null;
+      const node = board.doc.nodes.find((item) => item.ref === input.data.nodeRef);
+      const project = node?.storyboard && this.db.getStoryboardProject(node.storyboard.projectId);
+      if (!node?.storyboard || !project || project.revision !== input.data.revision) return null;
+      const index = project.data.shots.findIndex((shot) => shot.id === node.storyboard!.shotId);
+      if (index < 0) return null;
+      calls[0]!.args = { ...calls[0]!.args, expectedBoardVersion: board.version };
+      const fields = Object.entries(input.data.patch).map(([key, value]) => `${key}：${(typeof value === "object" ? JSON.stringify(value) : String(value)).slice(0, 160)}`).join("；");
+      return { message: `将修改分镜项目「${project.data.name}」第 ${index + 1} 镜：${fields}。当前画布不会自动改变。`, summary: `第 ${index + 1} 镜 · 项目版本 ${project.revision}` };
+    })() : null;
+    if (board && boardOpsPreview?.needsConfirm && calls[0]) calls[0].args = { ...calls[0].args, expectedBoardVersion: board.version };
     // 选图本身就不成立时先别摆确认卡：卡片上写不出「用哪几张」，
     // 用户点了确认也只会得到一个失败。直接执行，让工具把原因回灌给大脑去 ask / 重选。
-    const needsConfirm = Boolean(boardOpsPreview?.needsConfirm) || (!videoSelection?.error && !imageSelectionMissing && (overTaskLimit
+    const needsConfirm = Boolean(boardOpsPreview?.needsConfirm || boardGeneration || batchGeneration || projectUpdate) || (!videoSelection?.error && !imageSelectionMissing && (overTaskLimit
       || (calls.length === 1 && shouldConfirm(calls[0]!.tool, isContinuation, conversation.videoConfirmPolicy))));
     if (needsConfirm) {
       const preview: ConfirmPreview = boardOpsPreview?.needsConfirm
@@ -788,6 +920,11 @@ export class AgentService {
           boardDeleteNodes: boardOpsPreview.deleteNodes,
           boardDeleteWithAssets: boardOpsPreview.deleteWithAssets,
           boardSummary: boardOpsPreview.summary,
+        }
+        : boardGeneration || batchGeneration || projectUpdate ? {
+          reason: boardGeneration || batchGeneration ? "board_generation" : "board_project_update",
+          prompt: "", model: "", channelName: "",
+          message: (boardGeneration ?? batchGeneration ?? projectUpdate)!.message, boardSummary: (boardGeneration ?? batchGeneration ?? projectUpdate)!.summary,
         }
         : buildConfirmPreview(
           this.db, conversation, calls, overTaskLimit ? "session_limit" : "video_policy",

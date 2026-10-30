@@ -5,6 +5,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/server/app";
+import { storyboardProjectDataSchema } from "../src/shared/storyboard-project";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -77,6 +78,19 @@ describe("prompt polish", () => {
     const sent = JSON.parse(mock.bodies[0]);
     expect(sent.messages[0].content).toContain("视频提示词工程师");
     expect(sent.messages[0].content).toContain("镜头运动");
+  });
+
+  it("单镜 AI 拆分只返回建议，不直接修改已保存分镜", async () => {
+    const { mock, app, context } = await setup(JSON.stringify({ shots: [{ prompt: "人物走向门口", dialogue: "你好" }, { prompt: "人物推门进入", videoPrompt: "缓缓推门" }] }));
+    const channel = await addChatChannel(app, mock.origin);
+    const conversation = context.db.createConversation({ title: "拆镜", brainChannelId: channel.id, brainModel: "deepseek-v4-1-flash", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false });
+    const data = storyboardProjectDataSchema.parse({ name: "测试", characters: [], scenes: [], shots: [{ id: "shot-1", prompt: "人物走向并推门", dialogue: "你好" }] });
+    context.db.createStoryboardProject("project-1", conversation.id, data);
+    const response = await request(app).post("/api/storyboard-projects/project-1/split").send({ revision: 1, shotId: "shot-1" }).expect(200);
+    expect(response.body.data.shots).toHaveLength(2);
+    expect(response.body.data.shots[1].videoPrompt).toBe("缓缓推门");
+    expect(context.db.getStoryboardProject("project-1")?.data.shots).toHaveLength(1);
+    await request(app).post("/api/storyboard-projects/project-1/split").send({ revision: 2, shotId: "shot-1" }).expect(409);
   });
 
   it("fails with an actionable message when no chat channel exists", async () => {

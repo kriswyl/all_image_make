@@ -147,8 +147,8 @@ function parseDocOrThrow(value: unknown): BoardDoc {
  * 这样既挡住跨板引用，也挡住用户手改 JSON 指向磁盘上的任意文件。
  * 上传后会先插一条临时 board_assets 链接，保存文档时再按节点重建。
  */
-export function assertDocAssets(db: AppDatabase, boardId: string, doc: BoardDoc): void {
-  const linkedAssetIds = new Set(db.listBoardAssets(boardId).map((asset) => asset.id));
+export function assertDocAssets(db: AppDatabase, boardId: string, doc: BoardDoc, additionalAssetIds: string[] = []): void {
+  const linkedAssetIds = new Set([...db.listBoardAssets(boardId).map((asset) => asset.id), ...additionalAssetIds]);
   // 刚生成完、还没保存过文档的素材，靠 board_tasks 证明它属于这块板。
   // 下一次保存会把它写进 board_assets，之后就走上一条分支。
   const taskIds = new Set(db.listBoardTasksByBoard(boardId).map((task) => task.taskId));

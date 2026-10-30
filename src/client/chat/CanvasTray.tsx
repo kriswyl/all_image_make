@@ -24,12 +24,14 @@ function roleLabel(position: number): string {
 
 export function CanvasTray({
   items,
+  plain = false,
   onPreview,
   onRemove,
   onSetFirst,
   onSetLast,
 }: {
   items: CanvasTrayItem[];
+  plain?: boolean;
   onPreview: (assetId: string) => void;
   onRemove: (assetId: string) => void;
   onSetFirst: (assetId: string) => void;
@@ -79,21 +81,21 @@ export function CanvasTray({
           <button
             type="button"
             className="composer-canvas-thumb"
-            title={`${roleLabel(item.index)} · 左键看大图，右键设首帧 / 尾帧`}
+            title={plain ? "本轮附件 · 点击查看大图" : `${roleLabel(item.index)} · 左键看大图，右键设首帧 / 尾帧`}
             onClick={() => onPreview(item.asset.id)}
-            onContextMenu={(event) => { event.preventDefault(); openMenu(event, item); }}
+            onContextMenu={(event) => { event.preventDefault(); if (!plain) openMenu(event, item); }}
           >
             <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" loading="lazy" />
-            <span className="composer-canvas-order">{item.index + 1}</span>
+            {!plain ? <><span className="composer-canvas-order">{item.index + 1}</span>
             <span className={`composer-canvas-role is-${item.index === 0 ? "first" : item.index === 1 ? "last" : "ref"}`}>
               {roleLabel(item.index)}
-            </span>
+            </span></> : null}
           </button>
           <button
             type="button"
             className="composer-attachment-remove"
             title="从这一轮移除"
-            aria-label={`从画布移除 ${item.asset.fileName}`}
+            aria-label={`${plain ? "移除附件" : "从画布移除"} ${item.asset.fileName}`}
             onClick={() => onRemove(item.asset.id)}
           >
             <X size={11} />

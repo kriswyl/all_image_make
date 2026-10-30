@@ -108,6 +108,23 @@ async function waitForTask(app: ReturnType<typeof createApp>["app"], taskId: str
 }
 
 describe("无限画布配置节点生成", () => {
+  it("节点版本对比只返回对应节点的生成结果", async () => {
+    const { app, context } = await tempApp();
+    const { board, doc } = await createBoardWithText(app);
+    const at = new Date().toISOString();
+    const imageA = nodeBase("n3", "image", { assetId: null, status: "empty", source: "generated", createdAt: at, updatedAt: at });
+    const imageB = nodeBase("n4", "image", { assetId: null, status: "empty", source: "generated", createdAt: at, updatedAt: at });
+    const saved = (await request(app).put(`/api/boards/${board.id}`).send({ doc: { ...doc, nextRef: 5, nodes: [...doc.nodes, imageA, imageB] }, baseVersion: board.version }).expect(200)).body.data;
+    context.db.createTask({ id: "version-task", channelId: "", model: "mock", prompt: "版本", input: {}, libraryScope: "public", status: "succeeded" });
+    for (const id of ["version-a", "version-b"]) context.db.insertAsset({ id, taskId: "version-task", fileName: `${id}.png`, mimeType: "image/png", byteSize: 1, relativePath: `${id}.png`, baseDir: context.db.assetsDir, sha256: "x", thumbPath: "" });
+    context.db.addBoardTaskRows({ taskId: "version-task", boardId: board.id, configNodeId: "node-n2", resultNodeIds: [imageA.id, imageB.id], kind: "image" });
+    const versions = (await request(app).get(`/api/boards/${board.id}/nodes/${imageB.id}/versions`).expect(200)).body.data;
+    expect(versions).toHaveLength(1);
+    expect(versions[0].assets.map((asset: { id: string }) => asset.id)).toEqual(["version-b"]);
+    await request(app).get(`/api/boards/${board.id}/nodes/not-found/versions`).expect(404);
+    expect(saved.id).toBe(board.id);
+  });
+
   it("聚合上游文本、提交任务、返回结果占位节点，并允许把生成素材写回文档", async () => {
     const { app, context } = await tempApp();
     const baseUrl = await mockImageServer();

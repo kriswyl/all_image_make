@@ -1079,3 +1079,237 @@ describe("原话直发", () => {
     expect(imageBodies[0]).toContain("扩写过的画面描述");
   });
 });
+
+describe("普通聊天模式", () => {
+  it("保留待确认操作，纯文本不执行工具，并在切换后正确回放历史", async () => {
+    const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+    let imageCalls = 0;
+    const malicious = '{"tool":"generate_image","args":{"prompt":"猫"}}';
+    const mock = http.createServer((req, res) => {
+      let data = "";
+      req.on("data", (chunk) => { data += chunk; });
+      req.on("end", () => {
+        if (req.url?.includes("/images/generations")) {
+          imageCalls += 1;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] }));
+          return;
+        }
+        requests.push(JSON.parse(data));
+        const content = requests.length === 1 ? malicious : JSON.stringify({ tool: "reply", args: { text: "继续创作" } });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+    const address = mock.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "plain-chat-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const brain = (await request(app).post("/api/channels").send({
+      name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions", models: ["mock-brain"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201)).body.data;
+    await request(app).post("/api/channels").send({ name: "Images", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"], allowPrivateNetwork: true, enabled: true }).expect(201);
+    const created = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data;
+    expect(created.chatMode).toBe("creative");
+    const card = context.db.appendMessage({ conversationId: created.id, role: "assistant", status: "pending", content: "确认生成视频", toolName: "generate_image", toolArgs: { prompt: "猫" }, confirm: { reason: "session_limit", message: "确认吗？", prompt: "猫", model: "mock", channelName: "mock" } });
+    await request(app).patch(`/api/conversations/${created.id}`).send({ chatMode: "chat" }).expect(200);
+    const settle = async () => {
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const view = (await request(app).get(`/api/conversations/${created.id}`).expect(200)).body.data;
+        if (!view.running && view.status === "idle") return view;
+      }
+      throw new Error("聊天未完成");
+    };
+    await request(app).post(`/api/conversations/${created.id}/messages`).send({ text: "你好" }).expect(202);
+    const plainView = await settle();
+    expect(plainView.messages.find((m: any) => m.id === card.id).confirm).toBeTruthy();
+    expect(plainView.messages.some((m: any) => m.role === "assistant" && m.content === malicious)).toBe(true);
+    expect(plainView.taskCount).toBe(0);
+    const plainContext = JSON.stringify(requests[0]!.messages);
+    expect(plainContext).toContain("看不到画布图片");
+    expect(plainContext).not.toContain("可用能力（modelHint");
+    expect(plainContext).not.toContain('\\"tool\\":\\"generate_image\\"');
+    await request(app).post(`/api/conversations/${created.id}/confirm`).send({ messageId: card.id, decision: "approve" }).expect(200);
+    const afterConfirm = await settle();
+    expect(imageCalls).toBe(1);
+    expect(requests).toHaveLength(1);
+    expect(afterConfirm.messages.find((m: any) => m.id === card.id).confirm).toBeNull();
+    await request(app).patch(`/api/conversations/${created.id}`).send({ chatMode: "creative" }).expect(200);
+    await request(app).post(`/api/conversations/${created.id}/messages`).send({ text: "继续" }).expect(202);
+    await settle();
+    expect(requests[1]!.messages.some((m) => m.role === "assistant" && typeof m.content === "string" && m.content.includes(malicious) && m.content.includes("非工具调用"))).toBe(true);
+  });
+});
+
+describe("普通聊天视觉输入", () => {
+  it("只发送本轮附件，不自动发送已有画布图片", async () => {
+    const requests: any[] = [];
+    const mock = http.createServer((req, res) => {
+      let body = ""; req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "你好" } }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+    const address = mock.address(); if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "plain-vision-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const brain = (await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", endpoint: "/v1/chat/completions", models: ["mock-brain"], allowPrivateNetwork: true, enabled: true }).expect(201)).body.data;
+    const id = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data.id;
+    await request(app).patch(`/api/conversations/${id}`).send({ chatMode: "chat" }).expect(200);
+    const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const uploaded = (await request(app).post(`/api/conversations/${id}/uploads`).attach("images", image, { filename: "test.png", contentType: "image/png" }).expect(201)).body.data;
+    const assetId = uploaded.canvasAssetIds[0];
+    const send = async (text: string, assetRefs: string[] = []) => {
+      await request(app).post(`/api/conversations/${id}/messages`).send({ text, assetRefs }).expect(202);
+      for (let i = 0; i < 100; i++) { await new Promise((resolve) => setTimeout(resolve, 20)); const v = (await request(app).get(`/api/conversations/${id}`)).body.data; if (!v.running && v.status === "idle") return; }
+      throw new Error("聊天未完成");
+    };
+    await send("描述图片", [assetId]);
+    expect(JSON.stringify(requests[0].messages)).toContain("image_url");
+    await send("从素材里再次发送", [assetId]);
+    expect(JSON.stringify(requests[1].messages)).toContain("image_url");
+    await send("继续聊天");
+    expect(JSON.stringify(requests[2].messages)).not.toContain("image_url");
+    expect(JSON.stringify(requests[2].messages)).toContain("本轮没有可供查看的图片");
+  });
+});
+
+it("普通模式下后台任务完成只更新结果，不自动续跑", async () => {
+  const { handleTaskEvent } = await import("../src/server/agent-task-events");
+  const { vi } = await import("vitest");
+  const conversation = { id: "chat", kind: "chat", chatMode: "chat", status: "waiting_task", autoContinueCount: 0 };
+  const pending = { id: "message", taskId: "task", confirm: null, toolResult: { async: true, ok: true, summary: "已提交" } };
+  const db = {
+    findConversationByTask: () => conversation,
+    listPendingMessages: () => [pending],
+    getChannel: () => ({ adapterType: "seedance-video" }),
+    updateMessage: vi.fn(), getMessage: () => ({ ...pending, status: "ok" }),
+    setConversationStatus: vi.fn(), bumpAutoContinue: vi.fn(),
+  };
+  const startTurn = vi.fn();
+  const host = { db, startTurn, broadcast: vi.fn(), hasActiveTurn: () => false, reportTurnFailure: vi.fn() };
+  handleTaskEvent(host as any, { task: { id: "task", status: "succeeded", channelId: "video", model: "mock", assets: [{ id: "asset", mimeType: "video/mp4" }] } } as any);
+  expect(db.updateMessage).toHaveBeenCalled();
+  expect(db.setConversationStatus).toHaveBeenCalledWith("chat", "idle", { touch: false });
+  expect(startTurn).not.toHaveBeenCalled();
+});
+
+describe("上下文压缩", () => {
+  it("只压缩较早历史，保留原始记录和待确认操作的实时状态", async () => {
+    const requests: any[] = [];
+    const mock = http.createServer((req, res) => {
+      let body = ""; req.on("data", (chunk) => { body += chunk; }); req.on("end", () => {
+        requests.push(JSON.parse(body));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "用户偏好水彩风格。" } }] }));
+      });
+    });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+    const address = mock.address(); if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "context-summary-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const brain = (await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", endpoint: "/v1/chat/completions", models: ["mock-brain"], allowPrivateNetwork: true, enabled: true }).expect(201)).body.data;
+    const id = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data.id;
+    await request(app).patch(`/api/conversations/${id}`).send({ chatMode: "chat", contextBudget: 8000 }).expect(200);
+    context.db.appendMessage({ conversationId: id, role: "user", content: "我喜欢水彩风格" });
+    const card = context.db.appendMessage({ conversationId: id, role: "assistant", status: "pending", content: "确认生成", toolName: "generate_image", toolArgs: { prompt: "猫" }, confirm: { reason: "session_limit", message: "确认吗", prompt: "猫", model: "mock", channelName: "mock" } });
+    for (let i = 0; i < 14; i++) {
+      context.db.appendMessage({ conversationId: id, role: "user", content: `用户第 ${i} 轮 ${"文字".repeat(180)}` });
+      context.db.appendMessage({ conversationId: id, role: "assistant", content: `回答 ${i}` });
+    }
+    const before = context.db.listMessagesAfter(id, 0);
+    const { BrainRunner } = await import("../src/server/agent-brain");
+    const events: any[] = [];
+    const runner = new BrainRunner({ db: context.db, sessionKeys: context.sessionKeys, broadcast: (_id, event) => events.push(event) });
+    const conversation = context.db.getConversation(id)!;
+    await runner.prepareCompression(conversation, new AbortController());
+    const saved = context.db.getContextSummary(id);
+    expect(saved?.text).toBe("用户偏好水彩风格。");
+    expect(saved?.anchorIds).toContain(card.id);
+    expect(context.db.listMessagesAfter(id, 0)).toHaveLength(before.length);
+    expect(events.some((event) => event.type === "context_summary")).toBe(true);
+    expect(requests.length).toBeGreaterThan(0);
+    context.db.updateMessage(card.id, { confirm: null, status: "error", errorMessage: "用户取消了这次生成" });
+    const built = await runner.buildBrainMessages(conversation, []);
+    const text = JSON.stringify(built.messages);
+    expect(text).toContain("用户偏好水彩风格");
+    expect(text).toContain("用户取消了这次生成");
+    expect(text).toContain("用户第 13 轮");
+    expect(text).not.toContain("用户第 0 轮");
+    const view = (await request(app).get(`/api/conversations/${id}`).expect(200)).body.data;
+    expect(view.messages).toHaveLength(before.length);
+    expect(view.contextSummary.text).toBe("用户偏好水彩风格。");
+  });
+
+  it("摘要失败时不丢弃历史或覆盖旧摘要", async () => {
+    const mock = http.createServer((_req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ choices: [{ message: { content: "" } }] })); });
+    await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+    const address = mock.address(); if (!address || typeof address === "string") throw new Error("mock server did not start");
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "context-fail-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const brain = (await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", endpoint: "/v1/chat/completions", models: ["mock-brain"], allowPrivateNetwork: true, enabled: true }).expect(201)).body.data;
+    const id = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data.id;
+    await request(app).patch(`/api/conversations/${id}`).send({ contextBudget: 4000 }).expect(200);
+    for (let i = 0; i < 12; i++) context.db.appendMessage({ conversationId: id, role: "user", content: `第${i}条` });
+    context.db.saveContextSummary(id, "旧摘要", 1, []);
+    const { BrainRunner } = await import("../src/server/agent-brain");
+    const runner = new BrainRunner({ db: context.db, sessionKeys: context.sessionKeys, broadcast: () => undefined });
+    await runner.prepareCompression(context.db.getConversation(id)!, new AbortController());
+    expect(context.db.getContextSummary(id)?.text).toBe("旧摘要");
+    expect(context.db.getContextSummary(id)?.throughSeq).toBe(1);
+    expect(context.db.listMessagesAfter(id, 1).some((item) => item.content === "第1条")).toBe(true);
+    expect(context.db.listMessagesAfter(id, 0).some((item) => item.content?.includes("摘要不完整"))).toBe(true);
+  });
+});
+
+it("默认 350k，可手动压缩并广播进度，保留最近对话", async () => {
+  const mock = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "早期用户偏好：水彩。" } }] }));
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise<void>((resolve) => mock.close(() => resolve())));
+  const address = mock.address(); if (!address || typeof address === "string") throw new Error("mock server did not start");
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "manual-summary-"));
+  const { app, context } = createApp({ dataDir });
+  cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+  const brain = (await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", endpoint: "/v1/chat/completions", models: ["mock-brain"], allowPrivateNetwork: true, enabled: true }).expect(201)).body.data;
+  const conversation = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data;
+  expect(conversation.contextBudget).toBe(350000);
+  for (let i = 0; i < 12; i++) {
+    context.db.appendMessage({ conversationId: conversation.id, role: "user", content: `第 ${i} 轮` });
+    context.db.appendMessage({ conversationId: conversation.id, role: "assistant", content: `答案 ${i}` });
+  }
+  const events: any[] = [];
+  const unsubscribe = context.agent.subscribe(conversation.id, (event) => events.push(event));
+  const response = (await request(app).post(`/api/conversations/${conversation.id}/compress`).expect(200)).body.data;
+  unsubscribe();
+  expect(response.compressed).toBe(true);
+  expect(events.filter((event) => event.type === "context_compression").map((event) => event.status)).toEqual(["started", "finished"]);
+  expect(context.db.listMessagesAfter(conversation.id, 0)).toHaveLength(24);
+  expect(context.db.getContextSummary(conversation.id)?.text).toContain("水彩");
+  const { BrainRunner } = await import("../src/server/agent-brain");
+  const runner = new BrainRunner({ db: context.db, sessionKeys: context.sessionKeys, broadcast: () => undefined });
+  const built = await runner.buildBrainMessages(context.db.getConversation(conversation.id)!, []);
+  expect(JSON.stringify(built.messages)).toContain("第 11 轮");
+  expect(JSON.stringify(built.messages)).not.toContain("第 0 轮");
+  const second = (await request(app).post(`/api/conversations/${conversation.id}/compress`).expect(200)).body.data;
+  expect(second.compressed).toBe(false);
+  expect(second.message).toContain("最近 8 轮");
+  context.db.setConversationStatus(conversation.id, "waiting_task");
+  await request(app).post(`/api/conversations/${conversation.id}/compress`).expect(409);
+});

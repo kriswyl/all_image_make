@@ -82,6 +82,7 @@ export const boardOpSchema = z.discriminatedUnion("op", [
     nodeRef: boardNodeRefSchema,
     patch: nodePatchSchema,
   }),
+  z.object({ op: z.literal("set_asset"), nodeRef: boardNodeRefSchema, assetId: z.string().min(1).max(80) }),
   z.object({
     op: z.literal("connect"),
     from: z.string().min(1).max(80),
@@ -108,6 +109,7 @@ export const boardOpSchema = z.discriminatedUnion("op", [
 ]);
 
 export const boardApplySchema = z.object({
+  expectedBoardVersion: z.number().int().positive().optional(),
   ops: z.array(boardOpSchema).min(1).max(BOARD_OPS_PER_BATCH),
 });
 
@@ -124,6 +126,7 @@ export const boardReadSchema = z.object({
 });
 
 export const boardGenerateSchema = z.object({
+  expectedBoardVersion: z.number().int().positive().optional(),
   nodeRef: boardNodeRefSchema,
   overrides: z.object({
     prompt: z.string().max(BOARD_LIMITS.maxTextChars).optional(),

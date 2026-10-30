@@ -62,6 +62,7 @@ export function Composer({
   onInterrupt,
   onAssetAttached,
   canvasItems = [],
+  plainAttachments = false,
   onPreviewCanvas,
   onRemoveCanvas,
   onSetCanvasFirst,
@@ -88,6 +89,7 @@ export function Composer({
   onAssetAttached?: (assetId: string) => void;
   /** 这一轮画布里已经选好的图，直接排在附件区 */
   canvasItems?: CanvasTrayItem[];
+  plainAttachments?: boolean;
   onPreviewCanvas?: (assetId: string) => void;
   onRemoveCanvas?: (assetId: string) => void;
   onSetCanvasFirst?: (assetId: string) => void;
@@ -118,7 +120,7 @@ export function Composer({
     }
     const currentImages = pending.filter((item) => item.kind === "image").length;
     const currentDocuments = pending.filter((item) => item.kind === "document").length;
-    if (currentImages + images.length > MAX_REFERENCE_IMAGES) {
+    if (currentImages + images.length + (plainAttachments ? canvasItems.length + attachedAssets.length : 0) > MAX_REFERENCE_IMAGES) {
       setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
     }
@@ -154,6 +156,10 @@ export function Composer({
     const value = text.trim();
     // 图必须跟着一句话走：助手拿到一张没有说明的图，只能瞎猜要拿它做什么
     if (!value || running || disabled || uploading) return;
+    if (plainAttachments && canvasItems.length + pending.filter((item) => item.kind === "image").length > MAX_REFERENCE_IMAGES) {
+      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+      return;
+    }
     const files = pending.map((item) => item.file);
     setText("");
     setPending([]);
@@ -172,6 +178,7 @@ export function Composer({
           <div className="composer-attachments">
             <CanvasTray
               items={canvasItems}
+              plain={plainAttachments}
               onPreview={onPreviewCanvas ?? (() => undefined)}
               onRemove={onRemoveCanvas ?? (() => undefined)}
               onSetFirst={onSetCanvasFirst ?? (() => undefined)}
@@ -289,7 +296,7 @@ export function Composer({
           <span className="composer-hint-pending">{pending.filter((item) => item.kind === "document").length} 个脚本文档将在发送时读取</span>
         ) : null}
         {canvasItems.length ? (
-          <span className="composer-hint-pending">{canvasItems.length} 张已选入这一轮（①首帧 / ②尾帧 / 其余参考），发送后清空</span>
+          <span className="composer-hint-pending">{plainAttachments ? `${canvasItems.length} 张素材图片将在本轮发送` : `${canvasItems.length} 张已选入这一轮（①首帧 / ②尾帧 / 其余参考），发送后清空`}</span>
         ) : null}
         <div className="composer-hint-right">
           {statusSlot}

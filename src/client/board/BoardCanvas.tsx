@@ -1021,7 +1021,7 @@ export function BoardCanvas({
         <div className="board-empty">
           <SlidersHorizontal size={24} />
           <strong>这块无限画布还是空的</strong>
-          <span>双击空白处加文本，或从左下角添加节点；右键有更多操作。</span>
+          <span>双击空白处加文本；左下角“＋”可添加图片、视频、配音和音乐。</span>
         </div>
       ) : null}
 
@@ -1157,8 +1157,8 @@ export function BoardCanvas({
         <button
           type="button"
           className={`board-add-trigger ${addMenuOpen ? "is-on" : ""}`}
-          title="添加节点"
-          aria-label="添加节点"
+          title="添加节点（包括配音和音乐）"
+          aria-label="添加节点（包括配音和音乐）"
           onClick={() => setAddMenuOpen((open) => !open)}
         >
           <Plus size={14} />

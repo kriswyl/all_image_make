@@ -230,10 +230,16 @@ jobs:
           name: windows-nsis
           path: dist/windows
 
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          node -e 'const fs=require("fs"); const v=process.env.RELEASE_TAG; const text=fs.readFileSync("CHANGELOG.md","utf8"); const start=text.indexOf("## "+v+" "); if(start<0) throw Error("Missing changelog for "+v); const tail=text.slice(start); const end=tail.indexOf("\n## ",3); fs.writeFileSync("release-notes.md",end<0?tail:tail.slice(0,end));'
+
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
           files: |
             dist/macos/*.dmg
             dist/windows/*.exe

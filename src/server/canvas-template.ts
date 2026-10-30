@@ -81,6 +81,7 @@ export function templateInputToDoc(input: CanvasTemplateInput): BoardDoc {
       y: item.y,
       createdAt: at,
       updatedAt: at,
+      ...(item.storyboard ? { storyboard: item.storyboard } : {}),
     };
     let node: BoardNode;
     if (item.type === "text") {
@@ -189,6 +190,7 @@ export function createCanvasTemplate(
 function instantiateDoc(
   template: CanvasTemplate,
   target: BoardDoc | null,
+  assetBindings: Map<string, string> = new Map(),
 ): { doc: BoardDoc; nodeCount: number } {
   const existing = target?.nodes ?? [];
   if (existing.length + template.doc.nodes.length > BOARD_LIMITS.maxNodes) {
@@ -242,7 +244,8 @@ function instantiateDoc(
       updatedAt: at,
     } as BoardNode;
     if (base.type === "image" || base.type === "video" || base.type === "audio") {
-      nodes.push({ ...base, assetId: null, status: "empty", taskId: undefined, error: undefined } as BoardNode);
+      const assetId = assetBindings.get(node.id) ?? null;
+      nodes.push({ ...base, assetId, source: assetId ? "library" : base.source, status: assetId ? "succeeded" : "empty", taskId: undefined, error: undefined } as BoardNode);
     } else if (base.type === "config") {
       nodes.push({ ...base, status: "idle", lastTaskId: undefined, error: undefined } as BoardNode);
     } else {
@@ -277,6 +280,15 @@ function requireTemplate(db: AppDatabase, id: string): CanvasTemplate {
   return template;
 }
 
+function validTemplateAssets(db: AppDatabase, template: CanvasTemplate): Map<string, string> {
+  const bindings = db.getStoryboardTemplateAssets(template.id);
+  for (const assetId of bindings.values()) {
+    const asset = db.getAsset(assetId);
+    if (!asset || !asset.mimeType.startsWith("image/")) throw new AppError("STORYBOARD_ASSET_MISSING", "分镜模板中的参考图已不存在，请回到分镜审阅重新选择并导入。", 409);
+  }
+  return bindings;
+}
+
 export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templateId: string): {
   board: BoardView;
   addedNodes: number;
@@ -284,7 +296,8 @@ export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templa
   const record = db.getBoardRecord(boardId);
   if (!record) throw new AppError("BOARD_NOT_FOUND", "无限画布不存在", 404);
   const template = requireTemplate(db, templateId);
-  const { doc, nodeCount } = instantiateDoc(template, record.doc);
+  const bindings = validTemplateAssets(db, template);
+  const { doc, nodeCount } = instantiateDoc(template, record.doc, bindings);
   db.saveBoardSnapshot({
     boardId,
     previousDoc: record.doc,
@@ -297,9 +310,10 @@ export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templa
 
 export function createBoardFromTemplate(db: AppDatabase, templateId: string, title?: string): BoardView {
   const template = requireTemplate(db, templateId);
+  const bindings = validTemplateAssets(db, template);
   const created = createBoard(db, { title: title?.trim() || template.name });
   const record = db.getBoardRecord(created.id)!;
-  const { doc } = instantiateDoc(template, null);
+  const { doc } = instantiateDoc(template, null, bindings);
   db.saveBoardSnapshot({
     boardId: created.id,
     previousDoc: record.doc,
@@ -411,7 +425,14 @@ export function migrateStoryboardConversation(
     if (!asset) return null;
     const prefix = type === "image" ? "image/" : type === "video" ? "video/" : "audio/";
     if (!asset.mimeType.startsWith(prefix)) return null;
-    const config = configs[shotIndex];
+    const existingNode = nodes.find((node) => node.type === type && (node.title === title || (type === "audio" && node.title.startsWith(`第 ${shots[shotIndex]!.index} 镜 · `))));
+    if (existingNode && (existingNode.type === "image" || existingNode.type === "video" || existingNode.type === "audio")) {
+      const index = nodes.indexOf(existingNode);
+      nodes[index] = { ...existingNode, assetId, source: "generated", status: "succeeded" } as BoardNode;
+      db.insertBoardAssetLink(board.id, assetId, existingNode.id);
+      return nodes[index];
+    }
+    const config = configs[shotIndex] ?? nodes.find((node) => node.title === `第 ${shots[shotIndex]!.index} 镜 · 分镜图`);
     if (!config) return null;
     const allocated = allocateNodeRef({ nodes: [...nodes], nextRef });
     nextRef = allocated.nextRef;
@@ -436,14 +457,15 @@ export function migrateStoryboardConversation(
       ...(type === "audio" ? {} : { prompt: shots[shotIndex]!.prompt }),
     } as BoardNode;
     nodes.push(node);
-    edges.push({
+    if (config.type === "config") edges.push({
       id: `edge-${crypto.randomUUID()}`,
       source: config.id,
       target: node.id,
       kind: "result",
     });
     const scene = shots[shotIndex]!.scene.trim();
-    const group = groupByTitle.get(scene ? `场景 · ${scene}` : "分镜");
+    const group = groupByTitle.get(`第 ${shots[shotIndex]!.index} 镜${scene ? ` · ${scene}` : ""}`.slice(0, 80))
+      ?? groupByTitle.get(scene ? `场景 · ${scene}` : "分镜");
     if (group) group.nodeIds.push(node.id);
     db.insertBoardAssetLink(board.id, assetId, node.id);
     return node;
@@ -547,10 +569,12 @@ export interface StoryboardTemplateSetting {
 }
 
 export interface StoryboardTemplateShot {
+  id?: string;
   index: number;
   prompt: string;
   character?: string;
   characters?: string[];
+  props?: string[];
   scene?: string;
   kind?: "image" | "video";
   sourceText?: string;
@@ -566,17 +590,21 @@ export interface StoryboardTemplateShot {
 export function buildStoryboardTemplateInput(source: {
   name: string;
   description?: string;
+  projectId?: string;
   characters?: StoryboardTemplateSetting[];
   scenes?: StoryboardTemplateSetting[];
+  props?: StoryboardTemplateSetting[];
   shots: StoryboardTemplateShot[];
 }): CanvasTemplateInput {
   const nodes: CanvasTemplateInput["nodes"] = [];
   const edges: NonNullable<CanvasTemplateInput["edges"]> = [];
-  const sceneBuckets = new Map<string, string[]>();
+  const shotGroups: NonNullable<CanvasTemplateInput["groups"]> = [];
   const characterGroups: string[] = [];
   const sceneGroups: string[] = [];
+  const propGroups: string[] = [];
   const characterIds = new Map<string, string>();
   const sceneIds = new Map<string, string>();
+  const propIds = new Map<string, string>();
 
   /**
    * 设定图单独放在镜头区上方，角色一行、场景一行：
@@ -599,7 +627,7 @@ export function buildStoryboardTemplateInput(source: {
       width: 280,
       height: 210,
       title: `角色 · ${name}`.slice(0, 80),
-      text: character.prompt?.trim() || `角色设定：${name}`,
+      text: `角色设定图：${name}。${character.prompt?.trim() || "保持人物外貌与服饰一致"}。同一人物的正面、侧面、背面全身三视图，统一服装、比例和光线，简洁背景，无文字。`,
     });
   }
   for (const [index, scene] of (source.scenes ?? []).entries()) {
@@ -616,21 +644,30 @@ export function buildStoryboardTemplateInput(source: {
       width: 280,
       height: 210,
       title: `场景 · ${name}`.slice(0, 80),
-      text: scene.prompt?.trim() || `场景设定：${name}`,
+      text: `场景设定图：${name}。${scene.prompt?.trim() || "清晰呈现空间布局"}。展示环境全貌、空间结构、光线与色调，保持场景细节一致，无人物，无文字。`,
     });
+  }
+
+  for (const [index, prop] of (source.props ?? []).entries()) {
+    const name = prop.name.trim();
+    if (!name) continue;
+    const tempId = `prop${index + 1}`; propIds.set(name, tempId); propGroups.push(tempId);
+    nodes.push({ tempId, type: "image", x: index * 340, y: -1100, width: 280, height: 210, title: `道具 · ${name}`.slice(0, 80), text: `道具设定图：${name}。${prop.prompt?.trim() || "清晰展示外形、材质和细节"}。简洁背景，单件物品，无文字。` });
   }
 
   for (const [index, shot] of source.shots.entries()) {
     const col = index % 3;
     const row = Math.floor(index / 3);
-    const x = col * 960;
-    const y = row * 420;
+    const x = col * 1500;
+    const y = row * 720;
+    const storyboard = (role: "text" | "image" | "video" | "audio") => source.projectId && shot.id ? { projectId: source.projectId, shotId: shot.id, role } : undefined;
     const textId = `t${index + 1}`;
     const configId = `c${index + 1}`;
     const details = [
       `第 ${shot.index} 镜`,
       shot.character ? `角色：${shot.character}` : "",
       shot.scene ? `场景：${shot.scene}` : "",
+      shot.props?.length ? `道具：${shot.props.join("、")}` : "",
       shot.shotSize ? `景别：${shot.shotSize}` : "",
       shot.cameraMove ? `运镜：${shot.cameraMove}` : "",
       shot.sourceText?.trim() ? `原文：${shot.sourceText.trim()}` : "",
@@ -641,7 +678,7 @@ export function buildStoryboardTemplateInput(source: {
     ].filter(Boolean).join("\n");
     nodes.push({
       tempId: textId,
-      type: "text",
+      type: "text", storyboard: storyboard("text"),
       x,
       y,
       width: 320,
@@ -651,20 +688,32 @@ export function buildStoryboardTemplateInput(source: {
     });
     nodes.push({
       tempId: configId,
-      type: "config",
+      type: "image", storyboard: storyboard("image"),
       x: x + 370,
       y,
-      width: 340,
+      width: 280,
       height: 260,
-      title: `第 ${shot.index} 镜 · 生成`,
-      config: {
-        mode: shot.kind === "video" ? "video" : "image",
-        prompt: shot.prompt,
-        useUpstreamText: false,
-        count: 1,
-      },
+      title: `第 ${shot.index} 镜 · 分镜图`,
+      text: shot.prompt,
     });
-    edges.push({ from: textId, to: configId, kind: "input", role: "text" });
+    const videoId = `v${index + 1}`;
+    const videoPrompt = shot.videoPrompt?.trim() || [
+      shot.prompt,
+      shot.cameraMove?.trim() ? `运镜：${shot.cameraMove.trim()}` : "",
+      "基于首帧保持角色和场景一致，动作自然连贯。",
+    ].filter(Boolean).join("；");
+    nodes.push({
+      tempId: videoId, type: "video", storyboard: storyboard("video"), x: x + 740, y, width: 320, height: 260,
+      title: `第 ${shot.index} 镜 · 视频`, text: videoPrompt,
+    });
+    edges.push({ from: configId, to: videoId, kind: "input", role: "first-frame" });
+    const audioIds: string[] = [];
+    if (shot.dialogue?.trim()) {
+      const audioId = `a${index + 1}`;
+      audioIds.push(audioId);
+      nodes.push({ tempId: audioId, type: "audio", storyboard: storyboard("audio"), x: x + 1100, y, width: 300, height: 160,
+        title: `第 ${shot.index} 镜 · ${shot.speaker?.trim() || "配音"}`, text: shot.dialogue.trim() });
+    }
 
     // 设定图作为参考图输入：角色按名字找，场景按名字找；每镜最多 8 张
     const charNames = shot.characters?.length
@@ -677,22 +726,20 @@ export function buildStoryboardTemplateInput(source: {
     }
     const sceneId = shot.scene ? sceneIds.get(shot.scene.trim()) : undefined;
     if (sceneId) inputIds.add(sceneId);
+    for (const name of shot.props ?? []) { const tempId = propIds.get(name.trim()); if (tempId) inputIds.add(tempId); }
+    if (inputIds.size > 8) throw new AppError("STORYBOARD_REFERENCE_LIMIT", `第 ${shot.index} 镜参考图超过 8 张，请减少角色、场景或道具。`, 400);
     for (const tempId of [...inputIds].slice(0, 8)) {
       edges.push({ from: tempId, to: configId, kind: "input", role: "reference" });
     }
 
-    const scene = shot.scene?.trim() || "分镜";
-    const bucket = sceneBuckets.get(scene);
-    if (bucket) bucket.push(textId, configId);
-    else sceneBuckets.set(scene, [textId, configId]);
+    shotGroups.push({ title: `第 ${shot.index} 镜${shot.scene?.trim() ? ` · ${shot.scene.trim()}` : ""}`.slice(0, 80), nodeIds: [textId, configId, videoId, ...audioIds] });
   }
 
   const groups: NonNullable<CanvasTemplateInput["groups"]> = [];
   if (characterGroups.length) groups.push({ title: "角色设定", nodeIds: characterGroups });
   if (sceneGroups.length) groups.push({ title: "场景设定", nodeIds: sceneGroups });
-  for (const [title, nodeIds] of sceneBuckets) {
-    groups.push({ title: title === "分镜" ? "分镜" : `场景 · ${title}`.slice(0, 80), nodeIds });
-  }
+  if (propGroups.length) groups.push({ title: "道具设定", nodeIds: propGroups });
+  groups.push(...shotGroups);
 
   return {
     name: source.name.slice(0, 80),

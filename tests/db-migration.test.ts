@@ -176,3 +176,25 @@ describe("db.canvasImages", () => {
     expect(db.canvasImages(db.getConversation(conversation.id)!).map((asset) => asset.id)).toEqual(["img-a"]);
   });
 });
+
+it("迁移旧默认上下文预算并保留其他自定义值，重启不重复覆盖", async () => {
+  const dir = await tempDir();
+  const db = newDb(dir);
+  const input = { title: "测试", brainChannelId: "ch", brainModel: "m", videoConfirmPolicy: "auto_only" as const, visionEnabled: true, verbatimPrompt: false };
+  const oldDefault = db.createConversation(input);
+  const customized = db.createConversation(input);
+  db.updateConversation(oldDefault.id, { contextBudget: 15000 });
+  db.updateConversation(customized.id, { contextBudget: 50000 });
+  db.close();
+  const raw = new DatabaseSync(path.join(dir, "app.db"));
+  raw.prepare("DELETE FROM settings WHERE key = ?").run("contextBudgetDefault350k");
+  raw.close();
+  const migrated = newDb(dir);
+  expect(migrated.getConversation(oldDefault.id)?.contextBudget).toBe(350000);
+  expect(migrated.getConversation(customized.id)?.contextBudget).toBe(50000);
+  migrated.updateConversation(oldDefault.id, { contextBudget: 15000 });
+  migrated.close();
+  const reopened = newDb(dir);
+  expect(reopened.getConversation(oldDefault.id)?.contextBudget).toBe(15000);
+  expect(reopened.createConversation(input).contextBudget).toBe(350000);
+});

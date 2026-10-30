@@ -98,6 +98,11 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         video_confirm_policy TEXT NOT NULL DEFAULT 'auto_only',
         vision_enabled       INTEGER NOT NULL DEFAULT 1,
         verbatim_prompt      INTEGER NOT NULL DEFAULT 0,
+        chat_mode            TEXT NOT NULL DEFAULT 'creative',
+        context_budget       INTEGER NOT NULL DEFAULT 350000,
+        context_summary      TEXT NOT NULL DEFAULT '',
+        context_summary_seq  INTEGER NOT NULL DEFAULT 0,
+        context_anchors      TEXT NOT NULL DEFAULT '[]',
         -- 分镜的角色参考：auto = 用第一个已完成的图片镜头；manual = 指定产物；off = 不用
         storyboard_reference_asset_id TEXT,
         storyboard_reference_mode     TEXT NOT NULL DEFAULT 'auto',
@@ -275,6 +280,19 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       );
       CREATE INDEX IF NOT EXISTS canvas_templates_created_idx
         ON canvas_templates(created_at DESC);
+      CREATE TABLE IF NOT EXISTS storyboard_projects (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS storyboard_template_assets (
+        template_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        PRIMARY KEY (template_id, node_id)
+      );
       -- 旧分镜迁移记录：每个会话只迁移一次，避免重复生成画布
       CREATE TABLE IF NOT EXISTS storyboard_migrations (
         conversation_id TEXT PRIMARY KEY,
@@ -379,6 +397,22 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     // 「原话直发」：有时候用户就是要自己那句话原样发出去，不许大脑润色（需求.md 问题 1）
     if (!conversationColumns.some((col) => col.name === "verbatim_prompt")) {
       db.exec("ALTER TABLE conversations ADD COLUMN verbatim_prompt INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!conversationColumns.some((col) => col.name === 'chat_mode')) {
+      db.exec("ALTER TABLE conversations ADD COLUMN chat_mode TEXT NOT NULL DEFAULT 'creative'");
+    }
+    for (const [name, ddl] of [
+      ["context_budget", "INTEGER NOT NULL DEFAULT 350000"],
+      ["context_summary", "TEXT NOT NULL DEFAULT ''"],
+      ["context_summary_seq", "INTEGER NOT NULL DEFAULT 0"],
+      ["context_anchors", "TEXT NOT NULL DEFAULT '[]'"],
+    ]) {
+      if (!conversationColumns.some((col) => col.name === name)) db.exec(`ALTER TABLE conversations ADD COLUMN ${name} ${ddl}`);
+    }
+    // 旧版本的默认值迁移一次；其他自定义预算保留。
+    if (!db.prepare("SELECT value FROM settings WHERE key = ?").get("contextBudgetDefault350k")) {
+      db.exec("UPDATE conversations SET context_budget = 350000 WHERE context_budget = 15000");
+      db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("contextBudgetDefault350k", "1");
     }
     const shotColumns = db.prepare("PRAGMA table_info(conversation_shots)").all() as Array<{ name: string }>;
     if (!shotColumns.some((col) => col.name === "character_name")) {

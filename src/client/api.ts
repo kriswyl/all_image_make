@@ -6,6 +6,7 @@ import type {
   BoardAudioKind, BoardDoc, BoardSummary, BoardUiState, BoardView, BoardViewport, BoardVideoMode,
 } from "../shared/board";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template";
+import type { StoryboardPreviewBoard, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -137,6 +138,7 @@ export const api = {
       body: JSON.stringify({ customId, ...(label ? { label } : {}) }),
     }),
   /** keepFiles：只删记录，磁盘上的图片视频留着 */
+  deleteLibraryAsset: (id: string) => request<{ deleted: boolean }>(`/api/assets/${id}`, { method: "DELETE" }),
   deleteTask: (id: string, keepFiles = false) => request<{ deleted: true }>(`/api/generations/${id}${keepFiles ? "?keepFiles=1" : ""}`, { method: "DELETE" }),
   /** 一次请求清空一批记录，避免前端逐条 DELETE 排队 */
   clearTasks: (scope: ClearScope, keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
@@ -212,6 +214,7 @@ export const api = {
   }),
   deleteConversationAsset: (id: string, assetId: string) =>
     request<ConversationView>(`/api/conversations/${id}/assets/${assetId}`, { method: "DELETE" }),
+  compressConversation: (id: string) => request<{ compressed: boolean; message: string }>(`/api/conversations/${id}/compress`, { method: "POST" }),
   updateConversation: (id: string, patch: ConversationPatch) => request<ConversationView>(`/api/conversations/${id}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
@@ -256,6 +259,11 @@ export const api = {
     body: JSON.stringify({ file }),
   }),
   templates: () => request<CanvasTemplateSummary[]>("/api/templates"),
+  storyboardProject: (id: string) => request<StoryboardProject>(`/api/storyboard-projects/${id}`),
+  splitStoryboardShot: (id: string, revision: number, shotId: string) => request<{ shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> }>(`/api/storyboard-projects/${id}/split`, { method: "POST", body: JSON.stringify({ revision, shotId }) }),
+  storyboardPreview: (id: string) => request<StoryboardPreviewBoard[]>(`/api/storyboard-projects/${id}/preview`),
+  saveStoryboardProject: (id: string, revision: number, data: StoryboardProjectData) => request<StoryboardProject>(`/api/storyboard-projects/${id}`, { method: "PUT", body: JSON.stringify({ revision, data }) }),
+  storyboardSelectionTemplate: (id: string, revision: number, shotIds: string[]) => request<CanvasTemplate>(`/api/storyboard-projects/${id}/templates`, { method: "POST", body: JSON.stringify({ revision, shotIds }) }),
   template: (id: string) => request<CanvasTemplate>(`/api/templates/${id}`),
   updateTemplate: (id: string, patch: { name?: string; description?: string }) =>
     request<CanvasTemplate>(`/api/templates/${id}`, {
@@ -321,6 +329,9 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ baseVersion }),
   }),
+  claimBoardFrame: (boardId: string, requestId: string) => request<{ claimed: boolean }>(`/api/boards/${boardId}/frame-requests/${requestId}/claim`, { method: "POST" }),
+  completeBoardFrame: (boardId: string, requestId: string, result: { assetId?: string; error?: string }) => request<{ accepted: boolean }>(`/api/boards/${boardId}/frame-requests/${requestId}/complete`, { method: "POST", body: JSON.stringify(result) }),
+  boardNodeVersions: (boardId: string, nodeId: string) => request<Task[]>(`/api/boards/${boardId}/nodes/${nodeId}/versions`),
   boardHistory: (id: string) => request<{
     currentVersion: number;
     entries: Array<{ version: number; reason: string; createdAt: string; current: boolean }>;
@@ -417,6 +428,16 @@ export const api = {
    * 而「发消息」和「收事件」分成两个请求之后，重连时不需要重放任何东西——
    * 重连成功会触发一次 `open`，调用方在那里重新拉一遍会话即可补齐错过的消息。
    */
+  openTaskStream(handlers: { onTask: (task: Task) => void; onOpen: () => void; onError: () => void }): () => void {
+    const source = new EventSource(apiUrl("/api/generations/events"));
+    source.onmessage = (event: MessageEvent<string>) => {
+      try { handlers.onTask(JSON.parse(event.data) as Task); } catch { /* 忽略无效事件 */ }
+    };
+    source.onopen = handlers.onOpen;
+    source.onerror = handlers.onError;
+    return () => source.close();
+  },
+
   openConversationStream(
     id: string,
     handlers: {

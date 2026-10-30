@@ -20,6 +20,35 @@ afterEach(async () => {
 });
 
 describe("generation API", () => {
+  it("工作台 SSE 推送公共任务变化，不泄露会话私有任务，并可在重连后补查", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "task-stream-"));
+    const { app, context } = createApp({ dataDir });
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    cleanups.push(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); context.db.close(); await fs.rm(dataDir, { recursive: true, force: true }); });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("监听失败");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/generations/events`);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader();
+    await reader.read(); // 已连接，后续事件不会丢
+    const create = (id: string, scope: "public" | "conversation") => context.db.createTask({
+      id, channelId: "", model: "test", prompt: id, input: {}, libraryScope: scope,
+    });
+    create("private-task", "conversation");
+    create("public-task", "public");
+    context.runner.cancel("private-task");
+    context.runner.cancel("public-task");
+    const chunk = await reader.read();
+    const body = new TextDecoder().decode(chunk.value);
+    expect(body).toContain("public-task");
+    expect(body).toContain('"status":"cancelled"');
+    expect(body).not.toContain("private-task");
+    await reader.cancel();
+    const snapshot = await request(app).get("/api/generations/public-task").expect(200);
+    expect(snapshot.body.data.status).toBe("cancelled");
+  });
+
   it("only ever reveals the app's own media folders", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-reveal-test-"));
     const { app, context } = createApp({ dataDir });

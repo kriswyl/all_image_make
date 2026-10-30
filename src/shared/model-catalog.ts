@@ -57,7 +57,7 @@ export const RECOMMENDED_MODELS: Record<string, string> = {
   "tiantoken-wan-video:wan-video": "wan3.0-video",
   "tiantoken-kling-video:kling-video": "kling-3.0",
   "tiantoken-suno:suno-music": "suno_damobi_music",
-  "tiantoken-chat:chat": "deepseek-v4-1-flash",
+  "tiantoken-chat:chat": "deepseek-v4.1-flash-1017",
 };
 
 export function findModelGroup(key: string) {

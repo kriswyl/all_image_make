@@ -13,6 +13,8 @@ import {
 import { api, isTauriRuntime } from "../api";
 import { confirmGeneration } from "../generation-confirm";
 import { AssetLightbox } from "../chat/AssetLightbox";
+import { extractVideoLastFrame } from "../chat/video-frame";
+import { BoardNodeVersions } from "./BoardNodeVersions";
 import {
   createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
 } from "../../shared/board";
@@ -81,12 +83,13 @@ function historyTime(value: string): string {
 }
 
 function BoardSidebar({
-  host, boards, activeId, loading, onSelect, onCreate, onDelete,
+  host, boards, activeId, loading, filter, onSelect, onCreate, onDelete,
 }: {
   host: HTMLElement | null;
   boards: BoardSummary[];
   activeId: string | null;
   loading: boolean;
+  filter: string;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
@@ -95,7 +98,7 @@ function BoardSidebar({
   return createPortal(
     <div className="sidebar-group">
       <div className="sidebar-group-title">
-        <span>无限画布</span>
+        <span>我的画布</span>
         <button type="button" className="sidebar-group-add" aria-label="新建无限画布" data-tooltip="新建无限画布" onClick={onCreate}>
           <Plus size={13} />
         </button>
@@ -127,7 +130,7 @@ function BoardSidebar({
           </div>
         ))}
         {!loading && !boards.length ? (
-          <div className="board-sidebar-empty">还没有无限画布</div>
+          <div className="board-sidebar-empty">{filter.trim() ? "没有匹配的画布" : "还没有无限画布"}</div>
         ) : null}
       </div>
     </div>,
@@ -136,9 +139,12 @@ function BoardSidebar({
 }
 
 export function BoardWorkspace({
-  sidebarHost, onOpenMenu, onToast,
+  sidebarHost, onOpenMenu, onBoardSelected, sidebarOpen, sidebarFilter = "", onToast,
 }: {
   sidebarHost: HTMLElement | null;
+  onBoardSelected: () => void;
+  sidebarOpen: boolean;
+  sidebarFilter?: string;
   /** 顶栏「菜单」：展开侧边栏，让用户选对话 / 其他工作区 */
   onOpenMenu: () => void;
   onToast: (kind: "success" | "error", message: string) => void;
@@ -149,6 +155,8 @@ export function BoardWorkspace({
   // 等 boards 列表回来、确认它还在，再设成当前板。
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [assets, setAssets] = useState<Map<string, Asset>>(new Map());
+  const [versionNodeId, setVersionNodeId] = useState<string | null>(null);
+  const [extractingFrame, setExtractingFrame] = useState(false);
   const [imageAliases, setImageAliases] = useState<BoardImageAlias[]>([]);
   const [videoAliases, setVideoAliases] = useState<BoardVideoAlias[]>([]);
   const [audioAliases, setAudioAliases] = useState<BoardImageAlias[]>([]);
@@ -201,16 +209,17 @@ export function BoardWorkspace({
     }
   }, [onToast]);
 
-  const createBoard = useCallback(async () => {
+  const createBoard = useCallback(async (closeAfter = false) => {
     try {
       const created = await api.createBoard({ title: "未命名无限画布" });
       setCurrentId(created.id);
       writeCurrentBoard(created.id);
       await refreshBoards();
+      if (closeAfter) onBoardSelected();
     } catch (error) {
       onToast("error", error instanceof Error ? error.message : "新建无限画布失败");
     }
-  }, [onToast, refreshBoards]);
+  }, [onToast, refreshBoards, onBoardSelected]);
 
   const removeBoard = useCallback(async (id: string) => {
     const target = boards.find((item) => item.id === id);
@@ -646,6 +655,43 @@ export function BoardWorkspace({
     }
   }, [board, onToast, assets, videoAliases, defaultVideoAlias]);
 
+  const extractFrame = useCallback(async (nodeId: string) => {
+    if (extractingFrame || !board.view || !currentId) return;
+    const node = board.view.doc.nodes.find((item) => item.id === nodeId);
+    const asset = node?.type === "video" && node.assetId ? assets.get(node.assetId) : null;
+    if (!node || node.type !== "video" || !asset) { onToast("error", "视频素材不存在"); return; }
+    setExtractingFrame(true);
+    try {
+      if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后再试");
+      const file = await extractVideoLastFrame(asset, 0);
+      const frame = await api.uploadBoardAsset(currentId, file);
+      const image = board.addImageNode(frame, { x: node.x + node.width + 100, y: node.y }, `${node.title || node.ref} · 尾帧`);
+      if (!image) throw new Error("无法添加尾帧节点，请检查画布节点数量");
+      setAssets((current) => new Map(current).set(frame.id, frame));
+      board.setSelection([image.id]);
+      onToast("success", "已提取尾帧。请将它连接到下一镜视频并设为首帧；若已有首帧连线，先移除原连线。");
+    } catch (error) { onToast("error", error instanceof Error ? error.message : "提取尾帧失败"); }
+    finally { setExtractingFrame(false); }
+  }, [assets, board, currentId, extractingFrame, onToast]);
+
+  const handleFrameRequest = useCallback((request: { boardId: string; requestId: string; videoAssetId: string }) => {
+    void (async () => {
+      try {
+        if (request.boardId !== currentId) return;
+        if (!(await api.claimBoardFrame(request.boardId, request.requestId)).claimed) return;
+        const asset = assets.get(request.videoAssetId);
+        if (!asset || !asset.mimeType.startsWith("video/")) throw new Error("视频素材不存在或未加载");
+        const file = await extractVideoLastFrame(asset, 0);
+        const frame = await api.uploadBoardAsset(request.boardId, file);
+        if (!await board.ensureSaved()) throw new Error("画布有未保存的修改，暂不能连接尾帧");
+        setAssets((items) => new Map(items).set(frame.id, frame));
+        await api.completeBoardFrame(request.boardId, request.requestId, { assetId: frame.id });
+      } catch (error) {
+        await api.completeBoardFrame(request.boardId, request.requestId, { error: error instanceof Error ? error.message : "尾帧提取失败" }).catch(() => undefined);
+      }
+    })();
+  }, [assets, currentId, board]);
+
   const deleteNode = useCallback((nodeId: string) => {
     const node = board.view?.doc.nodes.find((item) => item.id === nodeId);
     if (node && (node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId) {
@@ -671,16 +717,17 @@ export function BoardWorkspace({
     <div className="board-workspace">
       <BoardSidebar
         host={sidebarHost}
-        boards={boards}
+        boards={boards.filter((item) => item.title.toLowerCase().includes(sidebarFilter.trim().toLowerCase()))}
         activeId={currentId}
         loading={boardsLoading}
-        onSelect={(id) => { setCurrentId(id); }}
-        onCreate={() => void createBoard()}
+        filter={sidebarFilter}
+        onSelect={(id) => { setCurrentId(id); onBoardSelected(); }}
+        onCreate={() => void createBoard(true)}
         onDelete={(id) => void removeBoard(id)}
       />
 
       <header className="board-topbar">
-        <button type="button" className="board-back" onClick={onOpenMenu} title="打开工作区菜单" aria-label="打开工作区菜单">
+        <button type="button" className="board-back" data-sidebar-toggle onClick={onOpenMenu} aria-expanded={sidebarOpen} title={sidebarOpen ? "关闭工作区菜单" : "打开工作区菜单"} aria-label={sidebarOpen ? "关闭工作区菜单" : "打开工作区菜单"}>
           <Menu size={14} /><span>菜单</span>
         </button>
         <input
@@ -817,6 +864,8 @@ export function BoardWorkspace({
             onGenerate={(nodeId) => void generateNode(nodeId)}
             onStopTask={(taskId) => void board.cancelTask(taskId)}
             onRetryTask={(taskId) => void retryBoardTask(taskId)}
+            onExtractFrame={(nodeId) => void extractFrame(nodeId)}
+            onCompareVersions={setVersionNodeId}
             onClose={() => board.setSelection([])}
           />
         ) : null}
@@ -859,7 +908,8 @@ export function BoardWorkspace({
           }}
           onToast={onToast}
           onBoardDelta={handleBoardDelta}
-          onBeforeSend={() => board.flush()}
+          onFrameRequest={handleFrameRequest}
+          onBeforeSend={async () => { if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后再发送给助手"); }}
           onClose={() => setAgentOpen(false)}
         />
       ) : null}
@@ -1037,6 +1087,15 @@ export function BoardWorkspace({
         </aside>
       ) : null}
 
+      {versionNodeId && currentId ? <BoardNodeVersions boardId={currentId} nodeId={versionNodeId} onClose={() => setVersionNodeId(null)} onApply={async (task, asset) => {
+        const current = board.view?.doc.nodes.find((item) => item.id === versionNodeId);
+        if (!current || current.type === "text" || current.type === "config" || current.status === "loading") throw new Error("节点不存在或正在生成");
+        if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后重试");
+        await api.linkBoardAsset(currentId, asset.id);
+        setAssets((items) => new Map(items).set(asset.id, asset));
+        board.updateNode(versionNodeId, { assetId: asset.id, taskId: task.id, status: "succeeded" } as Partial<BoardNode>);
+        onToast("success", "已切换节点素材；提示词和参数保持当前设置");
+      }} /> : null}
       {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId} onPreview={setPreview} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); }} onToast={onToast} /> : null}
 
       {preview ? (

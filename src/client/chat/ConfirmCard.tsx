@@ -77,7 +77,7 @@ export function ConfirmCard({
     onApprove(patch);
   }
 
-  if (preview.reason === "board_destructive") {
+  if (preview.reason === "board_destructive" || preview.reason === "board_generation" || preview.reason === "board_project_update") {
     return (
       <div className="chat-row chat-row-assistant">
         <div className="confirm-card">
@@ -87,9 +87,7 @@ export function ConfirmCard({
           </div>
           <p className="confirm-card-message">{preview.message}</p>
           {message.content ? <p className="confirm-card-say">{message.content}</p> : null}
-          <div className="confirm-card-batch">
-            将删除 {preview.boardDeleteNodes ?? 0} 个节点，其中 {preview.boardDeleteWithAssets ?? 0} 个绑定了素材或生成结果。素材文件本身不会被删除。
-          </div>
+          {preview.boardDeleteNodes ? <div className="confirm-card-batch">将删除 {preview.boardDeleteNodes} 个节点，其中 {preview.boardDeleteWithAssets ?? 0} 个绑定了素材或生成结果。素材文件本身不会被删除。</div> : null}
           <div className="confirm-card-actions">
             <button type="button" className="secondary-button" onClick={onReject} disabled={busy}>
               <X size={14} />先不改

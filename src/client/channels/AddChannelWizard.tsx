@@ -8,7 +8,8 @@ import {
 } from "../../shared/provider-presets";
 import { channelKindOf, type Channel } from "../../shared/types";
 import type { ModelGroupKind } from "../../shared/model-catalog";
-import { modelBrand } from "../chat/ModelLogo";
+import { ModelLogo, modelBrand } from "../chat/ModelLogo";
+import { SelectMenu } from "../ui/SelectMenu";
 
 type SaveMode = "create" | "skip";
 
@@ -20,11 +21,11 @@ type SaveMode = "create" | "skip";
  * 选模型时也分开两栏，避免把 Gemini 的配音模型当成写歌的。
  */
 const UNIT_GROUPS: ReadonlyArray<{ kind: ModelGroupKind; label: string }> = [
+  { kind: "chat", label: "对话（当大脑用）" },
   { kind: "image", label: "生图" },
   { kind: "video", label: "视频" },
   { kind: "music", label: "音乐" },
   { kind: "speech", label: "语音" },
-  { kind: "chat", label: "对话（当大脑用）" },
 ];
 
 function unitGroupOf(adapterType: string): ModelGroupKind {
@@ -88,7 +89,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
     if (!preset) return [];
     return buildChannelDrafts(preset, selections).map((draft) => {
       const duplicate = findConflictChannels(draft, initialChannels)[0];
-      return { draft, duplicate, mode: modes[draft.unitId] ?? (duplicate ? "skip" : "create") };
+      return { draft, duplicate, mode: modes[draft.unitId] ?? (duplicate && duplicate.name.trim() !== draft.name.trim() ? "skip" : "create") };
     });
   }, [preset, selections, modes, initialChannels]);
 
@@ -126,7 +127,9 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
 
   async function save() {
     setSaving(true);
-    setResults(Object.fromEntries(reviewRows.filter((row) => row.mode !== "skip").map((row) => [row.draft.unitId, { status: "saving" as const }])));
+    setResults(Object.fromEntries(reviewRows.map((row) => [row.draft.unitId, row.mode === "skip"
+      ? { status: "done" as const, message: "已跳过" }
+      : { status: "saving" as const }])));
     let savedCount = 0;
     try {
       for (const row of reviewRows) {
@@ -200,11 +203,14 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                 const icon = brand?.logo ?? item.logo;
                 return (
                   <button type="button" key={item.id} className={`preset-card ${providerId === item.id ? "selected" : ""}`} onClick={() => selectProvider(item.id)}>
-                    <span className={`preset-icon ${icon ? "has-logo" : `tone-${index % 3}`}`}>
+                    {group.kind === "chat" ? <span className="preset-chat-brands" aria-label="支持 DeepSeek、Gemini、GPT 和 Claude">
+                      {unit.models.map((model) => <span className="preset-chat-brand" key={model}><ModelLogo model={model} kind="chat" size={19} /></span>)}
+                    </span> : <span className={`preset-icon ${icon ? "has-logo" : `tone-${index % 3}`}`}>
                       {icon ? <img src={icon} alt="" loading="lazy" decoding="async" /> : <Server size={21} />}
-                    </span>
+                    </span>}
                     <span className="preset-title">{item.label}{providerId === item.id ? <CheckCircle2 className="preset-check" size={16} /> : null}</span>
                     <span className="preset-url">{item.baseUrl}</span>
+                    {group.kind === "chat" ? <span className="preset-chat-description">DeepSeek · Gemini · GPT · Claude</span> : null}
                     <span className="preset-tags">
                       {item.units.map((entry) => (
                         <span key={entry.id} className="preset-tag">{entry.label}</span>
@@ -299,10 +305,13 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                         <td>
                           {saveFinished ? (result?.message ?? "已跳过")
                             : row.duplicate ? (
-                              <select value={row.mode} onChange={(event) => setModes((current) => ({ ...current, [row.draft.unitId]: event.target.value as SaveMode }))} disabled={saving}>
-                                <option value="skip">跳过（已存在同名渠道）</option>
-                                <option value="create">覆盖更新</option>
-                              </select>
+                              <div className="wizard-conflict-action">
+                                <SelectMenu value={row.mode} ariaLabel={`保存方式：${row.draft.name}`} disabled={saving} minWidth={140}
+                                  options={[{ value: "create", label: "覆盖更新" }, { value: "skip", label: "跳过" }]}
+                                  onChange={(value) => setModes((current) => ({ ...current, [row.draft.unitId]: value as SaveMode }))} />
+                                <span title={row.duplicate.name}>已有：{row.duplicate.name}</span>
+                                <span title={row.duplicate.baseUrl}>{row.duplicate.baseUrl}</span>
+                              </div>
                             ) : "新建渠道"}
                         </td>
                         <td>

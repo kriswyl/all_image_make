@@ -21,6 +21,7 @@ import {
   type BoardDoc, type BoardUiState, type BoardViewport,
 } from "../shared/board.js";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template.js";
+import { storyboardProjectDataSchema, type StoryboardProject, type StoryboardProjectData } from "../shared/storyboard-project.js";
 
 export interface DbChannel {
   id: string;
@@ -290,6 +291,16 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
     if (options.keepFiles) return { assets: [], inputs: [] };
     return { assets, inputs };
+  }
+
+  /** 删除单个公共素材，保留生成记录和同任务的其他产物。 */
+  deletePublicAsset(assetId: string): StoredFileRef[] {
+    const asset = this.getAsset(assetId);
+    if (!asset) return [];
+    this.db.prepare("DELETE FROM assets WHERE id = ?").run(assetId);
+    const files = [{ baseDir: asset.baseDir, relativePath: asset.relativePath }];
+    if (asset.thumbPath) files.push({ baseDir: this.thumbsDir, relativePath: asset.thumbPath });
+    return files;
   }
 
   /**
@@ -690,8 +701,8 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO conversations
       (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
-       video_confirm_policy, vision_enabled, verbatim_prompt, auto_continue_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 0, ?, ?)
+       video_confirm_policy, vision_enabled, verbatim_prompt, context_budget, auto_continue_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 0, ?, ?)
     `).run(
       id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
       input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, at, at,
@@ -1335,6 +1346,8 @@ export class AppDatabase {
       brainChannelId: "brain_channel_id",
       brainModel: "brain_model",
       videoConfirmPolicy: "video_confirm_policy",
+      chatMode: "chat_mode",
+      contextBudget: "context_budget",
     };
     for (const [key, column] of Object.entries(mapping)) {
       if (!(key in patch)) continue;
@@ -1497,6 +1510,7 @@ export class AppDatabase {
   }
 
   deleteCanvasTemplate(id: string): boolean {
+    this.db.prepare("DELETE FROM storyboard_template_assets WHERE template_id = ?").run(id);
     const result = this.db.prepare("DELETE FROM canvas_templates WHERE id = ?").run(id);
     return Number(result.changes) > 0;
   }
@@ -1517,6 +1531,52 @@ export class AppDatabase {
         createdAt: String(row.created_at),
       };
     });
+  }
+
+  createStoryboardProject(id: string, conversationId: string, data: StoryboardProjectData): StoryboardProject {
+    this.db.prepare("INSERT INTO storyboard_projects (id, conversation_id, revision, data_json, updated_at) VALUES (?, ?, 1, ?, ?)")
+      .run(id, conversationId, JSON.stringify(data), now());
+    return this.getStoryboardProject(id)!;
+  }
+
+  getStoryboardProjectConversationId(id: string): string | null {
+    const row = this.db.prepare("SELECT conversation_id FROM storyboard_projects WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? String(row.conversation_id) : null;
+  }
+
+  getStoryboardProject(id: string): StoryboardProject | null {
+    const row = this.db.prepare("SELECT * FROM storyboard_projects WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row) return null;
+    return { id: String(row.id), revision: Number(row.revision), data: storyboardProjectDataSchema.parse(JSON.parse(String(row.data_json))) };
+  }
+
+  updateStoryboardProject(id: string, revision: number, data: StoryboardProjectData): StoryboardProject | null {
+    const result = this.db.prepare("UPDATE storyboard_projects SET data_json = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?")
+      .run(JSON.stringify(data), now(), id, revision);
+    return Number(result.changes) ? this.getStoryboardProject(id) : null;
+  }
+
+  setStoryboardTemplateAssets(templateId: string, entries: Array<{ nodeId: string; assetId: string }>) {
+    const statement = this.db.prepare("INSERT INTO storyboard_template_assets (template_id, node_id, asset_id) VALUES (?, ?, ?)");
+    for (const entry of entries) statement.run(templateId, entry.nodeId, entry.assetId);
+  }
+
+  getStoryboardTemplateAssets(templateId: string): Map<string, string> {
+    const rows = this.db.prepare("SELECT node_id, asset_id FROM storyboard_template_assets WHERE template_id = ?").all(templateId) as DbRow[];
+    return new Map(rows.map((row) => [String(row.node_id), String(row.asset_id)]));
+  }
+
+  assetHasStoryboardProjectReferences(assetId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.characters') c WHERE json_extract(c.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.scenes') s WHERE json_extract(s.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.characters') c, json_each(c.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.scenes') s, json_each(s.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.props') x WHERE json_extract(x.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.props') x, json_each(x.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ? LIMIT 1`).get(assetId, assetId, assetId, assetId, assetId, assetId));
+  }
+
+  taskHasStoryboardProjectReferences(taskId: string): boolean {
+    return this.listAssets(taskId).some((asset) => this.assetHasStoryboardProjectReferences(asset.id));
   }
 
   listStoryboardConversationIds(): string[] {
@@ -1624,6 +1684,21 @@ export class AppDatabase {
       "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?",
     ).all(conversationId, limit) as DbRow[];
     return rows.reverse().map((row) => this.messageFromRow(row));
+  }
+
+  listMessagesAfter(conversationId: string, seq: number): ChatMessage[] {
+    const rows = this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC").all(conversationId, seq) as DbRow[];
+    return rows.map((row) => this.messageFromRow(row));
+  }
+
+  getContextSummary(id: string): { text: string; throughSeq: number; anchorIds: string[] } | null {
+    const row = this.db.prepare("SELECT context_summary, context_summary_seq, context_anchors FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
+    if (!row || !row.context_summary || !Number(row.context_summary_seq)) return null;
+    return { text: String(row.context_summary), throughSeq: Number(row.context_summary_seq), anchorIds: stringArrayFromJson(row.context_anchors) };
+  }
+
+  saveContextSummary(id: string, text: string, throughSeq: number, anchorIds: string[]) {
+    this.db.prepare("UPDATE conversations SET context_summary = ?, context_summary_seq = ?, context_anchors = ? WHERE id = ?").run(text, throughSeq, JSON.stringify(anchorIds), id);
   }
 
   getMessage(id: string): ChatMessage | null {
@@ -1894,6 +1969,8 @@ export class AppDatabase {
       videoConfirmPolicy: String(row.video_confirm_policy) as VideoConfirmPolicy,
       visionEnabled: Boolean(row.vision_enabled),
       verbatimPrompt: Boolean(row.verbatim_prompt),
+      chatMode: row.kind === "board" ? "creative" : row.chat_mode === "chat" ? "chat" : "creative",
+      contextBudget: Number(row.context_budget) || 350000,
       autoContinueCount: Number(row.auto_continue_count),
       taskCount: this.countConversationTasks(String(row.id)),
       createdAt: String(row.created_at), updatedAt: String(row.updated_at),

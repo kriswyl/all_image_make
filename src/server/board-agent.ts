@@ -49,7 +49,7 @@ function nodeLine(node: BoardNode, doc: BoardDoc): string {
     return `${head}${title} @(${Math.round(node.x)},${Math.round(node.y)}) · ${previewText(node.text) || "（空文本）"}`;
   }
   if (node.type === "image" || node.type === "video" || node.type === "audio") {
-    return `${head}${title} @(${Math.round(node.x)},${Math.round(node.y)}) · ${statusLabel(node.status)}${node.assetId ? "" : " · 无素材"}`;
+    return `${head}${title} @(${Math.round(node.x)},${Math.round(node.y)}) · ${statusLabel(node.status)}${node.assetId ? "" : " · 无素材"}${node.prompt ? ` · 提示词：${previewText(node.prompt)}` : ""}${node.model ? ` · 模型：${node.model}` : ""}`;
   }
   const texts = directUpstreamText(doc, node.id).length;
   const images = directUpstreamImages(doc, node.id).length;
@@ -176,6 +176,7 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
   const deleted = new Set<string>();
   let connections = 0;
   let nextRef = doc.nextRef;
+  const allowedAssets = new Set<string>();
 
   const byRef = () => new Map(doc.nodes.map((node) => [node.ref, node]));
   const resolve = (value: string): string => {
@@ -226,7 +227,7 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
             ...base,
             type: op.type,
             assetId: op.assetRef ?? null,
-            source: op.assetRef ? "library" as const : "upload" as const,
+            source: op.assetRef && op.type === "image" ? "library" as const : "upload" as const,
             status: op.assetRef ? "succeeded" as const : "empty" as const,
             ...(op.text ? { prompt: op.text } : {}),
             ...(op.config ?? {}),
@@ -253,6 +254,22 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
         doc.nodes = doc.nodes.map((item) => item.id === node.id ? next : item);
         updated.add(ref);
         continue;
+      }
+
+      if (op.op === "set_asset") {
+        const ref = resolve(op.nodeRef);
+        const node = nodeOf(ref);
+        if (node.type !== "image" && node.type !== "video" && node.type !== "audio") throw new AppError("BOARD_OP_INVALID", `${ref} 不是素材节点`, 400);
+        if (node.status === "loading") throw new AppError("BOARD_OP_INVALID", `${ref} 正在生成`, 409);
+        const asset = db.getAsset(op.assetId);
+        const task = asset && db.getTaskRow(asset.taskId);
+        const linked = asset && db.findBoardAssetRefs(asset.id).some((entry) => entry.boardId === boardId);
+        const isPublic = task?.libraryScope === "public" || (task?.libraryScope === "legacy" && db.listLibraryTaskViews().some((item) => item.id === task.id));
+        if (!asset || (!linked && !isPublic)) throw new AppError("BOARD_ASSET_INVALID", "素材不存在或不属于公共素材库和当前画布", 403);
+        if (!asset.mimeType.startsWith(`${node.type}/`)) throw new AppError("BOARD_ASSET_INVALID", "素材类型与节点不匹配", 400);
+        allowedAssets.add(asset.id);
+        doc.nodes = doc.nodes.map((item) => item.id === node.id ? { ...node, assetId: asset.id, source: node.type === "image" ? "library" : "upload", status: "succeeded", taskId: undefined, error: undefined, updatedAt: at } as BoardNode : item);
+        updated.add(ref); continue;
       }
 
       if (op.op === "connect") {
@@ -324,7 +341,7 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
     }
     throw error;
   }
-  assertDocAssets(db, boardId, parsed);
+  assertDocAssets(db, boardId, parsed, [...allowedAssets]);
 
   const parts = [
     created.length ? `新增 ${created.map((item) => `${item.ref}（${item.type}，tempId=${item.tempId}）`).join("、")}` : "",
@@ -370,16 +387,20 @@ export function previewBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]
     if (node.type === "config" && node.lastTaskId) deleteWithAssets += 1;
   }
   const deleteNodes = deletes.length;
-  const needsConfirm = deleteNodes > 0 && (deleteWithAssets > 0 || deleteNodes >= 3);
+  const virtualAssets = new Map(board.doc.nodes.flatMap((node) => node.type === "image" || node.type === "video" || node.type === "audio" ? [[node.ref, node.assetId] as const] : []));
+  let replacements = 0;
+  for (const op of ops) {
+    if (op.op !== "set_asset" || !virtualAssets.has(op.nodeRef)) continue;
+    const previous = virtualAssets.get(op.nodeRef);
+    if (previous && previous !== op.assetId) replacements++;
+    virtualAssets.set(op.nodeRef, op.assetId);
+  }
+  const needsConfirm = replacements > 0 || (deleteNodes > 0 && (deleteWithAssets > 0 || deleteNodes >= 3));
   return {
     needsConfirm,
     deleteNodes,
     deleteWithAssets,
-    summary: deleteNodes
-      ? `删除 ${deleteNodes} 个节点（其中 ${deleteWithAssets} 个有生成结果）`
-      : "无删除",
-    message: deleteNodes
-      ? `这次会删除 ${deleteNodes} 个节点，其中 ${deleteWithAssets} 个已经绑定素材或生成结果。素材文件本身不会被删除。确认执行吗？`
-      : "确认执行这次无限画布修改吗？",
+    summary: [deleteNodes ? `删除 ${deleteNodes} 个节点（其中 ${deleteWithAssets} 个有生成结果）` : "", replacements ? `替换 ${replacements} 个节点素材` : ""].filter(Boolean).join("；") || "无删除",
+    message: `这次将${[deleteNodes ? `删除 ${deleteNodes} 个节点` : "", replacements ? `替换 ${replacements} 个节点的素材` : ""].filter(Boolean).join("，")}。原素材文件不会被删除。确认执行吗？`,
   };
 }

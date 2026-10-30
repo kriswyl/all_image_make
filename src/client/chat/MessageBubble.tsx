@@ -4,6 +4,8 @@
 import { AlertCircle, FileText, Info, Maximize2 } from "lucide-react";
 import type { ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 /**
  * 用户自己传的那条消息（需求.md 问题 4）。
@@ -90,7 +92,7 @@ export function AssistantBubble({
     <div className="chat-row chat-row-assistant">
       {message.content?.trim() ? (
         <div className={`chat-bubble chat-bubble-assistant ${message.status === "error" ? "is-error" : ""}`}>
-          {message.content}
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>
       ) : null}
       {options.length ? (
@@ -170,7 +172,7 @@ function liveSay(content: string): string | null {
  * 正文里能捞到 `say` 就实时显示，捞不到（比如这一轮直接调工具、没有 say）
  * 就退回到一句「正在组织回复」。
  */
-export function StreamingBubble({ reasoning, content }: { reasoning: string; content: string }) {
+export function StreamingBubble({ reasoning, content, plain = false }: { reasoning: string; content: string; plain?: boolean }) {
   const say = content ? liveSay(content) : null;
   return (
     <div className="chat-row chat-row-assistant">
@@ -182,7 +184,7 @@ export function StreamingBubble({ reasoning, content }: { reasoning: string; con
       ) : null}
       {content ? (
         <div className="chat-bubble chat-bubble-assistant">
-          {say ?? <span className="chat-typing">正在准备生成…</span>}
+          {plain ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown> : say ?? <span className="chat-typing">正在准备生成…</span>}
           <span className="chat-caret" aria-hidden="true" />
         </div>
       ) : reasoning ? null : (

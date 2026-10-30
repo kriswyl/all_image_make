@@ -70,19 +70,11 @@ const GEMINI_TTS_MODELS = [
 ];
 const MIDJOURNEY_MODELS = ["mj_imagine", "mj_upscale", "mj_variation", "mj_reroll"];
 
-/**
- * 对话（大脑）模型候选。
- * 挑选标准：指令跟随稳、JSON 输出不跑偏、支持视觉（看图改要用），
- * 并且尽量避开纯推理模型——它们每次调用都有几秒的推理开销，Agent 一轮要调好几次。
- * 实测 deepseek-v4-1-flash 三项都满足，所以排在第一个。
- */
+/** 对话模型模板：实际可用性以渠道和所填密钥为准。 */
 const CHAT_MODELS = [
-  "deepseek-v4-1-flash",
-  "deepseek-v4-pro",
-  "glm-5.3",
-  "qwen3.8-max",
-  "grok-4.7",
-  "gpt-5.6-sol",
+  "deepseek-v4.1-flash-1017",
+  "gemini-3.8-flash",
+  "gpt-6.1-sol",
   "claude-sonnet-5-5",
 ];
 
@@ -346,15 +338,15 @@ export function normalizeBaseUrl(url: string) {
 }
 
 /**
- * 冲突检测：先按渠道名精确匹配（重复运行向导时更新自身），
- * 再按模型交集匹配。同站点同协议但模型不重叠的单元（gpt 与 gpt-c）因此不会互相误判。
+ * 优先匹配同名渠道，同名的多个渠道优先选择站点与协议一致的；
+ * 没有同名时，再按同站点同协议的模型交集匹配。
  */
 export function findConflictChannels(draft: ChannelDraft, channels: Channel[]): Channel[] {
   const normalized = normalizeBaseUrl(draft.input.baseUrl);
   const sameEndpoint = channels.filter((channel) =>
     normalizeBaseUrl(channel.baseUrl) === normalized && channel.adapterType === draft.input.adapterType);
-  const byName = sameEndpoint.filter((channel) => channel.name === draft.name);
-  if (byName.length) return byName;
+  const byName = channels.filter((channel) => channel.name.trim() === draft.name.trim());
+  if (byName.length) return [...byName].sort((a, b) => Number(sameEndpoint.includes(b)) - Number(sameEndpoint.includes(a)));
   return sameEndpoint.filter((channel) => channel.models.some((model) => draft.input.models.includes(model)));
 }
 

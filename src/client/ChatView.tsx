@@ -36,6 +36,8 @@ import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
 import { AssetLibrary } from "./chat/AssetLibrary";
+import { ContextSummaryControl } from "./chat/ContextSummaryControl";
+import { SelectMenu } from "./ui/SelectMenu";
 import { TemplateImportDialog } from "./board/TemplateImportDialog";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
@@ -111,6 +113,8 @@ export function ChatView({
   const [status, setStatus] = useState<ConversationStatus>("idle");
   const [reasoning, setReasoning] = useState("");
   const [draft, setDraft] = useState("");
+  const [plainStream, setPlainStream] = useState(false);
+  const [compressing, setCompressing] = useState(false);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
   const [capabilities, setCapabilities] = useState<Array<{
     alias: string; kind: TaskKind; model: string; channelName: string; channelId: string; adapterType: string;
@@ -121,6 +125,8 @@ export function ChatView({
   });
   const [preview, setPreview] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [chatAssetIds, setChatAssetIds] = useState<string[]>([]);
+  useEffect(() => { setChatAssetIds([]); setLibraryOpen(false); }, [activeId]);
   const [templateImport, setTemplateImport] = useState<{
     id: string; name: string; description?: string;
   } | null>(null);
@@ -286,7 +292,7 @@ export function ChatView({
       // 否则已死的 id 会一直被 SSE 重连和 onOpen 拉取，用户反复看到「会话不存在」
       if (error instanceof ApiError && error.status === 404) {
         if (activeIdRef.current === id) {
-          localStorage.removeItem(STORAGE_KEY);
+          try { localStorage.removeItem(STORAGE_KEY); } catch { /* 存储不可用时仅清理内存状态 */ }
           setActiveId(null);
           void reloadList();
         }
@@ -313,12 +319,13 @@ export function ChatView({
         music: settings.defaultMusicAlias,
         speech: settings.defaultSpeechAlias,
       });
-      const remembered = localStorage.getItem(STORAGE_KEY);
+      let remembered = "";
+      try { remembered = localStorage.getItem(STORAGE_KEY) ?? ""; } catch { /* 保留可用的列表 */ }
       const pick = conversations.find((item) => item.id === remembered) ?? conversations[0];
       // 记着的那个已经没了（多半是在别处删的），顺手把指针抹掉；
       // 否则它会一直躺在 localStorage 里，下次启动还要再白找一遍
       if (pick) setActiveId(pick.id);
-      else if (remembered) localStorage.removeItem(STORAGE_KEY);
+      else if (remembered) { try { localStorage.removeItem(STORAGE_KEY); } catch { /* 忽略 */ } }
     })();
     return () => { cancelled = true; };
   }, [reloadList]);
@@ -346,18 +353,31 @@ export function ChatView({
   // 切换会话：拉全量 + 开 SSE
   useEffect(() => {
     if (!activeId) { setView(null); setStatus("idle"); return; }
-    localStorage.setItem(STORAGE_KEY, activeId);
+    try { localStorage.setItem(STORAGE_KEY, activeId); } catch { /* 不影响打开会话 */ }
     setReasoning("");
     setDraft("");
+    setCompressing(false);
     setProgress({});
     void reloadView(activeId);
 
     const onEvent = (event: AgentStreamEvent) => {
       switch (event.type) {
+        case "context_compression":
+          setCompressing(event.status === "started");
+          if (event.status === "finished") toast(/失败|不完整/.test(event.message) ? "error" : "ok", event.message);
+          break;
+        case "context_summary":
+          setView((current) => current && current.id === activeId ? { ...current, contextSummary: { text: event.text, throughSeq: event.throughSeq } } : current);
+          break;
         case "reasoning":
           setReasoning((current) => current + event.text);
           break;
+        case "text_token":
+          setPlainStream(true);
+          setDraft((current) => current + event.text);
+          break;
         case "token":
+          setPlainStream(false);
           setDraft((current) => current + event.text);
           break;
         case "reset":
@@ -473,7 +493,8 @@ export function ChatView({
     if (!activeId) return;
     // 画布是「这一轮要带的图」：连同拖进来的产物一起写进这条消息，
     // 这样发完清空画布也不会影响助手这一轮看到的图。
-    const refs = [...new Set([...(viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
+    const plain = viewRef.current?.chatMode === "chat";
+    const refs = [...new Set([...(plain ? [] : viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
     // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
     forcedScrollConversation.current = activeId;
     setReasoning("");
@@ -481,10 +502,12 @@ export function ChatView({
     try {
       await api.sendMessage(activeId, text, refs);
       setStatus("running");
-      if (refs.length) writeCanvas([]);
+      if (refs.length && !plain) writeCanvas([]);
+      return true;
     } catch (error) {
       toastError(error);
       setDraft("");
+      return false;
     }
   }
 
@@ -531,6 +554,14 @@ export function ChatView({
     }, CANVAS_PATCH_DEBOUNCE_MS);
   }
 
+  function toggleChatAsset(assetId: string) {
+    if (!chatAssetIds.includes(assetId) && chatAssetIds.length >= MAX_REFERENCE_IMAGES) {
+      toast("error", `一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+      return;
+    }
+    setChatAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : current.length >= MAX_REFERENCE_IMAGES ? current : [...current, assetId]);
+  }
+
   /** 素材库单击：在画布里就移出，不在就加到末尾（参考图） */
   function toggleCanvasSelection(assetId: string) {
     const current = viewRef.current?.canvasAssetIds ?? [];
@@ -555,6 +586,7 @@ export function ChatView({
     try {
       const next = await api.deleteConversationAsset(id, assetId);
       setView(next);
+      setChatAssetIds((current) => current.filter((id) => id !== assetId));
       setPreview((current) => current === assetId ? null : current);
       toast("ok", "已删除图片");
     } catch (error) {
@@ -634,7 +666,7 @@ export function ChatView({
       const next = await api.uploadConversationImages(activeId, images);
       setView(next);
       await reloadList();
-      toast("ok", images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
+      toast("ok", viewRef.current?.chatMode === "chat" ? `已上传 ${images.length} 张图片` : images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
       // 返回新上传的产物 id：发送时要把它们一起写进这条消息
       return next.canvasAssetIds;
     } catch (error) {
@@ -716,9 +748,21 @@ export function ChatView({
     // 图和文档分开传；文档放在最后，这样「文档消息 + 这句话」在库里是紧挨着的
     const images = files.filter((file) => !isScriptDocument(file));
     const documents = files.filter(isScriptDocument);
+    const plain = viewRef.current?.chatMode === "chat";
+    const previousCanvas = viewRef.current?.canvasAssetIds ?? [];
+    const selectedForChat = [...new Set([...chatAssetIds, ...assetIds])];
+    if (plain && selectedForChat.length + images.length > MAX_REFERENCE_IMAGES) {
+      toast("error", `一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+      return;
+    }
     const uploadedIds = images.length ? await uploadImages(images) : [];
     if (uploadedIds === null) return;
+    if (plain && images.length) await flushCanvas(previousCanvas);
     if (documents.length && !(await uploadDocuments(documents))) return;
+    if (plain) {
+      if (await send(text, [...new Set([...uploadedIds, ...selectedForChat])])) setChatAssetIds([]);
+      return;
+    }
     // 本地新传的、拖进来的既有产物、画布里已经挑好的，合并成「这一轮要带的图」
     const base = viewRef.current?.canvasAssetIds ?? [];
     const merged = [...new Set([...base, ...uploadedIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
@@ -949,7 +993,7 @@ export function ChatView({
                 <button
                   type="button"
                   className="chat-control chat-toggle"
-                  title="打开素材库：筛选、搜索、批量选图，设为首帧 / 尾帧"
+                  title={view.chatMode === "chat" ? "从本会话素材中选择图片发送" : "打开素材库：筛选、搜索、选图和设置首尾帧"}
                   onClick={() => setLibraryOpen(true)}
                 >
                   <Images size={13} />
@@ -959,11 +1003,11 @@ export function ChatView({
                 <button
                   type="button"
                   className={`chat-control chat-toggle ${view.visionEnabled ? "is-on" : ""}`}
-                  title={view.visionEnabled ? "助手能看到当前画布，改图更准" : "助手看不到图，只按你的描述改"}
+                  title={view.visionEnabled ? (view.chatMode === "chat" ? "模型支持视觉时可查看本轮附带图片" : "助手能看到当前画布，改图更准") : "已关闭看图，助手不能看到图片"}
                   onClick={() => void patch({ visionEnabled: !view.visionEnabled })}
                 >
                   {view.visionEnabled ? <Eye size={13} /> : <EyeOff size={13} />}
-                  {view.visionEnabled ? "看图改" : "盲改"}
+                  {view.chatMode === "chat" ? (view.visionEnabled ? "看图已开" : "看图已关") : (view.visionEnabled ? "看图改" : "盲改")}
                 </button>
 
                 {capabilities.length ? (
@@ -989,7 +1033,7 @@ export function ChatView({
               <div className="chat-thread-inner" ref={threadInnerRef}>
               {!rows.length && !hasStream ? (
                 <div className="chat-thread-empty">
-                  <p>说一句话开始。可以画图、改图、拆剧本做分镜，也能生成视频、音乐和配音。</p>
+                  <p>{view.chatMode === "chat" ? "说一句话开始聊天，可以提问、讨论、写作或分析。" : "说一句话开始。可以画图、改图、拆剧本做分镜，也能生成视频、音乐和配音。"}</p>
                 </div>
               ) : null}
 
@@ -1016,7 +1060,7 @@ export function ChatView({
                       key={row.message.id}
                       message={row.message}
                       preview={row.preview}
-                      busy={busy || running}
+                      busy={busy || running || compressing}
                       onApprove={(patchArgs) => void resolveConfirm(row.message.id, "approve", patchArgs)}
                       onReject={() => void resolveConfirm(row.message.id, "reject")}
                     />
@@ -1040,24 +1084,41 @@ export function ChatView({
                 );
               })}
 
-              {hasStream ? <StreamingBubble reasoning={reasoning} content={draft} /> : null}
+              {hasStream ? <StreamingBubble reasoning={reasoning} content={draft} plain={plainStream} /> : null}
 
               {status === "waiting_task" ? (
-                <div className="chat-note"><LoaderCircle size={13} className="spin" /><span>视频在后台生成，好了我接着处理</span></div>
+                <div className="chat-note"><LoaderCircle size={13} className="spin" /><span>任务在后台生成，完成后会更新结果</span></div>
               ) : null}
               </div>
             </div>
 
             <Composer
-              running={running}
+              running={running || compressing}
               uploading={uploading}
-              placeholder={canvasImages.length
+              placeholder={view.chatMode === "chat" ? "聊聊你的想法，或提出问题…" : canvasImages.length
                 ? canvasImages.length > 1
                   ? `画布 ${canvasImages.length} 张（① 首帧 ${assetRef(canvasImages[0]!.id)} / ② 尾帧${canvasImages[1] ? ` ${assetRef(canvasImages[1].id)}` : ""}${canvasImages.length > 2 ? " / 其余参考" : ""}），直接说怎么改…`
                   : `画布 1 张（① 首帧 / 主图 ${assetRef(canvasImages[0]!.id)}），直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
               leftSlot={(
                 <>
+                  <SelectMenu
+                    className="chat-mode-select"
+                    ariaLabel="对话模式"
+                    title="切换普通聊天或创作助手，不会取消待确认的任务"
+                    leading={view.chatMode === "chat" ? <MessageSquarePlus size={14} /> : <Wand2 size={14} />}
+                    minWidth={158}
+                    disabled={uploading}
+                    value={view.chatMode ?? "creative"}
+                    options={[{ value: "creative", label: "创作助手" }, { value: "chat", label: "普通聊天" }]}
+                    onChange={(mode) => { setChatAssetIds([]); void patch({ chatMode: mode as "creative" | "chat" }); }}
+                  />
+                  {view.chatMode === "chat" ? (
+                    <button type="button" className="chat-control chat-choose-assets" disabled={running || uploading} onClick={() => setLibraryOpen(true)}>
+                      <Images size={13} />选择素材{chatAssetIds.length ? ` · ${chatAssetIds.length}` : ""}
+                    </button>
+                  ) : null}
+                  {view.chatMode !== "chat" ? <>
                   {/*
                     「原话直发」：平时大脑会把口语扩写成完整画面（默认就该这样，效果更好），
                     但有些人是带着自己攒了很久的提示词来的，被「优化」一下反而不是他要的。
@@ -1085,6 +1146,7 @@ export function ChatView({
                       ))}
                     </select>
                   </label>
+                  </> : null}
                 </>
               )}
               rightSlot={(
@@ -1097,11 +1159,15 @@ export function ChatView({
                   }}
                 />
               )}
-              statusSlot={view.usage?.calls ? (
+              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onCompress={() => {
+                if (!activeId) return;
+                setCompressing(true);
+                void api.compressConversation(activeId).then(() => { setCompressing(false); void reloadView(activeId); }).catch((error) => { setCompressing(false); toastError(error); });
+              }} />{view.usage?.calls ? (
                 <span
                   className="composer-stats"
                   title={[
-                    `上下文：最近一次大脑请求的输入 ${view.usage.contextTokens.toLocaleString()} tokens`,
+                    `最近一次有用量统计的模型请求输入 ${view.usage.contextTokens.toLocaleString()} tokens（可能是摘要调用）；累计输入会重复计算每轮携带的历史`,
                     `本会话累计输入 ${view.usage.promptTokens.toLocaleString()} tokens`,
                     `本会话累计输出 ${view.usage.completionTokens.toLocaleString()} tokens`,
                     view.usage.reasoningTokens
@@ -1110,17 +1176,20 @@ export function ChatView({
                     `共 ${view.usage.calls} 次大脑调用`,
                   ].filter(Boolean).join("\n")}
                 >
-                  上下文 {formatTokenCount(view.usage.contextTokens)}
+                  最近请求输入 {formatTokenCount(view.usage.contextTokens)}
                   <span className="composer-stats-sep">·</span>
-                  本会话 输入 {formatTokenCount(view.usage.promptTokens)} / 输出 {formatTokenCount(view.usage.completionTokens)}
+                  累计 输入 {formatTokenCount(view.usage.promptTokens)} / 输出 {formatTokenCount(view.usage.completionTokens)}
                 </span>
-              ) : undefined}
+              ) : null}</>}
               onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
-              onAssetAttached={(assetId) => addCanvasBatch([assetId])}
-              canvasItems={canvasImages.map((asset, index) => ({ asset, index }))}
+              onAssetAttached={(assetId) => view.chatMode === "chat" ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
+              plainAttachments={view.chatMode === "chat"}
+              canvasItems={view.chatMode === "chat"
+                ? chatAssetIds.flatMap((id, index) => { const entry = sessionImages.find((item) => item.asset.id === id); return entry ? [{ asset: entry.asset, index }] : []; })
+                : canvasImages.map((asset, index) => ({ asset, index }))}
               onPreviewCanvas={setPreview}
-              onRemoveCanvas={(assetId) => removeCanvasBatch([assetId])}
+              onRemoveCanvas={(assetId) => view.chatMode === "chat" ? toggleChatAsset(assetId) : removeCanvasBatch([assetId])}
               onSetCanvasFirst={setCanvasFirst}
               onSetCanvasLast={setCanvasLast}
             />
@@ -1141,10 +1210,11 @@ export function ChatView({
       <AssetLibrary
         open={libraryOpen}
         assets={sessionImages}
-        canvasIds={canvasImages.map((asset) => asset.id)}
+        canvasIds={view?.chatMode === "chat" ? chatAssetIds : canvasImages.map((asset) => asset.id)}
+        chatSelection={view?.chatMode === "chat"}
         onClose={() => setLibraryOpen(false)}
         onPreview={setPreview}
-        onToggleCanvas={toggleCanvasSelection}
+        onToggleCanvas={view?.chatMode === "chat" ? toggleChatAsset : toggleCanvasSelection}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
         onDeleteAsset={deleteSessionAsset}

@@ -417,8 +417,8 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
    * 等一次 fetch 再 write 有被浏览器判定「不是用户操作」的风险，所以先缓存。
    */
   const activeAssetBlob = useRef<{ id: string; blob: Blob } | null>(null);
-  // 最近生成：取有图片的成功任务，供缩略图快速切换
-  const recentTasks = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 12);
+  // 生成中的任务占据固定位置，完成后原位变成缩略图。
+  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
   useEffect(() => { setSelectedAssetId(task?.assets[0]?.id ?? null); }, [task?.id, task?.assets.length]);
   useEffect(() => {
@@ -566,9 +566,11 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
           <span className="recent-label">最近</span>
           <div className="recent-thumbs">
             {recentTasks.map((item) => (
-              <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={item.prompt} onClick={() => onSelectTask(item)}>
-                <img src={api.assetUrl(item.assets[0].url)} alt="最近生成" loading="lazy" decoding="async" />
-                {item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
+              <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={`${statusLabels[item.status]} · ${item.prompt}`} aria-label={`${statusLabels[item.status]}：${item.prompt}`} onClick={() => onSelectTask(item)}>
+                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} />
+                  : item.status === "succeeded" && item.assets[0] ? <img src={api.assetUrl(item.assets[0].url)} alt="最近生成" loading="lazy" decoding="async" />
+                    : <AlertCircle className="recent-task-error" size={18} />}
+                {item.status === "succeeded" && item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
               </button>
             ))}
           </div>

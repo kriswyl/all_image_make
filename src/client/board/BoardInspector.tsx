@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { AudioLines, Image as ImageIcon, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import {
-  directInputLinks, directUpstreamImages, directUpstreamText,
+  BOARD_LIMITS, directInputLinks, directUpstreamImages, directUpstreamText,
   type BoardAudioKind, type BoardEdgeRole, type BoardNode, type BoardView,
 } from "../../shared/board";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts";
@@ -43,7 +43,7 @@ export function BoardInspector({
   view, node, selectedCount, assets, imageAliases, defaultImageAlias, videoAliases, defaultVideoAlias,
   audioAliases, defaultSpeechAlias, defaultMusicAlias,
   onUpdateNode, onUpdateEdge, onDeleteNode, onPreview, onPickImage, onRemoveAsset,
-  onGenerate, onStopTask, onRetryTask, onClose,
+  onGenerate, onStopTask, onRetryTask, onExtractFrame, onCompareVersions, onClose,
 }: {
   view: BoardView;
   node: BoardNode | null;
@@ -65,6 +65,8 @@ export function BoardInspector({
   onGenerate: (nodeId: string) => void;
   onStopTask: (taskId: string) => void;
   onRetryTask: (taskId: string) => void;
+  onExtractFrame: (nodeId: string) => void;
+  onCompareVersions: (nodeId: string) => void;
   onClose: () => void;
 }) {
   const [titleDraft, setTitleDraft] = useState("");
@@ -213,6 +215,8 @@ export function BoardInspector({
               {asset ? (
                 <button type="button" className="secondary-button compact" onClick={() => onPreview(asset)}>预览</button>
               ) : null}
+              {asset && node.type === "video" ? <button type="button" className="secondary-button compact" onClick={() => onExtractFrame(node.id)}>提取尾帧</button> : null}
+              {asset ? <button type="button" className="secondary-button compact" onClick={() => onCompareVersions(node.id)}>版本对比</button> : null}
               <button type="button" className="secondary-button compact" onClick={() => onPickImage(node.id)}>
                 <Upload size={12} />{asset ? "替换素材" : "选择素材"}
               </button>
@@ -401,6 +405,7 @@ export function BoardInspector({
                 ariaLabel={isAudio ? "无限画布音频模型" : isVideo ? "无限画布视频模型" : "无限画布生图模型"}
               />
 
+              {isVideo && videoCapability ? <p className="board-inspector-hint">{videoCapability.label}：支持 {videoModeOptions.filter((option) => option.value).map((option) => option.label).join("、")}；时长 {videoCapability.durations.fixed ? `${videoCapability.durations.fixed} 秒` : `${videoCapability.durations.min}–${videoCapability.durations.max} 秒`}；最多 {Math.min(BOARD_LIMITS.maxUpstreamImages, videoCapability.maxReferenceImages)} 张参考图；{videoCapability.supportsAudio ? "支持音频参数" : "不支持音频参数"}。具体组合请以所选模式的校验提示为准。</p> : null}
               {isAudio ? (
                 <>
                   {audioKind === "speech" ? (

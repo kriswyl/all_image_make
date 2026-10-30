@@ -58,6 +58,14 @@ export const AGENT_TOOL_NAMES = [
   "board_read",
   "board_apply",
   "board_generate",
+  "board_generate_batch",
+  "board_check",
+  "board_storyboard",
+  "board_storyboard_update",
+  "board_assets",
+  "board_versions",
+  "board_view_images",
+  "board_extract_frame",
   "ask",
   "reply",
 ] as const;
@@ -82,6 +90,14 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   board_read: "读无限画布",
   board_apply: "修改无限画布",
   board_generate: "无限画布生成",
+  board_generate_batch: "批量生成画布节点",
+  board_check: "检查生成条件",
+  board_storyboard: "查看关联分镜",
+  board_storyboard_update: "修改分镜项目",
+  board_assets: "搜索公共素材",
+  board_versions: "查看节点版本",
+  board_view_images: "查看画布图片",
+  board_extract_frame: "提取视频尾帧",
   ask: "提问",
   reply: "回复",
 };
@@ -379,7 +395,7 @@ export interface ConfirmPreview {
    * - `video_policy` / `session_limit`：生成闸门（§13）
    * - `brain_down`：大脑不可用，退化成「按你原话生成」（§15 直通模式）
    */
-  reason: "video_policy" | "session_limit" | "brain_down" | "board_destructive";
+  reason: "video_policy" | "session_limit" | "brain_down" | "board_destructive" | "board_generation" | "board_project_update";
   prompt: string;
   model: string;
   channelName: string;
@@ -496,6 +512,8 @@ export interface Conversation {
    * 自己攒了很久的提示词来的，被「优化」一下反而不是他要的。这个开关交给他自己决定。
    */
   verbatimPrompt: boolean;
+  chatMode?: "creative" | "chat";
+  contextBudget?: number;
   autoContinueCount: number;
   /** 本会话已经提交过的生成任务数，用于 §16 的任务软上限 */
   taskCount: number;
@@ -518,6 +536,7 @@ export interface ConversationUsage {
 }
 
 export interface ConversationView extends Conversation {
+  contextSummary: { text: string; throughSeq: number } | null;
   messages: ChatMessage[];
   /** token 用量；状态行用它，接口不可用时全 0 */
   usage: ConversationUsage;
@@ -596,11 +615,16 @@ export type AgentStreamEvent =
    * 不发的话，前端会把第一次跑偏的正文和重试后的正文拼在一起，用户看到的
    * 是一段前后矛盾的独白。
    */
+  | { type: "context_compression"; status: "started" | "finished"; message: string }
+  | { type: "context_summary"; text: string; throughSeq: number }
+  | { type: "text_token"; text: string }
   | { type: "reset" }
   /** 视频进度转发 */
   | { type: "progress"; taskId: string; status: string; progress: number | null }
   /** 无限画布 Agent 改了文档：带上增量，画布能直接合并；delta 缺失时回退整份拉取 */
   | { type: "board"; boardId: string; version: number; reason?: string; delta?: BoardDelta }
+  | { type: "board_frame_request"; boardId: string; requestId: string; videoAssetId: string }
+  | { type: "board_batch_progress"; text: string }
   | { type: "error"; message: string }
   | { type: "done"; status: ConversationStatus };
 
@@ -615,6 +639,8 @@ export interface ConversationInput {
 }
 
 export interface ConversationPatch {
+  contextBudget?: number;
+  chatMode?: "creative" | "chat";
   title?: string;
   brainChannelId?: string;
   brainModel?: string;
