@@ -1535,3 +1535,17 @@
   line-height: 1.5;
   word-break: break-all;
 }
+
+/* 设定图（角色 / 场景 / 道具）在画布上都是图片节点，靠标题前缀区分。
+   给它们一块彩色牌子 + 左侧色条，几十个节点铺开时也能一眼认出哪些是参考设定。 */
+.board-node-kind.is-role {
+  border-color: currentColor;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+.board-node-kind.is-character { color: #d97757; }
+.board-node-kind.is-scene { color: #5aa0d0; }
+.board-node-kind.is-prop { color: #a98bd0; }
+.board-node:has(.board-node-kind.is-character) { box-shadow: inset 3px 0 0 #d97757, 0 1px 2px rgba(0, 0, 0, .04); }
+.board-node:has(.board-node-kind.is-scene) { box-shadow: inset 3px 0 0 #5aa0d0, 0 1px 2px rgba(0, 0, 0, .04); }
+.board-node:has(.board-node-kind.is-prop) { box-shadow: inset 3px 0 0 #a98bd0, 0 1px 2px rgba(0, 0, 0, .04); }

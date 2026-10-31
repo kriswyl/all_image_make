@@ -5,7 +5,7 @@ import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { createBoard } from "../src/server/board";
-import { createBoardFromTemplate, importTemplateIntoBoard } from "../src/server/canvas-template";
+import { buildStoryboardTemplateInput, createBoardFromTemplate, importTemplateIntoBoard } from "../src/server/canvas-template";
 import { runAgentTool, type ToolContext } from "../src/server/agent-tools";
 import { buildCapabilityAliases } from "../src/server/capabilities";
 import type { CanvasTemplateInput } from "../src/shared/canvas-template";
@@ -335,6 +335,46 @@ describe("无限画布模板", () => {
     const preview = (await request(app).get(`/api/storyboard-projects/${id}/preview`).expect(200)).body.data;
     expect(preview.find((entry: { id: string }) => entry.id === board.id).shots[1].image.id).toBe("preview-image");
     expect(preview.find((entry: { id: string }) => entry.id === board.id).shots[0].image).toBeNull();
+  });
+
+  it("镜头引用了没有设定图的名字时补一个节点并连线，不再静默丢参考", () => {
+    const template = buildStoryboardTemplateInput({
+      name: "补节点",
+      characters: [{ name: "老陈", prompt: "中年男人" }],
+      scenes: [{ name: "老陈家", prompt: "老巷早餐铺" }],
+      props: [],
+      shots: [
+        { index: 1, prompt: "老陈在揉面", character: "老陈、林小满", scene: "老陈家", props: [] },
+        { index: 2, prompt: "林小满站在门口", character: "林小满", scene: "老巷深处", props: [] },
+      ],
+    });
+
+    const titles = template.nodes.filter((node) => node.type === "image" && node.title).map((node) => node.title!);
+    expect(titles.filter((title) => title === "角色 · 老陈")).toHaveLength(1);
+    expect(titles).toContain("角色 · 林小满");
+    expect(titles).toContain("场景 · 老巷深处");
+
+    // 第 1 镜：老陈 + 林小满 + 老陈家，三条参考连线一条都不少
+    const firstShotRefs = template.edges?.filter((edge) => edge.to === "c1" && edge.role === "reference") ?? [];
+    expect(firstShotRefs).toHaveLength(3);
+    // 第 2 镜：林小满只建一个节点，两镜指向同一个 tempId
+    const secondShotRefs = template.edges?.filter((edge) => edge.to === "c2" && edge.role === "reference") ?? [];
+    expect(secondShotRefs).toHaveLength(2);
+    expect(secondShotRefs.map((edge) => edge.from)).toContain(firstShotRefs.find((edge) => edge.from !== "ch1" && edge.from !== "sc1")?.from);
+  });
+
+  it("镜头写短名字时认到带版本后缀的设定，不会重复建节点", () => {
+    const template = buildStoryboardTemplateInput({
+      name: "前缀匹配",
+      characters: [{ name: "老陈 · 青年", prompt: "年轻版" }],
+      scenes: [],
+      props: [],
+      shots: [{ index: 1, prompt: "年轻的老陈", character: "老陈", scene: "" }],
+    });
+    const characterNodes = template.nodes.filter((node) => node.title?.startsWith("角色 ·"));
+    expect(characterNodes).toHaveLength(1);
+    expect(characterNodes[0]!.title).toBe("角色 · 老陈 · 青年");
+    expect(template.edges?.filter((edge) => edge.to === "c1" && edge.role === "reference")).toHaveLength(1);
   });
 
   it("迁移旧分镜：生成模板和画布，重复调用跳过", async () => {

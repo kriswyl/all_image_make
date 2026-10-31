@@ -568,6 +568,17 @@ export interface StoryboardTemplateSetting {
   prompt?: string;
 }
 
+/** 设定名比对用的归一化键：忽略空白、全半角括号和「·」写法差异 */
+function referenceKey(name: string) {
+  return name
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/[・•]/g, "·")
+    .replace(/\s+/g, "")
+    .trim()
+    .toLowerCase();
+}
+
 export interface StoryboardTemplateShot {
   id?: string;
   index: number;
@@ -605,6 +616,9 @@ export function buildStoryboardTemplateInput(source: {
   const characterIds = new Map<string, string>();
   const sceneIds = new Map<string, string>();
   const propIds = new Map<string, string>();
+  const characterNames: Array<[string, string]> = [];
+  const sceneNames: Array<[string, string]> = [];
+  const propNamesIndex: Array<[string, string]> = [];
 
   /**
    * 设定图单独放在镜头区上方，角色一行、场景一行：
@@ -617,7 +631,8 @@ export function buildStoryboardTemplateInput(source: {
     const name = character.name.trim();
     if (!name) continue;
     const tempId = `ch${index + 1}`;
-    characterIds.set(name, tempId);
+    characterIds.set(referenceKey(name), tempId);
+    characterNames.push([referenceKey(name), tempId]);
     characterGroups.push(tempId);
     nodes.push({
       tempId,
@@ -634,7 +649,8 @@ export function buildStoryboardTemplateInput(source: {
     const name = scene.name.trim();
     if (!name) continue;
     const tempId = `sc${index + 1}`;
-    sceneIds.set(name, tempId);
+    sceneIds.set(referenceKey(name), tempId);
+    sceneNames.push([referenceKey(name), tempId]);
     sceneGroups.push(tempId);
     nodes.push({
       tempId,
@@ -651,9 +667,48 @@ export function buildStoryboardTemplateInput(source: {
   for (const [index, prop] of (source.props ?? []).entries()) {
     const name = prop.name.trim();
     if (!name) continue;
-    const tempId = `prop${index + 1}`; propIds.set(name, tempId); propGroups.push(tempId);
+    const tempId = `prop${index + 1}`; propIds.set(referenceKey(name), tempId); propNamesIndex.push([referenceKey(name), tempId]); propGroups.push(tempId);
     nodes.push({ tempId, type: "image", x: index * 340, y: -1100, width: 280, height: 210, title: `道具 · ${name}`.slice(0, 80), text: `道具设定图：${name}。${prop.prompt?.trim() || "清晰展示外形、材质和细节"}。简洁背景，单件物品，无文字。` });
   }
+
+  /**
+   * 解析一个镜头引用的设定名。
+   *
+   * 先按归一化键精确匹配（忽略空格、全半角括号差异），再退一步认前缀
+   * （镜头写「老陈」、设定叫「老陈 · 青年」时也能认上）。都不中就现建一个设定节点，
+   * 保证这一镜的参考图不会静默丢掉——以前精确匹配失败就等于少一条连线，
+   * 用户只看到「这镜没参考到图」，根本查不到断在哪。
+   */
+  const ensureReference = (kind: "character" | "scene" | "prop", rawName: string): string | null => {
+    const name = rawName.trim();
+    if (!name) return null;
+    const key = referenceKey(name);
+    const exact = kind === "character" ? characterIds : kind === "scene" ? sceneIds : propIds;
+    const entries = kind === "character" ? characterNames : kind === "scene" ? sceneNames : propNamesIndex;
+    const hit = exact.get(key);
+    if (hit) return hit;
+    const fuzzy = entries.filter(([entry]) => entry.startsWith(key) || key.startsWith(entry));
+    if (fuzzy.length === 1) return fuzzy[0]![1];
+
+    const label = kind === "character" ? "角色" : kind === "scene" ? "场景" : "道具";
+    const groups = kind === "character" ? characterGroups : kind === "scene" ? sceneGroups : propGroups;
+    const tempId = `${kind === "character" ? "chx" : kind === "scene" ? "scx" : "prx"}${groups.length + 1}`;
+    const y = kind === "character" ? -760 : kind === "scene" ? -420 : -1100;
+    const suffix = kind === "character"
+      ? "保持人物外貌与服饰一致。同一人物的正面、侧面、背面全身三视图，统一服装、比例和光线，简洁背景，无文字。"
+      : kind === "scene"
+        ? "清晰呈现空间布局。展示环境全貌、空间结构、光线与色调，保持场景细节一致，无人物，无文字。"
+        : "清晰展示外形、材质和细节。简洁背景，单件物品，无文字。";
+    nodes.push({
+      tempId, type: "image", x: groups.length * 340, y, width: 280, height: 210,
+      title: `${label} · ${name}`.slice(0, 80),
+      text: `${label}设定图：${name}。${suffix}`,
+    });
+    groups.push(tempId);
+    exact.set(key, tempId);
+    entries.push([key, tempId]);
+    return tempId;
+  };
 
   for (const [index, shot] of source.shots.entries()) {
     const col = index % 3;
@@ -715,18 +770,23 @@ export function buildStoryboardTemplateInput(source: {
         title: `第 ${shot.index} 镜 · ${shot.speaker?.trim() || "配音"}`, text: shot.dialogue.trim() });
     }
 
-    // 设定图作为参考图输入：角色按名字找，场景按名字找；每镜最多 8 张
+    // 设定图作为参考图输入：角色 / 场景 / 道具都按名字解析，缺的现建；每镜最多 8 张
     const charNames = shot.characters?.length
       ? shot.characters
       : (shot.character ?? "").split(/[、,，]/).map((name) => name.trim()).filter(Boolean);
     const inputIds = new Set<string>();
     for (const name of charNames) {
-      const tempId = characterIds.get(name.trim());
+      const tempId = ensureReference("character", name);
       if (tempId) inputIds.add(tempId);
     }
-    const sceneId = shot.scene ? sceneIds.get(shot.scene.trim()) : undefined;
-    if (sceneId) inputIds.add(sceneId);
-    for (const name of shot.props ?? []) { const tempId = propIds.get(name.trim()); if (tempId) inputIds.add(tempId); }
+    for (const name of (shot.scene ?? "").split(/[、,，]/)) {
+      const tempId = ensureReference("scene", name);
+      if (tempId) inputIds.add(tempId);
+    }
+    for (const name of shot.props ?? []) {
+      const tempId = ensureReference("prop", name);
+      if (tempId) inputIds.add(tempId);
+    }
     if (inputIds.size > 8) throw new AppError("STORYBOARD_REFERENCE_LIMIT", `第 ${shot.index} 镜参考图超过 8 张，请减少角色、场景或道具。`, 400);
     for (const tempId of [...inputIds].slice(0, 8)) {
       edges.push({ from: tempId, to: configId, kind: "input", role: "reference" });

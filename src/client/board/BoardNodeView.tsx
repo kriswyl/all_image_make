@@ -500,17 +500,44 @@ function ConfigNodeView({ node, upstream, onUpdateNode, onDelete, onGenerate, on
   );
 }
 
+const SETTING_ROLE_LABEL = { character: "角色", scene: "场景", prop: "道具" } as const;
+
+/**
+ * 设定图节点（角色 / 场景 / 道具）的识别。
+ *
+ * 这三类节点在画布上都是普通图片节点，靠标题前缀区分；给它们一个带颜色的
+ * 牌子，几十个节点铺开时才能一眼分出「这是参考设定」还是「这是某一镜的产物」。
+ */
+function settingRoleOf(node: BoardNode): keyof typeof SETTING_ROLE_LABEL | null {
+  if (node.type !== "image" || !node.title) return null;
+  if (/^角色\s*[·・]/.test(node.title)) return "character";
+  if (/^场景\s*[·・]/.test(node.title)) return "scene";
+  if (/^道具\s*[·・]/.test(node.title)) return "prop";
+  return null;
+}
+
+/** 标题里的「角色 · 」前缀由牌子承担，正文只留名字，省一行宽度 */
+function titleWithoutRole(title: string) {
+  return title.replace(/^(角色|场景|道具)\s*[·・]\s*/, "");
+}
+
 export function BoardNodeView({
   node, asset, editing, upstream, onStartEdit, onCommitText, onCancelEdit, onUpdateNode,
   onPreview, onSelect, onPickImage, onRemoveAsset, onDelete, onGenerate, onStopTask, onRetryTask,
 }: BoardNodeViewProps) {
+  const settingRole = settingRoleOf(node);
+  const displayTitle = settingRole ? titleWithoutRole(node.title) : node.title;
   return (
     <>
       <header className="board-node-head">
-        <span className={`board-node-kind is-${node.type}`}>
-          {node.type === "text" ? "文本" : node.type === "config" ? "配置" : node.type === "video" ? "视频" : node.type === "audio" ? "音频" : "图片"}
-        </span>
-        <strong className="board-node-title" title={node.title}>{node.title || node.ref}</strong>
+        {settingRole ? (
+          <span className={`board-node-kind is-role is-${settingRole}`}>{SETTING_ROLE_LABEL[settingRole]}</span>
+        ) : (
+          <span className={`board-node-kind is-${node.type}`}>
+            {node.type === "text" ? "文本" : node.type === "config" ? "配置" : node.type === "video" ? "视频" : node.type === "audio" ? "音频" : "图片"}
+          </span>
+        )}
+        <strong className="board-node-title" title={node.title}>{displayTitle || node.ref}</strong>
         {node.type === "text" && !editing ? <button type="button" className="board-text-edit-button" title="编辑文本" aria-label="编辑文本" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(); onStartEdit(); }}><Pencil size={13} /></button> : null}
         {node.type === "image" || node.type === "video" || node.type === "audio"
           ? <StatusBadge status={node.status} />
