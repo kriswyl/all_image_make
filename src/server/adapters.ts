@@ -1,5 +1,6 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
+import { unsupportedLabels } from "../shared/channel-fields.js";
 import { TTS_DEFAULT_VOICE } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
@@ -12,6 +13,8 @@ export interface PreparedRequest {
   formData?: FormData;
   diagnosticBody?: Record<string, unknown>;
   allowPrivateNetwork: boolean;
+  /** 这次请求里设了、但当前渠道不认的字段（中文名），用于诊断和生成前提示 */
+  ignoredFields?: string[];
   /** 等待远端响应的超时时长（毫秒） */
   timeoutMs?: number;
 }
@@ -668,9 +671,29 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   if (body) headers["Content-Type"] = "application/json";
   let url = joinEndpoint(channel.baseUrl, endpoint);
   url = applyAuth(url, headers, channel, key);
+  // 设了但渠道不认的字段：不拦着生成，但要能告诉用户为什么「填了没反应」
+  const ignoredFields = unsupportedLabels(channel.adapterType, {
+    negativePrompt: input.negativePrompt,
+    aspectRatio: input.aspectRatio,
+    ratio: input.ratio,
+    duration: input.duration,
+    resolution: input.resolution,
+    audio: input.audio,
+    seed: input.seed,
+    watermark: input.watermark,
+    size: input.size,
+    imageSize: input.imageSize,
+    quality: input.quality,
+    style: input.style,
+    background: input.background,
+    outputFormat: input.outputFormat,
+    moderation: input.moderation,
+    count: input.count,
+  });
   return {
     url, method: "POST", headers, body, formData, diagnosticBody,
     allowPrivateNetwork: channel.allowPrivateNetwork,
+    ...(ignoredFields.length ? { ignoredFields } : {}),
     timeoutMs: normalizeTimeout(input.timeoutMs),
   };
 }
@@ -702,6 +725,7 @@ export function requestForDiagnostic(request: PreparedRequest) {
     method: request.method,
     headers: redactHeaders(request.headers),
     body: request.diagnosticBody ?? summarizeImageData(request.body ?? null),
+    ...(request.ignoredFields?.length ? { ignored: request.ignoredFields } : {}),
   };
 }
 

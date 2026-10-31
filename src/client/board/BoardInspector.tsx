@@ -15,6 +15,8 @@ import {
   supportedVideoModes, VIDEO_CAPABILITIES, VIDEO_DEFAULTS, VIDEO_MODE_LABELS, type VideoAdapter,
 } from "../../shared/video-capabilities";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
+import { unsupportedLabels } from "../../shared/channel-fields";
+import type { AdapterType } from "../../shared/types";
 import type { Asset } from "../../shared/types";
 import { ModelPicker } from "../chat/ModelPicker";
 import { StylePresetPicker } from "../chat/StylePresetPicker";
@@ -598,6 +600,28 @@ export function BoardInspector({
                 </>
               ) : (
                 <>
+                  {(() => {
+                    const ignored = unsupportedLabels((effectiveAliasInfo?.adapterType ?? "") as AdapterType, {
+                      negativePrompt: node.negativePrompt,
+                      aspectRatio: node.aspectRatio,
+                      ratio: node.ratio,
+                      duration: node.durationSeconds,
+                      resolution: node.resolution,
+                      audio: node.audio,
+                      seed: node.seed,
+                      watermark: node.watermark,
+                      size: node.size,
+                      imageSize: node.imageSize,
+                      quality: node.quality,
+                      style: node.style,
+                      background: node.background,
+                      outputFormat: node.outputFormat,
+                      moderation: node.moderation,
+                    });
+                    return ignored.length
+                      ? <p className="board-inspector-hint">当前渠道会忽略：{ignored.join("、")}</p>
+                      : null;
+                  })()}
                   {sizeMode === "none" ? (
                     <p className="board-inspector-hint">Midjourney 的尺寸由画幅参数决定，这里不单独设置。</p>
                   ) : (

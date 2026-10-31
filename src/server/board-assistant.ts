@@ -1,5 +1,6 @@
 import { BOARD_LIMITS, composeConfigPrompt, directInputLinks, type BoardNode } from "../shared/board.js";
 import type { AppDatabase, BoardRecord } from "./db.js";
+import { unsupportedLabels } from "../shared/channel-fields.js";
 import { resolveAlias, type CapabilityAlias } from "./capabilities.js";
 import { resolveBoardVideoSelection } from "./board-video-selection.js";
 import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities.js";
@@ -52,8 +53,8 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     const resolved = kind === "text" ? null : resolveAlias(candidates, node.model, kind, fallback);
     if (kind !== "text" && !resolved) errors.push("没有可用的对应模型");
     if (kind === "video" && links.some((link) => link.node.type === "video" && link.node.assetId)) warnings.push("参考视频会上传至渠道配置的图床，可能可通过公网访问");
+    const channel = resolved ? db.getChannel(resolved.channelId) : null;
     if (kind === "video" && resolved) {
-      const channel = db.getChannel(resolved.channelId);
       if (channel) {
         const check = resolveBoardVideoSelection({ doc: board.doc, config: node, adapterType: channel.adapterType, model: resolved.model }); if (check.error) errors.push(check.error);
         const capability = VIDEO_CAPABILITIES[channel.adapterType as VideoAdapter];
@@ -63,6 +64,27 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
           if (node.audio && !capability.supportsAudio) warnings.push("当前模型不支持生成音频参数");
         }
       }
+    }
+    // 设了但当前渠道不认的字段：生成前就说清楚，别等出图了才发现「比例没生效」
+    if (channel) {
+      const ignored = unsupportedLabels(channel.adapterType, {
+        negativePrompt: node.negativePrompt,
+        aspectRatio: node.aspectRatio,
+        ratio: node.ratio,
+        duration: node.durationSeconds,
+        resolution: node.resolution,
+        audio: node.audio,
+        seed: node.seed,
+        watermark: node.watermark,
+        size: node.size,
+        imageSize: node.imageSize,
+        quality: node.quality,
+        style: node.style,
+        background: node.background,
+        outputFormat: node.outputFormat,
+        moderation: node.moderation,
+      });
+      if (ignored.length) warnings.push(`当前渠道会忽略：${ignored.join("、")}`);
     }
     if (node.storyboard) {
       const project = db.getStoryboardProject(node.storyboard.projectId);

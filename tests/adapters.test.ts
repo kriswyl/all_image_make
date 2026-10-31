@@ -52,6 +52,23 @@ describe("adapter request building", () => {
     });
   });
 
+  it("把渠道不认的字段记进诊断，raw 透传的不算", () => {
+    const gemini: DbChannel = {
+      ...channel, adapterType: "gemini-content", endpoint: "/v1beta/models/{model}:generateContent", models: ["gemini-3-pro"],
+    };
+    const request = buildGenerationRequest(gemini, {
+      channelId: gemini.id, model: "gemini-3-pro", prompt: "雨夜", negativePrompt: "水印", imageSize: "2K",
+    }, "secret");
+    expect(request.ignoredFields).toEqual(["负面提示词"]);
+    expect(requestForDiagnostic(request).ignored).toEqual(["负面提示词"]);
+
+    // 显式走 rawParameters 的字段是用户自己要求的透传，不该被报成「被忽略」
+    const openAi = buildGenerationRequest(channel, {
+      channelId: channel.id, model: "image-model", prompt: "city", rawParameters: { seed: 42 },
+    }, "secret");
+    expect(openAi.ignoredFields).toBeUndefined();
+  });
+
   it("builds an OpenAI multipart edit request without exposing image data", () => {
     const request = buildGenerationRequest(channel, {
       channelId: channel.id, model: "image-model", prompt: "restyle", referenceImages: [referenceImage, referenceImage2],
