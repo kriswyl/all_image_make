@@ -11,6 +11,7 @@
 import type { AdapterType, TaskKind } from "../shared/types.js";
 import { channelKindOf } from "../shared/kinds.js";
 import { isMidjourneyActionModel } from "../shared/midjourney.js";
+import { OPENAI_SIZE_PRESETS } from "../shared/image-sizes.js";
 import type { DbChannel } from "./db.js";
 
 export type CapabilityKind = TaskKind;
@@ -89,7 +90,8 @@ function aliasBaseFor(model: string, kind: CapabilityKind) {
  * 各类适配器的能力摘要。
  *
  * 这些是**代码里真实支持的参数**，不是抄来的宣传词：
- * 尺寸选项来自 `App.tsx` 的参数面板，模式列表来自 `types.ts` 的 `WanVideoMode`。
+ * 尺寸预设来自 `shared/image-sizes.ts`（工作台和画布共用同一份），并且允许直接写「宽x高」；
+ * 模式列表来自 `types.ts` 的 `WanVideoMode`。
  * 大脑据此决定要不要 `ask` 追问尺寸，写错了会引导它问出这个渠道答不上的问题。
  *
  * **尺寸一定要标出参数名**：以前 gemini 那行只写「尺寸=1K|2K|4K」，大脑于是去写
@@ -97,10 +99,12 @@ function aliasBaseFor(model: string, kind: CapabilityKind) {
  * （需求.md 问题 1 的现场）。标上参数名，说的和做的才对得上。
  */
 const IMAGE_TRAITS: Record<string, string> = {
-  "openai-images": "尺寸(size)=1024x1024|1536x1024|1024x1536  图生图=✔  支持多张参考图",
-  "openai-chat-image": "尺寸(size)=1024x1024|1536x1024|1024x1536  图生图=✔",
+  // 尺寸列表跟着 shared/image-sizes.ts 走：以前两边各写一份，UI 加了自定义尺寸、
+  // 能力清单还停在三种，助手就会照着旧清单回答「只支持这三种」
+  "openai-images": `尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」  图生图=✔  支持多张参考图`,
+  "openai-chat-image": `尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」  图生图=✔`,
   "gemini-content": "宽高比(aspectRatio)=1:1|16:9|9:16|3:2|2:3|21:9  尺寸(imageSize)=1K|2K|4K  图生图=✔",
-  "generic-json": "尺寸(size)=1024x1024  图生图=✔",
+  "generic-json": "尺寸(size)=1024x1024，也可自定义「宽x高」  图生图=✔",
   "midjourney": "原生参数(--ar/--v/--no)  图生图=✔  结果=四宫格  支持 U/V/R 后续动作",
 };
 
