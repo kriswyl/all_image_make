@@ -1,6 +1,6 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
-import { unsupportedLabels } from "../shared/channel-fields.js";
+import { normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
 import { TTS_DEFAULT_VOICE } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
@@ -254,6 +254,13 @@ function midjourneyPrompt(input: GenerationInput) {
 }
 
 export function buildGenerationRequest(channel: DbChannel, input: GenerationInput, key: string): PreparedRequest {
+  // 画幅统一到渠道认的那一个字段：用户在画布上填的是「画幅比例」这一个概念，
+  // 万相 / Seedance 认 ratio、可灵 / Grok / Gemini / MJ 认 aspectRatio。
+  // 这里换成局部副本，调用方的 input 不受影响。
+  const aspect = normalizeAspectFields(channel.adapterType, { aspectRatio: input.aspectRatio, ratio: input.ratio });
+  if (aspect.aspectRatio !== input.aspectRatio || aspect.ratio !== input.ratio) {
+    input = { ...input, aspectRatio: aspect.aspectRatio, ratio: aspect.ratio };
+  }
   const references = referenceImages(input);
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
   if (references.length && channel.adapterType === "openai-images"

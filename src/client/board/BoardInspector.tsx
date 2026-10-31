@@ -564,13 +564,12 @@ export function BoardInspector({
                       <label className="board-field">
                         <span>画幅比例（可选）</span>
                         <select
-                          value={(videoCapability?.ratioField === "ratio" ? node.ratio : node.aspectRatio) ?? ""}
+                          // 只存 aspectRatio：万相 / Seedance 的 ratio 由适配器按渠道自动转，
+                          // 界面不再需要记住「这个渠道用哪个字段名」
+                          value={(node.aspectRatio ?? node.ratio) ?? ""}
                           onChange={(event) => {
                             const value = event.target.value || undefined;
-                            // 两家字段名不同：写错一个等于没写，所以切换时把另一个清掉
-                            onUpdateNode(node.id, (videoCapability?.ratioField === "ratio"
-                              ? { ratio: value, aspectRatio: undefined }
-                              : { aspectRatio: value, ratio: undefined }) as Partial<BoardNode>);
+                            onUpdateNode(node.id, { aspectRatio: value, ratio: undefined } as Partial<BoardNode>);
                           }}
                         >
                           <option value="">自动</option>

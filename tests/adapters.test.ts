@@ -655,3 +655,20 @@ describe("Kling 原生格式请求", () => {
     })).toThrow(/按顺序/);
   });
 });
+
+describe("画幅字段自动转换", () => {
+  it("万相收到 aspectRatio 会写成 ratio", () => {
+    const request = buildGenerationRequest(wanVideoChannel, {
+      channelId: wanVideoChannel.id, model: "wan3.0-video", prompt: "雨夜", aspectRatio: "16:9", duration: 5,
+    }, "secret");
+    expect((request.body as { parameters: { ratio?: string } }).parameters.ratio).toBe("16:9");
+  });
+
+  it("可灵收到 ratio 会写成 aspect_ratio，adaptive 交给默认", () => {
+    const request = klingRequest({ prompt: "cat", duration: 5, resolution: "720p", ratio: "9:16" });
+    expect((request.body as { settings: { aspect_ratio?: string } }).settings.aspect_ratio).toBe("9:16");
+
+    const adaptive = klingRequest({ prompt: "cat", duration: 5, resolution: "720p", ratio: "adaptive" });
+    expect((adaptive.body as { settings: { aspect_ratio?: string } }).settings.aspect_ratio).toBe("16:9");
+  });
+});
