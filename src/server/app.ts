@@ -1249,8 +1249,17 @@ export function createApp(options: { dataDir?: string } = {}) {
     const conversation = db.getConversation(id);
     if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const patch = conversationPatchSchema.parse(req.body ?? {}) as ConversationPatch;
-    if (conversation.kind !== "chat" && Object.keys(patch).some((key) => key !== "contextBudget")) {
-      return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "画布助手只允许修改上下文预算", crypto.randomUUID()));
+    // 画布线程只开放这两类设置：上下文预算，和「用哪个对话模型」。
+    // 模型是成对切的，只给一半时用现有的另一半补齐，再整体校验一遍，
+    // 免得把 channelId 和 model 拼成上游不认的组合。
+    const boardMutableKeys = new Set(["contextBudget", "brainChannelId", "brainModel"]);
+    if (conversation.kind !== "chat" && Object.keys(patch).some((key) => !boardMutableKeys.has(key))) {
+      return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "画布助手只允许修改上下文预算和对话模型", crypto.randomUUID()));
+    }
+    if (conversation.kind !== "chat" && (patch.brainChannelId !== undefined || patch.brainModel !== undefined)) {
+      const brain = pickBrainChannel(db, patch.brainChannelId ?? conversation.brainChannelId, patch.brainModel ?? conversation.brainModel);
+      patch.brainChannelId = brain.channelId;
+      patch.brainModel = brain.model;
     }
     // 老前端（`currentAssetId`）归一成新字段。只在**没同时给新字段**时生效：
     // 两个都给的话以新的为准，别让一个废弃字段去覆盖用户刚点的操作

@@ -273,6 +273,24 @@ describe("无限画布 API", () => {
     expect(rejected.body.error.code).toBe("BOARD_ASSET_INVALID");
   });
 
+  it("画布线程可以换对话模型，但其它会话设置仍然拒绝", async () => {
+    const { app, context } = await tempApp();
+    const channel = addChatChannel(context.db);
+    const board = await createBoard(app);
+
+    const switched = await request(app)
+      .patch(`/api/conversations/${board.threadId}`)
+      .send({ brainChannelId: channel.id, brainModel: "test-chat" })
+      .expect(200);
+    expect(switched.body.data.brainModel).toBe("test-chat");
+
+    const rejected = await request(app)
+      .patch(`/api/conversations/${board.threadId}`)
+      .send({ title: "改个名" })
+      .expect(400);
+    expect(rejected.body.error.code).toBe("CONVERSATION_NOT_CHAT");
+  });
+
   it("无限画布线程不能访问脚本文档 / 对话上传", async () => {
     const { app, context } = await tempApp();
     addChatChannel(context.db);
