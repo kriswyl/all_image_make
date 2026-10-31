@@ -5,6 +5,8 @@ import { api } from "../api";
 import type { StoryboardProject, StoryboardProjectData } from "../../shared/storyboard-project";
 import type { Asset } from "../../shared/types";
 import { StoryboardPreview } from "./StoryboardPreview";
+import { StylePresetPicker } from "./StylePresetPicker";
+import { applyStyleSuffix, stripStyleSuffix, type StylePreset } from "../../shared/style-presets";
 
 type Shot = StoryboardProjectData["shots"][number];
 const emptyShot = (): Shot => ({ id: crypto.randomUUID(), prompt: "", duration: 5, character: "", scene: "", characterVersions: {}, sceneVersionId: "", props: "", propVersions: {}, sourceText: "", dialogue: "", speaker: "", shotSize: "", cameraMove: "", videoPrompt: "", soundEffect: "" });
@@ -22,6 +24,7 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
   const [error, setError] = useState("");
   const [dirty, setDirty] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [splitSuggestion, setSplitSuggestion] = useState<{ shotId: string; shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> } | null>(null);
   const [picker, setPicker] = useState<{ kind: "characters" | "scenes" | "props"; index: number; variantId?: string } | null>(null);
   useEffect(() => {
@@ -33,6 +36,23 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
   const close = () => { if (!busy && (!dirty || window.confirm("还有未保存的修改，确定关闭？"))) onClose(); };
   useEffect(() => { const handle = (event: KeyboardEvent) => { if (event.key === "Escape") { if (previewOpen) setPreviewOpen(false); else if (picker) setPicker(null); else close(); } }; window.addEventListener("keydown", handle); return () => window.removeEventListener("keydown", handle); });
   function change(next: StoryboardProjectData) { setData(next); setDirty(true); }
+  /** 套用/清除风格模板：先按上一套的原文剥掉，再拼新的，来回切不会越拼越长 */
+  function applyStylePreset(preset: StylePreset | null) {
+    if (!data) return;
+    const previousName = data.brief.style?.trim() ?? "";
+    const previous = previousName ? stylePresets.find((item) => item.name === previousName)?.prompt : undefined;
+    const suffix = preset?.prompt ?? "";
+    change({
+      ...data,
+      brief: { ...data.brief, style: preset?.name ?? "" },
+      shots: data.shots.map((shot) => ({
+        ...shot,
+        prompt: suffix
+          ? applyStyleSuffix(shot.prompt, { prompt: suffix }, previous)
+          : stripStyleSuffix(shot.prompt, previous),
+      })),
+    });
+  }
   function changeShot(index: number, patch: Partial<Shot>) { if (!data) return; change({ ...data, shots: data.shots.map((shot, i) => i === index ? { ...shot, ...patch } : shot) }); }
   function move(index: number, delta: number) {
     if (!data || index + delta < 0 || index + delta >= data.shots.length) return;
@@ -115,6 +135,12 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
           </aside>
           <main className="story-review-main">
             <label>项目名称<input value={data.name} onChange={(e) => change({ ...data, name: e.target.value })} maxLength={80} /></label>
+            <div className="story-review-style">
+              <span>风格模板<small>套用到全部镜头的提示词末尾</small></span>
+              <StylePresetPicker value="" valueName={data.brief.style} onPresets={setStylePresets}
+                onChange={applyStylePreset}
+                toast={(kind, text) => onToast?.(kind === "success" ? "ok" : "error", text)} />
+            </div>
             <details className="story-review-settings"><summary>创作目标与拆镜参数</summary>
               <div className="story-review-fields" style={{ marginTop: 12 }}>{([ ["contentType", "内容类型"], ["duration", "目标时长"], ["aspectRatio", "画面比例"], ["style", "视觉风格"], ["density", "拆镜密度"], ["fidelity", "原文处理要求"] ] as const).map(([field, label]) => <label key={field}>{label}<input value={data.brief[field]} onChange={(e) => change({ ...data, brief: { ...data.brief, [field]: e.target.value } })} /></label>)}</div>
               <small>用于记录和核对创作目标；修改后不会自动重写已生成的镜头。</small>

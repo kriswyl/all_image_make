@@ -17,6 +17,8 @@ import {
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import type { Asset } from "../../shared/types";
 import { ModelPicker } from "../chat/ModelPicker";
+import { StylePresetPicker } from "../chat/StylePresetPicker";
+import type { StylePreset } from "../../shared/style-presets";
 import { api } from "../api";
 
 export interface BoardImageAlias {
@@ -44,6 +46,7 @@ export function BoardInspector({
   audioAliases, defaultSpeechAlias, defaultMusicAlias,
   onUpdateNode, onUpdateEdge, onDeleteNode, onPreview, onPickImage, onRemoveAsset,
   onGenerate, onStopTask, onRetryTask, onExtractFrame, onCompareVersions, onClose,
+  onApplyStyle,
 }: {
   view: BoardView;
   node: BoardNode | null;
@@ -67,6 +70,8 @@ export function BoardInspector({
   onRetryTask: (taskId: string) => void;
   onExtractFrame: (nodeId: string) => void;
   onCompareVersions: (nodeId: string) => void;
+  /** 套用风格模板；nodeIds 不传 = 整块画布。只用到 id 和 prompt 两个字段 */
+  onApplyStyle: (preset: Pick<StylePreset, "id" | "prompt"> | null, nodeIds?: string[]) => void;
   onClose: () => void;
 }) {
   const [titleDraft, setTitleDraft] = useState("");
@@ -531,6 +536,16 @@ export function BoardInspector({
                   ) : null}
                   <details className="board-advanced">
                     <summary>高级参数</summary>
+                    <div className="board-style-field">
+                      <span>风格模板</span>
+                      <StylePresetPicker
+                        value={node.stylePresetId ?? ""}
+                        onChange={(preset) => onApplyStyle(preset, [node.id])}
+                      />
+                      {"styleSuffix" in node && node.styleSuffix ? (
+                        <button type="button" className="secondary-button compact" onClick={() => onApplyStyle({ id: node.stylePresetId ?? "", prompt: node.styleSuffix! }, undefined)}>套用到整块画布</button>
+                      ) : null}
+                    </div>
                     <div className="board-inspector-grid">
                       <label className="board-field">
                         <span>随机种子（可选）</span>
@@ -618,6 +633,16 @@ export function BoardInspector({
                   ) : null}
                   <details className="board-advanced">
                     <summary>高级参数</summary>
+                    <div className="board-style-field">
+                      <span>风格模板</span>
+                      <StylePresetPicker
+                        value={node.stylePresetId ?? ""}
+                        onChange={(preset) => onApplyStyle(preset, [node.id])}
+                      />
+                      {"styleSuffix" in node && node.styleSuffix ? (
+                        <button type="button" className="secondary-button compact" onClick={() => onApplyStyle({ id: node.stylePresetId ?? "", prompt: node.styleSuffix! }, undefined)}>套用到整块画布</button>
+                      ) : null}
+                    </div>
                     <label className="board-field">
                       <span>负向提示词（可选）</span>
                       <textarea

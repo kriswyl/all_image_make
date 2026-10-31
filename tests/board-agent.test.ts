@@ -327,6 +327,37 @@ describe("无限画布 Agent 工具", () => {
     expect(prompt).not.toContain("分镜表");
   });
 
+  it("set_style 套用、切换、清除风格，不影响别的节点", async () => {
+    const { context } = await tempApp();
+    const board = createBoard(context.db, { title: "风格" });
+    const ctx = toolContext(context, board.threadId);
+    await runAgentTool("board_apply", {
+      ops: [
+        { op: "add_node", tempId: "a", type: "image", x: 0, y: 0, text: "雨夜街道" },
+        { op: "add_node", tempId: "b", type: "image", x: 400, y: 0, text: "清晨早餐铺" },
+      ],
+    }, ctx);
+
+    const promptOf = (node: (typeof doc.nodes)[number]) => ("prompt" in node ? node.prompt ?? "" : "");
+    await runAgentTool("board_apply", { ops: [{ op: "set_style", style: "写实电影感" }] }, ctx);
+    let doc = context.db.getBoardRecord(board.id)!.doc;
+    expect(promptOf(doc.nodes[0]!)).toContain("35mm");
+    expect(promptOf(doc.nodes[1]!)).toContain("35mm");
+
+    // 换风格：上一段要剥掉，不能越拼越长
+    await runAgentTool("board_apply", { ops: [{ op: "set_style", style: "黑白纪实" }] }, ctx);
+    doc = context.db.getBoardRecord(board.id)!.doc;
+    expect(promptOf(doc.nodes[0]!)).not.toContain("35mm");
+    expect(promptOf(doc.nodes[0]!)).toContain("黑白摄影");
+
+    // 只清一个节点：另一个保持不动
+    await runAgentTool("board_apply", { ops: [{ op: "set_style", style: "黑白纪实", nodeRefs: ["n1"], clear: true }] }, ctx);
+    doc = context.db.getBoardRecord(board.id)!.doc;
+    expect(promptOf(doc.nodes[0]!)).toBe("雨夜街道");
+    expect("styleSuffix" in doc.nodes[0]! ? doc.nodes[0]!.styleSuffix : undefined).toBeUndefined();
+    expect(promptOf(doc.nodes[1]!)).toContain("黑白摄影");
+  });
+
   it("arrange 把节点排成一列并归入同名分组", async () => {
     const { context } = await tempApp();
     const board = createBoard(context.db, { title: "排版" });

@@ -866,6 +866,7 @@ export function BoardWorkspace({
             onRetryTask={(taskId) => void retryBoardTask(taskId)}
             onExtractFrame={(nodeId) => void extractFrame(nodeId)}
             onCompareVersions={setVersionNodeId}
+            onApplyStyle={(preset, nodeIds) => board.applyStyle(preset, nodeIds)}
             onClose={() => board.setSelection([])}
           />
         ) : null}

@@ -15,6 +15,7 @@ import {
   type BoardDoc, type BoardEdge, type BoardNode, type ConfigBoardNode,
 } from "../shared/board.js";
 import { arrangePositions } from "../shared/board-layout.js";
+import { applyStyleSuffix, stripStyleSuffix } from "../shared/style-presets.js";
 import type { BoardOp } from "../shared/board-ops.js";
 import { VIDEO_MODE_LABELS } from "../shared/video-capabilities.js";
 import { assertDocAssets } from "./board.js";
@@ -312,6 +313,35 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
           ? { ...item, x: op.x, y: op.y, updatedAt: at }
           : item);
         updated.add(ref);
+        continue;
+      }
+
+      if (op.op === "set_style") {
+        const preset = db.findStylePreset(op.style);
+        const suffix = preset?.prompt ?? op.style;
+        const targetIds = op.nodeRefs?.length
+          ? new Set([...new Set(op.nodeRefs.map(resolve))].map((ref) => nodeOf(ref).id))
+          : null;
+        let changed = 0;
+        doc.nodes = doc.nodes.map((node) => {
+          if (targetIds && !targetIds.has(node.id)) return node;
+          if (!("prompt" in node)) return node;
+          const prompt = node.prompt ?? "";
+          const nextPrompt = op.clear
+            ? stripStyleSuffix(prompt, node.styleSuffix)
+            : applyStyleSuffix(prompt, { prompt: suffix }, node.styleSuffix);
+          if (nextPrompt === prompt && !op.clear) return node;
+          changed += 1;
+          updated.add(node.ref);
+          return {
+            ...node,
+            prompt: nextPrompt,
+            styleSuffix: op.clear ? undefined : suffix,
+            stylePresetId: op.clear ? undefined : preset?.id,
+            updatedAt: at,
+          } as BoardNode;
+        });
+        if (!changed) throw new AppError("BOARD_OP_INVALID", "没有可套用风格的节点（需要有提示词）", 400);
         continue;
       }
 

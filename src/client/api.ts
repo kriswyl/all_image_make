@@ -7,6 +7,7 @@ import type {
 } from "../shared/board";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template";
 import type { StoryboardPreviewBoard, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
+import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -263,6 +264,11 @@ export const api = {
   storyboardProject: (id: string) => request<StoryboardProject>(`/api/storyboard-projects/${id}`),
   splitStoryboardShot: (id: string, revision: number, shotId: string) => request<{ shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> }>(`/api/storyboard-projects/${id}/split`, { method: "POST", body: JSON.stringify({ revision, shotId }) }),
   storyboardPreview: (id: string) => request<StoryboardPreviewBoard[]>(`/api/storyboard-projects/${id}/preview`),
+  stylePresets: () => request<StylePreset[]>("/api/style-presets"),
+  createStylePreset: (input: StylePresetInput) => request<StylePreset>("/api/style-presets", { method: "POST", body: JSON.stringify(input) }),
+  updateStylePreset: (id: string, input: StylePresetInput) => request<StylePreset>(`/api/style-presets/${id}`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteStylePreset: (id: string) => request<{ deleted: true }>(`/api/style-presets/${id}`, { method: "DELETE" }),
+
   /** 导出剪映草稿：素材复制进目标目录下的同名草稿文件夹 */
   exportStoryboardDraft: (id: string, input: { boardId: string; targetDir: string; name?: string }) =>
     request<{ path: string; clips: number; skipped: number; durationSeconds: number }>(`/api/storyboard-projects/${id}/draft`, { method: "POST", body: JSON.stringify(input) }),

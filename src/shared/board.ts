@@ -105,6 +105,9 @@ const generationParamShape = {
   aspectRatio: z.string().max(20).optional(),
   /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio`，两个字段互不顶替 */
   ratio: z.string().max(20).optional(),
+  /** 用过的风格模板：换风格时靠 styleSuffix 把上一段剥掉，不会越拼越长 */
+  stylePresetId: z.string().max(80).optional(),
+  styleSuffix: z.string().max(400).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
@@ -198,6 +201,9 @@ export const configNodeSchema = z.object({
   aspectRatio: z.string().max(20).optional(),
   /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio`，两个字段互不顶替 */
   ratio: z.string().max(20).optional(),
+  /** 用过的风格模板：换风格时靠 styleSuffix 把上一段剥掉，不会越拼越长 */
+  stylePresetId: z.string().max(80).optional(),
+  styleSuffix: z.string().max(400).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),

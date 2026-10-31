@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { BUILTIN_STYLE_PRESETS, type StylePreset, type StylePresetInput } from "../shared/style-presets.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset, TaskKind } from "../shared/types.js";
@@ -101,6 +102,11 @@ function canvasIdsFromRow(value: unknown): string[] {
   return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
 }
 
+/** 风格模板的领域错误：db 层不依赖 AppError，路由层再翻成 HTTP 状态码 */
+export class StylePresetError extends Error {
+  constructor(public readonly code: "STYLE_NOT_FOUND" | "STYLE_BUILTIN", message: string) { super(message); }
+}
+
 export class AppDatabase {
   readonly dataDir: string;
   readonly filePath: string;
@@ -141,9 +147,82 @@ export class AppDatabase {
     // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
     // 否则面板里会出现一个「林小满、老陈」的卡片，谁都没法单独绑设定图。
     this.normalizeStoryboardCharacterNames();
+    // 内置风格模板按 id 幂等补齐：升级后新加的内置项也能出现在老库里，
+    // 用户改过的自定义项不受影响（它们的 id 是随机 uuid）
+    this.ensureBuiltinStylePresets();
 
     this.currentAssetsDir = this.resolveAssetsDir();
     fs.mkdirSync(this.currentAssetsDir, { recursive: true });
+  }
+
+  private ensureBuiltinStylePresets() {
+    const at = now();
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO style_presets (id, name, description, prompt, negative, builtin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+    );
+    for (const preset of BUILTIN_STYLE_PRESETS) {
+      insert.run(preset.id, preset.name, preset.description, preset.prompt, preset.negative, at, at);
+    }
+  }
+
+  /** 内置在前、自定义在后，同组按创建时间 */
+  listStylePresets(): StylePreset[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM style_presets ORDER BY builtin DESC, created_at ASC, rowid ASC",
+    ).all() as DbRow[];
+    return rows.map((row) => this.stylePresetFromRow(row));
+  }
+
+  getStylePreset(id: string): StylePreset | null {
+    const row = this.db.prepare("SELECT * FROM style_presets WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? this.stylePresetFromRow(row) : null;
+  }
+
+  /** 按 id 或名字找：大脑和用户都可能只记得名字 */
+  findStylePreset(nameOrId: string): StylePreset | null {
+    const key = nameOrId.trim();
+    if (!key) return null;
+    return this.getStylePreset(key) ?? this.listStylePresets().find((item) => item.name === key) ?? null;
+  }
+
+  saveStylePreset(input: StylePresetInput, id?: string): StylePreset {
+    const at = now();
+    if (id) {
+      const existing = this.getStylePreset(id);
+      if (!existing) throw new StylePresetError("STYLE_NOT_FOUND", "风格模板不存在");
+      if (existing.builtin) throw new StylePresetError("STYLE_BUILTIN", "内置风格不能修改，可以复制一份再改");
+      this.db.prepare(
+        "UPDATE style_presets SET name = ?, description = ?, prompt = ?, negative = ?, updated_at = ? WHERE id = ?",
+      ).run(input.name, input.description, input.prompt, input.negative, at, id);
+      return this.getStylePreset(id)!;
+    }
+    const newId = crypto.randomUUID();
+    this.db.prepare(
+      `INSERT INTO style_presets (id, name, description, prompt, negative, builtin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+    ).run(newId, input.name, input.description, input.prompt, input.negative, at, at);
+    return this.getStylePreset(newId)!;
+  }
+
+  deleteStylePreset(id: string): void {
+    const existing = this.getStylePreset(id);
+    if (!existing) throw new StylePresetError("STYLE_NOT_FOUND", "风格模板不存在");
+    if (existing.builtin) throw new StylePresetError("STYLE_BUILTIN", "内置风格不能删除");
+    this.db.prepare("DELETE FROM style_presets WHERE id = ?").run(id);
+  }
+
+  private stylePresetFromRow(row: DbRow): StylePreset {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      description: String(row.description ?? ""),
+      prompt: String(row.prompt ?? ""),
+      negative: String(row.negative ?? ""),
+      builtin: Boolean(row.builtin),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   private normalizeStoryboardCharacterNames() {

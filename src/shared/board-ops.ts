@@ -27,6 +27,8 @@ const generationPatchShape = {
   aspectRatio: z.string().max(20).optional(),
   /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio` */
   ratio: z.string().max(20).optional(),
+  stylePresetId: z.string().max(80).optional(),
+  styleSuffix: z.string().max(400).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
@@ -108,6 +110,15 @@ export const boardOpSchema = z.discriminatedUnion("op", [
    * 批量排版：把一组节点排成一列 / 一行 / 网格，坐标由服务端按节点真实宽高计算。
    * 想让「分镜图单独一列」时用这个，而不是连着写十几条 move_node 自己算坐标。
    */
+  z.object({
+    op: z.literal("set_style"),
+    /** 风格模板名或 id；匹配不上就当一句自由风格描述 */
+    style: z.string().trim().min(1).max(200),
+    /** 不填 = 整块画布；给了就只改这几个 */
+    nodeRefs: z.array(z.string().min(1).max(80)).min(1).max(BOARD_LIMITS.maxNodes).optional(),
+    /** true = 只剥掉已套用的风格，不写新的 */
+    clear: z.boolean().optional(),
+  }),
   z.object({
     op: z.literal("arrange"),
     nodeRefs: z.array(z.string().min(1).max(80)).min(1).max(BOARD_LIMITS.maxNodes),

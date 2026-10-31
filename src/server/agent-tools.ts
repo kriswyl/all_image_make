@@ -34,6 +34,7 @@ import { describeAliasChoice, resolveAlias } from "./capabilities.js";
 import { midjourneyUsableButtons } from "../shared/midjourney.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "./diagnose.js";
 import { callBrain, type BrainMessage } from "./brain.js";
+import { applyStyleSuffix } from "../shared/style-presets.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import {
@@ -141,6 +142,8 @@ export const generateSpeechSchema = z.object({
 /** 新流程用的精简分镜模板：不写旧分镜表，直接生成无限画布模板 */
 export const createStoryboardTemplateSchema = z.object({
   title: z.string().trim().max(80).optional(),
+  /** 风格模板：按名字或 id 找内置/自定义；找不到就当成一句自由风格描述用 */
+  style: z.string().trim().max(200).optional(),
   brief: z.object({ contentType: z.string().max(80).optional(), duration: z.string().max(80).optional(), aspectRatio: z.string().max(40).optional(), style: z.string().max(300).optional(), density: z.string().max(80).optional(), fidelity: z.string().max(200).optional() }).optional(),
   characters: z.array(z.object({
     name: nonEmpty(40),
@@ -1230,13 +1233,24 @@ function createStoryboardTemplateTool(
   try {
     const uniqueSettings = (items: Array<{ name: string; prompt?: string }> = []) =>
       [...new Map(items.map((item) => [item.name.trim(), { name: item.name.trim(), prompt: item.prompt ?? "" }])).values()];
+    const styleName = args.style?.trim() ?? "";
+    const preset = styleName ? ctx.db.findStylePreset(styleName) : null;
+    // 找不到模板时把用户这句话当风格用：总比悄悄丢掉好
+    const styleSuffix = preset?.prompt ?? (preset || !styleName ? "" : styleName);
+    const withStyle = (text: string) => styleSuffix ? applyStyleSuffix(text, { prompt: styleSuffix }) : text;
+
     const data = storyboardProjectDataSchema.parse({
       name: args.title?.trim() || `${ctx.conversation.title} · 分镜`,
-      brief: args.brief ?? {},
+      brief: { ...(args.brief ?? {}), ...(styleName && !(args.brief?.style ?? "").trim() ? { style: preset?.name ?? styleName } : {}) },
       characters: uniqueSettings(args.characters),
       scenes: uniqueSettings(args.scenes),
       props: uniqueSettings(args.props),
-      shots: args.shots.map((shot) => ({ ...shot, id: crypto.randomUUID() })),
+      shots: args.shots.map((shot) => ({
+        ...shot,
+        prompt: withStyle(shot.prompt),
+        ...(shot.videoPrompt?.trim() ? { videoPrompt: withStyle(shot.videoPrompt) } : {}),
+        id: crypto.randomUUID(),
+      })),
     });
     const input = buildStoryboardTemplateInput({
       name: data.name,
@@ -1248,7 +1262,7 @@ function createStoryboardTemplateTool(
     ctx.db.createStoryboardProject(template.id, ctx.conversation.id, data);
     const groupCount = template.doc.groups?.length ?? 0;
     return okResult(
-      `已生成分镜「${template.name}」：${args.shots.length} 镜。请先审阅、修改或选择镜头，再导入无限画布；不会自动生成。`,
+      `已生成分镜「${template.name}」：${args.shots.length} 镜${styleSuffix ? `，已套用风格「${preset?.name ?? styleSuffix}」` : ""}。请先审阅、修改或选择镜头，再导入无限画布；不会自动生成。`,
       {
         data: {
           templateId: template.id,

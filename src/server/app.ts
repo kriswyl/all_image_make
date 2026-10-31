@@ -9,7 +9,7 @@ import { APP_VERSION } from "../shared/app-config.js";
 import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
 import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../shared/types.js";
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
-import { AppDatabase, type DbChannel, type StoredFileRef } from "./db.js";
+import { AppDatabase, StylePresetError, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
 import { uploadReferenceVideo } from "./reference-video.js";
 import { AppError, TaskRunner, extensionForMime, matchesImageSignature, normalizeError, type MaskImageUpload, type ReferenceImageUpload } from "./tasks.js";
@@ -683,6 +683,45 @@ export function createApp(options: { dataDir?: string } = {}) {
       return node && binding.assetId ? [{ nodeId: node.id, assetId: binding.assetId }] : [];
     }));
     res.status(201).json(ok(template));
+  });
+
+  const stylePresetInputSchema = z.object({
+    name: z.string().trim().min(1).max(40),
+    description: z.string().trim().max(120).default(""),
+    prompt: z.string().trim().min(1).max(400),
+    negative: z.string().trim().max(200).default(""),
+  });
+  const rethrowStyleError = (error: unknown): never => {
+    if (error instanceof StylePresetError) throw new AppError(error.code, error.message, error.code === "STYLE_NOT_FOUND" ? 404 : 400);
+    throw error;
+  };
+
+  app.get("/api/style-presets", (_req, res) => {
+    res.json(ok(db.listStylePresets()));
+  });
+  app.post("/api/style-presets", (req, res) => {
+    const input = stylePresetInputSchema.parse(req.body ?? {});
+    try {
+      res.status(201).json(ok(db.saveStylePreset(input)));
+    } catch (error) {
+      rethrowStyleError(error);
+    }
+  });
+  app.put("/api/style-presets/:id", (req, res) => {
+    const input = stylePresetInputSchema.parse(req.body ?? {});
+    try {
+      res.json(ok(db.saveStylePreset(input, routeParam(req.params.id))));
+    } catch (error) {
+      rethrowStyleError(error);
+    }
+  });
+  app.delete("/api/style-presets/:id", (req, res) => {
+    try {
+      db.deleteStylePreset(routeParam(req.params.id));
+      res.json(ok({ deleted: true }));
+    } catch (error) {
+      rethrowStyleError(error);
+    }
   });
 
   app.get("/api/templates", (_req, res) => {

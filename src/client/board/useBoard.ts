@@ -11,6 +11,7 @@ import {
   type BoardAudioKind, type BoardDelta, type BoardDoc, type BoardEdge, type BoardEdgeKind, type BoardEdgeRole,
   type BoardGroup, type BoardNode, type BoardNodeType, type BoardView, type BoardViewport, type BoardVideoMode,
 } from "../../shared/board";
+import { applyStyleSuffix, stripStyleSuffix } from "../../shared/style-presets";
 import type { Asset, Task } from "../../shared/types";
 
 const SAVE_DEBOUNCE_MS = 400;
@@ -86,6 +87,8 @@ export interface UseBoardResult {
   addImageNode: (asset: Asset, position?: { x: number; y: number }, title?: string) => BoardNode | null;
   updateNode: (nodeId: string, patch: Partial<BoardNode>) => void;
   updateNodeSilently: (nodeId: string, patch: Partial<BoardNode>) => void;
+  /** 套用/清除风格模板；不传 nodeIds 就是整块画布。一次改完，不逐节点触发保存 */
+  applyStyle: (style: { id: string; prompt: string } | null, nodeIds?: string[]) => void;
   removeNodes: (nodeIds: string[]) => void;
   duplicateNodes: (nodeIds: string[]) => string[];
   autoLayout: () => void;
@@ -466,6 +469,28 @@ export function useBoard(
     } as BoardNode;
     applyLocal((doc) => ({ ...doc, nextRef, nodes: [...doc.nodes, node] }), "add:image");
     return node;
+  }, [applyLocal]);
+
+  const applyStyle = useCallback((style: { id: string; prompt: string } | null, nodeIds?: string[]) => {
+    applyLocal((doc) => ({
+      ...doc,
+      nodes: doc.nodes.map((node) => {
+        if (!("prompt" in node)) return node;
+        if (nodeIds && !nodeIds.includes(node.id)) return node;
+        const prompt = node.prompt ?? "";
+        const next = style
+          ? applyStyleSuffix(prompt, { prompt: style.prompt }, node.styleSuffix)
+          : stripStyleSuffix(prompt, node.styleSuffix);
+        if (next === prompt && !style) return node;
+        return {
+          ...node,
+          prompt: next,
+          styleSuffix: style?.prompt,
+          stylePresetId: style?.id,
+          updatedAt: now(),
+        } as BoardNode;
+      }),
+    }), "style");
   }, [applyLocal]);
 
   const updateNode = useCallback((nodeId: string, patch: Partial<BoardNode>) => {
@@ -1080,6 +1105,7 @@ export function useBoard(
     addImageNode,
     updateNode,
     updateNodeSilently,
+    applyStyle,
     removeNodes,
     duplicateNodes,
     autoLayout,

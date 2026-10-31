@@ -78,6 +78,17 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      -- 风格模板：内置的只读，自定义的可增删改；生成分镜 / 画布时拼到提示词末尾
+      CREATE TABLE IF NOT EXISTS style_presets (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        prompt      TEXT NOT NULL,
+        negative    TEXT NOT NULL DEFAULT '',
+        builtin     INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      );
       -- 对话式 Agent（AGENT_PLAN.md §5）。产物不复制，靠 task_id / asset_id 指向现有表
       CREATE TABLE IF NOT EXISTS conversations (
         id                   TEXT PRIMARY KEY,
