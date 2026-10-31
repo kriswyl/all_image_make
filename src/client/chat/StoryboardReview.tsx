@@ -7,6 +7,7 @@ import type { Asset } from "../../shared/types";
 import { StoryboardPreview } from "./StoryboardPreview";
 import { StylePresetPicker } from "./StylePresetPicker";
 import { applyStyleSuffix, stripStyleSuffix, type StylePreset } from "../../shared/style-presets";
+import { replacePromptClause } from "../../shared/prompt-clauses";
 
 type Shot = StoryboardProjectData["shots"][number];
 const emptyShot = (): Shot => ({ id: crypto.randomUUID(), prompt: "", duration: 5, character: "", scene: "", characterVersions: {}, sceneVersionId: "", props: "", propVersions: {}, sourceText: "", dialogue: "", speaker: "", shotSize: "", cameraMove: "", videoPrompt: "", soundEffect: "" });
@@ -59,10 +60,51 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
     const shots = [...data.shots]; [shots[index], shots[index + delta]] = [shots[index + delta]!, shots[index]!];
     change({ ...data, shots }); setActive(index + delta);
   }
+  /**
+   * 改景别 / 运镜时顺手把对应片段写进提示词。
+   *
+   * 以前这两个字段只在「生成模板」那一刻才拼进去，审阅里改了看不出效果；
+   * 现在改完立刻体现在 prompt（景别）和 videoPrompt（景别 / 运镜）里，
+   * 主体、场景、台词一个字都不动。
+   */
+  function changeShotField(index: number, field: string, value: string) {
+    if (!data) return;
+    const shot = data.shots[index];
+    if (!shot) return;
+    if (field === "shotSize") {
+      changeShot(index, {
+        shotSize: value,
+        prompt: replacePromptClause(shot.prompt, "景别", value),
+        ...(shot.videoPrompt.trim() ? { videoPrompt: replacePromptClause(shot.videoPrompt, "景别", value) } : {}),
+      });
+      return;
+    }
+    if (field === "cameraMove") {
+      changeShot(index, {
+        cameraMove: value,
+        ...(shot.videoPrompt.trim() ? { videoPrompt: replacePromptClause(shot.videoPrompt, "运镜", value) } : {}),
+      });
+      return;
+    }
+    changeShot(index, { [field]: value });
+  }
   function remove(index: number) {
     if (!data || data.shots.length <= 1 || !window.confirm("删除这个镜头？保存后生效，已导入的画布不受影响。")) return;
     const removed = data.shots[index]!; change({ ...data, shots: data.shots.filter((_, i) => i !== index) });
     setSelected((old) => { const next = new Set(old); next.delete(removed.id); return next; }); setActive(Math.max(0, Math.min(index, data.shots.length - 2)));
+  }
+  async function syncToCanvas() {
+    if (!project || !data || busy) return;
+    setBusy(true); setError("");
+    try {
+      const saved = dirty ? await save() : project;
+      if (!saved) return;
+      const result = await api.syncStoryboardCanvas(id);
+      onToast?.("ok", result.nodes
+        ? `已同步 ${result.nodes} 个画布节点${result.conflicts.length ? `；${result.conflicts.length} 块画布刚被改过，已跳过` : ""}`
+        : "画布上没有需要更新的节点");
+    } catch (e) { setError(e instanceof Error ? e.message : "同步失败"); }
+    finally { setBusy(false); }
   }
   async function save(): Promise<StoryboardProject | null> {
     if (!project || !data) return null;
@@ -166,7 +208,7 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
             {shot ? <><div className="story-review-editor-head"><strong>第 {active + 1} 镜</strong><div><button type="button" className="secondary-button compact" disabled={busy || data.shots.length >= 60} onClick={() => void suggestSplit()}>AI 拆成两镜</button><button type="button" className="icon-button" title="上移" disabled={active === 0} onClick={() => move(active, -1)}><ArrowUp size={16} /></button><button type="button" className="icon-button" title="下移" disabled={active === data.shots.length - 1} onClick={() => move(active, 1)}><ArrowDown size={16} /></button><button type="button" className="icon-button danger" title="删除镜头" disabled={data.shots.length <= 1} onClick={() => remove(active)}><Trash2 size={16} /></button></div></div>
               {splitSuggestion?.shotId === shot.id ? <div className="story-split-suggestion"><strong>拆分建议（应用前请核对台词与画面）</strong>{splitSuggestion.shots.map((draft, i) => <article key={i}><b>建议镜头 {i + 1}</b><p>画面：{draft.prompt}</p><p>视频：{draft.videoPrompt || "未填写"}</p><p>台词：{draft.dialogue || "无"}</p><p>原文：{draft.sourceText || "未提供"}</p></article>)}<div><button type="button" className="secondary-button compact" onClick={() => setSplitSuggestion(null)}>放弃建议</button><button type="button" className="primary-button compact" onClick={applySplit}>应用并继续编辑</button></div></div> : null}
               <div className="story-review-fields">
-                {([ ["scene", "场景"], ["character", "角色（多人用、分隔）"], ["props", "道具（多个用、分隔）"], ["shotSize", "景别"], ["cameraMove", "运镜"], ["speaker", "说话人"] ] as const).map(([field, label]) => <label key={field}>{label}<input value={shot[field]} onChange={(e) => changeShot(active, field === "scene" ? { scene: e.target.value, sceneVersionId: "" } : { [field]: e.target.value })} /></label>)}
+                {([ ["scene", "场景"], ["character", "角色（多人用、分隔）"], ["props", "道具（多个用、分隔）"], ["shotSize", "景别"], ["cameraMove", "运镜"], ["speaker", "说话人"] ] as const).map(([field, label]) => <label key={field}>{label}<input value={shot[field]} onChange={(e) => (field === "scene" ? changeShot(active, { scene: e.target.value, sceneVersionId: "" }) : changeShotField(active, field, e.target.value))} /></label>)}
                 {shot.character.split(/[、,，]/).map((name) => name.trim()).filter(Boolean).map((name) => { const setting = data.characters.find((item) => item.name === name); return setting?.variants.length ? <label key={name}>{name}的版本<select value={shot.characterVersions[name] ?? ""} onChange={(e) => changeShot(active, { characterVersions: { ...shot.characterVersions, [name]: e.target.value } })}><option value="">默认设定</option>{setting.variants.map((v) => <option value={v.id} key={v.id}>{v.name}</option>)}</select></label> : null; })}
                 {shot.props.split(/[、,，]/).map((name) => name.trim()).filter(Boolean).map((name) => { const setting = data.props.find((item) => item.name === name); return setting?.variants.length ? <label key={name}>{name}的版本<select value={shot.propVersions[name] ?? ""} onChange={(e) => changeShot(active, { propVersions: { ...shot.propVersions, [name]: e.target.value } })}><option value="">默认设定</option>{setting.variants.map((v) => <option value={v.id} key={v.id}>{v.name}</option>)}</select></label> : null; })}
                 {data.scenes.find((item) => item.name === shot.scene)?.variants.length ? <label>场景版本<select value={shot.sceneVersionId} onChange={(e) => changeShot(active, { sceneVersionId: e.target.value })}><option value="">默认设定</option>{data.scenes.find((item) => item.name === shot.scene)?.variants.map((v) => <option value={v.id} key={v.id}>{v.name}</option>)}</select></label> : null}
@@ -176,7 +218,7 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
             </> : null}
           </main>
         </div>
-        <footer className="story-review-footer"><span>{error ? <span role="alert" className="story-review-error">{error}</span> : dirty ? "有未保存的修改" : "修改不会自动覆盖已导入的画布"}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => setPreviewOpen(true)}>粗剪预览 / 导出</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => void persist(false)}><Check size={15} />保存</button><button type="button" className="primary-button" disabled={busy || !selected.size || selected.size > 30} onClick={() => void persist(true)}>{busy ? <LoaderCircle className="spin" size={15} /> : <LayoutGrid size={15} />}保存并导入所选镜头</button></footer>
+        <footer className="story-review-footer"><span>{error ? <span role="alert" className="story-review-error">{error}</span> : dirty ? "有未保存的修改" : "修改不会自动覆盖已导入的画布"}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => setPreviewOpen(true)}>粗剪预览 / 导出</button><button type="button" className="secondary-button" disabled={busy} onClick={() => void syncToCanvas()}>同步到画布</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => void persist(false)}><Check size={15} />保存</button><button type="button" className="primary-button" disabled={busy || !selected.size || selected.size > 30} onClick={() => void persist(true)}>{busy ? <LoaderCircle className="spin" size={15} /> : <LayoutGrid size={15} />}保存并导入所选镜头</button></footer>
       </>}
     </section>
     {previewOpen && data ? <StoryboardPreview id={id} data={data} onClose={() => setPreviewOpen(false)} /> : null}

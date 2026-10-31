@@ -401,6 +401,36 @@ describe("无限画布模板", () => {
     expect(text("v3")).toContain("运镜：跟拍");
   });
 
+  it("分镜改动可以同步到已导入的画布节点", async () => {
+    const { app, context } = await tempApp(); addChatChannel(context.db);
+    const conversation = context.db.createConversation({ title: "同步", brainChannelId: "brain", brainModel: "mock-chat", videoConfirmPolicy: "auto_only", visionEnabled: true, verbatimPrompt: false });
+    const created = await runAgentTool("create_storyboard_template", {
+      title: "同步测试",
+      shots: [{ prompt: "雨夜街道", shotSize: "中景", videoPrompt: "人物向前走", cameraMove: "跟拍" }],
+    }, contextFor(context, conversation.id));
+    const id = created.result.data?.storyboardProjectId as string;
+    const project = (await request(app).get(`/api/storyboard-projects/${id}`).expect(200)).body.data;
+    const template = (await request(app).post(`/api/storyboard-projects/${id}/templates`)
+      .send({ revision: project.revision, shotIds: [project.data.shots[0].id] }).expect(201)).body.data;
+    const board = (await request(app).post("/api/boards/from-template").send({ templateId: template.id }).expect(201)).body.data;
+
+    // 改分镜：景别 中景→全景，运镜 跟拍→横摇
+    const data = structuredClone(project.data);
+    data.shots[0].shotSize = "全景";
+    data.shots[0].cameraMove = "横摇";
+    await request(app).put(`/api/storyboard-projects/${id}`).send({ revision: project.revision, data }).expect(200);
+
+    const sync = (await request(app).post(`/api/storyboard-projects/${id}/sync-canvas`).expect(200)).body.data;
+    expect(sync.nodes).toBeGreaterThan(0);
+
+    const after = (await request(app).get(`/api/boards/${board.id}`).expect(200)).body.data;
+    const image = after.doc.nodes.find((node: { storyboard?: { role?: string } }) => node.storyboard?.role === "image");
+    const video = after.doc.nodes.find((node: { storyboard?: { role?: string } }) => node.storyboard?.role === "video");
+    expect(image.prompt).toContain("景别：全景");
+    expect(image.prompt).not.toContain("中景");
+    expect(video.prompt).toContain("运镜：横摇");
+  });
+
   it("迁移旧分镜：生成模板和画布，重复调用跳过", async () => {
     const { app, context } = await tempApp();
     addChatChannel(context.db);

@@ -585,6 +585,17 @@ function appendShotClauses(text: string, pairs: Array<[string, string | undefine
   return out;
 }
 
+/** 分镜图提示词：正文 + 景别（正文里提过的不重复拼） */
+export function composeShotImagePrompt(shot: { prompt: string; shotSize?: string }) {
+  return appendShotClauses(shot.prompt, [["景别", shot.shotSize]]);
+}
+
+/** 视频提示词：显式 videoPrompt 优先，缺的景别 / 运镜补齐 */
+export function composeShotVideoPrompt(shot: { prompt: string; videoPrompt?: string; shotSize?: string; cameraMove?: string }) {
+  const base = shot.videoPrompt?.trim() || [shot.prompt, "基于首帧保持角色和场景一致，动作自然连贯。"].filter(Boolean).join("；");
+  return appendShotClauses(base, [["景别", shot.shotSize], ["运镜", shot.cameraMove]], "；");
+}
+
 /** 设定名比对用的归一化键：忽略空白、全半角括号和「·」写法差异 */
 function referenceKey(name: string) {
   return name
@@ -766,14 +777,10 @@ export function buildStoryboardTemplateInput(source: {
       width: 280,
       height: 260,
       title: `第 ${shot.index} 镜 · 分镜图`,
-      text: appendShotClauses(shot.prompt, [["景别", shot.shotSize]]),
+      text: composeShotImagePrompt(shot),
     });
     const videoId = `v${index + 1}`;
-    const videoBase = shot.videoPrompt?.trim() || [
-      shot.prompt,
-      "基于首帧保持角色和场景一致，动作自然连贯。",
-    ].filter(Boolean).join("；");
-    const videoPrompt = appendShotClauses(videoBase, [["景别", shot.shotSize], ["运镜", shot.cameraMove]], "；");
+    const videoPrompt = composeShotVideoPrompt(shot);
     nodes.push({
       tempId: videoId, type: "video", storyboard: storyboard("video"), x: x + 740, y, width: 320, height: 260,
       title: `第 ${shot.index} 镜 · 视频`, text: videoPrompt,

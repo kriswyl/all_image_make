@@ -1568,3 +1568,7 @@
   min-height: 0;
   max-height: none;
 }
+
+/* 提示词里可单维度编辑的片段（景别 / 运镜）：直接在检查器里改，正文其它部分不动 */
+.board-clause-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.board-clause-row .board-field { flex: 1; min-width: 0; }

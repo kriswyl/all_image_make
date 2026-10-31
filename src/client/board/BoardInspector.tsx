@@ -16,6 +16,7 @@ import {
 } from "../../shared/video-capabilities";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import { unsupportedLabels } from "../../shared/channel-fields";
+import { CLAUSE_LABELS, readPromptClauses, replacePromptClause } from "../../shared/prompt-clauses";
 import type { AdapterType } from "../../shared/types";
 import type { Asset } from "../../shared/types";
 import { ModelPicker } from "../chat/ModelPicker";
@@ -538,6 +539,30 @@ export function BoardInspector({
                   ) : null}
                   <details className="board-advanced">
                     <summary>高级参数</summary>
+                    {(() => {
+                      const clauses = readPromptClauses("prompt" in node ? node.prompt ?? "" : "");
+                      const labels = CLAUSE_LABELS.filter((label) => clauses[label]);
+                      if (!labels.length) return null;
+                      return (
+                        <div className="board-clause-row">
+                          {labels.map((label) => (
+                            <label key={`${label}-${clauses[label]}`} className="board-field">
+                              <span>{label}</span>
+                              <input
+                                defaultValue={clauses[label]}
+                                onBlur={(event) => {
+                                  const next = event.target.value.trim();
+                                  if (next === clauses[label]) return;
+                                  if (!("prompt" in node)) return;
+                                  onUpdateNode(node.id, { prompt: replacePromptClause(node.prompt ?? "", label, next) } as Partial<BoardNode>);
+                                }}
+                                onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     <div className="board-style-field">
                       <span>风格模板</span>
                       <StylePresetPicker
@@ -656,6 +681,30 @@ export function BoardInspector({
                   ) : null}
                   <details className="board-advanced">
                     <summary>高级参数</summary>
+                    {(() => {
+                      const clauses = readPromptClauses("prompt" in node ? node.prompt ?? "" : "");
+                      const labels = CLAUSE_LABELS.filter((label) => clauses[label]);
+                      if (!labels.length) return null;
+                      return (
+                        <div className="board-clause-row">
+                          {labels.map((label) => (
+                            <label key={`${label}-${clauses[label]}`} className="board-field">
+                              <span>{label}</span>
+                              <input
+                                defaultValue={clauses[label]}
+                                onBlur={(event) => {
+                                  const next = event.target.value.trim();
+                                  if (next === clauses[label]) return;
+                                  if (!("prompt" in node)) return;
+                                  onUpdateNode(node.id, { prompt: replacePromptClause(node.prompt ?? "", label, next) } as Partial<BoardNode>);
+                                }}
+                                onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     <div className="board-style-field">
                       <span>风格模板</span>
                       <StylePresetPicker

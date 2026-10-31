@@ -31,6 +31,7 @@ import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard.j
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 import { claimBoardFrame, completeBoardFrame } from "./board-frame-broker.js";
 import { resolveStoryboardSelection } from "./storyboard-selection.js";
+import { composeShotImagePrompt, composeShotVideoPrompt } from "./canvas-template.js";
 import { buildDraftContent, buildDraftMeta, type DraftShot } from "./jianying-draft.js";
 import {
   addAssetsToBoard, appendConversationCanvasAssets,
@@ -645,6 +646,52 @@ export function createApp(options: { dataDir?: string } = {}) {
 
     res.json(ok({ path: draftDir, clips: shots.length, skipped, durationSeconds: durationUs / 1_000_000 }));
   }));
+
+  /**
+   * 把分镜的改动同步到已经导入的画布节点。
+   *
+   * 分镜和画布是两份快照：审阅里改了景别 / 运镜 / 提示词，画布上那份不会自己变。
+   * 这里按 storyboard 元数据把每镜重新拼一遍（和导入时用的是同一套拼装规则），
+   * 逐块保存；哪块在别处刚改过就跳过，不硬盖。
+   */
+  app.post("/api/storyboard-projects/:id/sync-canvas", (req, res) => {
+    const project = db.getStoryboardProject(routeParam(req.params.id));
+    if (!project) throw new AppError("STORYBOARD_NOT_FOUND", "分镜不存在", 404);
+    const at = new Date().toISOString();
+    let boards = 0;
+    let nodes = 0;
+    const conflicts: string[] = [];
+
+    for (const record of db.listBoardRecords()) {
+      const doc = structuredClone(record.doc);
+      let changed = false;
+      for (const node of doc.nodes) {
+        const meta = node.storyboard;
+        if (!meta || meta.projectId !== project.id) continue;
+        if (meta.role !== "image" && meta.role !== "video") continue;
+        if (!("prompt" in node)) continue;
+        const shot = project.data.shots.find((item) => item.id === meta.shotId);
+        if (!shot) continue;
+        const next = meta.role === "image" ? composeShotImagePrompt(shot) : composeShotVideoPrompt(shot);
+        if (node.prompt === next) continue;
+        node.prompt = next;
+        node.updatedAt = at;
+        changed = true;
+        nodes += 1;
+      }
+      if (!changed) continue;
+      try {
+        saveBoard(db, record.id, { doc, baseVersion: record.version, reason: "sync_storyboard" });
+        boards += 1;
+      } catch (error) {
+        // 这一块刚被别处改过：跳过它，其它块照常同步
+        if (error instanceof AppError && error.code === "BOARD_VERSION_CONFLICT") { conflicts.push(record.title); continue; }
+        throw error;
+      }
+    }
+
+    res.json(ok({ boards, nodes, conflicts }));
+  });
 
   app.put("/api/storyboard-projects/:id", (req, res) => {
     const input = z.object({ revision: z.number().int().positive(), data: storyboardProjectDataSchema }).parse(req.body);

@@ -264,6 +264,10 @@ export const api = {
   storyboardProject: (id: string) => request<StoryboardProject>(`/api/storyboard-projects/${id}`),
   splitStoryboardShot: (id: string, revision: number, shotId: string) => request<{ shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> }>(`/api/storyboard-projects/${id}/split`, { method: "POST", body: JSON.stringify({ revision, shotId }) }),
   storyboardPreview: (id: string) => request<StoryboardPreviewBoard[]>(`/api/storyboard-projects/${id}/preview`),
+  /** 把分镜改动同步到已导入的画布节点 */
+  syncStoryboardCanvas: (id: string) =>
+    request<{ boards: number; nodes: number; conflicts: string[] }>(`/api/storyboard-projects/${id}/sync-canvas`, { method: "POST" }),
+
   stylePresets: () => request<StylePreset[]>("/api/style-presets"),
   createStylePreset: (input: StylePresetInput) => request<StylePreset>("/api/style-presets", { method: "POST", body: JSON.stringify(input) }),
   updateStylePreset: (id: string, input: StylePresetInput) => request<StylePreset>(`/api/style-presets/${id}`, { method: "PUT", body: JSON.stringify(input) }),
