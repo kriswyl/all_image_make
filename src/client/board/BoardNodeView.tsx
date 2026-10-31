@@ -240,7 +240,7 @@ function ImageNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage
 }) {
   return (
     <>
-      <div className="board-media-body">
+      <div className={`board-media-body${asset ? "" : " is-empty"}`}>
         <button
           type="button"
           className={`board-image-body ${asset ? "has-asset" : ""}`}
@@ -302,7 +302,7 @@ function VideoNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage
 }) {
   return (
     <>
-      <div className="board-media-body">
+      <div className={`board-media-body${asset ? "" : " is-empty"}`}>
         <button
           type="button"
           className={`board-image-body ${asset ? "has-asset" : ""}`}
@@ -361,7 +361,7 @@ function AudioNodeView({ node, asset, upstream, onPreview, onSelect, onPickImage
   const kindLabel = node.audioKind === "music" ? "音乐" : "配音";
   return (
     <>
-      <div className="board-media-body">
+      <div className={`board-media-body${asset ? "" : " is-empty"}`}>
         <button
           type="button"
           className={`board-audio-body ${asset ? "has-asset" : ""}`}

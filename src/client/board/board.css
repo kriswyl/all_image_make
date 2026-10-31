@@ -1549,3 +1549,22 @@
 .board-node:has(.board-node-kind.is-character) { box-shadow: inset 3px 0 0 #d97757, 0 1px 2px rgba(0, 0, 0, .04); }
 .board-node:has(.board-node-kind.is-scene) { box-shadow: inset 3px 0 0 #5aa0d0, 0 1px 2px rgba(0, 0, 0, .04); }
 .board-node:has(.board-node-kind.is-prop) { box-shadow: inset 3px 0 0 #a98bd0, 0 1px 2px rgba(0, 0, 0, .04); }
+
+/* 还没出图 / 出片的节点：提示词才是此时该看的东西。
+   空占位压成一条，把高度让给提示词，不再只露出一行被截断的文字。 */
+.board-media-body.is-empty > .board-image-body,
+.board-media-body.is-empty > .board-video-body,
+.board-media-body.is-empty > .board-audio-body {
+  flex: 0 0 46px;
+  min-height: 46px;
+  max-height: 46px;
+  overflow: hidden;
+}
+/* 图片和视频节点共用 .board-image-empty 这层占位文案；音频保留自己的标签 */
+.board-media-body.is-empty .board-image-empty em { display: none; }
+.board-media-body.is-empty .board-media-prompt-row { flex: 1 1 auto; min-height: 0; }
+.board-media-body.is-empty .board-media-prompt {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+}
