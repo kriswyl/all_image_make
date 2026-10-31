@@ -12,6 +12,8 @@ import type { AdapterType, TaskKind } from "../shared/types.js";
 import { channelKindOf } from "../shared/kinds.js";
 import { isMidjourneyActionModel } from "../shared/midjourney.js";
 import { OPENAI_SIZE_PRESETS } from "../shared/image-sizes.js";
+import { CHANNEL_FIELD_SUPPORT } from "../shared/channel-fields.js";
+import { VIDEO_CAPABILITIES, supportedVideoModes, videoModeLabel, type VideoAdapter } from "../shared/video-capabilities.js";
 import type { DbChannel } from "./db.js";
 
 export type CapabilityKind = TaskKind;
@@ -89,31 +91,80 @@ function aliasBaseFor(model: string, kind: CapabilityKind) {
 /**
  * 各类适配器的能力摘要。
  *
- * 这些是**代码里真实支持的参数**，不是抄来的宣传词：
- * 尺寸预设来自 `shared/image-sizes.ts`（工作台和画布共用同一份），并且允许直接写「宽x高」；
- * 模式列表来自 `types.ts` 的 `WanVideoMode`。
- * 大脑据此决定要不要 `ask` 追问尺寸，写错了会引导它问出这个渠道答不上的问题。
+ * **参数部分不手写**：尺寸、宽高比、负面词、时长、分辨率、模式全部从
+ * `shared/channel-fields.ts` 的矩阵和 `VIDEO_CAPABILITIES` 派生。以前整行是手写字符串，
+ * 矩阵改了这边忘改，就会出现「助手说的和代码做的不一致」——尺寸只剩三种那次就是这么来的。
  *
  * **尺寸一定要标出参数名**：以前 gemini 那行只写「尺寸=1K|2K|4K」，大脑于是去写
- * `size`——而 gemini 只认 `imageSize`，参数被静默丢弃、上游回 400
- * （需求.md 问题 1 的现场）。标上参数名，说的和做的才对得上。
+ * `size`——而 gemini 只认 `imageSize`，参数被静默丢弃、上游回 400。
+ * 标上参数名，说的和做的才对得上。
  */
-const IMAGE_TRAITS: Record<string, string> = {
-  // 尺寸列表跟着 shared/image-sizes.ts 走：以前两边各写一份，UI 加了自定义尺寸、
-  // 能力清单还停在三种，助手就会照着旧清单回答「只支持这三种」
-  "openai-images": `尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」  图生图=✔  支持多张参考图`,
-  "openai-chat-image": `尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」  图生图=✔`,
-  "gemini-content": "宽高比(aspectRatio)=1:1|16:9|9:16|3:2|2:3|21:9  尺寸(imageSize)=1K|2K|4K  图生图=✔",
-  "generic-json": "尺寸(size)=1024x1024，也可自定义「宽x高」  图生图=✔",
-  "midjourney": "原生参数(--ar/--v/--no)  图生图=✔  结果=四宫格  支持 U/V/R 后续动作",
+/**
+ * 图像渠道的宽高比档位。
+ *
+ * 矩阵只说"支不支持 aspectRatio"，具体有哪些取值是渠道的取值域，放在这里；
+ * 和 UI 的下拉不是一个东西（那是全量候选，这里是这个渠道真能接的）。
+ */
+const IMAGE_ASPECTS: Partial<Record<AdapterType, readonly string[]>> = {
+  "gemini-content": ["1:1", "16:9", "9:16", "3:2", "2:3", "21:9"],
 };
 
-const VIDEO_TRAITS: Record<string, string> = {
-  "wan-video": "2-30s  480P|720P|1080P  模式=文生|首帧|首尾帧|参考|编辑|延长  音频=✔  提示词扩展=✔",
-  "seedance-video": "4-30s  480p|720p|1080p  模式=文生|首帧|首尾帧|参考  音频=✔",
-  "grok-video": "1-15s  480p|720p|1080p  模式=文生|图生  参考图≤7",
-  "kling-video": "3-15s  720p|1080p  模式=文生|首帧  音频=✔",
+/** 参数之外、只能手写的部分（是不是吃图、结果形态这类） */
+const IMAGE_NOTES: Partial<Record<AdapterType, string>> = {
+  "openai-images": "图生图=✔  支持多张参考图",
+  "openai-chat-image": "图生图=✔",
+  "gemini-content": "图生图=✔",
+  "generic-json": "图生图=✔",
+  midjourney: "原生参数(--ar/--v/--no)  图生图=✔  结果=四宫格  支持 U/V/R 后续动作",
 };
+
+/** 同样只能手写：助手工具够不到、但工作台里存在的模式 */
+const VIDEO_NOTES: Partial<Record<string, string>> = {
+  "wan-video": "另有编辑/延长（仅视频工作台）",
+};
+
+/**
+ * 图像渠道的能力摘要：参数部分从字段矩阵派生，叙述部分手写。
+ *
+ * 以前整行是手写字符串，矩阵改了这边忘了改，就会出现「助手说的和代码做的不一致」——
+ * 尺寸只有三种那次就是这么来的。现在只有"支不支持"这一个事实源头。
+ */
+function imageTraits(adapterType: AdapterType): string {
+  const support = CHANNEL_FIELD_SUPPORT[adapterType] ?? {};
+  const parts: string[] = [];
+  if (support.size) parts.push(`尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」`);
+  if (support.imageSize) parts.push("尺寸(imageSize)=1K|2K|4K");
+  const aspects = IMAGE_ASPECTS[adapterType];
+  if (support.aspectRatio && aspects?.length) parts.push(`宽高比(aspectRatio)=${aspects.join("|")}`);
+  if (support.negativePrompt === "param") parts.push("负面词(negative_prompt)");
+  if (support.seed) parts.push("种子(seed)");
+  const note = IMAGE_NOTES[adapterType];
+  if (note) parts.push(note);
+  return parts.join("  ");
+}
+
+/** 视频渠道的能力摘要：时长 / 分辨率 / 模式 / 画幅 / 音频都从 VIDEO_CAPABILITIES 来 */
+function videoTraits(adapterType: AdapterType): string {
+  const capability = VIDEO_CAPABILITIES[adapterType as VideoAdapter];
+  if (!capability) return "视频生成";
+  const parts: string[] = [];
+  parts.push(capability.durations.fixed !== null
+    ? `${capability.durations.fixed}s`
+    : `${capability.durations.min}-${capability.durations.max}s`);
+  parts.push(capability.resolutions.join("|"));
+  const modes = supportedVideoModes(adapterType).map((mode) => videoModeLabel(mode, adapterType));
+  if (modes.length) parts.push(`模式=${modes.join("|")}`);
+  if (capability.aspectRatios.length) {
+    const field = capability.ratioField === "ratio" ? "ratio" : "aspectRatio";
+    parts.push(`画幅(${field})=${capability.aspectRatios.join("|")}`);
+  }
+  if (capability.supportsAudio) parts.push("音频=✔");
+  if (capability.supportsPromptExtend) parts.push("提示词扩展=✔");
+  parts.push(`参考图≤${capability.maxReferenceImages}`);
+  const note = VIDEO_NOTES[adapterType];
+  if (note) parts.push(note);
+  return parts.join("  ");
+}
 
 const AUDIO_TRAITS: Record<string, string> = {
   "suno-music": "一次生成 2 首  灵感|自定义歌词|纯音乐  时长自动（约 2-5 分钟）",
@@ -132,8 +183,9 @@ export function likelySupportsVision(adapterType: AdapterType) {
 }
 
 function traitsFor(adapterType: AdapterType, kind: CapabilityKind) {
-  const table = kind === "video" ? VIDEO_TRAITS : kind === "audio" ? AUDIO_TRAITS : IMAGE_TRAITS;
-  return table[adapterType] ?? (kind === "video" ? "视频生成" : kind === "audio" ? "音乐生成" : "图片生成");
+  if (kind === "video") return videoTraits(adapterType);
+  if (kind === "audio") return AUDIO_TRAITS[adapterType] ?? "音乐生成";
+  return imageTraits(adapterType) || "图片生成";
 }
 
 /**
