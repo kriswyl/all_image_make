@@ -603,6 +603,10 @@ export function BoardAgentPanel({
             void api.compressConversation(threadId).then(() => { setCompressing(false); void load(); }).catch((error) => { setCompressing(false); toastRef.current("error", error instanceof Error ? error.message : "压缩失败"); });
           }} onBudgetChange={(contextBudget) => {
             void api.updateConversation(threadId, { contextBudget }).then(() => setView((current) => current ? { ...current, contextBudget } : current)).catch((error) => toastRef.current("error", error instanceof Error ? error.message : "设置保存失败"));
+          }} onBoardLimitsChange={(patch) => {
+            void api.updateConversation(threadId, patch)
+              .then((updated) => setView((current) => ({ ...updated, running: current?.running ?? false })))
+              .catch((error) => toastRef.current("error", error instanceof Error ? error.message : "设置保存失败"));
           }} /> : null}
           {running ? (
             <button type="button" className="board-agent-send is-stop" title="停止" onClick={() => void stop()}>

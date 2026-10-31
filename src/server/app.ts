@@ -139,6 +139,8 @@ const conversationCreateSchema = z.object({
 const conversationPatchSchema = z.object({
   contextBudget: z.number().int().min(4000).max(2000000).optional(),
   chatAutoContinueLimit: z.number().int().min(0).max(100).optional(),
+  boardMaxRounds: z.number().int().min(1).max(30).optional(),
+  boardAutoContinueLimit: z.number().int().min(0).max(20).optional(),
   chatMode: z.enum(["creative", "chat"]).optional(),
   title: z.string().trim().min(1).max(120).optional(),
   brainChannelId: z.string().uuid().optional(),
@@ -1252,7 +1254,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     // 画布线程只开放这两类设置：上下文预算，和「用哪个对话模型」。
     // 模型是成对切的，只给一半时用现有的另一半补齐，再整体校验一遍，
     // 免得把 channelId 和 model 拼成上游不认的组合。
-    const boardMutableKeys = new Set(["contextBudget", "brainChannelId", "brainModel"]);
+    const boardMutableKeys = new Set(["contextBudget", "brainChannelId", "brainModel", "boardMaxRounds", "boardAutoContinueLimit"]);
     if (conversation.kind !== "chat" && Object.keys(patch).some((key) => !boardMutableKeys.has(key))) {
       return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "画布助手只允许修改上下文预算和对话模型", crypto.randomUUID()));
     }

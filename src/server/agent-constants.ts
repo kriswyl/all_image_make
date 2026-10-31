@@ -1,7 +1,7 @@
 import { MAX_CANVAS_IMAGES } from "../shared/types.js";
 
-/** 一轮用户消息里最多让大脑思考几次。6 次够覆盖「优化→生图→改图→生成视频」这种长链 */
-export const MAX_ROUNDS = 6;
+/** 一轮用户消息里最多让大脑思考几次。默认 10 次，画布线程可用 boardMaxRounds 单独调 */
+export const MAX_ROUNDS = 10;
 /** 一个会话连续自动续跑的上限，防止「视频好了→大脑又要生成→视频好了」无限烧钱 */
 export const MAX_AUTO_CONTINUE = 3;
 /** 单个会话的任务软上限（§16）。到这个数以后每次生成都要用户点头 */

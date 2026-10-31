@@ -642,7 +642,10 @@ export class AgentService {
     startRound: number,
     turnAttachmentIds: string[] = [],
   ) {
-    for (let round = startRound; round < MAX_ROUNDS; round += 1) {
+    // 画布线程允许单独调大：多镜头「先建节点再逐镜生成」很容易超过 10 轮
+    const opening = this.db.getConversation(conversationId);
+    const maxRounds = opening?.kind === "board" ? opening.boardMaxRounds ?? MAX_ROUNDS : MAX_ROUNDS;
+    for (let round = startRound; round < maxRounds; round += 1) {
       if (controller.signal.aborted) return this.finishInterrupted(conversationId);
       const conversation = this.db.getConversation(conversationId);
       if (!conversation) return;
@@ -655,7 +658,7 @@ export class AgentService {
     // 轮次用尽：大脑在循环里转圈，收尾说一句实话而不是让它一直烧钱
     const note = this.db.appendMessage({
       conversationId, role: "system", status: "error",
-      content: `这一轮已经尝试了 ${MAX_ROUNDS} 次，我先停下来了。可以换个说法再试，或者直接说明你想要的结果。`,
+      content: `这一轮已经尝试了 ${maxRounds} 次，我先停下来了。可以换个说法再试，或者直接说明你想要的结果。`,
     });
     this.broadcast(conversationId, { type: "message", message: note });
     this.setStatus(conversationId, "idle");

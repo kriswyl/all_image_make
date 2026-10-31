@@ -284,6 +284,13 @@ describe("无限画布 API", () => {
       .expect(200);
     expect(switched.body.data.brainModel).toBe("test-chat");
 
+    const limits = await request(app)
+      .patch(`/api/conversations/${board.threadId}`)
+      .send({ boardMaxRounds: 16, boardAutoContinueLimit: 0 })
+      .expect(200);
+    expect(limits.body.data.boardMaxRounds).toBe(16);
+    expect(limits.body.data.boardAutoContinueLimit).toBe(0);
+
     const rejected = await request(app)
       .patch(`/api/conversations/${board.threadId}`)
       .send({ title: "改个名" })

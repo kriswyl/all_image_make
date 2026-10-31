@@ -3,10 +3,12 @@ import { X } from "lucide-react";
 import type { ConversationView } from "../../shared/agent-types";
 
 /** 保留原始聊天记录；这里只查看发送给模型的历史摘要。 */
-export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onCompress, compressing, disabled }: {
+export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onBoardLimitsChange, onCompress, compressing, disabled }: {
   view: ConversationView;
   onBudgetChange: (budget: number) => void;
   onAutoContinueChange?: (limit: number) => void;
+  /** 只有画布助手面板传：单轮思考次数 / 任务完成后的自动续跑次数 */
+  onBoardLimitsChange?: (patch: { boardMaxRounds?: number; boardAutoContinueLimit?: number }) => void;
   onCompress: () => void;
   compressing?: boolean;
   disabled?: boolean;
@@ -19,6 +21,8 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
   const [value, setValue] = useState(String(view.contextBudget ?? 350000));
   const [continuationValue, setContinuationValue] = useState(String(view.chatAutoContinueLimit ?? 20));
   const [editingContinuation, setEditingContinuation] = useState(false);
+  const [roundsValue, setRoundsValue] = useState(String(view.boardMaxRounds ?? 10));
+  const [autoContinueValue, setAutoContinueValue] = useState(String(view.boardAutoContinueLimit ?? 3));
   const budget = view.contextBudget ?? 350000;
   function save() {
     const parsed = Number(value);
@@ -39,6 +43,14 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
       return;
     }
     if (parsed !== current) onAutoContinueChange?.(parsed);
+  }
+  function saveBoardLimits(field: "boardMaxRounds" | "boardAutoContinueLimit", raw: string, minimum: number, maximum: number, fallback: number) {
+    const parsed = Number(raw);
+    if (!raw.trim() || !Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+      if (field === "boardMaxRounds") setRoundsValue(String(fallback)); else setAutoContinueValue(String(fallback));
+      return;
+    }
+    if (parsed !== fallback) onBoardLimitsChange?.({ [field]: parsed });
   }
   useEffect(() => {
     if (!open) return;
@@ -83,6 +95,25 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
             <span>次</span>
           </label>
           <small>设为 0 关闭；回答达到输出上限时自动接续，每次续写都会产生模型用量。</small>
+        </> : null}
+        {onBoardLimitsChange ? <>
+          <label>单轮思考次数
+            <input aria-label="单轮思考次数" type="number" min={1} max={30} step={1} disabled={disabled}
+              value={roundsValue}
+              onChange={(event) => setRoundsValue(event.target.value)}
+              onBlur={() => saveBoardLimits("boardMaxRounds", roundsValue, 1, 30, view.boardMaxRounds ?? 10)}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+            <span>轮</span>
+          </label>
+          <label>自动续跑次数
+            <input aria-label="自动续跑次数" type="number" min={0} max={20} step={1} disabled={disabled}
+              value={autoContinueValue}
+              onChange={(event) => setAutoContinueValue(event.target.value)}
+              onBlur={() => saveBoardLimits("boardAutoContinueLimit", autoContinueValue, 0, 20, view.boardAutoContinueLimit ?? 3)}
+              onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+            <span>次</span>
+          </label>
+          <small>单轮思考次数：一条消息里模型最多连续调几次工具。自动续跑：任务跑完后最多自动接着做几次，设 0 关闭。</small>
         </> : null}
         <button type="button" className="secondary-button compact context-compress-button" onClick={onCompress} disabled={disabled || compressing}>
           {compressing ? "正在压缩…" : "立即压缩"}

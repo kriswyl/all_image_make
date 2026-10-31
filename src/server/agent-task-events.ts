@@ -100,10 +100,11 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
     return;
   }
 
-  if (conversation.autoContinueCount >= MAX_AUTO_CONTINUE) {
+  const autoContinueLimit = conversation.kind === "board" ? conversation.boardAutoContinueLimit ?? MAX_AUTO_CONTINUE : MAX_AUTO_CONTINUE;
+  if (conversation.autoContinueCount >= autoContinueLimit) {
     const note = db.appendMessage({
       conversationId: conversation.id, role: "system",
-      content: `已经连续自动续跑 ${MAX_AUTO_CONTINUE} 次，我先停下来了。继续说一句就能接着做。`,
+      content: `已经连续自动续跑 ${autoContinueLimit} 次，我先停下来了。继续说一句就能接着做。`,
     });
     host.broadcast(conversation.id, { type: "message", message: note });
     db.setConversationStatus(conversation.id, "idle", { touch: false });

@@ -101,6 +101,9 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         chat_mode            TEXT NOT NULL DEFAULT 'creative',
         context_budget       INTEGER NOT NULL DEFAULT 350000,
         chat_auto_continue_limit INTEGER NOT NULL DEFAULT 20,
+        -- 画布助手专用：单轮最多思考几次、任务跑完后最多自动续跑几次
+        board_max_rounds     INTEGER NOT NULL DEFAULT 10,
+        board_auto_continue_limit INTEGER NOT NULL DEFAULT 3,
         context_summary      TEXT NOT NULL DEFAULT '',
         context_summary_seq  INTEGER NOT NULL DEFAULT 0,
         context_anchors      TEXT NOT NULL DEFAULT '[]',
@@ -405,6 +408,8 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     for (const [name, ddl] of [
       ["context_budget", "INTEGER NOT NULL DEFAULT 350000"],
       ["chat_auto_continue_limit", "INTEGER NOT NULL DEFAULT 20"],
+      ["board_max_rounds", "INTEGER NOT NULL DEFAULT 10"],
+      ["board_auto_continue_limit", "INTEGER NOT NULL DEFAULT 3"],
       ["context_summary", "TEXT NOT NULL DEFAULT ''"],
       ["context_summary_seq", "INTEGER NOT NULL DEFAULT 0"],
       ["context_anchors", "TEXT NOT NULL DEFAULT '[]'"],
