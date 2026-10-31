@@ -1503,3 +1503,35 @@
 .board-version-media img, .board-version-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .board-version-media audio { width: 90%; }
 .board-version-pane p { min-height: 3em; max-height: 5em; overflow: auto; margin: 0; font-size: 12px; color: var(--muted); }
+
+/* 画布助手的模型切换：标题栏只有 46px 高，选择器压成一行小字，和原来的文字位置对齐 */
+.board-agent-model { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.board-agent-model .model-picker { min-width: 0; }
+.board-agent-model .model-picker-trigger {
+  height: 18px;
+  min-height: 18px;
+  max-width: 100%;
+  padding: 0 4px;
+  gap: 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1;
+}
+.board-agent-model .model-picker-trigger:hover,
+.board-agent-model .model-picker-trigger.is-open { color: var(--ink); background: var(--surface-soft); }
+.board-agent-model .model-picker-trigger .model-logo { width: 11px; height: 11px; }
+.board-agent-model .model-picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-agent-running { flex: 0 0 auto; color: var(--muted); font-size: 9.5px; white-space: nowrap; }
+
+/* 导出剪映草稿的结果提示：路径可能很长，允许换行断字 */
+.story-preview-note {
+  margin: 0;
+  padding: 8px 18px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}

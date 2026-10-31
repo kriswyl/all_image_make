@@ -103,6 +103,8 @@ const generationParamShape = {
   quality: z.string().max(40).optional(),
   negativePrompt: z.string().max(2_000).optional(),
   aspectRatio: z.string().max(20).optional(),
+  /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio`，两个字段互不顶替 */
+  ratio: z.string().max(20).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
@@ -194,6 +196,8 @@ export const configNodeSchema = z.object({
   quality: z.string().max(40).optional(),
   negativePrompt: z.string().max(2_000).optional(),
   aspectRatio: z.string().max(20).optional(),
+  /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio`，两个字段互不顶替 */
+  ratio: z.string().max(20).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),

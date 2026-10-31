@@ -25,6 +25,8 @@ const generationPatchShape = {
   quality: z.string().max(40).optional(),
   negativePrompt: z.string().max(2_000).optional(),
   aspectRatio: z.string().max(20).optional(),
+  /** 万相 / Seedance 认的是 `ratio`，可灵和 Grok 认 `aspectRatio` */
+  ratio: z.string().max(20).optional(),
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
@@ -102,6 +104,20 @@ export const boardOpSchema = z.discriminatedUnion("op", [
     x: z.number().finite(),
     y: z.number().finite(),
   }),
+  /**
+   * 批量排版：把一组节点排成一列 / 一行 / 网格，坐标由服务端按节点真实宽高计算。
+   * 想让「分镜图单独一列」时用这个，而不是连着写十几条 move_node 自己算坐标。
+   */
+  z.object({
+    op: z.literal("arrange"),
+    nodeRefs: z.array(z.string().min(1).max(80)).min(1).max(BOARD_LIMITS.maxNodes),
+    axis: z.enum(["x", "y"]).default("y"),
+    origin: z.object({ x: z.number().finite(), y: z.number().finite() }).optional(),
+    gap: z.number().finite().min(0).max(2000).optional(),
+    columns: z.number().int().min(1).max(20).optional(),
+    /** 顺带把这批节点归到一个分组里；同名分组已存在时合并 */
+    group: z.string().trim().min(1).max(BOARD_LIMITS.maxTitleChars).optional(),
+  }),
   z.object({
     op: z.literal("delete_node"),
     nodeRef: boardNodeRefSchema,
@@ -138,6 +154,8 @@ export const boardGenerateSchema = z.object({
     videoMode: z.enum(BOARD_VIDEO_MODES).optional(),
     durationSeconds: z.number().int().min(1).max(30).optional(),
     resolution: z.string().max(20).optional(),
+    aspectRatio: z.string().max(20).optional(),
+    ratio: z.string().max(20).optional(),
     audio: z.boolean().optional(),
     audioKind: z.enum(BOARD_AUDIO_KINDS).optional(),
     voice: z.string().max(40).optional(),

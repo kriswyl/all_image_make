@@ -15,16 +15,13 @@ import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "../task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES } from "../../shared/types";
+import { OPENAI_SIZE_GROUPS } from "../../shared/image-sizes";
 import { isMidjourneyActionModel, midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
 import type { Asset, Channel, ImageSizeValue, Task, TaskStatus } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
-const openAiSizeGroups = [
-  { label: "方形", sizes: ["1024x1024", "2048x2048"] },
-  { label: "横向", sizes: ["1280x720", "1536x1024", "1600x1200", "2048x1152", "3840x2160"] },
-  { label: "纵向", sizes: ["720x1280", "1024x1536", "1200x1600", "1152x2048", "2160x3840"] },
-] as const;
+const openAiSizeGroups = OPENAI_SIZE_GROUPS;
 
 /** 任务最新一次活动的时间：跑完的算完成时间，还在跑的算创建时间 */
 function taskActivityAt(task: Task) {

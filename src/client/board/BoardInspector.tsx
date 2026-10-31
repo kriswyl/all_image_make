@@ -14,6 +14,7 @@ import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts";
 import {
   supportedVideoModes, VIDEO_CAPABILITIES, VIDEO_DEFAULTS, VIDEO_MODE_LABELS, type VideoAdapter,
 } from "../../shared/video-capabilities";
+import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import type { Asset } from "../../shared/types";
 import { ModelPicker } from "../chat/ModelPicker";
 import { api } from "../api";
@@ -28,7 +29,6 @@ export interface BoardImageAlias {
 
 export type BoardVideoAlias = BoardImageAlias;
 
-const OPENAI_SIZES = ["1024x1024", "1536x1024", "1024x1536"] as const;
 const GEMINI_SIZES = ["1K", "2K", "4K"] as const;
 const QUALITIES = ["low", "medium", "high"] as const;
 const VIDEO_MODE_OPTIONS = [
@@ -546,12 +546,21 @@ export function BoardInspector({
                       </label>
                       <label className="board-field">
                         <span>画幅比例（可选）</span>
-                        <input
-                          value={node.aspectRatio ?? ""}
-                          maxLength={20}
-                          placeholder="例如 16:9"
-                          onChange={(event) => onUpdateNode(node.id, { aspectRatio: event.target.value || undefined } as Partial<BoardNode>)}
-                        />
+                        <select
+                          value={(videoCapability?.ratioField === "ratio" ? node.ratio : node.aspectRatio) ?? ""}
+                          onChange={(event) => {
+                            const value = event.target.value || undefined;
+                            // 两家字段名不同：写错一个等于没写，所以切换时把另一个清掉
+                            onUpdateNode(node.id, (videoCapability?.ratioField === "ratio"
+                              ? { ratio: value, aspectRatio: undefined }
+                              : { aspectRatio: value, ratio: undefined }) as Partial<BoardNode>);
+                          }}
+                        >
+                          <option value="">自动</option>
+                          {(videoCapability?.aspectRatios ?? []).map((value) => (
+                            <option key={value} value={value}>{value === "adaptive" ? "自适应" : value}</option>
+                          ))}
+                        </select>
                       </label>
                     </div>
                     <label className="board-config-check">
@@ -579,7 +588,7 @@ export function BoardInspector({
                   ) : (
                     <label className="board-field">
                       <span>{sizeMode === "gemini" ? "尺寸（imageSize）" : "尺寸（size）"}</span>
-                      <select
+                      {sizeMode === "gemini" ? <select
                         value={sizeMode === "gemini" ? (node.imageSize ?? "") : (node.size ?? "")}
                         onChange={(event) => {
                           const value = event.target.value;
@@ -589,10 +598,10 @@ export function BoardInspector({
                         }}
                       >
                         <option value="">自动</option>
-                        {(sizeMode === "gemini" ? GEMINI_SIZES : OPENAI_SIZES).map((value) => (
+                        {GEMINI_SIZES.map((value) => (
                           <option key={value} value={value}>{value}</option>
                         ))}
-                      </select>
+                      </select> : <><input list="board-image-sizes" value={node.size ?? ""} placeholder="自动，或输入宽x高" onChange={(event) => onUpdateNode(node.id, { size: event.target.value || undefined } as Partial<BoardNode>)} /><datalist id="board-image-sizes">{OPENAI_SIZE_PRESETS.map((value) => <option key={value} value={value} />)}</datalist><small>可从预设里选，也可直接输入「宽x高」；实际上限取决于模型和渠道。</small></>}
                     </label>
                   )}
                   {effectiveAliasInfo?.adapterType !== "midjourney" && effectiveAliasInfo?.adapterType !== "gemini-content" ? (
@@ -620,7 +629,7 @@ export function BoardInspector({
                       />
                     </label>
                     <div className="board-inspector-grid">
-                      <label className="board-field">
+                      {effectiveAliasInfo?.adapterType !== "openai-images" && effectiveAliasInfo?.adapterType !== "openai-chat-image" ? <label className="board-field">
                         <span>画幅比例（可选）</span>
                         <input
                           value={node.aspectRatio ?? ""}
@@ -628,7 +637,7 @@ export function BoardInspector({
                           placeholder="例如 16:9"
                           onChange={(event) => onUpdateNode(node.id, { aspectRatio: event.target.value || undefined } as Partial<BoardNode>)}
                         />
-                      </label>
+                      </label> : null}
                       <label className="board-field">
                         <span>随机种子（可选）</span>
                         <input

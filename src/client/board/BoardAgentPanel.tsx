@@ -12,6 +12,7 @@ import { Bot, Check, ChevronDown, LoaderCircle, Send, Square, X } from "lucide-r
 import { api } from "../api";
 import { buildRows } from "../chat/rows";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "../chat/MessageBubble";
+import { ModelPicker, type ModelOption } from "../chat/ModelPicker";
 import { ToolCard, type TaskProgress } from "../chat/ToolCard";
 import { ConfirmCard } from "../chat/ConfirmCard";
 import type { AgentStreamEvent, ChatMessage, ConversationStatus, ConversationView } from "../../shared/agent-types";
@@ -156,6 +157,42 @@ export function BoardAgentPanel({
   }, [threadId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  /**
+   * 画布助手用哪个对话模型。
+   *
+   * 只列「能当大脑」的渠道（/api/agent/brains 已经按对话适配器筛过）——
+   * 选到生图模型只会得到一个「不是对话适配器」的报错。
+   */
+  const [chatOptions, setChatOptions] = useState<ModelOption[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void api.brains().then((brains) => {
+      if (cancelled) return;
+      setChatOptions(brains.flatMap((channel) => channel.models.map((model) => ({
+        value: `${channel.id}::${model}`, model, channelName: channel.name,
+      }))));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const pickModel = useCallback(async (next: string) => {
+    const [brainChannelId, brainModel] = next.split("::");
+    try {
+      const updated = await api.updateConversation(threadId, { brainChannelId: brainChannelId ?? "", brainModel: brainModel ?? "" });
+      setView((current) => ({ ...updated, running: current?.running ?? false }));
+    } catch (error) {
+      toastRef.current("error", error instanceof Error ? error.message : "切换模型失败");
+    }
+  }, [threadId]);
+
+  // 渠道被停用或改了模型列表后，当前值可能已经不在候选里；补一条，别让选择器显示空白
+  const modelOptions = useMemo<ModelOption[]>(() => {
+    if (!view) return chatOptions;
+    const current = `${view.brainChannelId}::${view.brainModel}`;
+    if (chatOptions.some((item) => item.value === current)) return chatOptions;
+    return [...chatOptions, { value: current, model: view.brainModel || "未配置模型", channelName: "当前设置" }];
+  }, [chatOptions, view?.brainChannelId, view?.brainModel]);
 
   useEffect(() => {
     const onEvent = (event: AgentStreamEvent) => {
@@ -442,7 +479,20 @@ export function BoardAgentPanel({
         <span className="board-agent-icon"><Bot size={15} /></span>
         <div className="board-agent-title">
           <strong>无限画布助手</strong>
-          <span>{view?.brainModel || "未配置模型"}{running ? " · 工作中" : ""}</span>
+          {/* 标题栏整体是拖拽区，选择器自己要吃掉 pointerdown，否则点开会变成拖窗口 */}
+          <div className="board-agent-model" onPointerDown={(event) => event.stopPropagation()}>
+            <ModelPicker
+              options={modelOptions}
+              value={`${view?.brainChannelId ?? ""}::${view?.brainModel ?? ""}`}
+              onChange={(next) => void pickModel(next)}
+              placeholder="选对话模型"
+              menuPlacement="down"
+              disabled={!view}
+              className="board-agent-model-picker"
+              ariaLabel="画布助手的对话模型"
+            />
+            {running ? <span className="board-agent-running">工作中</span> : null}
+          </div>
         </div>
         {running || awaitingConfirmation ? <LoaderCircle size={13} className="spin board-agent-spin" /> : null}
         <button

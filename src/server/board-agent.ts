@@ -11,9 +11,10 @@ import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
 import { AppError } from "./tasks.js";
 import {
-  allocateNodeRef, boardGroups, BoardValidationError, directUpstreamImages, directUpstreamText, parseBoardDoc,
+  allocateNodeRef, BOARD_LIMITS, boardGroups, BoardValidationError, directUpstreamImages, directUpstreamText, parseBoardDoc,
   type BoardDoc, type BoardEdge, type BoardNode, type ConfigBoardNode,
 } from "../shared/board.js";
+import { arrangePositions } from "../shared/board-layout.js";
 import type { BoardOp } from "../shared/board-ops.js";
 import { VIDEO_MODE_LABELS } from "../shared/video-capabilities.js";
 import { assertDocAssets } from "./board.js";
@@ -311,6 +312,46 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
           ? { ...item, x: op.x, y: op.y, updatedAt: at }
           : item);
         updated.add(ref);
+        continue;
+      }
+
+      if (op.op === "arrange") {
+        // 同一批里可能既给 n3 又给 tempId，resolve 之后去重，避免同一个节点被排两次
+        const refs = [...new Set(op.nodeRefs.map(resolve))];
+        const nodes = refs.map(nodeOf);
+        const positions = arrangePositions(nodes, {
+          axis: op.axis,
+          ...(op.columns ? { columns: op.columns } : {}),
+          ...(op.gap == null ? {} : { gap: op.gap }),
+          ...(op.origin ? { origin: op.origin } : {}),
+        });
+        const moved = new Map(nodes.map((node, index) => [node.id, positions[index]!]));
+        doc.nodes = doc.nodes.map((item) => {
+          const next = moved.get(item.id);
+          return next ? { ...item, x: next.x, y: next.y, updatedAt: at } : item;
+        });
+        for (const ref of refs) updated.add(ref);
+
+        if (op.group) {
+          const title = op.group.trim();
+          const ids = nodes.map((node) => node.id);
+          const idSet = new Set(ids);
+          const groups = boardGroups(doc);
+          let target = groups.find((group) => group.title === title);
+          if (!target) {
+            if (groups.length >= BOARD_LIMITS.maxGroups) {
+              throw new AppError("BOARD_GROUP_LIMIT", `画布最多 ${BOARD_LIMITS.maxGroups} 个分组`, 400);
+            }
+            target = { id: `group-${crypto.randomUUID()}`, title, nodeIds: [], collapsed: false };
+            groups.push(target);
+          }
+          // 一个节点只能属于一个分组：先从别的组里摘掉，再并进目标组
+          const merged = groups.map((group) => group === target
+            ? group
+            : { ...group, nodeIds: group.nodeIds.filter((nodeId) => !idSet.has(nodeId)) });
+          target.nodeIds = [...new Set([...target.nodeIds, ...ids])];
+          doc.groups = merged.filter((group) => group.nodeIds.length > 0);
+        }
         continue;
       }
 

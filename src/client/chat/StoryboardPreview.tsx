@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Download, LoaderCircle, Pause, Play, X } from "lucide-react";
+import { Download, Film, LoaderCircle, Pause, Play, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import type { StoryboardPreviewBoard, StoryboardProjectData } from "../../shared/storyboard-project";
 
@@ -31,6 +31,8 @@ export function StoryboardPreview({ id, data, onClose }: { id: string; data: Sto
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [draftNote, setDraftNote] = useState("");
   const remaining = useRef(0);
   const mediaRef = useRef<HTMLVideoElement>(null);
   useEffect(() => { let cancelled = false; void api.storyboardPreview(id).then((items) => { if (!cancelled) { setBoards(items); setBoardId(items[0]?.id ?? ""); } }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "加载画布失败"); }).finally(() => { if (!cancelled) setLoading(false); }); return () => { cancelled = true; }; }, [id]);
@@ -60,6 +62,32 @@ export function StoryboardPreview({ id, data, onClose }: { id: string; data: Sto
       }
     } catch (e) { setError(e instanceof Error ? e.message : "导出失败"); }
   }
+  /** 导出剪映草稿：让用户选剪映的草稿目录，素材由服务端复制进去 */
+  async function exportDraft() {
+    if (!board) { setError("先在「画布」里选一块有镜头素材的画布"); return; }
+    try {
+      let targetDir = "";
+      if (isTauriRuntime()) {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: true, title: "选择剪映草稿目录（com.lveditor.draft）" });
+        if (!picked || Array.isArray(picked)) return;
+        targetDir = picked;
+      } else {
+        const typed = window.prompt("剪映草稿目录，例如 C:\Users\你\AppData\Local\JianyingPro\User Data\Projects\com.lveditor.draft");
+        if (!typed) return;
+        targetDir = typed.trim();
+      }
+      setExporting(true);
+      setDraftNote("");
+      const result = await api.exportStoryboardDraft(id, { boardId: board.id, targetDir, name: `${data.name}-成片` });
+      setDraftNote(`已导出 ${result.clips} 个镜头${result.skipped ? `，跳过 ${result.skipped} 个没有画面的镜头` : ""}：${result.path}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导出剪映草稿失败");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return createPortal(<div className="story-reference-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="story-preview-dialog" role="dialog" aria-modal="true" aria-label="分镜粗剪预览">
     <header><div><strong>分镜粗剪预览</strong><small>按镜头预估时长播放，供检查节奏；不是成片或精确混音。同画布重复导入时使用最新节点。</small></div><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={16} /></button></header>
     {loading ? <p><LoaderCircle size={14} className="spin" /> 正在读取画布…</p> : <label>画布 <select value={boardId} onChange={(e) => { setPlaying(false); setBoardId(e.target.value); }}><option value="">仅预览分镜文字</option>{boards.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
@@ -68,6 +96,7 @@ export function StoryboardPreview({ id, data, onClose }: { id: string; data: Sto
     <div className="story-preview-details"><strong>第 {index + 1} / {data.shots.length} 镜 · {shot?.duration} 秒</strong><span>{shot?.dialogue || shot?.videoPrompt || shot?.prompt}</span></div>
     <div className="story-preview-strip">{data.shots.map((item, i) => { const frame = board?.shots.find((entry) => entry.shotId === item.id); return <button type="button" key={item.id} className={i === index ? "active" : ""} onClick={() => { setPlaying(false); setIndex(i); }}>{frame?.image ? <img src={api.assetUrl(frame.image.thumbUrl || frame.image.url)} alt="" /> : null}<span>第 {i + 1} 镜<br />{item.duration} 秒</span></button>; })}</div>
     {error ? <p role="alert" className="story-review-error">{error}</p> : null}
-    <footer><button type="button" className="secondary-button" onClick={() => { if (!playing && index === data.shots.length - 1) setIndex(0); setPlaying(!playing); }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button><span>总计 {data.shots.reduce((sum, item) => sum + item.duration, 0).toFixed(1)} 秒</span><button type="button" className="secondary-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表及素材清单</button></footer>
+    <footer><button type="button" className="secondary-button" onClick={() => { if (!playing && index === data.shots.length - 1) setIndex(0); setPlaying(!playing); }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button><span>总计 {data.shots.reduce((sum, item) => sum + item.duration, 0).toFixed(1)} 秒</span><button type="button" className="secondary-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表及素材清单</button><button type="button" className="secondary-button" disabled={exporting || !board} onClick={() => void exportDraft()}>{exporting ? <LoaderCircle size={15} className="spin" /> : <Film size={15} />}导出剪映草稿</button></footer>
+    {draftNote ? <p className="story-preview-note">{draftNote}</p> : null}
   </section></div>, document.body);
 }

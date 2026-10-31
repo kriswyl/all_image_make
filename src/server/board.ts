@@ -557,6 +557,7 @@ async function generateBoardVideo(input: {
     audio?: boolean;
     seed?: number;
     aspectRatio?: string;
+    ratio?: string;
     promptExtend?: boolean;
     watermark?: boolean;
   };
@@ -612,6 +613,9 @@ async function generateBoardVideo(input: {
       : { seed: input.overrides?.seed ?? config.seed }),
     ...((input.overrides?.aspectRatio ?? config.aspectRatio)
       ? { aspectRatio: input.overrides?.aspectRatio ?? config.aspectRatio }
+      : {}),
+    ...((input.overrides?.ratio ?? config.ratio)
+      ? { ratio: input.overrides?.ratio ?? config.ratio }
       : {}),
     timeoutMs: 300_000,
   };

@@ -326,4 +326,31 @@ describe("无限画布 Agent 工具", () => {
     expect(prompt).toContain(description);
     expect(prompt).not.toContain("分镜表");
   });
+
+  it("arrange 把节点排成一列并归入同名分组", async () => {
+    const { context } = await tempApp();
+    const board = createBoard(context.db, { title: "排版" });
+    const ctx = toolContext(context, board.threadId);
+    await runAgentTool("board_apply", {
+      ops: [
+        { op: "add_node", tempId: "a", type: "image", x: 0, y: 0, width: 280, height: 210 },
+        { op: "add_node", tempId: "b", type: "image", x: 900, y: 400, width: 280, height: 200 },
+        { op: "arrange", nodeRefs: ["a", "b"], axis: "y", gap: 20, origin: { x: 100, y: 100 }, group: "分镜图" },
+      ],
+    }, ctx);
+
+    const record = context.db.getBoardRecord(board.id)!;
+    expect(record.doc.nodes.map((node) => [node.x, node.y])).toEqual([[100, 100], [100, 330]]);
+    expect(record.doc.groups).toHaveLength(1);
+    expect(record.doc.groups![0]!.title).toBe("分镜图");
+    expect(record.doc.groups![0]!.nodeIds).toHaveLength(2);
+
+    // 同一个节点再并进另一个分组时，必须从旧组里摘掉，否则文档校验会拒绝
+    await runAgentTool("board_apply", {
+      ops: [{ op: "arrange", nodeRefs: ["n2"], axis: "y", group: "分镜图 B" }],
+    }, ctx);
+    const merged = context.db.getBoardRecord(board.id)!;
+    expect(merged.doc.groups).toHaveLength(2);
+    expect(merged.doc.groups!.find((group) => group.title === "分镜图")!.nodeIds).toHaveLength(1);
+  });
 });

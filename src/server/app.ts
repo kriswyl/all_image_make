@@ -31,6 +31,7 @@ import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard.j
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 import { claimBoardFrame, completeBoardFrame } from "./board-frame-broker.js";
 import { resolveStoryboardSelection } from "./storyboard-selection.js";
+import { buildDraftContent, buildDraftMeta, type DraftShot } from "./jianying-draft.js";
 import {
   addAssetsToBoard, appendConversationCanvasAssets,
   cancelBoardTask, createBoard, deleteBoard, detachAssetFromBoards, generateBoardConfig, getBoard,
@@ -544,6 +545,104 @@ export function createApp(options: { dataDir?: string } = {}) {
     });
     res.json(ok(boards));
   });
+
+  /**
+   * 导出剪映草稿：把这一组分镜的成片按镜头顺序写成一份 6.x 草稿。
+   *
+   * 素材复制进草稿目录（剪映官方做法），目标目录由用户选——通常是
+   * `%LOCALAPPDATA%\JianyingPro\User Data\Projects\com.lveditor.draft`。
+   * 没有画面的镜头会被跳过，返回值里带 skipped，前端要如实告诉用户。
+   */
+  app.post("/api/storyboard-projects/:id/draft", asyncHandler(async (req, res) => {
+    const input = z.object({
+      boardId: z.string().min(1).max(80),
+      targetDir: z.string().trim().min(1).max(1000),
+      name: z.string().trim().max(80).optional(),
+    }).parse(req.body);
+    const project = db.getStoryboardProject(routeParam(req.params.id));
+    if (!project) throw new AppError("STORYBOARD_NOT_FOUND", "分镜不存在", 404);
+    const board = db.getBoardRecord(input.boardId);
+    if (!board) throw new AppError("BOARD_NOT_FOUND", "画布不存在", 404);
+
+    const linked = board.doc.nodes.filter((node) => node.storyboard?.projectId === project.id);
+    const pickNode = (shotId: string, role: "image" | "video" | "audio") => {
+      const node = [...linked].reverse().find((item) => item.storyboard?.shotId === shotId
+        && item.storyboard.role === role
+        && (item.type === "image" || item.type === "video" || item.type === "audio"));
+      if (!node) return null;
+      return node.type === "image" || node.type === "video" || node.type === "audio" ? node : null;
+    };
+
+    // 草稿文件夹名要留在剪映里给人看，不能用 safeFileName——它只留 ASCII，
+    // 「安静的力量」会被洗成「____________」，所以在剪映里根本认不出是哪个草稿。
+    const draftName = (input.name ?? `${project.data.name || "成片"}-剪映草稿`)
+      .replace(/[\/:*?"<>|\u0000-\u001f]/g, "")
+      .replace(/^\.+/, "")
+      .trim()
+      .slice(0, 60) || "剪映草稿";
+
+    const hasAnyClip = project.data.shots.some((shot) => Boolean((pickNode(shot.id, "video") ?? pickNode(shot.id, "image"))?.assetId));
+    if (!hasAnyClip) throw new AppError("DRAFT_EMPTY", "这组分镜在画布上还没有任何已生成的画面", 400);
+
+    const draftDir = path.join(input.targetDir, draftName);
+    const materialsDir = path.join(draftDir, "materials");
+    await fs.promises.mkdir(materialsDir, { recursive: true });
+
+    const copyMaterial = async (assetId: string, index: number): Promise<{ path: string; name: string; bytes: number; durationUs: number } | null> => {
+      const row = db.getAsset(assetId);
+      if (!row) return null;
+      const source = path.join(row.baseDir, row.relativePath);
+      if (!fs.existsSync(source)) return null;
+      const fileName = `${String(index).padStart(3, "0")}-${safeFileName(row.fileName) || path.basename(row.relativePath)}`;
+      const target = path.join(materialsDir, fileName);
+      await fs.promises.copyFile(source, target);
+      return { path: target, name: fileName, bytes: row.byteSize, durationUs: Math.round((row.duration ?? 0) * 1_000_000) };
+    };
+
+    const shots: DraftShot[] = [];
+    let skipped = 0;
+    let materialBytes = 0;
+    for (const [index, shot] of project.data.shots.entries()) {
+      const videoNode = pickNode(shot.id, "video");
+      const imageNode = pickNode(shot.id, "image");
+      const audioNode = pickNode(shot.id, "audio");
+      const clipNode = videoNode ?? imageNode;
+      if (!clipNode?.assetId) { skipped += 1; continue; }
+      const clip = await copyMaterial(clipNode.assetId, index + 1);
+      if (!clip) { skipped += 1; continue; }
+      materialBytes += clip.bytes;
+      const audio = audioNode?.assetId ? await copyMaterial(audioNode.assetId, index + 1) : null;
+      if (audio) materialBytes += audio.bytes;
+
+      const wanted = Math.max(0.4, shot.duration ?? 3);
+      const available = clip.durationUs > 0 ? clip.durationUs / 1_000_000 : wanted;
+      const durationUs = Math.round(Math.min(wanted, available) * 1_000_000);
+      shots.push({
+        clipKind: clipNode.type === "video" ? "video" : "photo",
+        clip: { path: clip.path, name: clip.name, durationUs: clip.durationUs },
+        ...(audio ? { audio: { path: audio.path, name: audio.name, durationUs: audio.durationUs } } : {}),
+        durationUs,
+      });
+    }
+
+    if (!shots.length) throw new AppError("DRAFT_EMPTY", "这组分镜在画布上还没有任何已生成的画面", 400);
+
+    const ratio = project.data.brief?.aspectRatio ?? "";
+    const matched = /^(\d{1,2})\s*[:：]\s*(\d{1,2})$/.exec(ratio.trim());
+    const [width, height] = matched
+      ? (Number(matched[1]) >= Number(matched[2])
+        ? [1920, Math.round(1920 * Number(matched[2]) / Number(matched[1]))]
+        : [Math.round(1920 * Number(matched[1]) / Number(matched[2])), 1920])
+      : [1920, 1080];
+
+    const { content, durationUs } = buildDraftContent({ name: draftName, width, height: height - (height % 2), shots });
+    const draftId = crypto.randomUUID().toUpperCase();
+    const meta = buildDraftMeta({ draftId, name: draftName, draftDir, rootDir: input.targetDir, durationUs, materialBytes });
+    await fs.promises.writeFile(path.join(draftDir, "draft_content.json"), JSON.stringify(content, null, 2), "utf8");
+    await fs.promises.writeFile(path.join(draftDir, "draft_meta_info.json"), JSON.stringify(meta, null, 2), "utf8");
+
+    res.json(ok({ path: draftDir, clips: shots.length, skipped, durationSeconds: durationUs / 1_000_000 }));
+  }));
 
   app.put("/api/storyboard-projects/:id", (req, res) => {
     const input = z.object({ revision: z.number().int().positive(), data: storyboardProjectDataSchema }).parse(req.body);

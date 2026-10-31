@@ -263,6 +263,9 @@ export const api = {
   storyboardProject: (id: string) => request<StoryboardProject>(`/api/storyboard-projects/${id}`),
   splitStoryboardShot: (id: string, revision: number, shotId: string) => request<{ shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> }>(`/api/storyboard-projects/${id}/split`, { method: "POST", body: JSON.stringify({ revision, shotId }) }),
   storyboardPreview: (id: string) => request<StoryboardPreviewBoard[]>(`/api/storyboard-projects/${id}/preview`),
+  /** 导出剪映草稿：素材复制进目标目录下的同名草稿文件夹 */
+  exportStoryboardDraft: (id: string, input: { boardId: string; targetDir: string; name?: string }) =>
+    request<{ path: string; clips: number; skipped: number; durationSeconds: number }>(`/api/storyboard-projects/${id}/draft`, { method: "POST", body: JSON.stringify(input) }),
   saveStoryboardProject: (id: string, revision: number, data: StoryboardProjectData) => request<StoryboardProject>(`/api/storyboard-projects/${id}`, { method: "PUT", body: JSON.stringify({ revision, data }) }),
   storyboardSelectionTemplate: (id: string, revision: number, shotIds: string[]) => request<CanvasTemplate>(`/api/storyboard-projects/${id}/templates`, { method: "POST", body: JSON.stringify({ revision, shotIds }) }),
   template: (id: string) => request<CanvasTemplate>(`/api/templates/${id}`),
