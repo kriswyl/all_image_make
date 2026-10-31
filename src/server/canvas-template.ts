@@ -568,6 +568,23 @@ export interface StoryboardTemplateSetting {
   prompt?: string;
 }
 
+/**
+ * 把镜头里已经结构化、但过去只用于展示的字段拼进提示词。
+ *
+ * `shotSize` / `cameraMove` 以前只写在文本节点里给人看，真正发去生成的
+ * 分镜图 / 视频节点只拿到 `shot.prompt`，等于这两个字段一直没生效。
+ * 已经在正文里提过的不重复拼，避免「中景……景别：中景」这种叠加。
+ */
+function appendShotClauses(text: string, pairs: Array<[string, string | undefined]>, separator = "，"): string {
+  let out = text.trim();
+  for (const [label, value] of pairs) {
+    const clause = value?.trim();
+    if (!clause || out.includes(clause)) continue;
+    out = out ? `${out}${separator}${label}：${clause}` : `${label}：${clause}`;
+  }
+  return out;
+}
+
 /** 设定名比对用的归一化键：忽略空白、全半角括号和「·」写法差异 */
 function referenceKey(name: string) {
   return name
@@ -749,14 +766,14 @@ export function buildStoryboardTemplateInput(source: {
       width: 280,
       height: 260,
       title: `第 ${shot.index} 镜 · 分镜图`,
-      text: shot.prompt,
+      text: appendShotClauses(shot.prompt, [["景别", shot.shotSize]]),
     });
     const videoId = `v${index + 1}`;
-    const videoPrompt = shot.videoPrompt?.trim() || [
+    const videoBase = shot.videoPrompt?.trim() || [
       shot.prompt,
-      shot.cameraMove?.trim() ? `运镜：${shot.cameraMove.trim()}` : "",
       "基于首帧保持角色和场景一致，动作自然连贯。",
     ].filter(Boolean).join("；");
+    const videoPrompt = appendShotClauses(videoBase, [["景别", shot.shotSize], ["运镜", shot.cameraMove]], "；");
     nodes.push({
       tempId: videoId, type: "video", storyboard: storyboard("video"), x: x + 740, y, width: 320, height: 260,
       title: `第 ${shot.index} 镜 · 视频`, text: videoPrompt,

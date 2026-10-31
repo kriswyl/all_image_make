@@ -377,6 +377,30 @@ describe("无限画布模板", () => {
     expect(template.edges?.filter((edge) => edge.to === "c1" && edge.role === "reference")).toHaveLength(1);
   });
 
+  it("景别和运镜拼进分镜图 / 视频提示词，正文提过的不重复", () => {
+    const template = buildStoryboardTemplateInput({
+      name: "景别运镜",
+      characters: [], scenes: [], props: [],
+      shots: [
+        { index: 1, prompt: "老陈在揉面", shotSize: "中景", cameraMove: "缓慢推近" },
+        { index: 2, prompt: "中景构图，林小满站在门口", shotSize: "中景", cameraMove: "横摇" },
+        { index: 3, prompt: "雨夜街道", shotSize: "全景", cameraMove: "跟拍", videoPrompt: "人物向前走，镜头跟随" },
+      ],
+    });
+    const text = (tempId: string) => template.nodes.find((node) => node.tempId === tempId)?.text ?? "";
+
+    expect(text("c1")).toBe("老陈在揉面，景别：中景");
+    expect(text("v1")).toContain("景别：中景");
+    expect(text("v1")).toContain("运镜：缓慢推近");
+
+    // 正文已经写了「中景构图」，不要变成「中景构图……景别：中景」
+    expect(text("c2")).toBe("中景构图，林小满站在门口");
+    expect(text("c2")).not.toContain("景别：");
+
+    // 给了 videoPrompt 也要补齐缺的运镜
+    expect(text("v3")).toContain("运镜：跟拍");
+  });
+
   it("迁移旧分镜：生成模板和画布，重复调用跳过", async () => {
     const { app, context } = await tempApp();
     addChatChannel(context.db);
