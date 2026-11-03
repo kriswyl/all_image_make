@@ -14,7 +14,14 @@ function node(input: any, depth: number, count: { value: number }, xml: boolean)
   if (depth > 30 || ++count.value > 1500) throw new AppError("DOCUMENT_TOO_COMPLEX", "思维导图超过节点或层级限制", 400);
   const title = scalar(input?.title).trim() || "未命名主题";
   const notes = xml ? scalar(input?.notes?.plain).trim() : scalar(input?.notes?.plain?.content ?? input?.notes?.plain).trim();
-  const children = xml ? list(input?.children?.topics).flatMap((group) => list(group?.topic)) : [...list(input?.children?.attached), ...list(input?.children?.detached)];
+  // XMind 的子节点分好几组：attached（常规）、detached（游离主题）、summary（概要）。
+  // 概要里的内容是真实内容——只读 attached 会整棵子树丢掉（曾把 275 个节点读成 22 个）。
+  const children = xml
+    ? [
+        ...list(input?.children?.topics).flatMap((group) => list(group?.topic)),
+        ...list(input?.children?.summaries).flatMap((group) => list(group?.summary ?? group?.topic)),
+      ]
+    : ["attached", "detached", "summary", "callout"].flatMap((key) => list((input?.children ?? {})[key]));
   const id = scalar(input?.id ?? input?.['@_id']);
   const image = scalar(input?.image?.src ?? input?.image?.['@_src'] ?? input?.['xhtml:img']?.['@_xlink:href']);
   return { title, notes, children: children.map((child) => node(child, depth + 1, count, xml)), ...(id ? { id } : {}), ...(image ? { image } : {}) };

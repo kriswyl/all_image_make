@@ -23,6 +23,26 @@ describe("XMind 转 PPT", () => {
     expect(body).toContain("目标用户"); expect(body).toContain("竞争产品"); expect(body).toContain("<a:t>");
     expect(await ppt.file("ppt/notesSlides/notesSlide2.xml")!.async("string")).toContain("讲解备注");
   });
+  it("概要（summary）里的节点不能被丢掉", async () => {
+    const zip = new JSZip();
+    zip.file("content.json", JSON.stringify([{ rootTopic: { title: "课程", children: {
+      attached: [{
+        title: "第一章",
+        children: {
+          attached: [{ title: "要点" }],
+          // XMind 的「概要」是独立的一组子节点，真实文件里经常承载大半内容
+          summary: [{ title: "阶段一", children: { attached: [{ title: "基础" }] } }],
+        },
+      }],
+    } } }]));
+    const doc = await parseXmind(await zip.generateAsync({ type: "nodebuffer" }));
+    const chapter = doc.sheets[0]!.children[0]!;
+    expect(chapter.children.map((child) => child.title)).toEqual(["要点", "阶段一"]);
+    expect(chapter.children[1]!.children[0]!.title).toBe("基础");
+    const plan = planMindSlides(doc);
+    expect(plan.flatMap((slide) => slide.lines).join("")).toContain("基础");
+  });
+
   it("对超长内容分页，不丢失节点", async () => {
     const text = "长".repeat(400);
     const slides = planMindSlides({ format: "xmind", warnings: [], sheets: [{ title: "主题", notes: "", children: [{ title: "章节", notes: "", children: [{ title: text, notes: "", children: [] }] }] }] });
