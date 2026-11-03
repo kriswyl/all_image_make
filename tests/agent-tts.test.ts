@@ -102,7 +102,7 @@ describe("对话里生成配音", () => {
     expect(media[0]!.asset.duration).toBe(1);
 
     expect(submitted).toMatchObject({
-      contents: [{ parts: [{ text: "你好，欢迎收听。", annotations: [{ type: "speech_metadata", style: "亲切" }] }] }],
+      contents: [{ parts: [{ text: "你好，欢迎收听。", speechMetadata: { style: "亲切" } }] }],
       generationConfig: {
         responseModalities: ["AUDIO"],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } },

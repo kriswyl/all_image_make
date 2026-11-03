@@ -586,12 +586,14 @@ function appendShotClauses(text: string, pairs: Array<[string, string | undefine
 }
 
 /** 分镜图提示词：正文 + 景别（正文里提过的不重复拼） */
-export function composeShotImagePrompt(shot: { prompt: string; shotSize?: string }) {
+export function composeShotImagePrompt(shot: { prompt: string; shotSize?: string; finalImagePrompt?: string }) {
+  if (shot.finalImagePrompt?.trim()) return shot.finalImagePrompt.trim();
   return appendShotClauses(shot.prompt, [["景别", shot.shotSize]]);
 }
 
 /** 视频提示词：显式 videoPrompt 优先，缺的景别 / 运镜补齐 */
-export function composeShotVideoPrompt(shot: { prompt: string; videoPrompt?: string; shotSize?: string; cameraMove?: string }) {
+export function composeShotVideoPrompt(shot: { prompt: string; videoPrompt?: string; shotSize?: string; cameraMove?: string; finalVideoPrompt?: string }) {
+  if (shot.finalVideoPrompt?.trim()) return shot.finalVideoPrompt.trim();
   const base = shot.videoPrompt?.trim() || [shot.prompt, "基于首帧保持角色和场景一致，动作自然连贯。"].filter(Boolean).join("；");
   return appendShotClauses(base, [["景别", shot.shotSize], ["运镜", shot.cameraMove]], "；");
 }
@@ -623,6 +625,8 @@ export interface StoryboardTemplateShot {
   cameraMove?: string;
   videoPrompt?: string;
   soundEffect?: string;
+  finalImagePrompt?: string;
+  finalVideoPrompt?: string;
 }
 
 /** 从分镜数据生成模板：角色 / 场景设定图占位 + 每镜文本 / 配置节点 + 参考连线 */

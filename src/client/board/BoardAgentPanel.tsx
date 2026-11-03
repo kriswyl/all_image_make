@@ -79,7 +79,7 @@ function clampUi(ui: BoardAgentUiState): BoardAgentUiState {
 }
 
 export function BoardAgentPanel({
-  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onClose,
+  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onImportTemplate, onClose,
 }: {
   threadId: string;
   initialUiState?: BoardAgentUiState;
@@ -88,6 +88,7 @@ export function BoardAgentPanel({
   onBoardDelta: (delta?: BoardDelta) => void;
   onFrameRequest: (request: { boardId: string; requestId: string; videoAssetId: string }) => void;
   onBeforeSend: () => Promise<void>;
+  onImportTemplate: (templateId: string, name: string) => void;
   onClose: () => void;
 }) {
   const [view, setView] = useState<(ConversationView & { running: boolean }) | null>(null);
@@ -568,6 +569,7 @@ export function BoardAgentPanel({
               stale={!running}
               assets={view?.mediaAssets ?? []}
               onToast={(kind, text) => onToast(kind === "ok" ? "success" : "error", text)}
+              onImportTemplate={onImportTemplate}
             />
           );
         })}
@@ -585,7 +587,7 @@ export function BoardAgentPanel({
           value={draft}
           rows={2}
           maxLength={20000}
-          placeholder="让助手加节点、连线、改提示词，或生成图片…"
+          placeholder="让助手拆分镜、加节点、改提示词，或生成图片…"
           disabled={composerLocked || !view?.brainChannelId}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {

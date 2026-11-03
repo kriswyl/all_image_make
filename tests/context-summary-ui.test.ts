@@ -48,4 +48,16 @@ describe("上下文设置浮层", () => {
     expect(container.querySelector(".context-summary-panel")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
+
+  it("普通聊天显示工具和模型调用预算", () => {
+    act(() => root.render(React.createElement(ContextSummaryControl, {
+      view: { id: "chat", chatMode: "chat", contextBudget: 350000, contextSummary: null } as ConversationView,
+      onBudgetChange: vi.fn(), onChatLimitsChange: vi.fn(), onCompress: vi.fn(),
+    })));
+    act(() => container.querySelector<HTMLButtonElement>(".context-summary-trigger")!.click());
+    expect(container.querySelector<HTMLInputElement>('[aria-label="工具调用轮数"]')?.value).toBe("16");
+    expect(container.querySelector<HTMLInputElement>('[aria-label="模型调用上限"]')?.value).toBe("500");
+    expect(container.querySelector<HTMLInputElement>('[aria-label="处理时间上限"]')?.value).toBe("30");
+    expect(container.querySelector<HTMLInputElement>('[aria-label="本轮 token 上限"]')?.value).toBe("0");
+  });
 });

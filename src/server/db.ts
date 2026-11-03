@@ -810,8 +810,105 @@ export class AppDatabase {
    * `startTurn` 的 finally 兜着。
    */
   resetConversationsStuckInRunning(): number {
+    const interrupted = this.db.prepare("SELECT DISTINCT conversation_id FROM native_tool_calls WHERE status = 'running'").all() as DbRow[];
+    for (const item of interrupted) {
+      const conversationId = String(item.conversation_id);
+      this.clearNativeTurnCheckpoint(conversationId);
+      this.recoverNativeToolFiles(conversationId);
+      this.interruptNativeToolCalls(conversationId);
+    }
     const result = this.db.prepare("UPDATE conversations SET status = 'idle' WHERE status = 'running'").run();
     return Number(result.changes ?? 0);
+  }
+
+  beginNativeToolCall(conversationId: string, messageId: string, callId: string, toolName: string, argumentHash: string) {
+    this.db.prepare("INSERT INTO native_tool_calls (message_id, conversation_id, call_id, tool_name, argument_hash, status, created_at) VALUES (?, ?, ?, ?, ?, 'running', ?)").run(messageId, conversationId, callId, toolName, argumentHash, now());
+  }
+
+  startNativeToolCall(conversationId: string, displayName: string, toolArgs: Record<string, unknown>, callId: string, toolName: string, argumentHash: string) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const message = this.appendMessage({ conversationId, role: "assistant", toolName: displayName, toolArgs, content: "", status: "pending" });
+      this.beginNativeToolCall(conversationId, message.id, callId, toolName, argumentHash);
+      this.db.exec("COMMIT");
+      return message;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  finishNativeToolCall(conversationId: string, messageId: string, toolName: string, result: ToolResult) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const status = result.ok ? "ok" : "error";
+      const changed = this.db.prepare("UPDATE native_tool_calls SET status = ?, finished_at = ? WHERE message_id = ? AND conversation_id = ? AND status = 'running'").run(status, now(), messageId, conversationId);
+      if (Number(changed.changes) !== 1) throw new Error("工具调用状态已改变，无法重复写入结果");
+      this.updateMessage(messageId, { content: "", status });
+      const row = this.appendMessage({ conversationId, role: "tool", toolName, content: result.summary, toolResult: result, status, ...(result.ok ? {} : { errorMessage: result.summary }) });
+      this.db.exec("COMMIT");
+      return row;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  interruptNativeToolCalls(conversationId: string) {
+    const message = "工具调用被中断，执行结果可能尚未记录；重试前请先检查已生成的文件。";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE messages SET status = 'error', content = '', error_message = ? WHERE id IN (SELECT message_id FROM native_tool_calls WHERE conversation_id = ? AND status = 'running')").run(message, conversationId);
+      this.db.prepare("UPDATE native_tool_calls SET status = 'interrupted', finished_at = ? WHERE conversation_id = ? AND status = 'running'").run(now(), conversationId);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  listNativeToolCalls(conversationId: string) {
+    return this.db.prepare("SELECT message_id, call_id, tool_name, status, created_at, finished_at FROM native_tool_calls WHERE conversation_id = ? ORDER BY rowid").all(conversationId);
+  }
+
+  saveNativeTurnCheckpoint(conversationId: string, payload: string): boolean {
+    if (payload.length > 2_000_000) { this.clearNativeTurnCheckpoint(conversationId); return false; }
+    this.db.prepare("INSERT OR REPLACE INTO native_turn_checkpoints (conversation_id, payload, updated_at) VALUES (?, ?, ?)").run(conversationId, payload, now());
+    return true;
+  }
+  getNativeTurnCheckpoint(conversationId: string): string | null {
+    const row = this.db.prepare("SELECT payload FROM native_turn_checkpoints WHERE conversation_id = ?").get(conversationId) as DbRow | undefined;
+    return row ? String(row.payload) : null;
+  }
+  clearNativeTurnCheckpoint(conversationId: string): void {
+    this.db.prepare("DELETE FROM native_turn_checkpoints WHERE conversation_id = ?").run(conversationId);
+  }
+  recoverableNativeTurnIds(): string[] {
+    const rows = this.db.prepare("SELECT c.id FROM conversations c JOIN native_turn_checkpoints n ON n.conversation_id = c.id WHERE c.status = 'running' AND c.kind = 'chat' AND c.chat_mode = 'chat' AND NOT EXISTS (SELECT 1 FROM native_tool_calls t WHERE t.conversation_id = c.id AND t.status = 'running')").all() as DbRow[];
+    return rows.map((row) => String(row.id));
+  }
+
+  /** Recover published local artifacts; unknown side effects remain interrupted and are never replayed. */
+  private recoverNativeToolFiles(conversationId: string) {
+    const rows = this.db.prepare("SELECT message_id, tool_name FROM native_tool_calls WHERE conversation_id = ? AND status = 'running' AND tool_name IN ('doc_create', 'doc_edit', 'doc_convert') ORDER BY rowid").all(conversationId) as DbRow[];
+    for (const row of rows) {
+      const messageId = String(row.message_id);
+      const file = this.getWorkspaceDocumentByOperation(conversationId, messageId);
+      if (!file || !/^[0-9a-f-]{36}$/i.test(conversationId)) continue;
+      const root = path.resolve(this.dataDir, "documents");
+      const dir = path.resolve(root, conversationId);
+      const full = path.resolve(dir, file.name);
+      try {
+        if (path.dirname(dir).toLowerCase() !== root.toLowerCase() || path.dirname(full).toLowerCase() !== dir.toLowerCase()) continue;
+        if (fs.lstatSync(root).isSymbolicLink() || fs.lstatSync(dir).isSymbolicLink()) continue;
+        const stat = fs.lstatSync(full);
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== file.byteSize) continue;
+      } catch { continue; }
+      const summary = `已恢复中断前生成的文件 ${file.name}；请检查内容。`;
+      this.finishNativeToolCall(conversationId, messageId, String(row.tool_name), { ok: true, summary, data: { workspaceFileId: file.id, workspaceFileName: file.name, byteSize: file.byteSize, pendingDelete: false } });
+    }
+  }
+
+  getPresentationBatch(conversationId: string, key: string): string | null {
+    const row = this.db.prepare("SELECT content FROM presentation_batch_cache WHERE conversation_id = ? AND cache_key = ?").get(conversationId, key) as DbRow | undefined;
+    return row ? String(row.content) : null;
+  }
+
+  savePresentationBatch(conversationId: string, key: string, content: string): void {
+    if (content.length > 200_000) throw new Error("PPT 规划结果过大，无法保存断点");
+    this.db.prepare("INSERT OR REPLACE INTO presentation_batch_cache (conversation_id, cache_key, content, created_at) VALUES (?, ?, ?, ?)").run(conversationId, key, content, now());
+    this.db.prepare("DELETE FROM presentation_batch_cache WHERE conversation_id = ? AND rowid NOT IN (SELECT rowid FROM presentation_batch_cache WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 400)").run(conversationId, conversationId);
   }
 
   /**
@@ -857,6 +954,62 @@ export class AppDatabase {
     `).run(id, conversationId, fileName, content, content.length, at);
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
     return { id, conversationId, fileName, content, charCount: content.length, createdAt: at };
+  }
+
+  addBinaryConversationDocument(conversationId: string, fileName: string, content: string, bytes: Buffer): StoredDocument {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const document = this.addConversationDocument(conversationId, fileName, content);
+      this.db.prepare("INSERT INTO conversation_document_files (document_id, data) VALUES (?, ?)").run(document.id, bytes);
+      this.db.exec("COMMIT");
+      return document;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  getConversationDocumentFile(documentId: string): Buffer | null {
+    const row = this.db.prepare("SELECT data FROM conversation_document_files WHERE document_id = ?").get(documentId) as DbRow | undefined;
+    return row?.data ? Buffer.from(row.data as unknown as Uint8Array) : null;
+  }
+
+  getConversationDocumentPlan(documentId: string): string | null {
+    const row = this.db.prepare("SELECT plan_json FROM conversation_document_plans WHERE document_id = ?").get(documentId) as DbRow | undefined;
+    return row ? String(row.plan_json) : null;
+  }
+
+  setConversationDocumentPlan(documentId: string, plan: string): void {
+    this.db.prepare("INSERT INTO conversation_document_plans (document_id, plan_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(document_id) DO UPDATE SET plan_json = excluded.plan_json, updated_at = excluded.updated_at").run(documentId, plan, now());
+  }
+
+  addDocumentOutput(documentId: string, fileName: string, data: Buffer): string {
+    const id = crypto.randomUUID();
+    this.db.prepare("INSERT INTO conversation_document_outputs (id, document_id, file_name, data, created_at) VALUES (?, ?, ?, ?, ?)").run(id, documentId, fileName, data, now());
+    return id;
+  }
+
+  getDocumentOutput(id: string): { documentId: string; fileName: string; data: Buffer } | null {
+    const row = this.db.prepare("SELECT document_id, file_name, data FROM conversation_document_outputs WHERE id = ?").get(id) as DbRow | undefined;
+    return row ? { documentId: String(row.document_id), fileName: String(row.file_name), data: Buffer.from(row.data as unknown as Uint8Array) } : null;
+  }
+
+  addWorkspaceDocument(conversationId: string, fileName: string, byteSize: number, operationId?: string): { id: string; name: string; byteSize: number; createdAt: string } {
+    const id = crypto.randomUUID(); const createdAt = now();
+    this.db.prepare("INSERT INTO workspace_documents (id, conversation_id, file_name, byte_size, created_at, operation_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, conversationId, fileName, byteSize, createdAt, operationId ?? null);
+    return { id, name: fileName, byteSize, createdAt };
+  }
+  listWorkspaceDocuments(conversationId: string): Array<{ id: string; name: string; byteSize: number; createdAt: string }> {
+    const rows = this.db.prepare("SELECT id, file_name, byte_size, created_at FROM workspace_documents WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC").all(conversationId) as DbRow[];
+    return rows.map((row) => ({ id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at) }));
+  }
+  getWorkspaceDocument(conversationId: string, fileId: string) {
+    return this.listWorkspaceDocuments(conversationId).find((item) => item.id === fileId) ?? null;
+  }
+  getWorkspaceDocumentByOperation(conversationId: string, operationId: string) {
+    const row = this.db.prepare("SELECT id, file_name, byte_size, created_at FROM workspace_documents WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;
+    return row ? { id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at) } : null;
+  }
+
+  deleteWorkspaceDocument(conversationId: string, fileId: string): void {
+    this.db.prepare("DELETE FROM workspace_documents WHERE conversation_id = ? AND id = ?").run(conversationId, fileId);
   }
 
   listConversationDocuments(conversationId: string): StoredDocument[] {
@@ -1429,6 +1582,10 @@ export class AppDatabase {
       chatMode: "chat_mode",
       contextBudget: "context_budget",
       chatAutoContinueLimit: "chat_auto_continue_limit",
+      chatToolRoundLimit: "chat_tool_round_limit",
+      chatModelCallLimit: "chat_model_call_limit",
+      chatTurnMinutes: "chat_turn_minutes",
+      chatTokenLimit: "chat_token_limit",
       boardMaxRounds: "board_max_rounds",
       boardAutoContinueLimit: "board_auto_continue_limit",
     };
@@ -1486,6 +1643,15 @@ export class AppDatabase {
     const kindRow = this.db.prepare("SELECT kind FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
     if (kindRow && String(kindRow.kind) === "board") {
       throw new Error("无限画布线程不能按对话删除");
+    }
+    // 只移除本会话的文档工作区；拒绝链接或越界路径。
+    const workspaceRoot = path.resolve(this.dataDir, "documents");
+    const workspaceTarget = path.resolve(workspaceRoot, id);
+    if (!/^[0-9a-f-]{36}$/i.test(id) || path.dirname(workspaceTarget).toLowerCase() !== workspaceRoot.toLowerCase()) throw new Error("文档目录路径无效");
+    if (fs.existsSync(workspaceRoot) && fs.lstatSync(workspaceRoot).isSymbolicLink()) throw new Error("文档目录不安全");
+    if (fs.existsSync(workspaceTarget)) {
+      if (fs.lstatSync(workspaceTarget).isSymbolicLink()) throw new Error("会话文档目录不安全");
+      fs.rmSync(workspaceTarget, { recursive: true, force: true });
     }
     const uploads = this.db.prepare(`
       SELECT DISTINCT tasks.id AS id FROM messages
@@ -2055,6 +2221,10 @@ export class AppDatabase {
       chatMode: row.kind === "board" ? "creative" : row.chat_mode === "chat" ? "chat" : "creative",
       contextBudget: Number(row.context_budget) || 350000,
       chatAutoContinueLimit: row.chat_auto_continue_limit == null ? 20 : Number(row.chat_auto_continue_limit),
+      chatToolRoundLimit: row.chat_tool_round_limit == null ? 16 : Number(row.chat_tool_round_limit),
+      chatModelCallLimit: row.chat_model_call_limit == null ? 500 : Number(row.chat_model_call_limit),
+      chatTurnMinutes: row.chat_turn_minutes == null ? 30 : Number(row.chat_turn_minutes),
+      chatTokenLimit: row.chat_token_limit == null ? 0 : Number(row.chat_token_limit),
       boardMaxRounds: row.board_max_rounds == null ? 10 : Number(row.board_max_rounds),
       boardAutoContinueLimit: row.board_auto_continue_limit == null ? 3 : Number(row.board_auto_continue_limit),
       autoContinueCount: Number(row.auto_continue_count),

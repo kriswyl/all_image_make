@@ -17,10 +17,20 @@
  *    自动续跑的输出照样能推给重新连上的客户端（§12.2）。
  */
 import type { AppDatabase, AssetRow } from "./db.js";
+import { createHash } from "node:crypto";
 import type { TaskEvent, TaskRunner } from "./tasks.js";
 import { AppError, isTerminalStatus } from "./tasks.js";
 import type { KeyStore } from "./key-store.js";
 import { RemoteApiError } from "./adapters.js";
+import { CHAT_DOCUMENT_TOOLS, executeChatDocumentTool } from "./chat-tools/documents.js";
+import { ChatToolRegistry, type ChatToolResult } from "./chat-tools/registry.js";
+import { createPlanTool } from "./chat-tools/planning.js";
+import { compactNativeToolReads } from "./chat-tools/context.js";
+import { parseNativeTurnCheckpoint, type NativeTurnCheckpoint } from "./chat-tools/checkpoint.js";
+import { planPresentationWithAi } from "./ai-presentation.js";
+import { describeMindImages } from "./mind-image-vision.js";
+import { renderWithLocalWps } from "./wps-auto-render.js";
+import { reviewRenderedPresentation } from "./presentation-visual-review.js";
 import { BrainError, callBrain, type BrainContentPart, type BrainMessage, type BrainResult } from "./brain.js";
 import {
   buildCapabilityAliases,
@@ -99,7 +109,7 @@ export {
   MAX_VISION_READS_PER_ROUND, MAX_VISION_IMAGES,
 } from "./agent-constants.js";
 
-export type TurnTrigger = "user" | "task_finished" | "confirmation";
+export type TurnTrigger = "user" | "task_finished" | "confirmation" | "recovered";
 
 export class AgentService {
   /** 每个会话的 SSE 订阅者。HTTP 断开会退订，但会话本身继续跑（§12.2） */
@@ -158,6 +168,7 @@ export class AgentService {
   interrupt(conversationId: string) {
     const controller = this.activeTurns.get(conversationId);
     if (!controller) return false;
+    this.db.clearNativeTurnCheckpoint(conversationId);
     controller.abort();
     return true;
   }
@@ -241,6 +252,7 @@ export class AgentService {
     if (this.activeTurns.has(conversationId)) {
       throw new AppError("TURN_IN_FLIGHT", "上一条还在处理中，请稍候", 409);
     }
+    if (text !== null) this.db.clearNativeTurnCheckpoint(conversationId);
     const controller = new AbortController();
     this.activeTurns.set(conversationId, controller);
     void this.turn(conversationId, text, trigger, controller, assetRefs, conversation)
@@ -404,22 +416,150 @@ export class AgentService {
     }
     this.setStatus(conversationId, "running");
     try {
-      await this.brain.prepareCompression(turnConversation, controller, turnAttachmentIds);
+      if (trigger !== "recovered") await this.brain.prepareCompression(turnConversation, controller, turnAttachmentIds);
       if (plain) {
         const built = await this.brain.buildBrainMessages(turnConversation, turnAttachmentIds);
-        let plainMessages = built.messages;
+        const checkpoint = trigger === "recovered" ? parseNativeTurnCheckpoint(this.db.getNativeTurnCheckpoint(conversationId)) : null;
+        if (trigger === "recovered" && !checkpoint) throw new Error("任务断点不可用，请检查已完成的操作后重新发送请求。");
+        const turnStartedAt = Date.now() - (checkpoint?.elapsedMs ?? 0);
+        let brainCalls = checkpoint?.brainCalls ?? 0;
+        let usedTokens = checkpoint?.usedTokens ?? 0;
+        let usageMissing = checkpoint?.usageMissing ?? false;
+        const maxTokens = turnConversation.chatTokenLimit ?? 0;
+        const maxBrainCalls = turnConversation.chatModelCallLimit ?? 500;
+        const maxTurnMinutes = turnConversation.chatTurnMinutes ?? 30;
+        const callWithBudget = async (messages: BrainMessage[], options: Parameters<typeof this.brain.callBrainRaw>[4]) => {
+          if (++brainCalls > maxBrainCalls) throw new Error(`本轮模型调用已达 ${maxBrainCalls} 次上限；已保留完成的操作，请检查结果后继续。`);
+          if (Date.now() - turnStartedAt > maxTurnMinutes * 60_000) throw new Error(`本轮处理已超过 ${maxTurnMinutes} 分钟；已保留完成的操作，请检查结果后继续。`);
+          if (maxTokens && usageMissing) throw new Error("渠道未提供完整 token 用量，无法执行本轮用量上限；已停止后续调用并保留完成的操作。");
+          if (maxTokens && usedTokens >= maxTokens) throw new Error(`本轮已用 ${usedTokens} tokens，达到 ${maxTokens} 的上限；已停止后续调用并保留完成的操作。`);
+          const result = await this.brain.callBrainRaw(turnConversation, messages, controller, conversationId, options);
+          const usage = result.usage;
+          if (usage?.complete && usage.promptTokens + usage.completionTokens > 0) usedTokens += usage.promptTokens + usage.completionTokens;
+          else usageMissing = true;
+          return result;
+        };
+        const registry = new ChatToolRegistry();
+        for (const spec of CHAT_DOCUMENT_TOOLS) {
+          const name = spec.function.name;
+          registry.register({
+            spec, displayName: name as AgentToolName,
+            deduplicate: name === "doc_create" || name === "doc_edit" || name === "doc_convert",
+            hideResult: name === "doc_read" || name === "doc_search" || name === "doc_list",
+            run: (raw, report, operationId) => executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images) => {
+              if (turnConversation.visionEnabled && images.length) await describeMindImages(mind, images, (messages) => callWithBudget(messages, { silent: true }), report, controller.signal);
+              const requests = this.db.listMessages(conversationId).filter((message) => message.role === "user" && !message.documents.length && message.content && !/^(?:请)?(?:继续|重试|再试|重新试试)[。！!\s]*$/.test(message.content.trim())).slice(-5).map((message) => message.content!.slice(0, 2000));
+              return planPresentationWithAi(mind, requests.join("\n"), (messages) => callWithBudget(messages, { silent: true }), report, {
+                scope: `${turnConversation.brainChannelId}\n${turnConversation.brainModel}`,
+                get: (key) => this.db.getPresentationBatch(conversationId, key),
+                set: (key, value) => this.db.savePresentationBatch(conversationId, key, value),
+              }, (messages) => callWithBudget(messages, { silent: true }), { globalPlan: true });
+            }, operationId, async (plan, images) => {
+              if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
+              const result = await reviewRenderedPresentation(plan, images, (bytes) => renderWithLocalWps(this.db, bytes, controller.signal), (messages) => callWithBudget(messages, { silent: true }), report);
+              controller.signal.throwIfAborted(); return result;
+            }),
+          });
+        }
+        registry.register(createPlanTool());
+        const toolSpecs = registry.specs();
+        const toolSignature = createHash("sha256").update(JSON.stringify([...toolSpecs].sort((a, b) => a.function.name.localeCompare(b.function.name)))).digest("hex");
+        const channelVersion = this.db.getChannel(turnConversation.brainChannelId)?.updatedAt ?? "";
+        if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || checkpoint.toolSignature !== toolSignature)) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
+        const lastPlan = this.db.listMessages(conversationId).filter((message) => message.role === "tool" && message.toolName === "plan_update" && message.status === "ok").at(-1);
+        const context: BrainMessage[] = [{ role: "system", content: `复杂任务应分步规划、使用工具并检查结果；仅在实际完成后声称完成。${lastPlan?.content ? `\n本会话最近的任务计划（可能属于之前的任务，仅在相关时参考）：\n${lastPlan.content}` : ""}` }];
+        let plainMessages = checkpoint?.messages ?? [...context, ...built.messages];
+        const previousCalls = new Map<string, ChatToolResult>(checkpoint?.previousCalls ?? []);
+        let toolRounds = checkpoint?.toolRounds ?? 0;
+        const maxToolRounds = turnConversation.chatToolRoundLimit ?? 16;
+        let checkpointNoticeSent = false;
+        if (checkpoint) {
+          const note = this.db.appendMessage({ conversationId, role: "system", content: "已从上次完成的工具步骤继续；未完成的操作不会自动重放。" });
+          this.broadcast(conversationId, { type: "message", message: note });
+        }
         let result: BrainResult;
         try {
-          result = await this.brain.callBrainRaw(turnConversation, built.messages, controller, conversationId, { plain: true });
+          result = await callWithBudget(plainMessages, { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) });
         } catch (error) {
           if (controller.signal.aborted) return this.finishInterrupted(conversationId);
+          if (checkpoint) throw error;
+          if (error instanceof RemoteApiError && error.status === 400 && /(?:tools?|function.call).{0,60}(?:not support|unsupported|not allowed|invalid parameter)|(?:not support|unsupported|unknown parameter|unrecognized).{0,60}(?:tools?|function.call)/i.test(error.message)) {
+            const notice = this.db.appendMessage({ conversationId, role: "system", content: "当前渠道或模型不支持工具调用，本轮只能文字回答，不能生成文件。" });
+            this.broadcast(conversationId, { type: "message", message: notice });
+            plainMessages = [...context, ...built.messages, { role: "system", content: "本轮工具不可用。只能回答文字，不能声称创建或修改了文件。" }];
+            result = await callWithBudget(plainMessages, { plain: true });
+          } else {
           if (!built.visionAttached || !isVisionError(error)) throw error;
           this.broadcast(conversationId, { type: "reset" });
           this.brain.degradeVision(turnConversation, error);
           const retry = await this.brain.buildBrainMessages({ ...turnConversation, visionEnabled: false }, turnAttachmentIds);
-          plainMessages = retry.messages;
-          result = await this.brain.callBrainRaw(turnConversation, retry.messages, controller, conversationId, { plain: true });
+          plainMessages = [...context, ...retry.messages];
+          result = await callWithBudget(plainMessages, { plain: true, tools: toolSpecs });
+          }
         }
+        this.db.clearNativeTurnCheckpoint(conversationId);
+        while (result.toolCalls.length && toolRounds < maxToolRounds) {
+          if (controller.signal.aborted) return this.finishInterrupted(conversationId);
+          if (result.truncated || result.toolCalls.length > 8 || result.toolCalls.some((call) => !call.id || !call.name) || new Set(result.toolCalls.map((call) => call.id)).size !== result.toolCalls.length) throw new Error("模型返回的工具调用不完整，请重试");
+          toolRounds++;
+          if (result.content.trim()) {
+            const message = this.db.appendMessage({ conversationId, role: "assistant", content: result.content });
+            this.broadcast(conversationId, { type: "message", message });
+          }
+          this.broadcast(conversationId, { type: "reset" });
+          plainMessages = [...plainMessages, { role: "assistant", content: result.content || null, tool_calls: result.toolCalls.map((call) => ({ id: call.id, type: "function" as const, function: { name: call.name, arguments: call.arguments } })) }];
+          for (const call of result.toolCalls) {
+            if (controller.signal.aborted) return this.finishInterrupted(conversationId);
+            const tool = registry.get(call.name);
+            const toolName = tool?.displayName ?? "doc_read";
+            // Keep only small, non-content arguments in the visible call record.
+            let visibleArgs: Record<string, unknown> = {};
+            try {
+              const input: unknown = JSON.parse(call.arguments);
+              if (input && typeof input === "object" && !Array.isArray(input)) {
+                const values = input as Record<string, unknown>;
+                for (const key of ["fileId", "to", "kind", "name", "offset", "limit"]) {
+                  const value = values[key];
+                  if (typeof value === "string") visibleArgs[key] = value.slice(0, 200);
+                  else if (typeof value === "number" && Number.isFinite(value)) visibleArgs[key] = value;
+                }
+                if (call.name === "plan_update" && Array.isArray(values.steps)) visibleArgs.steps = values.steps.length;
+              }
+            } catch { /* Invalid arguments are reported by the tool. */ }
+            const pending = this.db.startNativeToolCall(conversationId, toolName, visibleArgs, call.id, call.name, createHash("sha256").update(call.arguments).digest("hex"));
+            this.broadcast(conversationId, { type: "message", message: pending });
+            const key = `${call.name}\n${call.arguments}`;
+            const outcome: ChatToolResult = (tool?.deduplicate ? previousCalls.get(key) : undefined) ?? (tool ? await tool.run(call.arguments, (progress) => {
+              if (controller.signal.aborted) return;
+              const usageText = usageMissing ? "用量不完整" : `${usedTokens.toLocaleString()} tokens`;
+              this.db.updateMessage(pending.id, { content: `${progress} · 模型调用 ${brainCalls}/${maxBrainCalls} · ${usageText}` });
+              const updated = this.db.getMessage(pending.id);
+              if (updated) this.broadcast(conversationId, { type: "message", message: updated });
+            }, pending.id) : { ok: false, summary: `未知工具：${call.name}` });
+            if (tool?.deduplicate && outcome.ok) previousCalls.set(key, outcome);
+            const display = outcome.ok && tool?.hideResult ? "读取完成。" : outcome.summary;
+            const file = outcome.data;
+            const fileData = file && typeof file.fileId === "string" && typeof file.fileName === "string" && typeof file.byteSize === "number" ? { workspaceFileId: file.fileId, workspaceFileName: file.fileName, byteSize: file.byteSize, pendingDelete: file.pendingDelete === true } : undefined;
+            const publicData = outcome.uiData || fileData ? { ...outcome.uiData, ...fileData } : undefined;
+            const toolResult: ToolResult = { ok: outcome.ok, summary: display, ...(publicData ? { data: publicData } : {}) };
+            const row = this.db.finishNativeToolCall(conversationId, pending.id, toolName, toolResult);
+            const updated = this.db.getMessage(pending.id);
+            if (updated) this.broadcast(conversationId, { type: "message", message: updated });
+            this.broadcast(conversationId, { type: "message", message: row });
+            plainMessages.push({ role: "tool", tool_call_id: call.id, content: `${outcome.ok ? "成功" : "失败"}：${outcome.summary}${typeof outcome.data?.fileId === "string" ? `\n文件ID：${outcome.data.fileId}` : ""}` });
+          }
+          plainMessages = compactNativeToolReads(plainMessages);
+          const snapshot: NativeTurnCheckpoint = { version: 3, channelId: turnConversation.brainChannelId, channelVersion, model: turnConversation.brainModel, toolSignature, messages: plainMessages, toolRounds, brainCalls, elapsedMs: Date.now() - turnStartedAt, usedTokens, usageMissing, previousCalls: [...previousCalls.entries()] };
+          const checkpointSaved = this.db.saveNativeTurnCheckpoint(conversationId, JSON.stringify(snapshot));
+          if (!checkpointSaved && !checkpointNoticeSent) {
+            checkpointNoticeSent = true;
+            const notice = this.db.appendMessage({ conversationId, role: "system", content: "当前上下文过大，无法保存自动续跑断点；如程序退出，请检查已完成的操作后继续。" });
+            this.broadcast(conversationId, { type: "message", message: notice });
+          }
+          result = await callWithBudget(plainMessages, { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) });
+          this.db.clearNativeTurnCheckpoint(conversationId);
+        }
+        if (result.toolCalls.length) throw new Error("工具调用次数已达上限，请缩小任务范围后重试");
         if (controller.signal.aborted) return this.finishInterrupted(conversationId);
         let content = result.content;
         let continuationNotice = "";
@@ -429,11 +569,11 @@ export class AgentService {
           continuations += 1;
           let streamed = "";
           try {
-            result = await this.brain.callBrainRaw(turnConversation, [
+            result = await callWithBudget([
               ...plainMessages,
               { role: "assistant", content },
               { role: "user", content: "请从刚才截断的位置直接继续，不要重复已有内容，不要解释或添加开场白。" },
-            ], controller, conversationId, { plain: true, onContent: (text) => { streamed += text; } });
+            ], { plain: true, onContent: (text) => { streamed += text; } });
             content += result.content;
             if (!result.content.trim()) {
               continuationNotice = "自动续写没有返回正文，已保留之前的内容；可以发送消息要求继续。";
@@ -624,7 +764,10 @@ export class AgentService {
    * 会接着轮询；`awaiting_confirmation` 也留着，那是在等用户点头。
    */
   recoverStaleConversations(): number {
-    return this.db.resetConversationsStuckInRunning();
+    const resumable = this.db.recoverableNativeTurnIds();
+    const count = this.db.resetConversationsStuckInRunning();
+    for (const conversationId of resumable) this.startTurn(conversationId, null, "recovered");
+    return count;
   }
 
   private settleFinishedTasks(conversationId: string) {
@@ -1192,6 +1335,8 @@ export class AgentService {
   }
 
   private finishInterrupted(conversationId: string) {
+    this.db.clearNativeTurnCheckpoint(conversationId);
+    this.db.interruptNativeToolCalls(conversationId);
     const note = this.db.appendMessage({ conversationId, role: "system", content: "已中断本轮处理" });
     this.broadcast(conversationId, { type: "message", message: note });
     this.setStatus(conversationId, "idle");
@@ -1204,6 +1349,8 @@ export class AgentService {
   }
 
   private reportTurnFailure(conversationId: string, error: unknown) {
+    this.db.clearNativeTurnCheckpoint(conversationId);
+    this.db.interruptNativeToolCalls(conversationId);
     // 大脑这一侧的报错原样透传会把上游返回体（可能含 Base URL、请求片段）落进
     // SQLite 和界面，所以这类只留下翻译过的一句话，本地校验类错误才用原文
     const message = isBrainTimeout(error)

@@ -1,7 +1,7 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
 import { normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
-import { TTS_DEFAULT_VOICE } from "../shared/tts.js";
+import { TTS_DEFAULT_VOICE, splitTtsDialogue } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
 
@@ -191,24 +191,6 @@ export function applyAuth(url: string, headers: Record<string, string>, channel:
     return parsed.toString();
   }
   return url;
-}
-
-/** 把带「A：」「B：」标签的正文切成逐说话人的 part */
-function splitSpeakerParts(text: string): Array<{ speaker: "A" | "B"; text: string }> {
-  const parts: Array<{ speaker: "A" | "B"; text: string }> = [];
-  // 支持换行分段，也支持「A：你好。B：你好。」这种同一行写法
-  const pattern = /(^|\n|(?<=[。！？!?；;]))\s*([AB])\s*[：:]\s*/g;
-  let speaker: "A" | "B" | null = null;
-  let lastIndex = 0;
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    const chunk = text.slice(lastIndex, match.index).trim();
-    if (speaker && chunk) parts.push({ speaker, text: chunk });
-    speaker = match[2] as "A" | "B";
-    lastIndex = pattern.lastIndex;
-  }
-  const tail = text.slice(lastIndex).trim();
-  if (speaker && tail) parts.push({ speaker, text: tail });
-  return parts;
 }
 
 /** 没显式给模式时，按素材反推一个最合理的模式 */
@@ -600,13 +582,14 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     }
     const style = input.ttsStyle?.trim();
     /**
-     * 单人：一个 text part，风格放 annotations。
+     * 单人：一个 text part，风格放 speech_metadata。
      *
      * 双人：3.8 实测要求每个 text part 都带 `speech_metadata.speaker`；
      * 把整段「A：… B：…」塞进一个 part 会被 400 拒绝。所以先按 A/B 标签切段，
-     * 每段一个 part，annotations 里同时写 speaker 和 style。
+     * 每段一个 part，使用 REST JSON 的 speechMetadata（驼峰）携带 speaker 和 style，
+     * 兼容只识别 JSON 字段名的中转渠道。
      */
-    const speakerParts = speakers.length === 2 ? splitSpeakerParts(input.prompt) : [];
+    const speakerParts = speakers.length === 2 ? splitTtsDialogue(input.prompt) : [];
     if (speakers.length === 2 && (!speakerParts.some((item) => item.speaker === "A")
       || !speakerParts.some((item) => item.speaker === "B"))) {
       throw new Error("双人对话正文需要用「A：」「B：」标出两个说话人的台词");
@@ -614,12 +597,12 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     const parts = speakers.length === 2
       ? speakerParts.map((item) => ({
         text: item.text,
-        annotations: [{ type: "speech_metadata", speaker: item.speaker, ...(style ? { style } : {}) }],
+        speechMetadata: { speaker: item.speaker, ...(style ? { style } : {}) },
       }))
       : [compact({
         text: input.prompt,
-        // style 必须放在 annotations 里；写进正文有被念出来的风险
-        annotations: style ? [{ type: "speech_metadata", style }] : undefined,
+        // 把风格放进 speech_metadata，避免作为正文被朗读。
+        speechMetadata: style ? { style } : undefined,
       })];
     const speechConfig = compact({
       ...(input.ttsLanguage?.trim() ? { languageCode: input.ttsLanguage.trim() } : {}),

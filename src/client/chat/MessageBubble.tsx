@@ -5,6 +5,7 @@ import { AlertCircle, Check, Copy, FileText, Info, Maximize2, Play, X } from "lu
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
+import { MindPptPreview } from "./MindPptPreview";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -62,6 +63,7 @@ const markdownComponents: Components = {
 export function UserBubble({ message, onPreview }: { message: ChatMessage; onPreview?: (assetId: string) => void }) {
   // 产出/上传的那一张走 assetId，从画布拖进来的那几张走 assetRefs，两者不重叠
   const thumbs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
+  const [mind, setMind] = useState<{ id: string; name: string } | null>(null);
   return (
     <div className="chat-row chat-row-user">
       <div className="chat-bubble chat-bubble-user">
@@ -100,12 +102,13 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
               <span key={document.id} className="chat-document-chip" title="脚本文档，全文已交给助手">
                 <FileText size={13} />
                 <span>{document.name}</span>
-                <small>{document.charCount.toLocaleString()} 字</small>
+                {/\.xmind$/i.test(document.name) ? <button type="button" className="mind-export-link" onClick={() => setMind({ id: document.id, name: document.name })}>按结构预览</button> : <small>{document.charCount.toLocaleString()} 字</small>}
               </span>
             ))}
           </div>
         ) : null}
         {message.content}
+        {mind ? <MindPptPreview conversationId={message.conversationId} documentId={mind.id} name={mind.name} onClose={() => setMind(null)} /> : null}
       </div>
     </div>
   );

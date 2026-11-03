@@ -808,7 +808,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [theater, setTheater] = useState(false);
-  const recentTasks = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 12);
+  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
   // 竖屏视频两侧会空出大片版面，用画面自身的模糊放大图垫底
   const [portraitAssetId, setPortraitAssetId] = useState<string | null>(null);
@@ -939,9 +939,9 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
           <span className="recent-label">最近</span>
           <div className="recent-thumbs">
             {recentTasks.map((item) => (
-              <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={item.prompt} onClick={() => onSelectTask(item)}>
-                <LazyVideoThumb src={api.assetUrl(item.assets[0].url)} alt={item.prompt} />
-                {item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
+              <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={`${statusLabels[item.status]} · ${item.prompt}`} aria-label={`${statusLabels[item.status]}：${item.prompt}`} onClick={() => onSelectTask(item)}>
+                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} /> : item.assets[0] ? <LazyVideoThumb src={api.assetUrl(item.assets[0].url)} alt={item.prompt} /> : null}
+                {item.status === "succeeded" && item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
               </button>
             ))}
           </div>

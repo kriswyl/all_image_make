@@ -5,10 +5,11 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, FileDown, FileText, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { api, isTauriRuntime } from "../api";
 import { StoryboardReview } from "./StoryboardReview";
+import { WpsPreview } from "./WpsPreview";
 import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
 import { LazyVideoThumb } from "../LazyVideoThumb";
@@ -40,6 +41,16 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_speech: Mic,
   create_storyboard_template: Clapperboard,
   create_canvas_template: LayoutGrid,
+  document_read: FileText,
+  document_make_pptx: FileDown,
+  doc_list: FileText,
+  doc_delete: FileText,
+  doc_read: FileText,
+  doc_search: FileText,
+  doc_create: FileDown,
+  doc_edit: FileDown,
+  doc_convert: FileDown,
+  plan_update: CheckCircle2,
   board_read: Eye,
   board_apply: SlidersHorizontal,
   board_generate: Sparkles,
@@ -121,6 +132,7 @@ export function ToolCard({
 }) {
   const [open, setOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [wpsOpen, setWpsOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [mjBusy, setMjBusy] = useState(false);
   const tool = message.toolName ?? "reply";
@@ -133,12 +145,15 @@ export function ToolCard({
    * 会让用户一直等一件不会发生的事（实际反馈就是「任务失败了还在转圈」）。
    * 会话已经不在跑、结果又缺，就按「没跑完」如实显示。
    */
-  const orphaned = !result && stale;
+  const orphaned = !result && (stale || message.status === "error");
   const isPending = !orphaned && (!result || result.status === "pending");
   const failed = (result && result.status === "error") || payload?.ok === false;
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
+  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "plan_update"].includes(tool);
+  const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数" };
+  const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;
   // set_canvas 的 assetId 是「切到哪张」，一样值得点开看一眼
   const assetId = result?.assetId ?? null;
@@ -163,6 +178,33 @@ export function ToolCard({
   );
   const mjTaskId = typeof payload?.data?.midjourneyTaskId === "string"
     ? payload.data.midjourneyTaskId : result?.taskId;
+  const [deletedWorkspaceFile, setDeletedWorkspaceFile] = useState(false);
+  const pendingWorkspaceDeletion = payload?.data?.pendingDelete === true;
+  const workspaceFileId = typeof payload?.data?.workspaceFileId === "string" ? payload.data.workspaceFileId : null;
+  const workspaceFileName = typeof payload?.data?.workspaceFileName === "string" ? payload.data.workspaceFileName : "文档";
+  async function downloadWorkspaceFile() {
+    if (!workspaceFileId) return;
+    setDownloadingId(workspaceFileId);
+    try { if (await api.downloadWorkspaceFile(message.conversationId, workspaceFileId, workspaceFileName)) onToast?.("ok", "文件已保存"); }
+    catch (error) { onToast?.("error", error instanceof Error ? error.message : "下载失败"); }
+    finally { setDownloadingId(null); }
+  }
+  async function deleteWorkspaceFile() {
+    if (!workspaceFileId || !window.confirm(`确定删除「${workspaceFileName}」？此操作无法撤销。`)) return;
+    setDownloadingId(workspaceFileId);
+    try { await api.deleteWorkspaceFile(message.conversationId, workspaceFileId); setDeletedWorkspaceFile(true); onToast?.("ok", "文件已删除"); }
+    catch (error) { onToast?.("error", error instanceof Error ? error.message : "删除失败"); }
+    finally { setDownloadingId(null); }
+  }
+  const documentOutputId = typeof payload?.data?.documentOutputId === "string" ? payload.data.documentOutputId : null;
+  const documentFileName = typeof payload?.data?.documentFileName === "string" ? payload.data.documentFileName : "演示文稿.pptx";
+  async function downloadDocument() {
+    if (!documentOutputId) return;
+    setDownloadingId(documentOutputId);
+    try { if (await api.downloadDocumentOutput(message.conversationId, documentOutputId, documentFileName)) onToast?.("ok", "PPT 已保存"); }
+    catch (error) { onToast?.("error", error instanceof Error ? error.message : "下载失败"); }
+    finally { setDownloadingId(null); }
+  }
   const storyboardProjectId = typeof payload?.data?.storyboardProjectId === "string" ? payload.data.storyboardProjectId : null;
   const templateId = typeof payload?.data?.templateId === "string" ? payload.data.templateId : null;
   const templateName = typeof payload?.data?.templateName === "string" ? payload.data.templateName : "画布模板";
@@ -208,7 +250,7 @@ export function ToolCard({
   return (
     <div className="chat-row chat-row-assistant">
       {/* 助手说的那句话单独成一段正文，不再塞进卡片里——Codex 里正文和工具调用是两件事 */}
-      {message.content ? <div className="tool-card-say">{message.content}</div> : null}
+      {message.content && !(nativeTool && isPending) ? <div className="tool-card-say">{message.content}</div> : null}
 
       <div className={`tool-card ${failed ? "is-error" : ""} ${isPending ? "is-pending" : ""}`}>
         {/*
@@ -222,6 +264,7 @@ export function ToolCard({
           <span className="tool-pill-status">
             {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
               : orphaned ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+            {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : failed ? "失败" : "已完成"}</span> : null}
           </span>
           <ChevronDown size={13} className={`tool-pill-chevron ${open ? "flip" : ""}`} />
         </button>
@@ -230,8 +273,15 @@ export function ToolCard({
           <div className="tool-card-bar"><span style={{ width: `${Math.max(2, Math.min(100, progress.progress))}%` }} /></div>
         ) : null}
 
-        {orphaned ? <div className="tool-card-result">这一轮被中断了，没有拿到结果（你可以直接再说一次）。</div> : null}
+        {orphaned ? <div className="tool-card-result">{message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
+        {nativeTool && isPending && message.content ? <div className="tool-card-result" aria-live="polite">{message.content}</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
+
+        {workspaceFileId && pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId) || deletedWorkspaceFile} onClick={() => void deleteWorkspaceFile()}>{deletedWorkspaceFile ? "已删除" : "确认删除"}</button><span>{workspaceFileName}</span></div> : null}
+        {workspaceFileId && !pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadWorkspaceFile()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载文件</button>{isTauriRuntime() ? <button type="button" className="secondary-button compact" onClick={() => { void api.revealWorkspaceFile(message.conversationId, workspaceFileId).catch((error) => onToast?.("error", error instanceof Error ? error.message : "无法打开目录")); }}>打开所在文件夹</button> : null}{/\.pptx$/i.test(workspaceFileName) ? <button type="button" className="secondary-button compact" onClick={() => setWpsOpen(true)}><Eye size={12} />WPS 预览</button> : null}<span>{workspaceFileName}</span></div> : null}
+        {wpsOpen && workspaceFileId ? <WpsPreview conversationId={message.conversationId} fileId={workspaceFileId} name={workspaceFileName} onClose={() => setWpsOpen(false)} /> : null}
+
+        {documentOutputId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadDocument()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载 PPT</button><span>{documentFileName}</span></div> : null}
 
         {templateId ? (
           <div className="tool-card-template-action">
@@ -253,6 +303,7 @@ export function ToolCard({
         {open ? (
           <div className="tool-card-body">
             {prompt ? <div className="tool-card-prompt">{prompt}</div> : null}
+            {nativeArgs.length ? <dl className="tool-card-detail">{nativeArgs.map(([key, value]) => <div key={key}><dt>{nativeArgLabels[key]}</dt><dd>{String(value)}</dd></div>)}</dl> : null}
             {detail.length ? (
               <dl className="tool-card-detail">
                 {detail.map(([key, value]) => (

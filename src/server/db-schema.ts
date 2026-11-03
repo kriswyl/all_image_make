@@ -155,6 +155,54 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       );
       CREATE INDEX IF NOT EXISTS conversation_documents_conv_idx
         ON conversation_documents(conversation_id, created_at);
+      -- 文档原件与最后确认的转换方案跟随会话文档删除。
+      CREATE TABLE IF NOT EXISTS conversation_document_files (
+        document_id TEXT PRIMARY KEY REFERENCES conversation_documents(id) ON DELETE CASCADE,
+        data BLOB NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS conversation_document_plans (
+        document_id TEXT PRIMARY KEY REFERENCES conversation_documents(id) ON DELETE CASCADE,
+        plan_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS conversation_document_outputs (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES conversation_documents(id) ON DELETE CASCADE,
+        file_name TEXT NOT NULL,
+        data BLOB NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workspace_documents (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        file_name TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS workspace_documents_conv_idx ON workspace_documents(conversation_id, created_at);
+      CREATE TABLE IF NOT EXISTS native_tool_calls (
+        message_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        argument_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS native_tool_calls_conv_idx ON native_tool_calls(conversation_id, created_at);
+      CREATE TABLE IF NOT EXISTS presentation_batch_cache (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        cache_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, cache_key)
+      );
+      CREATE TABLE IF NOT EXISTS native_turn_checkpoints (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       -- 会话内分镜表：一个会话一张，镜号从 1 开始。
       -- task_id 只指向**最近一次**生成；重跑会覆盖它，旧产物仍在生成历史里
       CREATE TABLE IF NOT EXISTS conversation_shots (
@@ -406,6 +454,9 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     }
     // 画布从一根指针改成一组图（有序列表）：加列 + 把老指针搬进来
     const conversationColumns = db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
+    const workspaceColumns = db.prepare("PRAGMA table_info(workspace_documents)").all() as Array<{ name: string }>;
+    if (!workspaceColumns.some((col) => col.name === "operation_id")) db.exec("ALTER TABLE workspace_documents ADD COLUMN operation_id TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS workspace_documents_operation_idx ON workspace_documents(conversation_id, operation_id) WHERE operation_id IS NOT NULL");
     if (!conversationColumns.some((col) => col.name === "canvas_asset_ids")) {
       db.exec("ALTER TABLE conversations ADD COLUMN canvas_asset_ids TEXT");
     }
@@ -419,6 +470,10 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     for (const [name, ddl] of [
       ["context_budget", "INTEGER NOT NULL DEFAULT 350000"],
       ["chat_auto_continue_limit", "INTEGER NOT NULL DEFAULT 20"],
+      ["chat_tool_round_limit", "INTEGER NOT NULL DEFAULT 16"],
+      ["chat_model_call_limit", "INTEGER NOT NULL DEFAULT 500"],
+      ["chat_turn_minutes", "INTEGER NOT NULL DEFAULT 30"],
+      ["chat_token_limit", "INTEGER NOT NULL DEFAULT 0"],
       ["board_max_rounds", "INTEGER NOT NULL DEFAULT 10"],
       ["board_auto_continue_limit", "INTEGER NOT NULL DEFAULT 3"],
       ["context_summary", "TEXT NOT NULL DEFAULT ''"],

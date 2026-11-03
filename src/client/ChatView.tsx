@@ -691,6 +691,7 @@ export function ChatView({
       const documents: Array<{ name: string; content: string }> = [];
       let total = 0;
       for (const file of files) {
+        if (/\.xmind$/i.test(file.name)) continue;
         const content = (await file.text()).replace(/^﻿/, "").replace(/\0/g, "");
         if (!content.trim()) {
           toast("error", `${file.name} 是空的`);
@@ -707,9 +708,10 @@ export function ChatView({
         }
         documents.push({ name: file.name, content });
       }
-      setView(await api.uploadConversationDocuments(activeId, documents));
+      if (documents.length) setView(await api.uploadConversationDocuments(activeId, documents));
+      for (const file of files.filter((item) => /\.xmind$/i.test(item.name))) setView(await api.uploadMindDocument(activeId, file));
       await reloadList();
-      toast("ok", documents.length > 1 ? `已上传 ${documents.length} 个脚本文档` : `已上传《${documents[0]!.name}》`);
+      toast("ok", `已上传 ${files.length} 个文档`);
       return true;
     } catch (error) {
       toastError(error);
@@ -1158,7 +1160,7 @@ export function ChatView({
                   }}
                 />
               )}
-              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onAutoContinueChange={(chatAutoContinueLimit) => void patch({ chatAutoContinueLimit })} onCompress={() => {
+              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onAutoContinueChange={(chatAutoContinueLimit) => void patch({ chatAutoContinueLimit })} onChatLimitsChange={(limits) => void patch(limits)} onCompress={() => {
                 if (!activeId) return;
                 setCompressing(true);
                 void api.compressConversation(activeId).then(() => { setCompressing(false); void reloadView(activeId); }).catch((error) => { setCompressing(false); toastError(error); });

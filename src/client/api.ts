@@ -244,6 +244,73 @@ export const api = {
     return request<ConversationView>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
   },
   /** 脚本文档：内容本来就已经在内存里，直接走 JSON，不必再编一次 multipart */
+  uploadMindDocument: (id: string, file: File) => {
+    const form = new FormData(); form.append("file", file, file.name);
+    return request<ConversationView>(`/api/conversations/${id}/mind-documents`, { method: "POST", body: form });
+  },
+  mindDocumentPlan: (id: string, documentId: string) => request<{ slides: Array<{ title: string; lines: string[]; notes: string }>; warnings: string[]; sourceAvailable: boolean }>(`/api/conversations/${id}/mind-documents/${documentId}/plan`),
+  saveMindDocumentPlan: (id: string, documentId: string, slides: Array<{ title: string; lines: string[]; notes: string }>) => request<{ slides: typeof slides }>(`/api/conversations/${id}/mind-documents/${documentId}/plan`, { method: "PUT", body: JSON.stringify({ slides }) }),
+  downloadMindSource: async (id: string, documentId: string, filename: string) => {
+    const response = await fetch(apiUrl(`/api/conversations/${id}/mind-documents/${documentId}/source`));
+    if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "原文件下载失败"); }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const target = await save({ defaultPath: filename, filters: [{ name: "XMind", extensions: ["xmind"] }] });
+      if (!target) return false;
+      await writeFile(target, bytes); return true;
+    }
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
+  },
+  deleteWorkspaceFile: (id: string, fileId: string) => request<{ deleted: boolean }>(`/api/conversations/${id}/documents/files/${fileId}`, { method: "DELETE" }),
+  revealWorkspaceFile: (id: string, fileId: string) => request<{ opened: boolean }>(`/api/conversations/${id}/documents/files/${fileId}/reveal`, { method: "POST" }),
+  createWpsPreview: (id: string, fileId: string, first = 1) => request<{ id: string; secret: string; first: number; last: number; total: number }>(`/api/conversations/${id}/documents/files/${fileId}/wps-preview`, { method: "POST", body: JSON.stringify({ first }) }),
+  wpsPreviewStatus: () => request<{ serviceAvailable: boolean }>("/api/wps-preview/status"),
+  wpsPreviewPage: async (id: string, secret: string, page: number) => {
+    const response = await fetch(apiUrl(`/api/wps-preview/${id}/pages/${page}`), { headers: { Authorization: `Bearer ${secret}` } });
+    if (!response.ok) throw new Error(`第 ${page} 页预览尚未生成或读取失败`);
+    return response.blob();
+  },
+  closeWpsPreview: (id: string, secret: string) => request<{ closed: boolean }>(`/api/wps-preview/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${secret}` } }),
+  wpsPreviewDiagnostics: (id: string, secret: string) => request<{ files: string[]; ready: number; total: number; first: number; last: number }>(`/api/wps-preview/${id}/diagnostics`, { headers: { Authorization: `Bearer ${secret}` } }),
+  downloadWorkspaceFile: async (id: string, fileId: string, filename: string) => {
+    const response = await fetch(apiUrl(`/api/conversations/${id}/documents/files/${fileId}`));
+    if (!response.ok) throw new Error("文件不存在或不可访问");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const target = await save({ defaultPath: filename }); if (!target) return false;
+      await writeFile(target, bytes); return true;
+    }
+    const url = URL.createObjectURL(new Blob([bytes])); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
+  },
+  downloadDocumentOutput: async (id: string, outputId: string, filename: string) => {
+    const response = await fetch(apiUrl(`/api/conversations/${id}/document-outputs/${outputId}`));
+    if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "文件下载失败"); }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const target = await save({ defaultPath: filename, filters: [{ name: "PowerPoint", extensions: ["pptx"] }] });
+      if (!target) return false;
+      await writeFile(target, bytes); return true;
+    }
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }));
+    const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
+  },
+  downloadMindPptx: async (id: string, documentId: string, filename: string) => {
+    const response = await fetch(apiUrl(`/api/conversations/${id}/mind-documents/${documentId}/pptx`), { method: "POST" });
+    if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "PPT 生成失败"); }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const target = await save({ defaultPath: filename, filters: [{ name: "PowerPoint", extensions: ["pptx"] }] });
+      if (!target) return false;
+      await writeFile(target, bytes); return true;
+    }
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }));
+    const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
+  },
   uploadConversationDocuments: (id: string, documents: Array<{ name: string; content: string }>) =>
     request<ConversationView>(`/api/conversations/${id}/documents`, {
       method: "POST",

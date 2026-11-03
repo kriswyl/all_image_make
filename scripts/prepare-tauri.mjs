@@ -110,6 +110,11 @@ for (const name of serverDependencies) {
 removeTree(serverTarget);
 fs.mkdirSync(path.dirname(serverTarget), { recursive: true });
 fs.cpSync(serverSource, serverTarget, { recursive: true });
+// WPS loads these assets via the loopback backend, not the embedded Tauri webview.
+const wpsAddonTarget = path.join(serverTarget, "wps-addon");
+fs.cpSync(path.join(projectDir, "src", "client", "public", "wps-addon"), wpsAddonTarget, { recursive: true });
+fs.copyFileSync(path.join(projectDir, "node_modules", "wpsjs-rpc-sdk-new", "wpsjsrpcsdk.js"), path.join(wpsAddonTarget, "wpsjsrpcsdk.js"));
+fs.copyFileSync(path.join(projectDir, "node_modules", "wpsjs-rpc-sdk-new", "package.json"), path.join(wpsAddonTarget, "wps-sdk-package.json"));
 fs.copyFileSync(packageJsonPath, path.join(serverTarget, "package.json"));
 
 const packageLock = JSON.parse(fs.readFileSync(packageLockPath, "utf8"));

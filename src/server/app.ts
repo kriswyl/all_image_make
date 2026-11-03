@@ -3,7 +3,12 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import multer from "multer";
+import { readWorkspaceFile } from "./chat-tools/documents.js";
+import { getWpsPreviewJobs, isWpsServiceRunning } from "./wps-preview.js";
+import { parseXmind, planMindSlides, renderMindPptx, type MindDocument } from "./mind-document.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
 import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
@@ -83,6 +88,7 @@ const boardUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 0 },
 });
+const mindUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 0 } });
 const referenceVideoUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 + 1, files: 1, fields: 1 },
@@ -140,6 +146,10 @@ const conversationCreateSchema = z.object({
 const conversationPatchSchema = z.object({
   contextBudget: z.number().int().min(4000).max(2000000).optional(),
   chatAutoContinueLimit: z.number().int().min(0).max(100).optional(),
+  chatToolRoundLimit: z.number().int().min(1).max(100).optional(),
+  chatModelCallLimit: z.number().int().min(1).max(1000).optional(),
+  chatTurnMinutes: z.number().int().min(1).max(180).optional(),
+  chatTokenLimit: z.number().int().min(0).max(10000000).optional(),
   boardMaxRounds: z.number().int().min(1).max(30).optional(),
   boardAutoContinueLimit: z.number().int().min(0).max(20).optional(),
   chatMode: z.enum(["creative", "chat"]).optional(),
@@ -424,6 +434,7 @@ export interface AppContext {
 export function createApp(options: { dataDir?: string } = {}) {
   const app = express();
   const db = new AppDatabase(options.dataDir);
+  const wpsPreviews = getWpsPreviewJobs(db);
   const sessionKeys = new KeyStore(db.dataDir);
   sessionKeys.retainOnly(db.listChannels().map((channel) => channel.id));
   const runner = new TaskRunner(db, sessionKeys);
@@ -437,7 +448,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const origin = req.headers.origin;
     if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173") {
       res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     }
     if (req.method === "OPTIONS") return res.status(204).end();
@@ -453,6 +464,16 @@ export function createApp(options: { dataDir?: string } = {}) {
   });
 
   app.get("/api/health", (_req, res) => res.json(ok({ status: "ok", version: APP_VERSION })));
+
+  // WPS loads its add-in over loopback even in a packaged Tauri build, where the UI is embedded.
+  const bundledWpsAddon = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../wps-addon");
+  const wpsAddonDir = fs.existsSync(bundledWpsAddon) ? bundledWpsAddon : path.resolve("src/client/public/wps-addon");
+  app.get("/wps-addon/wpsjsrpcsdk.js", (_req, res) => {
+    const bundled = path.join(wpsAddonDir, "wpsjsrpcsdk.js");
+    const sdk = fs.existsSync(bundled) ? bundled : createRequire(import.meta.url).resolve("wpsjs-rpc-sdk-new");
+    res.type("application/javascript").sendFile(sdk);
+  });
+  app.use("/wps-addon", express.static(wpsAddonDir, { index: false, fallthrough: false }));
 
   // 预览仅存在内存里，随机地址配合 iframe 沙箱与独立 CSP 隔离生成代码。
   const htmlPreviews = new Map<string, { html: string; expires: number }>();
@@ -976,6 +997,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     next();
   };
   app.use("/api/conversations/:id/documents", chatThreadOnly);
+  app.use("/api/conversations/:id/mind-documents", chatThreadOnly);
   app.use("/api/conversations/:id/uploads", chatThreadOnly);
   app.use("/api/conversations/:id/assets", chatThreadOnly);
 
@@ -1515,6 +1537,110 @@ export function createApp(options: { dataDir?: string } = {}) {
    * 全文存进 conversation_documents——聊天记录里塞几万字，用户和大脑都会被淹。
    * 全文只在**紧接着的那一轮**作为素材喂给大脑，之后靠分镜表的 source_text 回溯。
    */
+  // XMind 的结构保存在会话文档里，可从附件反复预览和导出。
+  app.get("/api/conversations/:id/documents/files", (req, res) => {
+    res.json(ok(db.listWorkspaceDocuments(routeParam(req.params.id))));
+  });
+  app.delete("/api/conversations/:id/documents/files/:fileId", (req, res) => {
+    const conversationId = routeParam(req.params.id); const fileId = routeParam(req.params.fileId);
+    let file: ReturnType<typeof readWorkspaceFile>;
+    try { file = readWorkspaceFile(db, conversationId, fileId); }
+    catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }
+    fs.unlinkSync(file.full); db.deleteWorkspaceDocument(conversationId, fileId);
+    res.json(ok({ deleted: true }));
+  });
+  app.post("/api/conversations/:id/documents/files/:fileId/reveal", (req, res) => {
+    try { const file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); revealFolder(path.dirname(file.full)); res.json(ok({ opened: true })); }
+    catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }
+  });
+  app.get("/api/conversations/:id/documents/files/:fileId", (req, res) => {
+    try { const file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); res.type("application/octet-stream").send(file.bytes); }
+    catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }
+  });
+  app.post("/api/conversations/:id/documents/files/:fileId/wps-preview", asyncHandler(async (req, res) => {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    const sameLoopback = origin && /^http:\/\/127\.0\.0\.1:\d+$/.test(origin) && origin === `http://${host}`;
+    if (!req.is("application/json") || (origin && !sameLoopback && !["http://tauri.localhost", "tauri://localhost", "http://127.0.0.1:5173"].includes(origin))) throw new AppError("PREVIEW_FORBIDDEN", "不能从当前页面启动预览", 403);
+    const input = z.object({ first: z.number().int().min(1).default(1) }).parse(req.body ?? {});
+    const job = await wpsPreviews.create(routeParam(req.params.id), routeParam(req.params.fileId), input.first);
+    res.status(201).json(ok(job));
+  }));
+  const previewSecret = (req: Request) => (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  app.get("/api/wps-preview/status", asyncHandler(async (_req, res) => { res.json(ok({ serviceAvailable: await isWpsServiceRunning() })); }));
+  app.get("/api/wps-preview/:id/claim", (req, res) => {
+    res.json(ok(wpsPreviews.claim(routeParam(req.params.id), previewSecret(req))));
+  });
+  app.get("/api/wps-preview/:id/pages/:page", (req, res) => {
+    res.type("image/png").send(wpsPreviews.page(routeParam(req.params.id), previewSecret(req), Number(req.params.page)));
+  });
+  app.get("/api/wps-preview/:id/diagnostics", (req, res) => {
+    res.json(ok(wpsPreviews.diagnostics(routeParam(req.params.id), previewSecret(req))));
+  });
+  app.delete("/api/wps-preview/:id", (req, res) => {
+    wpsPreviews.close(routeParam(req.params.id), previewSecret(req)); res.json(ok({ closed: true }));
+  });
+  app.post("/api/conversations/:id/mind-documents", mindUpload.single("file"), asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    if (!req.file || !/\.xmind$/i.test(req.file.originalname)) throw new AppError("DOCUMENT_INVALID", "请选择 XMind 文件", 400);
+    const parsed = await parseXmind(req.file.buffer);
+    const content = JSON.stringify(parsed);
+    if (content.length > 400_000) throw new AppError("DOCUMENT_TOO_LARGE", "导图解析后的内容超过 400000 字，请分章节上传", 400);
+    const originalName = Buffer.from(req.file.originalname, "latin1").toString("utf8");
+    const stored = db.addBinaryConversationDocument(id, displayFileName(originalName.includes("�") ? req.file.originalname : originalName), content, req.file.buffer);
+    db.appendMessage({ conversationId: id, role: "user", content: "上传了 XMind 思维导图，可在附件中预览拆页并导出 PPT。", documents: [{ id: stored.id, name: stored.fileName, charCount: stored.charCount }] });
+    res.status(201).json(ok(agent.buildView(id)));
+  }));
+  const getMindDocument = (conversationId: string, documentId: string): MindDocument => {
+    const document = db.getConversationDocument(documentId);
+    if (!document || document.conversationId !== conversationId || !/\.xmind$/i.test(document.fileName)) throw new AppError("DOCUMENT_NOT_FOUND", "思维导图不存在", 404);
+    const parsed = JSON.parse(document.content) as MindDocument;
+    if (parsed.format !== "xmind" || !Array.isArray(parsed.sheets)) throw new AppError("DOCUMENT_INVALID", "思维导图内容不可用", 400);
+    return parsed;
+  };
+  const slidePlanSchema = z.array(z.object({ title: z.string().trim().min(1).max(2000), lines: z.array(z.string().max(200)).max(7), notes: z.string().max(60000) })).min(1).max(200);
+  app.get("/api/conversations/:id/document-outputs/:outputId", (req, res) => {
+    const output = db.getDocumentOutput(routeParam(req.params.outputId));
+    if (!output) throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在", 404);
+    const document = db.getConversationDocument(output.documentId);
+    if (!document || document.conversationId !== routeParam(req.params.id)) throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在", 404);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    res.setHeader("Content-Disposition", 'attachment; filename="presentation.pptx"');
+    res.send(output.data);
+  });
+  app.get("/api/conversations/:id/mind-documents/:documentId/source", (req, res) => {
+    const documentId = routeParam(req.params.documentId);
+    getMindDocument(routeParam(req.params.id), documentId);
+    const bytes = db.getConversationDocumentFile(documentId);
+    if (!bytes) throw new AppError("DOCUMENT_SOURCE_MISSING", "这个附件上传时尚未保存原文件，请重新上传", 404);
+    res.type("application/octet-stream").send(bytes);
+  });
+  app.get("/api/conversations/:id/mind-documents/:documentId/plan", (req, res) => {
+    const documentId = routeParam(req.params.documentId);
+    const doc = getMindDocument(routeParam(req.params.id), documentId);
+    const stored = db.getConversationDocumentPlan(documentId);
+    const slides = stored ? slidePlanSchema.parse(JSON.parse(stored)) : planMindSlides(doc);
+    res.json(ok({ slides, warnings: doc.warnings, sourceAvailable: Boolean(db.getConversationDocumentFile(documentId)) }));
+  });
+  app.put("/api/conversations/:id/mind-documents/:documentId/plan", (req, res) => {
+    const documentId = routeParam(req.params.documentId);
+    getMindDocument(routeParam(req.params.id), documentId);
+    const slides = slidePlanSchema.parse(req.body?.slides);
+    db.setConversationDocumentPlan(documentId, JSON.stringify(slides));
+    res.json(ok({ slides }));
+  });
+  app.post("/api/conversations/:id/mind-documents/:documentId/pptx", asyncHandler(async (req, res) => {
+    const documentId = routeParam(req.params.documentId);
+    const doc = getMindDocument(routeParam(req.params.id), documentId);
+    const stored = db.getConversationDocumentPlan(documentId);
+    const slides = stored ? slidePlanSchema.parse(JSON.parse(stored)) : planMindSlides(doc);
+    const buffer = await renderMindPptx(slides);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    res.setHeader("Content-Disposition", 'attachment; filename="mind-map.pptx"');
+    res.send(buffer);
+  }));
+
   app.post("/api/conversations/:id/documents", asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);

@@ -911,6 +911,12 @@ export function BoardWorkspace({
           onBoardDelta={handleBoardDelta}
           onFrameRequest={handleFrameRequest}
           onBeforeSend={async () => { if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后再发送给助手"); }}
+          onImportTemplate={(id, name) => {
+            void (async () => {
+              const added = await board.importTemplate(id);
+              if (added !== null) onToast("success", `已导入分镜「${name}」：新增 ${added} 个节点`);
+            })();
+          }}
           onClose={() => setAgentOpen(false)}
         />
       ) : null}

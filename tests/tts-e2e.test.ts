@@ -85,7 +85,7 @@ describe("Gemini TTS 端到端", () => {
     expect(mock.submitted()).toMatchObject({
       contents: [{
         role: "user",
-        parts: [{ text: "第一行标题\n第二行正文", annotations: [{ type: "speech_metadata", style: "自然、像聊天" }] }],
+        parts: [{ text: "第一行标题\n第二行正文", speechMetadata: { style: "自然、像聊天" } }],
       }],
       generationConfig: {
         responseModalities: ["AUDIO"],

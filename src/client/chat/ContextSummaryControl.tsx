@@ -3,10 +3,11 @@ import { X } from "lucide-react";
 import type { ConversationView } from "../../shared/agent-types";
 
 /** 保留原始聊天记录；这里只查看发送给模型的历史摘要。 */
-export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onBoardLimitsChange, onCompress, compressing, disabled }: {
+export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onChatLimitsChange, onBoardLimitsChange, onCompress, compressing, disabled }: {
   view: ConversationView;
   onBudgetChange: (budget: number) => void;
   onAutoContinueChange?: (limit: number) => void;
+  onChatLimitsChange?: (patch: { chatToolRoundLimit?: number; chatModelCallLimit?: number; chatTurnMinutes?: number; chatTokenLimit?: number }) => void;
   /** 只有画布助手面板传：单轮思考次数 / 任务完成后的自动续跑次数 */
   onBoardLimitsChange?: (patch: { boardMaxRounds?: number; boardAutoContinueLimit?: number }) => void;
   onCompress: () => void;
@@ -23,6 +24,10 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
   const [editingContinuation, setEditingContinuation] = useState(false);
   const [roundsValue, setRoundsValue] = useState(String(view.boardMaxRounds ?? 10));
   const [autoContinueValue, setAutoContinueValue] = useState(String(view.boardAutoContinueLimit ?? 3));
+  const [chatRounds, setChatRounds] = useState(String(view.chatToolRoundLimit ?? 16));
+  const [modelCalls, setModelCalls] = useState(String(view.chatModelCallLimit ?? 500));
+  const [turnMinutes, setTurnMinutes] = useState(String(view.chatTurnMinutes ?? 30));
+  const [tokenLimit, setTokenLimit] = useState(String(view.chatTokenLimit ?? 0));
   const budget = view.contextBudget ?? 350000;
   function save() {
     const parsed = Number(value);
@@ -51,6 +56,11 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
       return;
     }
     if (parsed !== fallback) onBoardLimitsChange?.({ [field]: parsed });
+  }
+  function saveChatLimit(field: "chatToolRoundLimit" | "chatModelCallLimit" | "chatTurnMinutes" | "chatTokenLimit", raw: string, max: number, current: number, set: (value: string) => void, min = 1) {
+    const parsed = Number(raw);
+    if (!raw.trim() || !Number.isInteger(parsed) || parsed < min || parsed > max) { set(String(current)); return; }
+    if (parsed !== current) onChatLimitsChange?.({ [field]: parsed });
   }
   useEffect(() => {
     if (!open) return;
@@ -95,6 +105,14 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
             <span>次</span>
           </label>
           <small>设为 0 关闭；回答达到输出上限时自动接续，每次续写都会产生模型用量。</small>
+        </> : null}
+        {onChatLimitsChange && view.chatMode === "chat" ? <>
+          <label>工具调用轮数<input aria-label="工具调用轮数" type="number" min={1} max={100} value={chatRounds} disabled={disabled} onChange={(event) => setChatRounds(event.target.value)} onBlur={() => saveChatLimit("chatToolRoundLimit", chatRounds, 100, view.chatToolRoundLimit ?? 16, setChatRounds)} /><span>轮</span></label>
+          <label>模型调用上限<input aria-label="模型调用上限" type="number" min={1} max={1000} value={modelCalls} disabled={disabled} onChange={(event) => setModelCalls(event.target.value)} onBlur={() => saveChatLimit("chatModelCallLimit", modelCalls, 1000, view.chatModelCallLimit ?? 500, setModelCalls)} /><span>次</span></label>
+          <label>处理时间上限<input aria-label="处理时间上限" type="number" min={1} max={180} value={turnMinutes} disabled={disabled} onChange={(event) => setTurnMinutes(event.target.value)} onBlur={() => saveChatLimit("chatTurnMinutes", turnMinutes, 180, view.chatTurnMinutes ?? 30, setTurnMinutes)} /><span>分钟</span></label>
+          <label>本轮 token 上限<input aria-label="本轮 token 上限" type="number" min={0} max={10000000} value={tokenLimit} disabled={disabled} onChange={(event) => setTokenLimit(event.target.value)} onBlur={() => saveChatLimit("chatTokenLimit", tokenLimit, 10000000, view.chatTokenLimit ?? 0, setTokenLimit, 0)} /><span>tokens</span></label>
+          <small>上限针对一条消息；达到时间后不再发起新的模型请求，已在进行的请求仍可能产生用量。PPT 分批规划和审校均计入调用次数。</small>
+          <small>token 上限为 0 时关闭；按渠道返回的输入与输出用量累计，每次请求结束后检查，可能超过设定值。渠道未返回完整用量时将停止后续请求；该上限不等同于费用上限，自动压缩历史的用量不计入。</small>
         </> : null}
         {onBoardLimitsChange ? <>
           <label>单轮思考次数

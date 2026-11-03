@@ -64,7 +64,7 @@
 
 - 模型：`gemini-3.8-flash-tts`、`gemini-3.8-flash-lite-tts`、`gemini-3.1-flash-tts-preview`
 - 30 个预置音色；支持单人配音和双人对话（正文用 `A：` / `B：` 标注）
-- 风格/情绪通过 `annotations` 控制，不会读进正文；可选 BCP-47 语种
+- 风格/情绪通过 `speech_metadata` 控制，不会读进正文；可选 BCP-47 语种
 - 输出 24kHz / 16bit / 单声道 WAV；3.1 preview 返回的裸 PCM 会在服务端补 WAV 头
 - 独立「语音生成」工作台；历史页的音频筛选同时包含音乐和配音
 - 对话里的 `generate_speech` 可以直接朗读脚本、旁白或双人台词

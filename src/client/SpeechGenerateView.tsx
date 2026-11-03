@@ -1,8 +1,9 @@
 import { useState } from "react";
 import {
-  AlertCircle, AudioLines, Download, Eye, KeyRound, LoaderCircle, Mic, Plus, RotateCcw, Square,
+  AlertCircle, AudioLines, Download, Eye, KeyRound, LoaderCircle, Mic, Plus, RotateCcw, Square, Upload,
 } from "lucide-react";
 import { api } from "./api";
+import { useFileDrop } from "./useFileDrop";
 import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
@@ -10,7 +11,7 @@ import {
   StatusBadge, formatDuration, statusLabels, terminalStatuses, usePersistentState,
 } from "./task-ui";
 import type { Asset, Channel, Task } from "../shared/types";
-import { TTS_DEFAULT_VOICE, TTS_LANGUAGES, TTS_STYLE_PRESETS, TTS_VOICES } from "../shared/tts";
+import { TTS_DEFAULT_VOICE, TTS_LANGUAGES, TTS_STYLE_PRESETS, TTS_VOICES, splitTtsDialogue, formatTtsDialogue } from "../shared/tts";
 
 type Toast = { kind: "success" | "error"; message: string };
 type SpeechMode = "single" | "duo";
@@ -43,6 +44,21 @@ export function SpeechGenerateView(props: {
 
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
 
+  async function importText(file: File) {
+    if (!/\.(txt|md)$/i.test(file.name)) return props.onToast("error", "请选择 TXT 或 Markdown 文本文件");
+    if (file.size > 1024 * 1024) return props.onToast("error", "文件不能超过 1 MB");
+    try {
+      const content = (await file.text()).replace(/^\uFEFF/, "");
+      if (!content.trim()) return props.onToast("error", "文件内容为空");
+      if (content.length > 20000) return props.onToast("error", "文本超过 20000 字，请拆分后再导入");
+      if (text.trim() && !window.confirm("导入文件会替换当前朗读文本，继续吗？")) return;
+      let imported = content;
+      if (mode === "duo") { try { imported = formatTtsDialogue(content); } catch { /* 未识别的内容保留原样，供用户编辑 */ } }
+      setText(imported); props.onToast("success", `已导入 ${file.name}`);
+    } catch { props.onToast("error", "读取失败，请使用 UTF-8 编码的文本文件"); }
+  }
+  const textDrop = useFileDrop(!submitting, (files) => { if (files[0]) void importText(files[0]); });
+
   async function generate() {
     if (!channel) return props.onToast("error", "请先选择语音渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择 TTS 模型");
@@ -50,8 +66,9 @@ export function SpeechGenerateView(props: {
     if (!content) return props.onToast("error", "请输入要朗读的文本");
     if (style.trim().length > 200) return props.onToast("error", "风格描述最多 200 字");
     if (mode === "duo" && !secondVoice) return props.onToast("error", "双人对话需要选择第二个音色");
-    if (mode === "duo" && !(/A\s*[：:]/.test(content) && /B\s*[：:]/.test(content))) {
-      return props.onToast("error", "双人对话正文需要用「A：」「B：」标出两段台词");
+    if (mode === "duo") {
+      try { splitTtsDialogue(content); }
+      catch (error) { return props.onToast("error", error instanceof Error ? error.message : "对话格式不正确"); }
     }
 
     if (!confirmGeneration({ kind: "语音生成", model: props.selectedModel, channel: channel.name })) return;
@@ -136,18 +153,23 @@ export function SpeechGenerateView(props: {
               </div>
               <p className="mode-hint">
                 {mode === "duo"
-                  ? "正文用「A：…」「B：…」标注说话人；只支持两个音色。"
+                  ? "每行用 A：或 B：标注说话人；带外层引号的对话可整理为标准格式。"
                   : "一段文字配一个音色；长文建议按 50–200 字分段生成，便于重录。"}
               </p>
 
               <div className="section-title">
                 <div><AudioLines size={17} /><h2>朗读文本</h2></div>
-                <span>{text.length} / 20000</span>
+                <div className="tts-text-actions">{mode === "duo" ? <button type="button" className="secondary-button compact" onClick={() => { try { setText(formatTtsDialogue(text)); props.onToast("success", "已整理为 A：B：格式"); } catch (error) { props.onToast("error", error instanceof Error ? error.message : "对话格式不正确"); } }}>整理 A/B 格式</button> : null}<span>{text.length} / 20000</span></div>
+              </div>
+              <div className={`tts-import-drop ${textDrop.active ? "active" : ""}`} {...textDrop.dropProps}>
+                <label className="tts-import-button"><Upload size={15} />导入文本<input type="file" accept=".txt,.md,text/plain,text/markdown" className="file-input" disabled={submitting} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importText(file); event.target.value = ""; }} /></label>
+                <span>选择或拖入 TXT / Markdown 文件，也可直接粘贴文字</span>
               </div>
               <textarea
                 className="prompt-input"
                 value={text}
                 onChange={(event) => setText(event.target.value)}
+                onBlur={() => { if (mode === "duo" && text.trim()) { try { const formatted = formatTtsDialogue(text); if (formatted.length <= 20000 && formatted !== text) setText(formatted); } catch { /* 未完成的内容保持原样 */ } } }}
                 maxLength={20000}
                 placeholder={mode === "duo" ? "A：你听说了吗？\nB：听说什么？" : "输入旁白、口播稿或要朗读的文字…"}
               />
@@ -235,7 +257,7 @@ function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, o
 }) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const recent = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 8);
+  const recent = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 8);
 
   async function cancel() {
     if (!task) return;
@@ -335,10 +357,11 @@ function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, o
               <button
                 key={item.id}
                 className={`recent-thumb ${task?.id === item.id ? "active" : ""}`}
-                title={item.prompt}
+                title={`${statusLabels[item.status]} · ${item.prompt}`}
+                aria-label={`${statusLabels[item.status]}：${item.prompt}`}
                 onClick={() => onSelectTask(item)}
               >
-                <Mic size={17} />
+                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} /> : <Mic size={17} />}
               </button>
             ))}
           </div>

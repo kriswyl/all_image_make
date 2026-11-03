@@ -46,3 +46,32 @@ export const TTS_STYLE_PRESETS = [
 
 /** 双人对话只支持两个说话人，正文用 A：/ B： 标注 */
 export const TTS_SPEAKERS = ["A", "B"] as const;
+
+/** Parse A/B dialogue, accepting optional paired quotes around each turn. */
+export function splitTtsDialogue(text: string): Array<{ speaker: "A" | "B"; text: string }> {
+  const parts: Array<{ speaker: "A" | "B"; text: string }> = [];
+  const pattern = /(^|\n|(?<=[。！？!?；;」』”\"]))\s*([「『“\"])?\s*([ABab])\s*[：:]\s*/g;
+  const closing: Record<string, string> = { "「": "」", "『": "』", "“": "”", '"': '"' };
+  let current: { speaker: "A" | "B"; opening: string; start: number } | null = null;
+  let match: RegExpExecArray | null;
+  const add = (end: number) => {
+    if (!current) return;
+    let value = text.slice(current.start, end).trim();
+    const endQuote = closing[current.opening];
+    if (endQuote && value.endsWith(endQuote)) value = value.slice(0, -endQuote.length).trimEnd();
+    if (value) parts.push({ speaker: current.speaker, text: value });
+  };
+  while ((match = pattern.exec(text))) {
+    if (!current && text.slice(0, match.index).trim()) throw new Error("双人对话开头有未标注说话人的文字，请为每段台词加上 A：或 B：");
+    add(match.index);
+    current = { speaker: match[3]!.toUpperCase() as "A" | "B", opening: match[2] ?? "", start: pattern.lastIndex };
+  }
+  add(text.length);
+  if (!parts.some((part) => part.speaker === "A") || !parts.some((part) => part.speaker === "B")) throw new Error("双人对话正文需要用「A：」「B：」标出两个说话人的台词");
+  return parts;
+}
+
+/** Format recognized dialogue without changing quoted words inside a turn. */
+export function formatTtsDialogue(text: string): string {
+  return splitTtsDialogue(text).map((part) => `${part.speaker}：${part.text}`).join("\n");
+}

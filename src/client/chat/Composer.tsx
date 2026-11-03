@@ -39,7 +39,7 @@ type PendingAttachment = {
 /** 和输入框同宽的图片白名单，和服务端那道真正的把关（看字节头）不是一回事 */
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|webp)$/i;
 /** 剧本只收纯文本格式：docx/pdf 的解析质量不稳定，首版不做 */
-const DOCUMENT_EXTENSIONS = /\.(txt|md|markdown)$/i;
+const DOCUMENT_EXTENSIONS = /\.(txt|md|markdown|csv|json|xmind)$/i;
 const MAX_DOCUMENTS_PER_MESSAGE = 3;
 
 export function isScriptDocument(file: File): boolean {
@@ -115,7 +115,7 @@ export function Composer({
     const attachedAssets = assetIds.filter((id) => !canvasItems.some((item) => item.asset.id === id));
     if (!images.length && !documents.length && !attachedAssets.length) {
       // 拖了文件但没一张能收，才提示；拖的是别的东西就当没发生
-      if (files.length) setReject("只支持 PNG、JPEG、WebP 图片，或 .txt / .md 脚本文档");
+      if (files.length) setReject("只支持 PNG、JPEG、WebP 图片，或 TXT、Markdown、CSV、JSON、XMind 文档");
       return;
     }
     const currentImages = pending.filter((item) => item.kind === "image").length;
@@ -130,8 +130,8 @@ export function Composer({
     }
     const oversizedImage = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
     if (oversizedImage) { setReject(`${oversizedImage.name} 超过 20 MB`); return; }
-    const oversizedDocument = documents.find((file) => file.size > MAX_SCRIPT_FILE_BYTES);
-    if (oversizedDocument) { setReject(`${oversizedDocument.name} 超过 2 MB，请先拆分`); return; }
+    const oversizedDocument = documents.find((file) => file.size > (/\.xmind$/i.test(file.name) ? 10 * 1024 * 1024 : MAX_SCRIPT_FILE_BYTES));
+    if (oversizedDocument) { setReject(`${oversizedDocument.name} 超过文件大小限制（文本 2 MB、XMind 10 MB）`); return; }
     setReject(null);
     setPending((current) => [
       ...current,
@@ -240,7 +240,7 @@ export function Composer({
           <button
             type="button"
             className={`composer-attach ${pending.length ? "is-on" : ""}`}
-            title="传图片或脚本文档（.txt / .md；也可以直接拖进来）"
+            title="传图片或文档（TXT、Markdown、CSV、JSON、XMind；也可以直接拖进来）"
             disabled={blocked}
             onClick={() => fileRef.current?.click()}
           >
@@ -251,7 +251,7 @@ export function Composer({
             ref={fileRef}
             className="file-input"
             type="file"
-            accept="image/png,image/jpeg,image/webp,.txt,.md,.markdown,text/plain,text/markdown"
+            accept="image/png,image/jpeg,image/webp,.txt,.md,.markdown,.csv,.json,.xmind,text/plain,text/markdown"
             multiple
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);

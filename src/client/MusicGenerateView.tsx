@@ -436,7 +436,7 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 }) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const recent = tasks.filter((item) => item.status === "succeeded" && item.assets.length).slice(0, 8);
+  const recent = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 8);
 
   async function cancel() {
     if (!task) return;
@@ -535,12 +535,13 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
               <button
                 key={item.id}
                 className={`recent-thumb ${task?.id === item.id ? "active" : ""}`}
-                title={item.prompt}
+                title={`${statusLabels[item.status]} · ${item.prompt}`}
+                aria-label={`${statusLabels[item.status]}：${item.prompt}`}
                 onClick={() => onSelectTask(item)}
               >
-                {item.assets[0]?.thumbUrl
-                  ? <img src={api.assetUrl(item.assets[0].thumbUrl)} alt="" loading="lazy" />
-                  : <Music size={17} />}
+                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} />
+                  : item.assets[0]?.thumbUrl ? <img src={api.assetUrl(item.assets[0].thumbUrl)} alt="" loading="lazy" />
+                    : <Music size={17} />}
               </button>
             ))}
           </div>

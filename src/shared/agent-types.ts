@@ -55,6 +55,16 @@ export const AGENT_TOOL_NAMES = [
   "generate_speech",
   "create_storyboard_template",
   "create_canvas_template",
+  "document_read",
+  "document_make_pptx",
+  "doc_list",
+  "doc_delete",
+  "doc_read",
+  "doc_search",
+  "doc_create",
+  "doc_edit",
+  "doc_convert",
+  "plan_update",
   "board_read",
   "board_apply",
   "board_generate",
@@ -87,6 +97,16 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_speech: "生成配音",
   create_storyboard_template: "拆分镜模板",
   create_canvas_template: "生成画布模板",
+  document_read: "读取文档",
+  document_make_pptx: "生成 PPT",
+  doc_list: "查看文件",
+  doc_delete: "请求删除文件",
+  doc_read: "读取文件",
+  doc_search: "搜索文件",
+  doc_create: "创建文件",
+  doc_edit: "修改文件",
+  doc_convert: "转换文件",
+  plan_update: "更新任务计划",
   board_read: "读无限画布",
   board_apply: "修改无限画布",
   board_generate: "无限画布生成",
@@ -515,6 +535,10 @@ export interface Conversation {
   chatMode?: "creative" | "chat";
   contextBudget?: number;
   chatAutoContinueLimit?: number;
+  chatToolRoundLimit?: number;
+  chatModelCallLimit?: number;
+  chatTurnMinutes?: number;
+  chatTokenLimit?: number;
   /** 画布助手：单轮最多思考几次；任务跑完后最多自动续跑几次 */
   boardMaxRounds?: number;
   boardAutoContinueLimit?: number;
@@ -645,6 +669,10 @@ export interface ConversationInput {
 export interface ConversationPatch {
   contextBudget?: number;
   chatAutoContinueLimit?: number;
+  chatToolRoundLimit?: number;
+  chatModelCallLimit?: number;
+  chatTurnMinutes?: number;
+  chatTokenLimit?: number;
   boardMaxRounds?: number;
   boardAutoContinueLimit?: number;
   chatMode?: "creative" | "chat";

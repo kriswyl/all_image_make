@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildGenerationRequest, extractAudioCandidates } from "../src/server/adapters";
 import { wavDurationSeconds } from "../src/server/tasks";
 import type { DbChannel } from "../src/server/db";
+import { formatTtsDialogue } from "../src/shared/tts";
 import type { GenerationInput } from "../src/shared/types";
 
 const channel: DbChannel = {
@@ -35,7 +36,7 @@ describe("Gemini TTS 请求体", () => {
         role: "user",
         parts: [{
           text: "你好，欢迎收听今天的节目。",
-          annotations: [{ type: "speech_metadata", style: "轻声耳语，放慢语速" }],
+          speechMetadata: { style: "轻声耳语，放慢语速" },
         }],
       }],
       generationConfig: {
@@ -50,11 +51,11 @@ describe("Gemini TTS 请求体", () => {
     expect(JSON.stringify(built.body)).not.toContain("maxOutputTokens");
   });
 
-  it("不填音色时补 Kore，不传风格就不带 annotations", () => {
+  it("不填音色时补 Kore，不传风格就不带 speech_metadata", () => {
     const built = request();
     const part = (built.body as { contents: Array<{ parts: Array<Record<string, unknown>> }> })
       .contents[0]!.parts[0]!;
-    expect(part).not.toHaveProperty("annotations");
+    expect(part).not.toHaveProperty("speechMetadata");
     expect(built.body).toMatchObject({
       generationConfig: {
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } },
@@ -75,8 +76,8 @@ describe("Gemini TTS 请求体", () => {
       contents: [{
         role: "user",
         parts: [
-          { text: "你听说了吗？", annotations: [{ type: "speech_metadata", speaker: "A", style: "自然" }] },
-          { text: "听说什么？", annotations: [{ type: "speech_metadata", speaker: "B", style: "自然" }] },
+          { text: "你听说了吗？", speechMetadata: { speaker: "A", style: "自然" } },
+          { text: "听说什么？", speechMetadata: { speaker: "B", style: "自然" } },
         ],
       }],
       generationConfig: {
@@ -103,6 +104,26 @@ describe("Gemini TTS 请求体", () => {
     expect(built.body).toMatchObject({
       contents: [{ parts: [{ text: "你好。" }, { text: "你好呀。" }] }],
     });
+  });
+
+  it("支持引号包住说话人标签，同时保留台词内的引号", () => {
+    const built = request({
+      prompt: "「A：今天下班好早，要不要绕着湖边走一圈？」\n「B：好啊，他说‘天气不错’。」\n「A：那就出发！」",
+      ttsSpeakers: [{ speaker: "A", voice: "Despina" }, { speaker: "B", voice: "Rasalgethi" }],
+    });
+    expect(built.body).toMatchObject({ contents: [{ parts: [
+      { text: "今天下班好早，要不要绕着湖边走一圈？", speechMetadata: { speaker: "A" } },
+      { text: "好啊，他说‘天气不错’。", speechMetadata: { speaker: "B" } },
+      { text: "那就出发！", speechMetadata: { speaker: "A" } },
+    ] }] });
+  });
+
+  it("整理为 A/B 格式并保留台词内部引号", () => {
+    expect(formatTtsDialogue("「A：他说‘你好’。」\n「B：你好！」")).toBe("A：他说‘你好’。\nB：你好！");
+  });
+
+  it("不丢弃未标注说话人的开头文字", () => {
+    expect(() => request({ prompt: "旁白\nA：你好\nB：你好", ttsSpeakers: [{ speaker: "A", voice: "Kore" }, { speaker: "B", voice: "Puck" }] })).toThrow(/未标注说话人/);
   });
 
   it("说话人不是两个、或正文缺 A/B 标签时本地就拒绝", () => {

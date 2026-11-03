@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+import fs from "node:fs";
 
 /*
  * 浏览器预览（非 Tauri）时，客户端的 apiBase 是空串，请求走同源 /api，
@@ -11,7 +12,15 @@ const apiProxy = process.env.VITE_API_PROXY || "http://127.0.0.1:17891";
 
 export default defineConfig({
   root: path.resolve("src/client"),
-  plugins: [react()],
+  plugins: [react(), {
+    name: "wps-sdk-dev",
+    configureServer(server) {
+      server.middlewares.use("/wps-addon/wpsjsrpcsdk.js", (_req, res) => {
+        res.setHeader("Content-Type", "application/javascript");
+        res.end(fs.readFileSync(path.resolve("node_modules/wpsjs-rpc-sdk-new/wpsjsrpcsdk.js")));
+      });
+    },
+  }],
   server: {
     proxy: {
       "/api/": apiProxy,

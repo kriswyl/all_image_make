@@ -19,6 +19,8 @@ export const storyboardShotSchema = z.object({
   cameraMove: z.string().max(80).default(""),
   videoPrompt: z.string().max(2000).default(""),
   soundEffect: z.string().max(500).default(""),
+  finalImagePrompt: z.string().max(5000).default(""),
+  finalVideoPrompt: z.string().max(5000).default(""),
 });
 export const storyboardProjectDataSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -40,3 +42,11 @@ export type StoryboardProjectData = z.infer<typeof storyboardProjectDataSchema>;
 export type StoryboardProject = { id: string; revision: number; data: StoryboardProjectData };
 
 export type StoryboardPreviewBoard = { id: string; title: string; shots: Array<{ shotId: string; image: import("./types.js").Asset | null; video: import("./types.js").Asset | null; audio: import("./types.js").Asset | null }> };
+
+/** Deterministic prompt assembly; generated text remains editable by the user. */
+export function assembleStoryboardPrompt(shot: Pick<StoryboardProjectData["shots"][number], "prompt" | "videoPrompt" | "shotSize" | "cameraMove">, kind: "image" | "video"): string {
+  let text = kind === "image" ? shot.prompt.trim() : (shot.videoPrompt.trim() || [shot.prompt.trim(), "基于首帧保持角色和场景一致，动作自然连贯。"].filter(Boolean).join("；"));
+  const fields: Array<[string, string]> = kind === "image" ? [["景别", shot.shotSize]] : [["景别", shot.shotSize], ["运镜", shot.cameraMove]];
+  for (const [label, value] of fields) if (value.trim() && !text.includes(value.trim())) text += `${kind === "image" ? "，" : "；"}${label}：${value.trim()}`;
+  return text;
+}

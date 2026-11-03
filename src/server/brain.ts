@@ -16,10 +16,12 @@ export type BrainContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
 
-export interface BrainMessage {
-  role: "system" | "user" | "assistant";
-  content: string | BrainContentPart[];
-}
+export interface BrainToolCall { id: string; name: string; arguments: string }
+export interface BrainToolSpec { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
+export type BrainMessage =
+  | { role: "system" | "user"; content: string | BrainContentPart[] }
+  | { role: "assistant"; content: string | BrainContentPart[] | null; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }
+  | { role: "tool"; content: string; tool_call_id: string };
 
 /** 流式增量。推理模型会走 reasoning 通道，和正文分开，正好可以拿来显示「思考中」 */
 export interface BrainDelta {
@@ -31,11 +33,13 @@ export interface BrainUsage {
   promptTokens: number;
   completionTokens: number;
   reasoningTokens: number;
+  complete: boolean;
 }
 
 export interface BrainResult {
   /** 正文。推理模型在 max_tokens 被耗尽时这里会是空串，配合 truncated 判断 */
   content: string;
+  toolCalls: BrainToolCall[];
   /** 推理过程全文，UI 上折叠显示；非推理模型为空串 */
   reasoning: string;
   finishReason: string | null;
@@ -62,6 +66,8 @@ export interface CallBrainOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   onDelta?: (delta: BrainDelta) => void;
+  tools?: BrainToolSpec[];
+  toolChoice?: "auto" | "none";
 }
 
 /**
@@ -91,6 +97,7 @@ function buildRequestBody(options: CallBrainOptions) {
     stream: true,
     max_tokens: options.maxTokens ?? BRAIN_DEFAULT_MAX_TOKENS,
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    ...(options.tools?.length ? { tools: options.tools, tool_choice: options.toolChoice ?? "auto" } : {}),
   };
 }
 
@@ -172,6 +179,7 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
     if (content && options.onDelta) options.onDelta({ content });
     return {
       content,
+      toolCalls: parseFullToolCalls(message.tool_calls),
       reasoning,
       finishReason,
       usage: pickUsage(payload),
@@ -190,6 +198,7 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
   let reasoning = "";
   let finishReason: string | null = null;
   let usage: BrainUsage | null = null;
+  const toolCalls = new Map<number, BrainToolCall>();
 
   const consume = (block: string) => {
     const data = parseSseBlock(block);
@@ -207,6 +216,20 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
     if (reason) finishReason = reason;
     const delta = pickDelta(chunk);
     if (!delta) return true;
+    if (Array.isArray(delta.tool_calls)) for (const part of delta.tool_calls) {
+      if (!part || typeof part !== "object") continue;
+      const call = part as Record<string, unknown>;
+      const index = typeof call.index === "number" ? call.index : 0;
+      const entry = toolCalls.get(index) ?? { id: "", name: "", arguments: "" };
+      if (typeof call.id === "string" && call.id) entry.id = call.id;
+      const fn = call.function && typeof call.function === "object" ? call.function as Record<string, unknown> : {};
+      if (typeof fn.name === "string" && fn.name && fn.name !== entry.name) {
+        if (fn.name.startsWith(entry.name)) entry.name = fn.name;
+        else if (!entry.name.startsWith(fn.name)) entry.name += fn.name;
+      }
+      if (typeof fn.arguments === "string") entry.arguments += fn.arguments;
+      toolCalls.set(index, entry);
+    }
     const piece: BrainDelta = {};
     if (typeof delta.content === "string" && delta.content) {
       content += delta.content;
@@ -243,6 +266,7 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
 
   return {
     content,
+    toolCalls: [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call),
     reasoning,
     finishReason,
     usage,
@@ -250,6 +274,16 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
     usedFallback: false,
     truncated: finishReason === "length",
   };
+}
+
+function parseFullToolCalls(raw: unknown): BrainToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const call = value as Record<string, unknown>;
+    const fn = call.function && typeof call.function === "object" ? call.function as Record<string, unknown> : {};
+    return typeof call.id === "string" && typeof fn.name === "string" && typeof fn.arguments === "string" ? [{ id: call.id, name: fn.name, arguments: fn.arguments }] : [];
+  });
 }
 
 function pickMessage(payload: Record<string, unknown>): Record<string, unknown> {
@@ -292,6 +326,7 @@ function pickUsage(payload: Record<string, unknown>): BrainUsage | null {
     promptTokens: num(record.prompt_tokens),
     completionTokens: num(record.completion_tokens),
     reasoningTokens,
+    complete: typeof record.prompt_tokens === "number" && Number.isSafeInteger(record.prompt_tokens) && record.prompt_tokens >= 0 && typeof record.completion_tokens === "number" && Number.isSafeInteger(record.completion_tokens) && record.completion_tokens >= 0,
   };
 }
 

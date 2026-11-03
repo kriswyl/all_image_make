@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AppDatabase } from "../src/server/db";
-import { collectTurnDocuments } from "../src/server/agent-context";
+import { collectTurnDocuments, renderDocumentContext } from "../src/server/agent-context";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -11,6 +11,13 @@ afterEach(async () => {
 });
 
 describe("脚本文档上下文", () => {
+  it("普通聊天只放入导图引用，避免大导图直接占满上下文", () => {
+    const doc = { id: "doc-1", conversationId: "chat", fileName: "大导图.xmind", content: "导图正文".repeat(20000), charCount: 80000, createdAt: "" };
+    const plain = renderDocumentContext([doc], true)!;
+    expect(plain).toContain("doc-1");
+    expect(plain).toContain("doc_read");
+    expect(plain).not.toContain("导图正文");
+  });
   it("上一轮空正文失败后，下一轮只发「重试」也会带上最近的脚本文档", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "chatcanvas-doc-context-"));
     const db = new AppDatabase(dataDir);

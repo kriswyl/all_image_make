@@ -71,6 +71,22 @@ const genericTemplate: CanvasTemplateInput = {
 };
 
 describe("无限画布模板", () => {
+  it("画布助手创建分镜并导入当前画布", async () => {
+    const { context } = await tempApp();
+    const board = createBoard(context.db, { title: "分镜画布" });
+    const result = await runAgentTool("create_storyboard_template", {
+      title: "雨夜", brief: { style: "电影感" },
+      shots: [{ prompt: "雨夜的街道上，一个人站在路灯下" }],
+    }, contextFor(context, board.threadId));
+    expect(result.result.ok).toBe(true);
+    const id = result.result.data?.storyboardProjectId as string;
+    expect(context.db.getStoryboardProject(id)?.data.brief.style).toBe("电影感");
+    expect(context.db.getBoardRecord(board.id)?.doc.nodes).toHaveLength(0);
+    const imported = importTemplateIntoBoard(context.db, board.id, id);
+    expect(imported.addedNodes).toBeGreaterThan(0);
+    expect(imported.board.doc.nodes.some((node) => node.title === "第 1 镜 · 分镜图")).toBe(true);
+  });
+
   it("对话工具生成模板，导入已有画布时重排 id / ref 并保留分组", async () => {
     const { context } = await tempApp();
     addChatChannel(context.db);
@@ -223,6 +239,8 @@ describe("无限画布模板", () => {
     expect(original.data.shots[0]).toMatchObject({ sourceText: "小林来到门口", videoPrompt: "她缓缓推门" });
     const edited = structuredClone(original.data);
     edited.shots[0].prompt = "小林撑伞站在门口";
+    edited.shots[0].finalImagePrompt = "最终图片提示词";
+    edited.shots[0].finalVideoPrompt = "最终视频提示词";
     edited.shots.reverse();
     const saved = (await request(app).put(`/api/storyboard-projects/${id}`).send({ revision: original.revision, data: edited }).expect(200)).body.data;
     expect(saved.revision).toBe(2);
@@ -232,8 +250,8 @@ describe("无限画布模板", () => {
     const template = (await request(app).post(`/api/storyboard-projects/${id}/templates`).send({ revision: 2, shotIds: [edited.shots[1].id] }).expect(201)).body.data;
     expect(template.doc.nodes.some((node: { title: string }) => node.title === "角色 · 小林")).toBe(true);
     expect(template.doc.nodes.some((node: { title: string }) => node.title === "角色 · 店主")).toBe(false);
-    expect(template.doc.nodes.find((node: { title: string }) => node.title === "第 2 镜 · 分镜图")).toMatchObject({ prompt: "小林撑伞站在门口" });
-    expect(template.doc.nodes.find((node: { title: string }) => node.title === "第 2 镜 · 视频")).toMatchObject({ prompt: "她缓缓推门" });
+    expect(template.doc.nodes.find((node: { title: string }) => node.title === "第 2 镜 · 分镜图")).toMatchObject({ prompt: "最终图片提示词" });
+    expect(template.doc.nodes.find((node: { title: string }) => node.title === "第 2 镜 · 视频")).toMatchObject({ prompt: "最终视频提示词" });
     const imported = await request(app).post("/api/boards/from-template").send({ templateId: template.id }).expect(201);
     expect(imported.body.data.doc.nodes.some((node: { title: string }) => node.title === "第 2 镜 · 视频")).toBe(true);
   });
