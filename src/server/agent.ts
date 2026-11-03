@@ -462,7 +462,8 @@ export class AgentService {
           });
         }
         registry.register(createPlanTool());
-        const toolSpecs = registry.specs();
+        // 渠道明确报过「不支持 tools」之后，这次对话不再发工具定义，省掉每轮一次的失败调用
+        const toolSpecs = turnConversation.toolsUnsupported ? [] : registry.specs();
         const toolSignature = createHash("sha256").update(JSON.stringify([...toolSpecs].sort((a, b) => a.function.name.localeCompare(b.function.name)))).digest("hex");
         const channelVersion = this.db.getChannel(turnConversation.brainChannelId)?.updatedAt ?? "";
         if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || checkpoint.toolSignature !== toolSignature)) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
@@ -486,6 +487,7 @@ export class AgentService {
           if (error instanceof RemoteApiError && error.status === 400 && /(?:tools?|function.call).{0,60}(?:not support|unsupported|not allowed|invalid parameter)|(?:not support|unsupported|unknown parameter|unrecognized).{0,60}(?:tools?|function.call)/i.test(error.message)) {
             const notice = this.db.appendMessage({ conversationId, role: "system", content: "当前渠道或模型不支持工具调用，本轮只能文字回答，不能生成文件。" });
             this.broadcast(conversationId, { type: "message", message: notice });
+            this.db.updateConversation(conversationId, { toolsUnsupported: true });
             plainMessages = [...context, ...built.messages, { role: "system", content: "本轮工具不可用。只能回答文字，不能声称创建或修改了文件。" }];
             result = await callWithBudget(plainMessages, { plain: true });
           } else {

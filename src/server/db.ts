@@ -1583,6 +1583,7 @@ export class AppDatabase {
       contextBudget: "context_budget",
       chatAutoContinueLimit: "chat_auto_continue_limit",
       chatToolRoundLimit: "chat_tool_round_limit",
+      toolsUnsupported: "tools_unsupported",
       chatModelCallLimit: "chat_model_call_limit",
       chatTurnMinutes: "chat_turn_minutes",
       chatTokenLimit: "chat_token_limit",
@@ -1591,8 +1592,10 @@ export class AppDatabase {
     };
     for (const [key, column] of Object.entries(mapping)) {
       if (!(key in patch)) continue;
+      const value = (patch as Record<string, unknown>)[key];
       fields.push(`${column} = ?`);
-      values.push((patch as Record<string, unknown>)[key] as string | null);
+      // SQLite 只认 0/1，布尔值直接塞进去会报 "cannot be bound"
+      values.push(typeof value === "boolean" ? (value ? 1 : 0) : value as string | null);
     }
     // 画布是数组，不能走上面那个把值强转成 string | null 的循环——得像 visionEnabled 一样单开一支
     if ("canvasAssetIds" in patch && patch.canvasAssetIds) {
@@ -2222,6 +2225,7 @@ export class AppDatabase {
       contextBudget: Number(row.context_budget) || 350000,
       chatAutoContinueLimit: row.chat_auto_continue_limit == null ? 20 : Number(row.chat_auto_continue_limit),
       chatToolRoundLimit: row.chat_tool_round_limit == null ? 16 : Number(row.chat_tool_round_limit),
+      toolsUnsupported: Boolean(row.tools_unsupported),
       chatModelCallLimit: row.chat_model_call_limit == null ? 500 : Number(row.chat_model_call_limit),
       chatTurnMinutes: row.chat_turn_minutes == null ? 30 : Number(row.chat_turn_minutes),
       chatTokenLimit: row.chat_token_limit == null ? 0 : Number(row.chat_token_limit),

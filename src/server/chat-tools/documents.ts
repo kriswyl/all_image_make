@@ -7,6 +7,7 @@ import type { AppDatabase } from "../db.js";
 import { extractMindImages, parseXmind, renderAiPresentation, type AiPresentation, type DocumentNode, type MindDocument, type MindImage } from "../mind-document.js";
 import type { BrainToolSpec } from "../brain.js";
 import { checkPresentation, paginatePresentation } from "../presentation-check.js";
+import { markdownToDocx, markdownToMind, readDocxText } from "./markdown.js";
 
 const MAX_FILE = 20 * 1024 * 1024;
 const nodeSchema: z.ZodType<DocumentNode> = z.lazy(() => z.object({ title: z.string().trim().min(1).max(2000), notes: z.string().max(10000).default(""), children: z.array(nodeSchema).max(500).default([]) }));
@@ -15,7 +16,7 @@ const schemas = {
   doc_delete: z.object({ fileId: z.string().min(1) }),
   doc_read: z.object({ fileId: z.string().min(1), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(500).default(100), charOffset: z.number().int().min(0).optional(), charLimit: z.number().int().min(1).max(20000).default(12000) }),
   doc_search: z.object({ fileId: z.string().min(1), query: z.string().min(1).max(500), charOffset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(50).default(20) }),
-  doc_create: z.object({ kind: z.enum(["md", "txt", "csv", "json", "xmind"]), name: z.string().trim().min(1).max(120), content: z.string().max(2_000_000).optional(), nodes: nodeSchema.optional() }),
+  doc_create: z.object({ kind: z.enum(["md", "txt", "csv", "json", "xmind", "docx"]), name: z.string().trim().min(1).max(120), content: z.string().max(2_000_000).optional(), nodes: nodeSchema.optional() }),
   doc_edit: z.object({ fileId: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i), edits: z.array(z.object({ find: z.string().min(1).max(20000), replace: z.string().max(100000) })).min(1).max(20) }),
   doc_convert: z.object({ fileId: z.string().min(1), to: z.enum(["pptx"]) }),
 };
@@ -25,9 +26,9 @@ export const CHAT_DOCUMENT_TOOLS: BrainToolSpec[] = [
   { type: "function", function: { name: "doc_list", description: "列出本聊天的已上传导图和已生成文件，返回文件 ID。", parameters: objectSchema({}) } },
   { type: "function", function: { name: "doc_read", description: "读取本会话文件内容，返回 SHA-256 版本号。默认按行分页；文本文件传 charOffset 可按字符分页并保留原始换行，适合长行和精确修改。", parameters: objectSchema({ fileId: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 500 }, charOffset: { type: "integer", minimum: 0 }, charLimit: { type: "integer", minimum: 1, maximum: 20000 } }, ["fileId"]) } },
   { type: "function", function: { name: "doc_search", description: "在本会话 UTF-8 文本、Markdown、CSV 或 JSON 中搜索精确文字，返回位置、上下文和版本号；可按 nextCharOffset 翻页，用 doc_read 查看完整上下文。偏移按 UTF-16 代码单元计。", parameters: objectSchema({ fileId: { type: "string" }, query: { type: "string", minLength: 1, maxLength: 500 }, charOffset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, ["fileId", "query"]) } },
-  { type: "function", function: { name: "doc_create", description: "根据用户要求创建新文件；xmind 传结构化 nodes，其余类型传完整字符串 content。不会覆盖已有文件。", parameters: objectSchema({ kind: { type: "string", enum: ["md", "txt", "csv", "json", "xmind"] }, name: { type: "string" }, content: { type: "string" }, nodes: { type: "object", description: "思维导图根节点：{title, notes?, children:[同结构的子节点]}" } }, ["kind", "name"]) } },
+  { type: "function", function: { name: "doc_create", description: "根据用户要求创建新文件；xmind 传结构化 nodes，docx 传 Markdown 正文（按标题/列表/表格/代码块转成 Word 排版），其余类型传纯文本内容。不会覆盖已有文件。", parameters: objectSchema({ kind: { type: "string", enum: ["md", "txt", "csv", "json", "xmind", "docx"] }, name: { type: "string" }, content: { type: "string", description: "docx 传 Markdown，会按标题/列表/表格/代码块转成 Word 排版" }, nodes: { type: "object", description: "思维导图根节点：{title, notes?, children:[同结构的子节点]}" } }, ["kind", "name"]) } },
   { type: "function", function: { name: "doc_edit", description: "根据 doc_read 的 SHA-256 版本号，对本会话的 UTF-8 文本、Markdown、CSV 或 JSON 精确替换并创建新版本。每个 find 必须在当前内容中唯一匹配；先用 doc_read 读取。原文件不会覆盖。", parameters: objectSchema({ fileId: { type: "string" }, expectedSha256: { type: "string", description: "doc_read 返回的 sha256" }, edits: { type: "array", minItems: 1, maxItems: 20, items: objectSchema({ find: { type: "string", minLength: 1 }, replace: { type: "string" } }, ["find", "replace"]) } }, ["fileId", "expectedSha256", "edits"]) } },
-  { type: "function", function: { name: "doc_convert", description: "将本会话 XMind 交由 AI 整理并生成可编辑 PPT。可解析的关联关系以文字参与规划；支持的主题图片作为独立页导入，启用看图时尝试理解部分图片。原布局与关系线样式不保留，应按工具结果告知用户实际情况。", parameters: objectSchema({ fileId: { type: "string" }, to: { type: "string", enum: ["pptx"] } }, ["fileId", "to"]) } },
+  { type: "function", function: { name: "doc_convert", description: "将本会话的 XMind，或 Markdown / 纯文本大纲，交由 AI 整理并生成可编辑 PPT。可解析的关联关系以文字参与规划；支持的主题图片作为独立页导入，启用看图时尝试理解部分图片。原布局与关系线样式不保留，应按工具结果告知用户实际情况。", parameters: objectSchema({ fileId: { type: "string" }, to: { type: "string", enum: ["pptx"] } }, ["fileId", "to"]) } },
 ];
 export type ChatDocResult = { ok: boolean; summary: string; data?: { fileId: string; fileName: string; byteSize: number; pendingDelete?: boolean } };
 
@@ -93,6 +94,12 @@ function source(db: AppDatabase, conversationId: string, id: string): { name: st
 }
 function flatten(node: DocumentNode, depth = 0): string[] { return [`${"  ".repeat(depth)}- ${node.title}${node.notes ? `（备注：${node.notes}）` : ""}`, ...node.children.flatMap((child) => flatten(child, depth + 1))]; }
 function countImageDescriptions(mind: MindDocument): number { const count = (node: DocumentNode): number => (node.imageDescription ? 1 : 0) + node.children.reduce((sum, child) => sum + count(child), 0); return mind.sheets.reduce((sum, root) => sum + count(root), 0); }
+/** 统一取文本：docx 走 Word 解析，其余按 UTF-8 */
+async function textOf(file: { name: string; bytes?: Buffer }) {
+  if (!file.bytes) throw new Error("文件内容不可用");
+  if (/\.docx$/i.test(file.name)) return readDocxText(file.bytes);
+  return decodeText(file.bytes);
+}
 function decodeText(bytes: Buffer) {
   try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
   catch { throw new Error("文件不是有效的 UTF-8 文本，不能安全读取或修改"); }
@@ -119,8 +126,8 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
     if (name === "doc_search") {
       const { fileId, query, charOffset, limit } = args as z.infer<typeof schemas.doc_search>;
       const file = source(db, conversationId, fileId);
-      if (!file.bytes || !/\.(md|markdown|txt|csv|json)$/i.test(file.name)) throw new Error("当前仅支持搜索 UTF-8 文本、Markdown、CSV 和 JSON");
-      const text = decodeText(file.bytes);
+      if (!file.bytes || !/\.(md|markdown|txt|csv|json|docx)$/i.test(file.name)) throw new Error("当前仅支持搜索文本、Markdown、CSV、JSON 和 Word");
+      const text = await textOf(file);
       const matches: Array<{ charOffset: number; contextStart: number; context: string }> = [];
       let cursor = charOffset;
       while (matches.length < limit) {
@@ -138,9 +145,9 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
     if (name === "doc_read") {
       const { fileId, offset, limit, charOffset, charLimit } = args as z.infer<typeof schemas.doc_read>; const file = source(db, conversationId, fileId);
       const mind = file.mind ?? (/\.xmind$/i.test(file.name) && file.bytes ? await parseXmind(file.bytes) : null);
-      if (!mind && !/\.(md|markdown|txt|csv|json)$/i.test(file.name)) throw new Error("当前不支持读取该格式");
+      if (!mind && !/\.(md|markdown|txt|csv|json|docx)$/i.test(file.name)) throw new Error("当前不支持读取该格式");
       const sha256 = file.bytes ? createHash("sha256").update(file.bytes).digest("hex") : undefined;
-      const text = !mind ? decodeText(file.bytes!) : "";
+      const text = mind ? "" : await textOf(file);
       if (charOffset !== undefined) {
         if (mind) throw new Error("导图请使用按行分页读取");
         let end = Math.min(text.length, charOffset + charLimit);
@@ -180,15 +187,21 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
       if (a.kind === "xmind") {
         if (!a.nodes) throw new Error("生成 XMind 需要 nodes 主题树");
         const zip = new JSZip(); zip.file("content.json", JSON.stringify([{ id: randomUUID(), class: "sheet", title: a.nodes.title, rootTopic: xmindTopic(a.nodes) }])); zip.file("metadata.json", JSON.stringify({ creator: { name: "ChatCanvas" } })); zip.file("manifest.json", JSON.stringify({ "file-entries": { "content.json": {}, "metadata.json": {} } })); bytes = await zip.generateAsync({ type: "nodebuffer" }); await parseXmind(bytes);
+      } else if (a.kind === "docx") {
+        if (a.content === undefined) throw new Error("生成 Word 需要 content（Markdown 正文）");
+        bytes = await markdownToDocx(a.content, a.name);
       } else { if (a.content === undefined) throw new Error("生成文本文件需要 content"); if (a.kind === "json") JSON.parse(a.content); bytes = Buffer.from((a.kind === "csv" ? "\uFEFF" : "") + a.content, "utf8"); }
       const saved = save(db, conversationId, a.name, a.kind, bytes, operationId);
       return { ok: true, summary: `已创建 ${saved.name}，文件可下载。`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize } };
     }
     const a = args as z.infer<typeof schemas.doc_convert>; const file = source(db, conversationId, a.fileId);
-    const mind = file.mind ?? (file.bytes && /\.xmind$/i.test(file.name) ? await parseXmind(file.bytes) : null);
-    if (!mind) throw new Error("当前只支持 XMind 转 PPTX");
+    const mind = file.mind
+      ?? (file.bytes && /\.xmind$/i.test(file.name) ? await parseXmind(file.bytes) : null)
+      ?? (file.bytes && /\.(md|markdown|txt)$/i.test(file.name) ? markdownToMind(await textOf(file), file.name.replace(/\.[^.]+$/, "")) : null);
+    if (!mind) throw new Error("当前支持 XMind、Markdown 和文本转 PPTX");
     if (!planPresentation) throw new Error("AI 幻灯片规划不可用，请检查对话模型后重试；没有生成文件。");
-    const extracted = file.bytes ? await extractMindImages(file.bytes, mind) : { images: [], skipped: 0 };
+    // 只有 xmind 是 zip、才有主题图片；Markdown 来源没有可提取的图片
+    const extracted = file.bytes && /\.xmind$/i.test(file.name) ? await extractMindImages(file.bytes, mind) : { images: [], skipped: 0 };
     let presentation = paginatePresentation(await planPresentation(mind, extracted.images));
     if (presentation.slides.length + extracted.images.length > 200) throw new Error("包含图片的 PPT 超过 200 页，请分章节转换；没有生成文件。");
     const inserted = new Map<number, typeof presentation.slides>();

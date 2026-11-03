@@ -471,6 +471,8 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       ["context_budget", "INTEGER NOT NULL DEFAULT 350000"],
       ["chat_auto_continue_limit", "INTEGER NOT NULL DEFAULT 20"],
       ["chat_tool_round_limit", "INTEGER NOT NULL DEFAULT 16"],
+      // 渠道明确报过「不支持 tools」后置 1，之后不再发工具，省掉每轮一次的失败调用
+      ["tools_unsupported", "INTEGER NOT NULL DEFAULT 0"],
       ["chat_model_call_limit", "INTEGER NOT NULL DEFAULT 500"],
       ["chat_turn_minutes", "INTEGER NOT NULL DEFAULT 30"],
       ["chat_token_limit", "INTEGER NOT NULL DEFAULT 0"],

@@ -536,6 +536,8 @@ export interface Conversation {
   contextBudget?: number;
   chatAutoContinueLimit?: number;
   chatToolRoundLimit?: number;
+  /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
+  toolsUnsupported?: boolean;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;
   chatTokenLimit?: number;
@@ -670,6 +672,8 @@ export interface ConversationPatch {
   contextBudget?: number;
   chatAutoContinueLimit?: number;
   chatToolRoundLimit?: number;
+  /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
+  toolsUnsupported?: boolean;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;
   chatTokenLimit?: number;
