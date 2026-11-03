@@ -99,10 +99,10 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
         {message.documents.length ? (
           <div className="chat-bubble-documents">
             {message.documents.map((document) => (
-              <span key={document.id} className="chat-document-chip" title="脚本文档，全文已交给助手">
+              <span key={document.id} className="chat-document-chip" title={/\.pptx$/i.test(document.name) ? "PPT 风格参考，可用于提取颜色和字体" : "会话文档，可由助手读取"}>
                 <FileText size={13} />
                 <span>{document.name}</span>
-                {/\.xmind$/i.test(document.name) ? <button type="button" className="mind-export-link" onClick={() => setMind({ id: document.id, name: document.name })}>按结构预览</button> : <small>{document.charCount.toLocaleString()} 字</small>}
+                {/\.xmind$/i.test(document.name) ? <button type="button" className="mind-export-link" onClick={() => setMind({ id: document.id, name: document.name })}>按结构预览</button> : /\.pptx$/i.test(document.name) ? <small>风格参考</small> : <small>{document.charCount.toLocaleString()} 字</small>}
               </span>
             ))}
           </div>

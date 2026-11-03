@@ -179,3 +179,48 @@ it("内容反复未通过审校时不写入断点缓存", async () => {
   await expect(planPresentationWithAi(source, "完整转换", async (messages) => response(parts(messages)), undefined, cache, async () => ({ content: JSON.stringify({ issues: ["遗漏限定条件"] }), truncated: false }))).rejects.toThrow(/内容审校仍有问题/);
   expect(stored.size).toBe(0);
 });
+
+it("先阅读全部原文再全局策划，元素页覆盖来源且可见正文接受独立审校", async () => {
+  const stages: string[] = [];
+  const plan = await planPresentationWithAi(source, "完整培训", async (messages) => {
+    const system = String(messages[0]!.content);
+    if (system.includes("阅读分析员")) {
+      stages.push("read"); const items = parts(messages);
+      expect(JSON.stringify(items)).toContain("按平台仓储计费");
+      return { content: JSON.stringify({ summary: "物流需要区分履约方式", keyFacts: ["FBA按平台仓储计费"], conditions: ["比较FBM与FBA"], sourceIds: items.map((item: any) => item.id) }), truncated: false };
+    }
+    if (system.includes("总策划")) {
+      stages.push("outline"); expect(String(messages[1]!.content)).toContain("FBA按平台仓储计费");
+      return { content: JSON.stringify({ title: "选择履约方式", audience: "新人", objective: "掌握费用与方式", narrative: "方式到成本", sections: [{ title: "物流", goal: "比较费用", batchIds: [1] }] }), truncated: false };
+    }
+    stages.push("design"); const items = parts(messages);
+    return { content: JSON.stringify({ title: "培训", theme: "blue", slides: [{ title: "FBA按平台仓储计费", sourceIds: items.map((item: any) => item.id), elements: [
+      { id: "claim", type: "text", x: 0.8, y: 0.5, w: 11, h: 0.8, text: "FBA按平台仓储计费", style: { fontSize: 28 } },
+      { id: "condition", type: "text", x: 0.8, y: 2, w: 11, h: 2, text: "FBM 与 FBA 的区别，需要结合平台仓储费用判断。" },
+    ] }] }), truncated: false };
+  }, undefined, undefined, async () => { stages.push("review"); return { content: '{"issues":[]}', truncated: false }; }, { globalPlan: true, deepRead: true });
+  expect(stages).toEqual(["read", "outline", "design", "review", "review"]);
+  expect(plan.slides[1]!.elements?.[1]).toMatchObject({ id: "condition" });
+  await checkPresentation(await renderAiPresentation(plan), plan);
+});
+
+it("元素页越界会反馈给模型修正，而不是剥掉elements降级旧模板", async () => {
+  let calls = 0;
+  await expect(planPresentationWithAi(source, "转换", async (messages) => {
+    calls++; const items = parts(messages);
+    return { content: JSON.stringify({ title: "培训", slides: [{ title: "标题", sourceIds: items.map((item: any) => item.id), elements: [
+      { id: "title", type: "text", x: 13, y: 1, w: 3, h: 1, text: "标题" },
+    ] }] }), truncated: false };
+  })).rejects.toThrow(/超出页面边界/);
+  expect(calls).toBe(2);
+});
+
+it("同一材料批次可支持多个逻辑章节，但不会重复执行批次或生成重复页面", async () => {
+  let designs = 0;
+  const plan = await planPresentationWithAi(source, "按逻辑分章", async (messages) => {
+    if (String(messages[0]!.content).includes("总策划")) return { content: JSON.stringify({ title: "培训", audience: "新人", objective: "理解", narrative: "先方式后成本", sections: [{ title: "方式", goal: "比较方式", batchIds: [1] }, { title: "成本", goal: "明确计费", batchIds: [1] }] }), truncated: false };
+    designs++; expect(String(messages[1]!.content)).toContain("比较方式"); expect(String(messages[1]!.content)).toContain("明确计费");
+    return response(parts(messages));
+  }, undefined, undefined, undefined, { globalPlan: true });
+  expect(designs).toBe(1); expect(plan.slides).toHaveLength(2);
+});

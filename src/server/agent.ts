@@ -446,14 +446,14 @@ export class AgentService {
             spec, displayName: name as AgentToolName,
             deduplicate: name === "doc_create" || name === "doc_edit" || name === "doc_convert",
             hideResult: name === "doc_read" || name === "doc_search" || name === "doc_list",
-            run: (raw, report, operationId) => executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images) => {
+            run: (raw, report, operationId) => executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images, design) => {
               if (turnConversation.visionEnabled && images.length) await describeMindImages(mind, images, (messages) => callWithBudget(messages, { silent: true }), report, controller.signal);
               const requests = this.db.listMessages(conversationId).filter((message) => message.role === "user" && !message.documents.length && message.content && !/^(?:请)?(?:继续|重试|再试|重新试试)[。！!\s]*$/.test(message.content.trim())).slice(-5).map((message) => message.content!.slice(0, 2000));
               return planPresentationWithAi(mind, requests.join("\n"), (messages) => callWithBudget(messages, { silent: true }), report, {
                 scope: `${turnConversation.brainChannelId}\n${turnConversation.brainModel}`,
                 get: (key) => this.db.getPresentationBatch(conversationId, key),
                 set: (key, value) => this.db.savePresentationBatch(conversationId, key, value),
-              }, (messages) => callWithBudget(messages, { silent: true }), { globalPlan: true });
+              }, (messages) => callWithBudget(messages, { silent: true }), { globalPlan: true, deepRead: true, images, design });
             }, operationId, async (plan, images) => {
               if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
               const result = await reviewRenderedPresentation(plan, images, (bytes) => renderWithLocalWps(this.db, bytes, controller.signal), (messages) => callWithBudget(messages, { silent: true }), report);

@@ -691,7 +691,7 @@ export function ChatView({
       const documents: Array<{ name: string; content: string }> = [];
       let total = 0;
       for (const file of files) {
-        if (/\.xmind$/i.test(file.name)) continue;
+        if (/\.(xmind|pptx)$/i.test(file.name)) continue;
         const content = (await file.text()).replace(/^﻿/, "").replace(/\0/g, "");
         if (!content.trim()) {
           toast("error", `${file.name} 是空的`);
@@ -709,7 +709,7 @@ export function ChatView({
         documents.push({ name: file.name, content });
       }
       if (documents.length) setView(await api.uploadConversationDocuments(activeId, documents));
-      for (const file of files.filter((item) => /\.xmind$/i.test(item.name))) setView(await api.uploadMindDocument(activeId, file));
+      for (const file of files.filter((item) => /\.(xmind|pptx)$/i.test(item.name))) setView(await api.uploadMindDocument(activeId, file));
       await reloadList();
       toast("ok", `已上传 ${files.length} 个文档`);
       return true;

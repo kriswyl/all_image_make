@@ -128,6 +128,7 @@ export function renderDocumentContext(documents: StoredDocument[], plain = false
     `<<<脚本文档 ${document.fileName}｜${document.charCount} 字>>>`,
     plain && /\.xmind$/i.test(document.fileName)
       ? `[XMind 文件 ID：${document.id}。内容未直接放入上下文，请用 doc_read 分页读取，或用 doc_convert 分章节规划转换。]`
+      : /\.pptx$/i.test(document.fileName) ? `[PPT参考文件ID：${document.id}。可用doc_read查看主题信息，用doc_convert.referenceFileId作为风格参考；外部PPT不支持原版式保真修改。]`
       : document.content,
     `<<<脚本文档结束 ${document.fileName}>>>`,
   ].join("\n"));

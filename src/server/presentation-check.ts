@@ -1,21 +1,36 @@
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import type { AiPresentation } from "./mind-document.js";
+import path from "node:path";
+import { resolveElements, validateElements, elementTexts } from "./presentation-elements.js";
+
+/** Prefer semantic boundaries; only an unbroken token longer than capacity is split by characters. */
+export function wrapPresentationLine(line: string, limit: number): string[] {
+  const chars = Array.from(line), result: string[] = [];
+  let at = 0;
+  while (at < chars.length) {
+    let end = Math.min(chars.length, at + limit);
+    if (end < chars.length) {
+      for (let i = end - 1; i >= at + Math.floor(limit / 2); i--) if (/[，。；：！？、,.!?;:\s]/u.test(chars[i]!)) { end = i + 1; break; }
+    }
+    result.push(chars.slice(at, end).join("")); at = end;
+  }
+  return result;
+}
 
 /** Conservative layout preflight: wrap long lines and split crowded slides before rendering. */
 export function paginatePresentation(plan: AiPresentation): AiPresentation {
   const slides: AiPresentation["slides"] = [];
   for (const slide of plan.slides) {
+    const elements = resolveElements(slide);
+    if (elements) { validateElements(elements); slides.push({ ...slide, elements, box: undefined }); continue; }
+    if (slide.layout === "image" || slide.layout === "illustrated") { slides.push(slide); continue; }
     if (slide.layout === "cover" || slide.layout === "section") { slides.push(slide); continue; }
     // Keep paired comparison groups intact; splitting individual lines would mix the two sides.
     if (slide.layout === "comparison") { slides.push(slide); continue; }
     const maxChars = slide.layout === "process" ? 18 : slide.layout === "cards" || slide.layout === "columns" ? 26 : 42;
-    const lines = slide.lines.flatMap((line) => {
-      const chars = Array.from(line);
-      const chunks: string[] = [];
-      for (let offset = 0; offset < chars.length; offset += maxChars) chunks.push(chars.slice(offset, offset + maxChars).join(""));
-      return chunks;
-    });
+    const lines = slide.lines.flatMap((line) => wrapPresentationLine(line, maxChars));
+    if (!lines.length) { slides.push(slide); continue; }
     const perPage = slide.layout === "keypoint" ? 5 : 6;
     for (let offset = 0; offset < lines.length; offset += perPage) {
       const page = Math.floor(offset / perPage);
@@ -47,19 +62,42 @@ export async function checkPresentation(bytes: Buffer, plan: AiPresentation): Pr
       for (const [key, value] of Object.entries(item)) {
         if (key === "a:t" && (typeof value === "string" || typeof value === "number")) text.push(String(value));
         else if (value && typeof value === "object") pending.push(value);
-        if (key === "a:xfrm" && value && typeof value === "object" && !Array.isArray(value)) {
+        if ((key === "a:xfrm" || key === "p:xfrm") && value && typeof value === "object" && !Array.isArray(value)) {
           const transform = value as Record<string, unknown>;
           const offset = transform["a:off"] as Record<string, unknown> | undefined;
           const extent = transform["a:ext"] as Record<string, unknown> | undefined;
           if (offset && extent && !("a:chOff" in transform)) {
             const [x, y, width, height] = [offset["@_x"], offset["@_y"], extent["@_cx"], extent["@_cy"]].map(Number);
-            if (![x, y, width, height].every(Number.isFinite) || x! < 0 || y! < 0 || width! <= 0 || height! <= 0 || x! + width! > 12_192_050 || y! + height! > 6_858_050) throw new Error(`第 ${index + 1} 页有元素超出页面边界`);
+            if (![x, y, width, height].every(Number.isFinite) || x! < 0 || y! < 0 || width! < 0 || height! < 0 || width! + height! <= 0 || x! + width! > 12_192_050 || y! + height! > 6_858_050) throw new Error(`第 ${index + 1} 页有元素超出页面边界`);
           }
         }
       }
     }
-    for (const expected of [slide.title, ...(slide.subtitle ? [slide.subtitle] : []), ...slide.lines]) {
-      if (!text.includes(expected)) throw new Error(`第 ${index + 1} 页缺少计划中的文字`);
+    const elements = resolveElements(slide);
+    if (elements) validateElements(elements);
+    const rels = archive.file(`ppt/slides/_rels/slide${index + 1}.xml.rels`);
+    if (rels) {
+      const relationships = parser.parse(await rels.async("string"))?.Relationships?.Relationship;
+      for (const rel of relationships ? Array.isArray(relationships) ? relationships : [relationships] : []) {
+        if (!/\/(?:image|chart)$/.test(String(rel["@_Type"]))) continue;
+        if (rel["@_TargetMode"] === "External") throw new Error("PPT 素材不能引用外部地址");
+        const target = path.posix.normalize(String(rel["@_Target"]).startsWith("/") ? String(rel["@_Target"]).slice(1) : path.posix.join("ppt/slides", rel["@_Target"]));
+        const asset = archive.file(target);
+        if (!asset) throw new Error(`第 ${index + 1} 页素材缺失`);
+        if (/\/chart$/.test(String(rel["@_Type"]))) {
+          const chart = parser.parse(await asset.async("string"));
+          const collect = (value: unknown): void => {
+            if (!value || typeof value !== "object") return;
+            if (Array.isArray(value)) { value.forEach(collect); return; }
+            for (const [key, child] of Object.entries(value)) if (key === "c:v" && (typeof child === "string" || typeof child === "number")) text.push(String(child)); else collect(child);
+          };
+          collect(chart);
+        }
+      }
+    }
+    const expectedTexts = elements ? elementTexts(elements) : [slide.title, ...(slide.subtitle ? [slide.subtitle] : []), ...slide.lines];
+    for (const expected of expectedTexts.flatMap((value) => value.split(/\r?\n/)).filter(Boolean)) {
+      if (!text.some((value) => value === expected || value.replace(/\s/g, "") === expected.replace(/\s/g, ""))) throw new Error(`第 ${index + 1} 页缺少计划中的文字：${expected.slice(0, 40)}`);
     }
     if (slide.notes) {
       const notes = archive.file(`ppt/notesSlides/notesSlide${index + 1}.xml`);

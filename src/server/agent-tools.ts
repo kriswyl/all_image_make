@@ -1,5 +1,4 @@
 import { requestBoardFrame } from "./board-frame-broker.js";
-import { planMindSlides, renderMindPptx, type MindDocument } from "./mind-document.js";
 import { describeBoardStoryboards, inspectBoardGeneration } from "./board-assistant.js";
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 /**
@@ -191,8 +190,9 @@ export const TOOL_SCHEMAS = {
   create_storyboard_template: createStoryboardTemplateSchema,
   create_canvas_template: canvasTemplateInputSchema,
   doc_list: z.never(), doc_delete: z.never(), doc_read: z.never(), doc_search: z.never(), doc_create: z.never(), doc_edit: z.never(), doc_convert: z.never(), plan_update: z.never(),
-  document_read: z.object({ documentId: z.string().max(80).optional(), start: z.number().int().min(1).default(1), count: z.number().int().min(1).max(30).default(20) }),
-  document_make_pptx: z.object({ documentId: z.string().max(80).optional(), slides: z.array(z.object({ title: z.string().trim().min(1).max(2000), lines: z.array(z.string().max(200)).max(7), notes: z.string().max(60000).default("") })).min(1).max(200).optional(), edits: z.array(z.object({ page: z.number().int().min(1), title: z.string().trim().min(1).max(2000).optional(), lines: z.array(z.string().max(200)).max(7).optional(), notes: z.string().max(60000).optional() })).max(50).optional() }).refine((input) => !(input.slides && input.edits), "slides 与 edits 只能二选一"),
+  // 保留旧名称以识别历史调用；在执行入口统一返回模式引导，不再运行旧导出器。
+  document_read: z.never(),
+  document_make_pptx: z.never(),
   board_read: boardReadSchema,
   board_apply: boardApplySchema,
   board_generate: boardGenerateSchema,
@@ -1286,46 +1286,6 @@ function createStoryboardTemplateTool(
   }
 }
 
-function findMindDocument(ctx: ToolContext, documentId?: string) {
-  const docs = ctx.db.listConversationDocuments(ctx.conversation.id).filter((item) => /\.xmind$/i.test(item.fileName));
-  const doc = documentId ? docs.find((item) => item.id === documentId) : docs.at(-1);
-  if (!doc) throw new AppError("DOCUMENT_NOT_FOUND", "当前会话中找不到指定的 XMind 文件，请先上传", 404);
-  const parsed = JSON.parse(doc.content) as MindDocument;
-  if (parsed.format !== "xmind" || !Array.isArray(parsed.sheets)) throw new AppError("DOCUMENT_INVALID", "思维导图内容不可用", 400);
-  return { doc, parsed };
-}
-function currentMindPlan(ctx: ToolContext, documentId: string, doc: MindDocument) {
-  const saved = ctx.db.getConversationDocumentPlan(documentId);
-  return saved ? JSON.parse(saved) as ReturnType<typeof planMindSlides> : planMindSlides(doc);
-}
-function documentReadTool(ctx: ToolContext, args: z.infer<typeof TOOL_SCHEMAS.document_read>): ToolOutcome {
-  try {
-    const { doc, parsed } = findMindDocument(ctx, args.documentId);
-    const slides = currentMindPlan(ctx, doc.id, parsed);
-    const selected = slides.slice(args.start - 1, args.start - 1 + args.count);
-    if (!selected.length) return failResult(`只有 ${slides.length} 页，请调整起始页`, "DOCUMENT_RANGE");
-    const context = JSON.stringify({ fileName: doc.fileName, documentId: doc.id, totalPages: slides.length, startPage: args.start, pages: selected.map((slide, i) => ({ page: args.start + i, ...slide })), warnings: parsed.warnings });
-    if (context.length > 50000) return failResult("所选页面内容太长，请减少 count 后分批读取", "DOCUMENT_RANGE_TOO_LARGE");
-    return okResult(`已读取「${doc.fileName}」第 ${args.start}–${args.start + selected.length - 1} 页，共 ${slides.length} 页。`, { data: { agentContext: context } });
-  } catch (error) { return failResult(describeError(error), "DOCUMENT_READ_FAILED"); }
-}
-async function documentMakePptxTool(ctx: ToolContext, args: z.infer<typeof TOOL_SCHEMAS.document_make_pptx>): Promise<ToolOutcome> {
-  try {
-    const { doc, parsed } = findMindDocument(ctx, args.documentId);
-    const slides = args.slides ? structuredClone(args.slides) : structuredClone(currentMindPlan(ctx, doc.id, parsed));
-    for (const edit of args.edits ?? []) {
-      const existing = slides[edit.page - 1];
-      if (!existing) throw new AppError("DOCUMENT_RANGE", `第 ${edit.page} 页不存在`, 400);
-      slides[edit.page - 1] = { ...existing, ...(edit.title !== undefined ? { title: edit.title } : {}), ...(edit.lines !== undefined ? { lines: edit.lines } : {}), ...(edit.notes !== undefined ? { notes: edit.notes } : {}) };
-    }
-    const buffer = await renderMindPptx(slides);
-    const name = `${doc.fileName.replace(/\.xmind$/i, "") || "思维导图"}.pptx`;
-    const outputId = ctx.db.addDocumentOutput(doc.id, name, buffer);
-    if (args.slides || args.edits?.length) ctx.db.setConversationDocumentPlan(doc.id, JSON.stringify(slides));
-    return okResult(`已生成「${name}」，共 ${slides.length} 页，可通过工具卡下载。${parsed.warnings.join("")}`, { data: { documentOutputId: outputId, documentFileName: name, documentPageCount: slides.length } });
-  } catch (error) { return failResult(describeError(error), "DOCUMENT_EXPORT_FAILED"); }
-}
-
 /** 工具统一入口：先校验参数，再分发。参数不合法的错误会回灌给大脑让它重试 */
 const BOARD_TOOL_NAMES = new Set(["board_read", "board_apply", "board_generate", "board_generate_batch", "board_check", "board_storyboard", "board_storyboard_update", "board_assets", "board_versions", "board_view_images", "board_extract_frame"]);
 
@@ -1426,6 +1386,13 @@ export async function runAgentTool(
   rawArgs: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolOutcome> {
+  // 在参数解析前拦截，历史计划、批量调用和确认后重放都不能绕过。
+  if (name === "document_read" || name === "document_make_pptx") {
+    return failResult(
+      "创作助手的旧 PPT 工具已停用。请在当前对话输入框的模式菜单中切换到「普通聊天」，再发送制作、转换或修改 PPT 的要求；已上传的文件会保留，无需重新上传。请直接向用户说明，不要重试旧工具或声称已生成、修改文件。",
+      "PPT_CHAT_MODE_REQUIRED",
+    );
+  }
   // 无限画布线程只开放 board_* 和纯文本工具，避免大脑把对话 / 分镜工具用错地方
   if (ctx.conversation.kind === "board"
     && !BOARD_TOOL_NAMES.has(name)
@@ -1462,8 +1429,6 @@ export async function runAgentTool(
     case "generate_speech": return generateSpeech(ctx, parsed.data as GenerateSpeechArgs);
     case "create_storyboard_template": return createStoryboardTemplateTool(ctx, parsed.data as z.infer<typeof createStoryboardTemplateSchema>);
     case "create_canvas_template": return createCanvasTemplateTool(ctx, parsed.data as CanvasTemplateInput);
-    case "document_read": return documentReadTool(ctx, parsed.data as z.infer<typeof TOOL_SCHEMAS.document_read>);
-    case "document_make_pptx": return documentMakePptxTool(ctx, parsed.data as z.infer<typeof TOOL_SCHEMAS.document_make_pptx>);
     case "board_read": return boardReadTool(ctx, parsed.data as BoardReadArgs);
     case "board_apply": return boardApplyTool(ctx, parsed.data as BoardApplyArgs);
     case "board_generate": return boardGenerateTool(ctx, parsed.data as BoardGenerateArgs);

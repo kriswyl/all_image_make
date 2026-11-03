@@ -3,10 +3,11 @@ import { XMLParser } from "fast-xml-parser";
 import pptxgen from "pptxgenjs";
 import { z } from "zod";
 import { AppError } from "./tasks.js";
+import { designSchema, elementSchema, slideBoxSchema, resolveElements, validateElements, renderElements, MAX_SLIDES, MAX_LEGACY_LINES, type PresentationElement, type ElementSlide } from "./presentation-elements.js";
 
 export type DocumentNode = { title: string; notes: string; children: DocumentNode[]; id?: string; image?: string; imageDescription?: string };
 export type MindDocument = { format: "xmind"; sheets: DocumentNode[]; warnings: string[]; relationships?: Array<{ from: string; to: string; title: string; fromTitle: string; toTitle: string }> };
-export type SlidePlan = { title: string; lines: string[]; notes: string };
+export type SlidePlan = { title: string; lines: string[]; notes: string; layout?: AiPresentation["slides"][number]["layout"]; subtitle?: string; background?: string; elements?: PresentationElement[]; box?: ElementSlide["box"] };
 const LIMIT = 4_000_000;
 function list(value: unknown): any[] { return value == null ? [] : Array.isArray(value) ? value : [value]; }
 function scalar(value: unknown): string { if (typeof value === "string" || typeof value === "number") return String(value); if (value && typeof value === "object") return scalar((value as any)["#text"]); return ""; }
@@ -130,15 +131,16 @@ export function planMindSlides(doc: MindDocument): SlidePlan[] {
   if (slides.length > 200) throw new AppError("DOCUMENT_TOO_COMPLEX", "转换结果超过 200 页，请精简导图", 400);
   return slides;
 }
-export async function renderMindPptx(slides: SlidePlan[]): Promise<Buffer> {
-  const ppt = new (pptxgen as unknown as { new(): InstanceType<typeof import("pptxgenjs").default> })(); ppt.layout = "LAYOUT_WIDE"; ppt.author = "ChatCanvas"; ppt.subject = "XMind 导图";
-  slides.forEach((item, index) => {
-    const slide = ppt.addSlide(); slide.background = { color: "FAFAF8" };
-    slide.addText(item.title, { x: 0.75, y: index === 0 ? 2.6 : 0.55, w: 11.8, h: index === 0 ? 1.5 : 0.8, fontFace: "Microsoft YaHei", fontSize: index === 0 ? 36 : 28, bold: true, color: "20252A", breakLine: false, fit: "shrink" });
-    if (item.lines.length) slide.addText(item.lines.map((line) => ({ text: line, options: { breakLine: true } })), { x: 0.85, y: 1.65, w: 11.6, h: 5.1, fontFace: "Microsoft YaHei", fontSize: 20, color: "374151", valign: "top", breakLine: false, paraSpaceAfter: 12, fit: "shrink" });
-    if (item.notes) slide.addNotes(item.notes);
-  });
-  return Buffer.from(await ppt.write({ outputType: "nodebuffer" }) as Buffer);
+export async function renderMindPptx(slides: SlidePlan[], images: Array<{ title: string; data: string }> = []): Promise<Buffer> {
+  // Adapt saved legacy plans without truncating their visible text. Both entry points now share one renderer.
+  for (const slide of slides) if (slide.elements || slide.box) resolveElements(slide);
+  return renderAiPresentation({ title: slides[0]?.title.slice(0, 80) || "演示文稿", theme: "ink", slides: slides.map((item, index) => ({
+    ...item, layout: item.layout ?? (index === 0 && !item.lines.length ? "cover" : "content"), title: item.title.slice(0, 70), subtitle: item.subtitle ?? "", lines: [],
+    ...(item.elements || item.box ? {} : { elements: [
+      { id: "title", type: "text" as const, x: 0.8, y: index === 0 && !item.lines.length ? 2.4 : 0.55, w: 11.7, h: 1.2, text: item.title, style: { fontSize: index === 0 && !item.lines.length ? 34 : 28, bold: true, color: "243443" } },
+      ...item.lines.map((line, i) => ({ id: `body-${i}`, type: "text" as const, x: 0.9, y: 1.95 + i * (4.8 / Math.max(1, item.lines.length)), w: 11.5, h: 4.6 / Math.max(1, item.lines.length), text: line || " ", style: { fontSize: 18 } })),
+    ], background: "FAFAF8" }),
+  })) }, images);
 }
 
 
@@ -147,29 +149,38 @@ export const aiPresentationSchema = z.object({
   title: z.string().trim().min(1).max(80),
   theme: z.enum(["ink", "blue"]).default("ink"),
   slides: z.array(z.object({
-    layout: z.enum(["cover", "section", "content", "columns", "cards", "process", "comparison", "keypoint", "illustrated", "image"]),
+    layout: z.enum(["cover", "section", "content", "columns", "cards", "process", "comparison", "keypoint", "illustrated", "image"]).default("content"),
     title: z.string().trim().min(1).max(70),
     subtitle: z.string().trim().max(140).default(""),
-    lines: z.array(z.string().trim().min(1).max(70)).max(6).default([]),
-    notes: z.string().max(12000).default(""),
+    lines: z.array(z.string().trim().min(1).max(70)).max(MAX_LEGACY_LINES).default([]),
+    notes: z.string().max(60000).default(""),
     imageIndex: z.number().int().min(0).optional(),
     sourceIds: z.array(z.string()).optional(),
-  })).min(1).max(200),
+    elements: z.array(elementSchema).min(1).max(160).optional(),
+    box: slideBoxSchema.optional(),
+    background: z.string().regex(/^[0-9a-fA-F]{6}$/).optional(),
+  })).min(1).max(MAX_SLIDES),
+  design: designSchema.optional(),
 });
 export type AiPresentation = z.infer<typeof aiPresentationSchema>;
 
 /** 生成原生文本框，不将内容压成不可编辑的整页图片。 */
 export async function renderAiPresentation(plan: AiPresentation, images: Array<{ title: string; data: string }> = []): Promise<Buffer> {
+  plan = aiPresentationSchema.parse(plan);
   const ppt = new (pptxgen as unknown as { new(): InstanceType<typeof import("pptxgenjs").default> })();
   ppt.layout = "LAYOUT_WIDE"; ppt.author = "ChatCanvas"; ppt.subject = plan.title;
   const dark = plan.theme === "blue" ? "142A43" : "1C232B";
-  const accent = plan.theme === "blue" ? "286D9C" : "2A716B";
-  const font = "Microsoft YaHei";
+  const accent = plan.design?.accent ?? (plan.theme === "blue" ? "286D9C" : "2A716B");
+  const font = plan.design?.fontFace ?? "Microsoft YaHei";
   plan.slides.forEach((item, index) => {
     const slide = ppt.addSlide();
     const isDark = item.layout === "cover" || item.layout === "section";
-    slide.background = { color: isDark ? dark : "FAFAF8" };
-    if (isDark) {
+    const elements = resolveElements(item);
+    slide.background = { color: item.background ?? (isDark && !elements ? dark : plan.design?.background ?? "FAFAF8") };
+    if (elements) {
+      validateElements(elements, images.length);
+      renderElements(ppt, slide, elements, images, { text: dark, accent, ...plan.design });
+    } else if (isDark) {
       slide.addText(item.title, { x: 0.9, y: 2.2, w: 11.4, h: 1.35, fontFace: font, fontSize: item.layout === "cover" ? 36 : 32, bold: true, color: "FFFFFF", valign: "middle", margin: 0, fit: "shrink" });
       if (item.subtitle) slide.addText(item.subtitle, { x: 0.92, y: 3.85, w: 11.45, h: 1.0, fontFace: font, fontSize: item.subtitle.length > 45 ? 16 : 20, color: "D1DEE1", margin: 0, valign: "top", fit: "shrink" });
     } else if (item.layout === "illustrated") {

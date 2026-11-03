@@ -9,6 +9,7 @@ import multer from "multer";
 import { readWorkspaceFile } from "./chat-tools/documents.js";
 import { getWpsPreviewJobs, isWpsServiceRunning } from "./wps-preview.js";
 import { parseXmind, planMindSlides, renderMindPptx, type MindDocument } from "./mind-document.js";
+import { readPresentationStyle } from "./presentation-project.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
 import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
@@ -1583,13 +1584,14 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.post("/api/conversations/:id/mind-documents", mindUpload.single("file"), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-    if (!req.file || !/\.xmind$/i.test(req.file.originalname)) throw new AppError("DOCUMENT_INVALID", "请选择 XMind 文件", 400);
-    const parsed = await parseXmind(req.file.buffer);
+    if (!req.file || !/\.(xmind|pptx)$/i.test(req.file.originalname)) throw new AppError("DOCUMENT_INVALID", "请选择 XMind 或 PPTX 文件", 400);
+    const reference = /\.pptx$/i.test(req.file.originalname);
+    const parsed = reference ? await readPresentationStyle(req.file.buffer) : await parseXmind(req.file.buffer);
     const content = JSON.stringify(parsed);
     if (content.length > 400_000) throw new AppError("DOCUMENT_TOO_LARGE", "导图解析后的内容超过 400000 字，请分章节上传", 400);
     const originalName = Buffer.from(req.file.originalname, "latin1").toString("utf8");
     const stored = db.addBinaryConversationDocument(id, displayFileName(originalName.includes("�") ? req.file.originalname : originalName), content, req.file.buffer);
-    db.appendMessage({ conversationId: id, role: "user", content: "上传了 XMind 思维导图，可在附件中预览拆页并导出 PPT。", documents: [{ id: stored.id, name: stored.fileName, charCount: stored.charCount }] });
+    db.appendMessage({ conversationId: id, role: "user", content: reference ? "上传了 PPT 风格参考，可参考主题颜色和字体，不复制原母版与动画。" : "上传了 XMind 思维导图，可在附件中预览拆页并导出 PPT。", documents: [{ id: stored.id, name: stored.fileName, charCount: stored.charCount }] });
     res.status(201).json(ok(agent.buildView(id)));
   }));
   const getMindDocument = (conversationId: string, documentId: string): MindDocument => {
