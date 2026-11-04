@@ -88,6 +88,16 @@ describe("buildRows", () => {
     expect(rows[0]!.result?.id).toBe(orphan.id);
   });
 
+  it("按操作 ID 匹配重启后乱序补回的结果", () => {
+    const first = message("assistant", { toolName: "generate_image" });
+    const second = message("assistant", { toolName: "generate_image" });
+    const result = (operationId: string) => message("tool", { toolName: "generate_image", toolResult: { ok: true, summary: "已完成", data: { agentOperationId: operationId } } });
+    const secondResult = result(second.id);
+    const firstResult = result(first.id);
+    const rows = buildRows([first, second, secondResult, firstResult]);
+    expect(rows.map(row => row.kind === "tool" ? row.result?.id : null)).toEqual([firstResult.id, secondResult.id]);
+  });
+
   it("renders a pending confirmation as a confirm card, not a tool card", () => {
     const preview: ConfirmPreview = {
       reason: "video_policy", prompt: "镜头慢慢推近", model: "wan-2.5", channelName: "测试渠道",

@@ -10,7 +10,7 @@ import { auditParameters } from "./diagnose.js";
 import { initializeSchema } from "./db-schema.js";
 import { BoardRepository } from "./db-board.js";
 import type {
-  AgentPlan, ChatDocumentRef, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
+  AgentPlan, ChatDocumentRef, ChatToolScope, ChatVideoFrames, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
   ConversationStatus, ConversationUsage, MessageRole, MessageStatus, ToolResult, VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import {
@@ -37,6 +37,8 @@ export interface DbChannel {
   uploadHeaders?: Record<string, string>;
   models: string[];
   allowPrivateNetwork: boolean;
+  /** 这个渠道新建的对话默认使用统一助手入口 */
+  unifiedAgentDefault?: boolean;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -351,6 +353,15 @@ export class AppDatabase {
   }
 
   /**
+   * 只改「新对话默认统一入口」这一位，不动 updated_at。
+   * 渠道指纹用它判断会话/断点是否仍匹配；一个 UI 偏好不该让所有进行中的任务失效。
+   */
+  setChannelUnifiedAgentDefault(id: string, enabled: boolean) {
+    this.db.prepare("UPDATE channels SET unified_agent_default = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+    return this.getChannel(id);
+  }
+
+  /**
    * 删除任务及其图片、诊断记录。
    *
    * `keepFiles` 为真时只删记录、不动磁盘：产物文件留在各自目录里，
@@ -588,16 +599,17 @@ export class AppDatabase {
     origin?: TaskOrigin;
     libraryScope?: "public" | "conversation";
     ownerConversationId?: string;
+    agentOperationId?: string;
     /** 上传的图生下来就是完成的，没有排队这一步 */
     status?: TaskStatus;
   }): TaskRow {
     const createdAt = now();
     this.db.prepare(`
-      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at, origin, library_scope, owner_conversation_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, channel_id, model, prompt, status, input_json, created_at, origin, library_scope, owner_conversation_id, agent_operation_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id, input.channelId, input.model, input.prompt,
-      input.status ?? "queued", JSON.stringify(input.input), createdAt, input.origin ?? "generate", input.libraryScope ?? (input.origin === "upload" ? "legacy" : "public"), input.ownerConversationId ?? null,
+      input.status ?? "queued", JSON.stringify(input.input), createdAt, input.origin ?? "generate", input.libraryScope ?? (input.origin === "upload" ? "legacy" : "public"), input.ownerConversationId ?? null, input.agentOperationId ?? null,
     );
     return this.getTaskRow(input.id)!;
   }
@@ -774,6 +786,7 @@ export class AppDatabase {
     /** 缺省是普通对话；无限画布线程由 board 服务显式传 board */
     kind?: ConversationKind;
     boardId?: string | null;
+    toolScope?: ChatToolScope;
   }): Conversation {
     const id = crypto.randomUUID();
     const at = now();
@@ -781,11 +794,11 @@ export class AppDatabase {
       INSERT INTO conversations
       (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
        video_confirm_policy, vision_enabled, verbatim_prompt, context_budget, chat_auto_continue_limit,
-       board_max_rounds, board_auto_continue_limit, auto_continue_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?)
+       board_max_rounds, board_auto_continue_limit, auto_continue_count, tool_scope, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?, ?)
     `).run(
       id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
-      input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, at, at,
+      input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, input.toolScope ?? null, at, at,
     );
     return this.getConversation(id)!;
   }
@@ -875,7 +888,9 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM native_turn_checkpoints WHERE conversation_id = ?").run(conversationId);
   }
   recoverableNativeTurnIds(): string[] {
-    const rows = this.db.prepare("SELECT c.id FROM conversations c JOIN native_turn_checkpoints n ON n.conversation_id = c.id WHERE c.status = 'running' AND c.kind = 'chat' AND c.chat_mode = 'chat' AND NOT EXISTS (SELECT 1 FROM native_tool_calls t WHERE t.conversation_id = c.id AND t.status = 'running')").all() as DbRow[];
+    const rows = this.db.prepare(`SELECT c.id FROM conversations c JOIN native_turn_checkpoints n ON n.conversation_id = c.id
+      WHERE c.status = 'running' AND c.kind = 'chat' AND (c.tool_scope = 'all' OR (c.tool_scope IS NULL AND c.chat_mode = 'chat'))
+      AND NOT EXISTS (SELECT 1 FROM native_tool_calls t WHERE t.conversation_id = c.id AND t.status = 'running')`).all() as DbRow[];
     return rows.map((row) => String(row.id));
   }
 
@@ -905,10 +920,23 @@ export class AppDatabase {
     return row ? String(row.content) : null;
   }
 
+  getPresentationResume(conversationId: string): import("./presentation-execution.js").PresentationResume | null {
+    const row = this.db.prepare("SELECT payload FROM presentation_resumes WHERE conversation_id = ?").get(conversationId) as DbRow | undefined;
+    return row ? JSON.parse(String(row.payload)) : null;
+  }
+
+  savePresentationResume(conversationId: string, resume: import("./presentation-execution.js").PresentationResume) {
+    this.db.prepare("INSERT OR REPLACE INTO presentation_resumes (conversation_id, payload) VALUES (?, ?)").run(conversationId, JSON.stringify(resume));
+  }
+
+  clearPresentationResume(conversationId: string) {
+    this.db.prepare("DELETE FROM presentation_resumes WHERE conversation_id = ?").run(conversationId);
+  }
+
   savePresentationBatch(conversationId: string, key: string, content: string): void {
     if (content.length > 200_000) throw new Error("PPT 规划结果过大，无法保存断点");
     this.db.prepare("INSERT OR REPLACE INTO presentation_batch_cache (conversation_id, cache_key, content, created_at) VALUES (?, ?, ?, ?)").run(conversationId, key, content, now());
-    this.db.prepare("DELETE FROM presentation_batch_cache WHERE conversation_id = ? AND rowid NOT IN (SELECT rowid FROM presentation_batch_cache WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 400)").run(conversationId, conversationId);
+    this.db.prepare("DELETE FROM presentation_batch_cache WHERE conversation_id = ? AND rowid NOT IN (SELECT rowid FROM presentation_batch_cache WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1600)").run(conversationId, conversationId);
   }
 
   /**
@@ -1580,10 +1608,12 @@ export class AppDatabase {
       brainModel: "brain_model",
       videoConfirmPolicy: "video_confirm_policy",
       chatMode: "chat_mode",
+      toolScope: "tool_scope",
       contextBudget: "context_budget",
       chatAutoContinueLimit: "chat_auto_continue_limit",
       chatToolRoundLimit: "chat_tool_round_limit",
       toolsUnsupported: "tools_unsupported",
+      nativeImagePilot: "native_image_pilot",
       chatModelCallLimit: "chat_model_call_limit",
       chatTurnMinutes: "chat_turn_minutes",
       chatTokenLimit: "chat_token_limit",
@@ -1965,6 +1995,7 @@ export class AppDatabase {
     confirm?: ConfirmPreview | null; taskId?: string | null; assetId?: string | null;
     /** 这条消息引用的一组产物（用户从输入框拖进来的那些图） */
     assetRefs?: string[] | null;
+    videoFrames?: ChatVideoFrames;
     /** 这条消息附带的脚本文档（只存引用，全文在 conversation_documents） */
     documents?: ChatDocumentRef[] | null;
     status?: MessageStatus; errorMessage?: string | null;
@@ -1976,8 +2007,8 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO messages
       (id, conversation_id, seq, role, content, plan_json, tool_name, tool_args_json,
-       tool_result_json, confirm_json, task_id, asset_id, asset_refs, documents_json, status, error_message, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       tool_result_json, confirm_json, task_id, asset_id, asset_refs, video_frames_json, documents_json, status, error_message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.conversationId, seq, input.role,
       input.content ?? null,
@@ -1988,6 +2019,7 @@ export class AppDatabase {
       input.confirm ? JSON.stringify(input.confirm) : null,
       input.taskId ?? null, input.assetId ?? null,
       input.assetRefs?.length ? JSON.stringify(input.assetRefs) : null,
+      input.videoFrames ? JSON.stringify(input.videoFrames) : null,
       input.documents?.length ? JSON.stringify(input.documents) : null,
       input.status ?? "ok", input.errorMessage ?? null, now(),
     );
@@ -2024,6 +2056,106 @@ export class AppDatabase {
     if (!fields.length) return;
     values.push(id);
     this.db.prepare(`UPDATE messages SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  claimAgentConfirmation(message: ChatMessage, decision: "approve" | "reject", args?: Record<string, unknown>): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db.prepare(`
+        UPDATE messages SET confirm_json = NULL, status = ?, error_message = ?,
+          tool_args_json = COALESCE(?, tool_args_json)
+        WHERE id = ? AND conversation_id = ? AND status = 'pending' AND confirm_json IS NOT NULL
+      `).run(decision === "reject" ? "error" : "pending", decision === "reject" ? "用户取消了这次生成" : null,
+        args ? JSON.stringify(args) : null, message.id, message.conversationId);
+      if (Number(changed.changes) === 1) {
+        const native = this.getNativeMediaConfirmation(message.id);
+        const executionPath = native ? "native" : "legacy";
+        const snapshot = JSON.stringify({ preview: message.confirm, plan: message.plan, args: args ?? message.toolArgs, executionPath });
+        this.db.prepare("INSERT INTO agent_confirmation_decisions (message_id, decision, snapshot, created_at) VALUES (?, ?, ?, ?)")
+          .run(message.id, decision, snapshot, now());
+        if (native && decision === "reject") this.clearNativeMediaConfirmation(message.id);
+      }
+      this.db.exec("COMMIT");
+      return Number(changed.changes) === 1;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  listUnlinkedAgentTasks(): TaskRow[] {
+    const rows = this.db.prepare(`
+      SELECT t.* FROM tasks t
+      JOIN messages op ON op.id = t.agent_operation_id AND op.conversation_id = t.owner_conversation_id
+      JOIN conversations c ON c.id = op.conversation_id
+      WHERE c.status = 'running' AND op.tool_name IS NOT NULL AND op.confirm_json IS NULL
+        AND op.status IN ('ok', 'pending')
+        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.task_id = t.id AND m.conversation_id = c.id)
+        AND t.rowid = (
+          SELECT MAX(other.rowid) FROM tasks other
+          WHERE other.owner_conversation_id = c.id AND other.agent_operation_id = op.id
+        )
+    `).all() as DbRow[];
+    return rows.map(row => this.taskFromRow(row));
+  }
+
+  getNativeMediaConfirmation(messageId: string): import("./chat-tools/native-image.js").NativeMediaConfirmation | null {
+    const row = this.db.prepare("SELECT payload FROM native_image_confirmations WHERE message_id = ?").get(messageId) as DbRow | undefined;
+    if (!row) return null;
+    const payload = JSON.parse(String(row.payload));
+    // 旧图片确认卡仍可恢复，沿用现有表和操作 ID。
+    if (!payload.target) payload.target = { kind: "image", channelId: payload.imageChannelId, channelVersion: payload.imageChannelVersion, model: payload.imageModel };
+    return payload;
+  }
+
+  clearNativeMediaConfirmation(messageId: string): void {
+    this.db.prepare("DELETE FROM native_image_confirmations WHERE message_id = ?").run(messageId);
+  }
+
+  completeNativeMediaTask(conversationId: string, pendingId: string, operationId: string, result: ToolResult,
+    canResume: boolean, checkpoint: string | null): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.updateMessage(pendingId, {
+        content: result.summary, toolResult: result, status: result.ok ? "ok" : "error",
+        assetId: result.assetId ?? null, errorMessage: result.ok ? null : result.summary,
+      });
+      this.clearNativeMediaConfirmation(operationId);
+      const resume = Boolean(canResume && checkpoint && this.saveNativeTurnCheckpoint(conversationId, checkpoint));
+      if (canResume) this.setConversationStatus(conversationId, resume ? "running" : "idle", { touch: false });
+      this.db.exec("COMMIT");
+      return resume;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  hasUserMessageAfter(conversationId: string, seq: number): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND seq > ? AND role = 'user' LIMIT 1").get(conversationId, seq));
+  }
+
+  appendNativeMediaConfirmation(input: Parameters<AppDatabase["appendMessage"]>[0], state: import("./chat-tools/native-image.js").NativeMediaConfirmation) {
+    const payload = JSON.stringify(state);
+    if (payload.length > 2_000_000) throw new Error("当前对话内容过大，无法保存创作确认。请缩短对话后重试。");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const message = this.appendMessage(input);
+      this.db.prepare("INSERT INTO native_image_confirmations (message_id, payload) VALUES (?, ?)").run(message.id, payload);
+      this.db.exec("COMMIT");
+      return message;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  interruptUnstartedAgentConfirmations(): void {
+    const rows = this.db.prepare(`
+      SELECT m.id, m.conversation_id FROM messages m
+      JOIN agent_confirmation_decisions d ON d.message_id = m.id
+      JOIN conversations c ON c.id = m.conversation_id
+      WHERE d.decision = 'approve' AND m.status = 'pending'
+        AND c.status IN ('running', 'awaiting_confirmation')
+        AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.owner_conversation_id = c.id AND t.agent_operation_id = m.id)
+        AND NOT EXISTS (SELECT 1 FROM messages later WHERE later.conversation_id = c.id AND later.seq > m.seq)
+    `).all() as DbRow[];
+    for (const row of rows) {
+      this.updateMessage(String(row.id), { status: "error", errorMessage: "确认后的操作被服务重启中断，请核对当前结果后再继续。" });
+      this.clearNativeMediaConfirmation(String(row.id));
+      this.setConversationStatus(String(row.conversation_id), "idle", { touch: false });
+    }
   }
 
   /** 待确认的消息。用户发新消息时要把它们标成「已被取代」并让出 pending 状态 */
@@ -2222,10 +2354,12 @@ export class AppDatabase {
       visionEnabled: Boolean(row.vision_enabled),
       verbatimPrompt: Boolean(row.verbatim_prompt),
       chatMode: row.kind === "board" ? "creative" : row.chat_mode === "chat" ? "chat" : "creative",
+      toolScope: row.kind !== "board" && (row.tool_scope === "all" || row.tool_scope === "conversation") ? row.tool_scope : null,
       contextBudget: Number(row.context_budget) || 350000,
       chatAutoContinueLimit: row.chat_auto_continue_limit == null ? 20 : Number(row.chat_auto_continue_limit),
       chatToolRoundLimit: row.chat_tool_round_limit == null ? 16 : Number(row.chat_tool_round_limit),
       toolsUnsupported: Boolean(row.tools_unsupported),
+      nativeImagePilot: Boolean(row.native_image_pilot),
       chatModelCallLimit: row.chat_model_call_limit == null ? 500 : Number(row.chat_model_call_limit),
       chatTurnMinutes: row.chat_turn_minutes == null ? 30 : Number(row.chat_turn_minutes),
       chatTokenLimit: row.chat_token_limit == null ? 0 : Number(row.chat_token_limit),
@@ -2250,6 +2384,7 @@ export class AppDatabase {
       taskId: row.task_id == null ? null : String(row.task_id),
       assetId: row.asset_id == null ? null : String(row.asset_id),
       assetRefs: parseJson<string[]>(row.asset_refs, []),
+      ...(row.video_frames_json ? { videoFrames: parseJson<ChatVideoFrames | undefined>(row.video_frames_json, undefined) } : {}),
       documents: parseJson<ChatDocumentRef[]>(row.documents_json, []),
       status: String(row.status) as MessageStatus,
       errorMessage: row.error_message == null ? null : String(row.error_message),
@@ -2348,7 +2483,8 @@ export class AppDatabase {
       id: String(row.id), name: String(row.name), baseUrl: String(row.base_url), adapterType: String(row.adapter_type) as AdapterType,
       authType: String(row.auth_type) as AuthType, authHeaderName: String(row.auth_header_name ?? ""), secretEnv: String(row.secret_env ?? ""),
       endpoint: String(row.endpoint ?? ""), uploadEndpoint: String(row.upload_endpoint ?? ""), uploadHeaders: parseJson(row.upload_headers_json, {}), models: parseJson(row.models_json, []),
-      allowPrivateNetwork: Boolean(row.allow_private_network), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+      allowPrivateNetwork: Boolean(row.allow_private_network), unifiedAgentDefault: Boolean(row.unified_agent_default),
+      enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     };
   }
 
@@ -2366,6 +2502,7 @@ export class AppDatabase {
       origin: (row.origin == null ? "generate" : String(row.origin)) as TaskOrigin,
       libraryScope: (row.library_scope == null ? "legacy" : String(row.library_scope)) as TaskLibraryScope,
       ownerConversationId: row.owner_conversation_id == null ? null : String(row.owner_conversation_id),
+      agentOperationId: row.agent_operation_id == null ? null : String(row.agent_operation_id),
     };
   }
 }
@@ -2392,6 +2529,7 @@ export interface TaskRow {
   origin: TaskOrigin;
   libraryScope: TaskLibraryScope;
   ownerConversationId: string | null;
+  agentOperationId: string | null;
 }
 
 export interface AssetRow {

@@ -27,6 +27,18 @@ export type ConversationStatus =
 export const CONVERSATION_KINDS = ["chat", "board"] as const;
 export type ConversationKind = (typeof CONVERSATION_KINDS)[number];
 
+export const CHAT_TOOL_SCOPES = ["all", "conversation"] as const;
+export type ChatToolScope = (typeof CHAT_TOOL_SCOPES)[number];
+
+export function usesPlainChat(conversation: Pick<Conversation, "kind" | "chatMode" | "toolScope"> | null | undefined): boolean {
+  return conversation?.kind === "chat" && (conversation.toolScope != null || conversation.chatMode === "chat");
+}
+
+export function usesNativeCreativeTools(conversation: Conversation): boolean {
+  return usesPlainChat(conversation) && !conversation.toolsUnsupported
+    && (conversation.toolScope === "all" || conversation.toolScope == null && Boolean(conversation.nativeImagePilot));
+}
+
 /** §13.2 视频确认策略 */
 export const VIDEO_CONFIRM_POLICIES = ["always", "auto_only", "never"] as const;
 export type VideoConfirmPolicy = (typeof VIDEO_CONFIRM_POLICIES)[number];
@@ -65,6 +77,7 @@ export const AGENT_TOOL_NAMES = [
   "doc_edit",
   "doc_convert",
   "plan_update",
+  "capability_search",
   "board_read",
   "board_apply",
   "board_generate",
@@ -107,6 +120,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   doc_edit: "修改文件",
   doc_convert: "转换文件",
   plan_update: "更新任务计划",
+  capability_search: "查找能力",
   board_read: "读无限画布",
   board_apply: "修改无限画布",
   board_generate: "无限画布生成",
@@ -396,6 +410,10 @@ export function readCanvasAssetIds(data: Record<string, unknown> | undefined): s
 
 /** 视频里一张图扮演的角色。和万相 `VideoMediaType` / Seedance `role` 对齐 */
 export type ConversationVideoRole = "first_frame" | "last_frame" | "reference_image";
+export interface ChatVideoFrames {
+  firstAssetId: string;
+  lastAssetId?: string;
+}
 
 /** 确认卡上要展示的「哪几张图、各自什么角色」 */
 export interface ConfirmVideoInput {
@@ -415,7 +433,7 @@ export interface ConfirmPreview {
    * - `video_policy` / `session_limit`：生成闸门（§13）
    * - `brain_down`：大脑不可用，退化成「按你原话生成」（§15 直通模式）
    */
-  reason: "video_policy" | "session_limit" | "brain_down" | "board_destructive" | "board_generation" | "board_project_update";
+  reason: "video_policy" | "session_limit" | "brain_down" | "board_destructive" | "board_generation" | "board_project_update" | "native_image" | "native_audio";
   prompt: string;
   model: string;
   channelName: string;
@@ -444,6 +462,10 @@ export interface ConfirmPreview {
   musicTempo?: number;
   musicKey?: string;
   musicLoop?: boolean;
+  speechVoice?: string;
+  speechSecondVoice?: string;
+  speechStyle?: string;
+  speechLanguage?: string;
   /**
    * 这次真正进视频的图，按顺序、带角色。
    *
@@ -498,6 +520,7 @@ export interface ChatMessage {
    * 两者不重叠。
    */
   assetRefs: string[];
+  videoFrames?: ChatVideoFrames;
   /** 这条消息附带的脚本文档。全文只在当轮喂给大脑，回放时只留名字和字数 */
   documents: ChatDocumentRef[];
   status: MessageStatus;
@@ -533,11 +556,13 @@ export interface Conversation {
    */
   verbatimPrompt: boolean;
   chatMode?: "creative" | "chat";
+  toolScope?: ChatToolScope | null;
   contextBudget?: number;
   chatAutoContinueLimit?: number;
   chatToolRoundLimit?: number;
   /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
   toolsUnsupported?: boolean;
+  nativeImagePilot?: boolean;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;
   chatTokenLimit?: number;
@@ -674,6 +699,8 @@ export interface ConversationPatch {
   chatToolRoundLimit?: number;
   /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
   toolsUnsupported?: boolean;
+  nativeImagePilot?: boolean;
+  toolScope?: ChatToolScope | null;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;
   chatTokenLimit?: number;

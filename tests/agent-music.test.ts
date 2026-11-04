@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/server/app";
 import { shouldConfirm } from "../src/server/agent";
@@ -17,12 +17,14 @@ afterEach(async () => {
 });
 
 describe("对话里生成音乐", () => {
-  it("用户明确要歌时直接提交；完成后两张音频都回到工具卡片，且不碰画布", async () => {
+  it.each(["creative", "chat"] as const)("音乐结果回到对话，保留两首歌及其素材引用（%s）", async (chatMode) => {
+    const native = chatMode === "chat";
     let origin = "";
     let brainCalls = 0;
     let submitted: Record<string, unknown> | null = null;
     let polls = 0;
     const musicRequests: string[] = [];
+    const brainRequests: Array<{ messages: Array<{ role: string; tool_call_id?: string; content?: string }> }> = [];
 
     const mock = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", origin || "http://127.0.0.1");
@@ -30,12 +32,16 @@ describe("对话里生成音乐", () => {
       req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       req.on("end", () => {
         if (url.pathname === "/v1/chat/completions") {
+          brainRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
           brainCalls += 1;
           const plan = brainCalls === 1
             ? { tool: "generate_music", args: { prompt: "雨后的城市，温暖民谣", mode: "inspiration" }, say: "这就写。" }
             : { tool: "reply", args: { text: "两首已经好了，听听看。" }, say: "写好了。" };
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+          const message = !native ? { content: JSON.stringify(plan) } : brainCalls === 1
+            ? { tool_calls: [{ id: "music-call", type: "function", function: { name: plan.tool, arguments: JSON.stringify(plan.args) } }] }
+            : { content: "两首已经好了，听听看。" };
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }] }));
           return;
         }
         if (url.pathname === "/api/queue/makeAiMusic") {
@@ -100,8 +106,16 @@ describe("对话里生成音乐", () => {
     }).expect(201)).body.data;
 
     const conversationId = (await request(app).post("/api/conversations").send({}).expect(201)).body.data.id as string;
+    if (native) await request(app).patch(`/api/conversations/${conversationId}`).send({ chatMode, nativeImagePilot: true }).expect(200);
     await request(app).post(`/api/conversations/${conversationId}/messages`)
       .send({ text: "写一首关于雨后城市的歌" }).expect(202);
+    if (native) {
+      await vi.waitFor(() => expect(context.db.getConversation(conversationId)?.status).toBe("awaiting_confirmation"));
+      const confirmation = context.db.listPendingMessages(conversationId).find(row => row.confirm)!;
+      expect(confirmation.confirm).toMatchObject({ musicMode: "inspiration", channelName: "Music" });
+      expect(musicRequests).toEqual([]);
+      await request(app).post(`/api/conversations/${conversationId}/confirm`).send({ messageId: confirmation.id, decision: "approve" }).expect(200);
+    }
 
     let view: Record<string, unknown> = {};
     for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -142,6 +156,10 @@ describe("对话里生成音乐", () => {
     });
     expect(musicRequests).toEqual(["/api/queue/makeAiMusic"]);
     expect(music.models).toEqual(["suno_damobi_music"]);
+    if (native) {
+      const result = brainRequests.at(-1)?.messages.find(message => message.tool_call_id === "music-call");
+      expect(JSON.parse(result?.content ?? "{}").assetIds).toEqual(resultRow.toolResult?.assetIds);
+    }
   }, 20_000);
 });
 

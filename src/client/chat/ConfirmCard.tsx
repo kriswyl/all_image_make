@@ -6,7 +6,7 @@
  * 视频参数在卡片上可改：改完直接点确认，改动跟着这次确认一起提交，
  * 用户不用退回去重新说一遍。
  */
-import { AlertCircle, Check, Film, Image as ImageIcon, Music, X } from "lucide-react";
+import { AlertCircle, Check, Film, Image as ImageIcon, Mic, Music, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import {
@@ -37,6 +37,7 @@ export function ConfirmCard({
 }) {
   const isVideo = message.toolName === "generate_video";
   const isMusic = message.toolName === "generate_music";
+  const isSpeech = message.toolName === "generate_speech";
   // 大脑不可用时的退化卡片：不是「拦一下」，而是「问一句要不要将就着生成」
   const isDegraded = preview.reason === "brain_down";
   // 批量（需求.md 问题 2b）：一张卡替 N 个调用问清楚。N 得写在按钮上，
@@ -108,10 +109,10 @@ export function ConfirmCard({
           <span className={`confirm-card-badge ${preview.reason === "session_limit" || isDegraded ? "is-warn" : ""}`}>
             {preview.reason === "session_limit" || isDegraded
               ? <AlertCircle size={13} />
-              : isVideo ? <Film size={13} /> : isMusic ? <Music size={13} /> : <ImageIcon size={13} />}
+              : isVideo ? <Film size={13} /> : isMusic ? <Music size={13} /> : isSpeech ? <Mic size={13} /> : <ImageIcon size={13} />}
             {preview.reason === "session_limit"
               ? "会话任务额度"
-              : isDegraded ? "大脑不可用" : isVideo ? "生成视频" : isMusic ? "生成音乐" : "生成图片"}
+              : isDegraded ? "大脑不可用" : isVideo ? "生成视频" : isMusic ? "生成音乐" : isSpeech ? "生成配音" : message.toolName === "edit_image" ? "修改图片" : "生成图片"}
           </span>
           <span className="confirm-card-model">
             {preview.channelName ? `${preview.channelName} · ` : ""}{preview.model || "（未指定）"}
@@ -127,7 +128,12 @@ export function ConfirmCard({
               : `这次会一次并行提交 ${batchCount} 个任务（${batchCount} 笔费用），下面显示的是第 1 个的提示词。`}
           </div>
         ) : null}
-        {preview.prompt ? <div className="confirm-card-prompt">{preview.prompt}</div> : null}
+        {preview.prompt ? <div className={`confirm-card-prompt${isSpeech ? " is-speech" : ""}`}>{preview.prompt}</div> : null}
+        {isSpeech ? <div className="confirm-card-batch">
+          {preview.speechSecondVoice ? `A · ${preview.speechVoice} / B · ${preview.speechSecondVoice}` : preview.speechVoice}
+          {preview.speechLanguage ? ` · ${preview.speechLanguage}` : ""}
+          {preview.speechStyle ? ` · ${preview.speechStyle}` : ""}
+        </div> : null}
         {isMusic ? (() => {
           const labels: Record<string, string> = {
             inspiration: "灵感描述", custom: "自定义歌词", cover: "翻唱",
@@ -236,7 +242,7 @@ export function ConfirmCard({
             <X size={14} />{isDegraded ? "算了" : "先不生成"}
           </button>
           <button type="button" className="primary-button" onClick={approve} disabled={busy}>
-            <Check size={14} />{isDegraded ? "按这句话生成" : batchCount > 1 ? `确认生成 ${batchCount} 张` : "确认生成"}
+            <Check size={14} />{isDegraded ? "按这句话生成" : message.toolName === "edit_image" ? "确认改图" : batchCount > 1 ? `确认生成 ${batchCount} 张` : "确认生成"}
           </button>
         </div>
       </div>

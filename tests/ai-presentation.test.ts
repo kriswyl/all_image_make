@@ -224,3 +224,58 @@ it("同一材料批次可支持多个逻辑章节，但不会重复执行批次�
   }, undefined, undefined, undefined, { globalPlan: true });
   expect(designs).toBe(1); expect(plan.slides).toHaveLength(2);
 });
+it("逐页生成保留已通过页面断点，第二页失败后继续只重做第二页", async () => {
+  const stored = new Map<string, string>();
+  const cache = { scope: "page-test", get: (key: string) => stored.get(key) ?? null, set: (key: string, value: string) => { stored.set(key, value); } };
+  let designs = 0; let fail = true; let schemas = 0;
+  const call = async (messages: any[], schema?: Record<string, unknown>) => {
+    if (schema) schemas++;
+    if (String(messages[0].content).includes("页面策划员")) {
+      const data = JSON.parse(messages[1].content); const ids = data.sources.map((item: any) => item.id);
+      return { content: JSON.stringify({ pages: [{ title: "第一页", goal: "第一部分", sourceIds: ids.slice(0,1) }, { title: "第二页", goal: "第二部分", sourceIds: ids.slice(1) }] }), truncated: false };
+    }
+    designs++;
+    if (fail && String(messages[1].content).includes("本页标题：第二页")) throw new Error("模拟中断");
+    return response(parts(messages));
+  };
+  await expect(planPresentationWithAi(source, "分页", call, undefined, cache, undefined, { pagewise: true })).rejects.toThrow("模拟中断");
+  expect(designs).toBe(2);
+  fail = false; designs = 0;
+  const result = await planPresentationWithAi(source, "分页", call, undefined, cache, undefined, { pagewise: true });
+  expect(designs).toBe(1); expect(result.slides).toHaveLength(3); expect(schemas).toBeGreaterThan(0);
+});
+
+it("内容审校的可选建议不会阻断交付", async () => {
+  const result = await planPresentationWithAi(source, "完整转换", async messages => response(parts(messages)), undefined, undefined, async () => ({ content: JSON.stringify({ issues: [{ severity: "suggestion", message: "标题可以更生动" }] }), truncated: false }));
+  expect(result.slides.length).toBeGreaterThan(1);
+});
+
+it("垂直居中别名自动归一化，未知值仍被拒绝", async () => {
+  const make = (valign: string) => async (messages: any[]) => ({ content: JSON.stringify({ title: "标题", theme: "ink", slides: [{ layout: "content", title: "标题", lines: [], notes: "", sourceIds: parts(messages).map((item: any) => item.id), elements: [{ id: "title", type: "text", x: 1, y: 1, w: 10, h: 1, text: "标题", style: { valign } }, { id: "body", type: "text", x: 1, y: 3, w: 10, h: 2, text: "内容" }] }] }), truncated: false });
+  const result = await planPresentationWithAi(source, "转换", make("center"));
+  expect((result.slides[1]!.elements![0] as any).style.valign).toBe("middle");
+  await expect(planPresentationWithAi(source, "转换", make("arbitrary"))).rejects.toThrow("valign");
+});
+it("整套审校定位页面后只修复该页并复查，来源备注保持不变", async () => {
+  let finalReviews = 0; let repairs = 0;
+  const result = await planPresentationWithAi(source, "转换", async (messages) => {
+    const system = String(messages[0]!.content);
+    if (system.includes("阅读分析员")) return { content: JSON.stringify({ summary: "物流", keyFacts: [], conditions: [], sourceIds: parts(messages).map((p: any) => p.id) }), truncated: false };
+    if (system.startsWith("修正这一页")) {
+      repairs++; const data = JSON.parse(String(messages[1]!.content));
+      expect(data.evidence.some((p: any) => p.text.includes("按平台仓储计费"))).toBe(true);
+      return { content: JSON.stringify({ ...data.page, lines: ["按平台仓储计费，保留限定条件"], notes: "模型试图替换备注" }), truncated: false };
+    }
+    return response(parts(messages));
+  }, undefined, undefined, async messages => {
+    if (String(messages[0]!.content).includes("全量阅读摘要")) {
+      finalReviews++;
+      return { content: JSON.stringify({ issues: finalReviews === 1 ? [{ page: 2, severity: "error", message: "补充计费限定条件" }] : [] }), truncated: false };
+    }
+    return { content: JSON.stringify({ issues: [] }), truncated: false };
+  }, { deepRead: true });
+  expect(repairs).toBe(1); expect(finalReviews).toBe(2);
+  expect(result.slides[1]!.lines).toContain("按平台仓储计费，保留限定条件");
+  expect(result.slides[1]!.notes).toContain("来源原文");
+  expect(result.slides[1]!.notes).not.toContain("模型试图替换备注");
+});

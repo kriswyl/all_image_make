@@ -13,11 +13,13 @@ const message = z.union([
 const outcome = z.object({ ok: z.boolean(), summary: z.string(), data: z.record(z.string(), z.unknown()).optional(), uiData: z.record(z.string(), z.unknown()).optional() });
 const schema = z.object({
   version: z.literal(3), channelId: z.string(), channelVersion: z.string(), model: z.string(), toolSignature: z.string(),
+  /** 这一轮实际暴露给模型的工具名；恢复时按它还原，不重新猜能力组 */
+  activeTools: z.array(z.string()).optional(),
   messages: z.array(message).min(1), toolRounds: z.number().int().min(0), brainCalls: z.number().int().min(0), elapsedMs: z.number().int().min(0), usedTokens: z.number().int().min(0), usageMissing: z.boolean(),
   previousCalls: z.array(z.tuple([z.string(), outcome])),
 });
 
-export type NativeTurnCheckpoint = { version: 3; channelId: string; channelVersion: string; model: string; toolSignature: string; messages: BrainMessage[]; toolRounds: number; brainCalls: number; elapsedMs: number; usedTokens: number; usageMissing: boolean; previousCalls: Array<[string, ChatToolResult]> };
+export type NativeTurnCheckpoint = { version: 3; channelId: string; channelVersion: string; model: string; toolSignature: string; activeTools?: string[]; messages: BrainMessage[]; toolRounds: number; brainCalls: number; elapsedMs: number; usedTokens: number; usageMissing: boolean; previousCalls: Array<[string, ChatToolResult]> };
 export function parseNativeTurnCheckpoint(raw: string | null): NativeTurnCheckpoint | null {
   if (!raw || raw.length > 2_000_000) return null;
   try { const parsed = schema.safeParse(JSON.parse(raw)); return parsed.success ? parsed.data as NativeTurnCheckpoint : null; }

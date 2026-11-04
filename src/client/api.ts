@@ -1,6 +1,6 @@
 import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
 import type {
-  AgentStreamEvent, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
+  AgentStreamEvent, ChatVideoFrames, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
 import type {
   BoardAudioKind, BoardDoc, BoardSummary, BoardUiState, BoardView, BoardViewport, BoardVideoMode,
@@ -112,6 +112,7 @@ export const api = {
   }),
   deleteChannel: (id: string) => request<{ deleted: true }>(`/api/channels/${id}`, { method: "DELETE" }),
   testChannel: (id: string) => request<{ reachable: boolean; httpStatus: number; durationMs?: number; message?: string }>(`/api/channels/${id}/test`, { method: "POST" }),
+  setUnifiedAgentDefault: (id: string, enabled: boolean) => request<Channel>(`/api/channels/${id}/unified-agent`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   /**
    * `maskFile` 是局部重绘蒙版（PNG）。有蒙版时必须走 multipart，哪怕参考图数组为空——
    * 服务端会明确拒绝「只有蒙版没有底图」，但不该在这之前把蒙版悄悄丢掉。
@@ -226,9 +227,9 @@ export const api = {
    * 发一条消息。**立即返回**，模型输出走 `openConversationStream`。
    * 卡在这里等会撞上前端自己的超时——一趟生图几十秒，连接等不起。
    */
-  sendMessage: (id: string, text: string, assetRefs: string[] = []) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
+  sendMessage: (id: string, text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
     method: "POST",
-    body: JSON.stringify(assetRefs.length ? { text, assetRefs } : { text }),
+    body: JSON.stringify({ text, ...(assetRefs.length ? { assetRefs } : {}), videoFrames }),
   }),
   interruptConversation: (id: string) => request<{ interrupted: boolean }>(`/api/conversations/${id}/interrupt`, { method: "POST" }),
   /**

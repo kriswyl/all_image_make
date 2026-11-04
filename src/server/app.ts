@@ -154,6 +154,9 @@ const conversationPatchSchema = z.object({
   boardMaxRounds: z.number().int().min(1).max(30).optional(),
   boardAutoContinueLimit: z.number().int().min(0).max(20).optional(),
   chatMode: z.enum(["creative", "chat"]).optional(),
+  /** 统一入口的工具范围；null 表示回到旧模式，交给 chatMode 决定 */
+  toolScope: z.enum(["all", "conversation"]).nullable().optional(),
+  nativeImagePilot: z.boolean().optional(),
   title: z.string().trim().min(1).max(120).optional(),
   brainChannelId: z.string().uuid().optional(),
   brainModel: z.string().trim().min(1).max(200).optional(),
@@ -275,6 +278,13 @@ const messageCreateSchema = z.object({
    * 上限和画布同一个数：这些图发送前会被并进画布，多出来的本来就进不去。
    */
   assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
+  /** 统一入口里显式指定的视频首尾帧；同一张图不能同时当首帧和尾帧 */
+  videoFrames: z.object({
+    firstAssetId: z.string().trim().min(1).max(80),
+    lastAssetId: z.string().trim().min(1).max(80).optional(),
+  }).refine((value) => !value.lastAssetId || value.lastAssetId !== value.firstAssetId, {
+    message: "首帧和尾帧不能是同一张图片",
+  }).optional(),
 });
 
 const promptOptimizeSchema = z.object({
@@ -1070,6 +1080,14 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(publicChannel(saved, sessionKeys)));
   }));
 
+  app.patch("/api/channels/:id/unified-agent", (req, res) => {
+    const id = routeParam(req.params.id);
+    if (!db.getChannel(id)) return res.status(404).json(fail("CHANNEL_NOT_FOUND", "渠道不存在"));
+    const input = z.object({ enabled: z.boolean() }).parse(req.body ?? {});
+    const saved = db.setChannelUnifiedAgentDefault(id, input.enabled);
+    res.json(ok(publicChannel(saved!, sessionKeys)));
+  });
+
   app.delete("/api/channels/:id", (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getChannel(id)) return res.status(404).json(fail("CHANNEL_NOT_FOUND", "渠道不存在"));
@@ -1345,6 +1363,8 @@ export function createApp(options: { dataDir?: string } = {}) {
       videoConfirmPolicy: input.videoConfirmPolicy ?? readAgentDefaults(db).videoConfirmPolicy,
       visionEnabled: input.visionEnabled ?? readAgentDefaults(db).visionEnabled,
       verbatimPrompt: input.verbatimPrompt ?? false,
+      // 渠道级灰度：只影响之后新建的会话，旧会话保留自己的入口
+      ...(db.getChannel(brain.channelId)?.unifiedAgentDefault ? { toolScope: "all" as const } : {}),
     });
     res.status(201).json(ok(agent.buildView(conversation.id)));
   });
@@ -1387,6 +1407,11 @@ export function createApp(options: { dataDir?: string } = {}) {
         if (!asset.mimeType.startsWith("image/")) return res.status(400).json(fail("ASSET_NOT_IMAGE", "视频不能作为画布"));
       }
       patch.canvasAssetIds = ids;
+    }
+    // 换模型/渠道后重新给工具一次机会：上一轮的「不支持 tools」只属于那个组合
+    if ((patch.brainModel !== undefined && patch.brainModel !== conversation.brainModel)
+      || (patch.brainChannelId !== undefined && patch.brainChannelId !== conversation.brainChannelId)) {
+      patch.toolsUnsupported = false;
     }
     const updated = db.updateConversation(id, patch);
     res.json(ok(agent.buildView(updated!.id)));
@@ -1448,7 +1473,7 @@ export function createApp(options: { dataDir?: string } = {}) {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const input = messageCreateSchema.parse(req.body ?? {});
-    agent.startTurn(id, input.text, "user", input.assetRefs ?? []);
+    agent.startTurn(id, input.text, "user", input.assetRefs ?? [], input.videoFrames);
     res.status(202).json(ok({ accepted: true }));
   });
 
@@ -1492,7 +1517,8 @@ export function createApp(options: { dataDir?: string } = {}) {
    */
   app.post("/api/conversations/:id/uploads", conversationUpload.array("images", MAX_REFERENCE_IMAGES), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    const conversation = db.getConversation(id);
+    if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
 
@@ -1527,7 +1553,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     }
     // 刚传进来的图直接就是当前画布：用户下一步十有八九是「把这张图的手改成握着咖啡杯」。
     // 主图从「最后一张」改成「第一张」——一次传多张时，用户心里排第一的显然是他先选的那张。
-    if (uploaded.length) db.updateConversation(id, { canvasAssetIds: uploaded });
+    // 统一入口和原生生图试用里，附件默认只属于本轮；旧创作模式仍按原行为放进画布
+    const attachmentStaysInTurn = conversation.toolScope != null
+      || (conversation.chatMode === "chat" && conversation.nativeImagePilot);
+    if (uploaded.length && !attachmentStaysInTurn) db.updateConversation(id, { canvasAssetIds: uploaded });
     res.status(201).json(ok(agent.buildView(id)));
   }));
 

@@ -5,7 +5,7 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, FileDown, FileText, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, FileDown, FileText, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, Search, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api, isTauriRuntime } from "../api";
 import { StoryboardReview } from "./StoryboardReview";
@@ -43,6 +43,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   create_canvas_template: LayoutGrid,
   document_read: FileText,
   document_make_pptx: FileDown,
+  capability_search: Search,
   doc_list: FileText,
   doc_delete: FileText,
   doc_read: FileText,
@@ -116,6 +117,7 @@ export function ToolCard({
   onDiagnostics,
   onToast,
   onImportTemplate,
+  onResumePresentation,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
@@ -128,6 +130,7 @@ export function ToolCard({
   /** 打开应用内诊断弹窗；Tauri webview 会拦掉 window.open，所以不能再走新窗口 */
   onDiagnostics?: (taskId: string) => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
+  onResumePresentation?: () => void;
   onImportTemplate?: (templateId: string, name: string, description?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -147,7 +150,8 @@ export function ToolCard({
    */
   const orphaned = !result && (stale || message.status === "error");
   const isPending = !orphaned && (!result || result.status === "pending");
-  const failed = (result && result.status === "error") || payload?.ok === false;
+  const paused = payload?.data?.presentationPaused === true;
+  const failed = !paused && ((result && result.status === "error") || payload?.ok === false);
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
@@ -263,8 +267,8 @@ export function ToolCard({
           {pillArg ? <span className="tool-pill-arg">{pillArg}</span> : null}
           <span className="tool-pill-status">
             {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
-              : orphaned ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
-            {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : failed ? "失败" : "已完成"}</span> : null}
+              : orphaned || paused ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
+            {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : paused ? "已暂停" : failed ? "失败" : "已完成"}</span> : null}
           </span>
           <ChevronDown size={13} className={`tool-pill-chevron ${open ? "flip" : ""}`} />
         </button>
@@ -276,6 +280,7 @@ export function ToolCard({
         {orphaned ? <div className="tool-card-result">{message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
         {nativeTool && isPending && message.content ? <div className="tool-card-result" aria-live="polite">{message.content}</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
+        {paused && onResumePresentation ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" onClick={onResumePresentation}>继续 PPT</button></div> : null}
 
         {workspaceFileId && pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId) || deletedWorkspaceFile} onClick={() => void deleteWorkspaceFile()}>{deletedWorkspaceFile ? "已删除" : "确认删除"}</button><span>{workspaceFileName}</span></div> : null}
         {workspaceFileId && !pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadWorkspaceFile()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载文件</button>{isTauriRuntime() ? <button type="button" className="secondary-button compact" onClick={() => { void api.revealWorkspaceFile(message.conversationId, workspaceFileId).catch((error) => onToast?.("error", error instanceof Error ? error.message : "无法打开目录")); }}>打开所在文件夹</button> : null}{/\.pptx$/i.test(workspaceFileName) ? <button type="button" className="secondary-button compact" onClick={() => setWpsOpen(true)}><Eye size={12} />WPS 预览</button> : null}<span>{workspaceFileName}</span></div> : null}

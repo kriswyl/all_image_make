@@ -146,7 +146,9 @@ export function toBrainMessage(message: ChatMessage): BrainMessage | null {
     // 回放时也得让大脑知道这条消息当时带了哪几张图
     const refs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
     const suffix = refs.length ? `\n[这条消息附带的图片：${refs.map(assetRef).join("、")}]` : "";
-    return { role: "user", content: `${message.content ?? ""}${suffix}` };
+    const frames = message.videoFrames;
+    const roles = frames ? `\n[用户为本轮视频指定首帧 ${assetRef(frames.firstAssetId)}${frames.lastAssetId ? `，尾帧 ${assetRef(frames.lastAssetId)}` : ""}]` : "";
+    return { role: "user", content: `${message.content ?? ""}${suffix}${roles}` };
   }
   if (message.role === "assistant") {
     // 有 plan 的是「工具调用」，回放成模型当初输出的那个 JSON
@@ -193,7 +195,8 @@ export function toPlainChatMessage(message: ChatMessage): BrainMessage | null {
   const result = message.toolResult;
   const status = result?.async ? "任务进行中" : result?.ok ? "操作完成" : message.status === "pending" ? "任务进行中" : "操作失败";
   const text = result?.summary || message.content || message.errorMessage || message.toolName || "操作";
-  return { role: "assistant", content: `[${status}：${text}]` };
+  const imageId = result?.ok && result.mimeType?.startsWith("image/") ? result.assetId : undefined;
+  return { role: "assistant", content: `[${status}：${text}${imageId ? `\n图片 ID ${imageId}` : ""}]` };
 }
 
 /**

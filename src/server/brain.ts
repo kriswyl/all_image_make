@@ -67,7 +67,7 @@ export interface CallBrainOptions {
   signal?: AbortSignal;
   onDelta?: (delta: BrainDelta) => void;
   tools?: BrainToolSpec[];
-  toolChoice?: "auto" | "none";
+  toolChoice?: "auto" | "none" | { type: "function"; function: { name: string } };
 }
 
 /**

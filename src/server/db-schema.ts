@@ -19,6 +19,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         status_endpoint TEXT NOT NULL DEFAULT '',
         models_json TEXT NOT NULL DEFAULT '[]',
         allow_private_network INTEGER NOT NULL DEFAULT 0,
+        unified_agent_default INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -197,6 +198,20 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         content TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY (conversation_id, cache_key)
+      );
+      CREATE TABLE IF NOT EXISTS agent_confirmation_decisions (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        decision TEXT NOT NULL,
+        snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS presentation_resumes (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS native_image_confirmations (
+        message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS native_turn_checkpoints (
         conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -389,6 +404,9 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       db.exec("ALTER TABLE channels ADD COLUMN upload_headers_json TEXT NOT NULL DEFAULT '{}'");
       db.exec(`UPDATE channels SET upload_headers_json = '{"New-Api-User":"1"}' WHERE upload_endpoint = 'https://imageproxy.zhongzhuan.chat/api/upload'`);
     }
+    if (!channelColumns.some((col) => col.name === "unified_agent_default")) {
+      db.exec("ALTER TABLE channels ADD COLUMN unified_agent_default INTEGER NOT NULL DEFAULT 0");
+    }
     // Migration: add duration column to assets if it doesn't exist
     const columnsResult = db.prepare("PRAGMA table_info(assets)").all() as Array<{name: string}>;
     const hasDuration = columnsResult.some((col) => col.name === "duration");
@@ -436,6 +454,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     if (!messageColumns.some((col) => col.name === "documents_json")) {
       db.exec("ALTER TABLE messages ADD COLUMN documents_json TEXT");
     }
+    if (!messageColumns.some((col) => col.name === "video_frames_json")) db.exec("ALTER TABLE messages ADD COLUMN video_frames_json TEXT");
     // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
     // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
     const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
@@ -448,6 +467,10 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     if (!taskColumns.some((col) => col.name === "owner_conversation_id")) {
       db.exec("ALTER TABLE tasks ADD COLUMN owner_conversation_id TEXT");
     }
+    if (!taskColumns.some((col) => col.name === "agent_operation_id")) {
+      db.exec("ALTER TABLE tasks ADD COLUMN agent_operation_id TEXT");
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS tasks_agent_operation_idx ON tasks(owner_conversation_id, agent_operation_id) WHERE agent_operation_id IS NOT NULL");
     // 上游任务的附加元数据（Midjourney 的按钮等）；空串表示没有
     if (!taskColumns.some((col) => col.name === "remote_meta")) {
       db.exec("ALTER TABLE tasks ADD COLUMN remote_meta TEXT NOT NULL DEFAULT ''");
@@ -473,6 +496,8 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       ["chat_tool_round_limit", "INTEGER NOT NULL DEFAULT 16"],
       // 渠道明确报过「不支持 tools」后置 1，之后不再发工具，省掉每轮一次的失败调用
       ["tools_unsupported", "INTEGER NOT NULL DEFAULT 0"],
+      ["native_image_pilot", "INTEGER NOT NULL DEFAULT 0"],
+      ["tool_scope", "TEXT"],
       ["chat_model_call_limit", "INTEGER NOT NULL DEFAULT 500"],
       ["chat_turn_minutes", "INTEGER NOT NULL DEFAULT 30"],
       ["chat_token_limit", "INTEGER NOT NULL DEFAULT 0"],

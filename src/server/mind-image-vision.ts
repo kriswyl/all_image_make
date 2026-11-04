@@ -1,3 +1,4 @@
+import { PresentationPaused } from "./presentation-execution.js";
 import type { BrainMessage, BrainResult } from "./brain.js";
 import type { DocumentNode, MindDocument, MindImage } from "./mind-document.js";
 
@@ -19,7 +20,7 @@ export async function describeMindImages(mind: MindDocument, images: MindImage[]
       if (result.truncated || !description) { report?.(`第 ${index + 1} 张图片未获得完整描述，将仅保留原图`); continue; }
       const node = nodes.get(image.sourceId); if (node) node.imageDescription = description;
     } catch (error) {
-      if (signal?.aborted) throw error;
+      if (signal?.aborted || error instanceof PresentationPaused) throw error;
       report?.("当前模型未能理解图片；仍会保留原图并继续整理文字。");
       break;
     }

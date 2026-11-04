@@ -173,6 +173,7 @@ export interface Channel {
   uploadHeaders?: Record<string, string>;
   models: string[];
   allowPrivateNetwork: boolean;
+  unifiedAgentDefault?: boolean;
   enabled: boolean;
   hasKey: boolean;
   createdAt: string;

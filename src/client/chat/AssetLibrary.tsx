@@ -45,6 +45,7 @@ export function AssetLibrary({
   onClose,
   onPreview,
   onToggleCanvas,
+  onAddToBoard,
   onSetFirst,
   onSetLast,
   onDeleteAsset,
@@ -58,6 +59,7 @@ export function AssetLibrary({
   onPreview: (assetId: string) => void;
   /** 点一下就是加入 / 移出画布 */
   onToggleCanvas: (assetId: string) => void;
+  onAddToBoard?: (assetId: string) => void;
   onSetFirst: (assetId: string) => void;
   onSetLast: (assetId: string) => void;
   /** 右键删除：永久删除磁盘文件并清理会话里的引用 */
@@ -269,7 +271,10 @@ export function AssetLibrary({
               : "点图加入 / 移出画布，双击看大图"}
           </span>
           <div className="asset-library-actions">
-            {chatSelection ? <button type="button" className="primary-button compact" onClick={onClose}>完成</button> : focused ? (
+            {chatSelection ? <>
+              {onAddToBoard && focused ? <button type="button" className="secondary-button compact" onClick={() => onAddToBoard(focused)}>加入无限画布</button> : null}
+              <button type="button" className="primary-button compact" onClick={onClose}>完成</button>
+            </> : focused ? (
               <>
                 <button type="button" className="secondary-button compact" onClick={() => onPreview(focused)}>
                   <ImageIcon size={13} />预览
@@ -313,6 +318,9 @@ export function AssetLibrary({
             <button type="button" role="menuitem" onClick={() => { setMenu(null); onPreview(menu.assetId); }}>
               <Eye size={13} />查看大图
             </button>
+            {onAddToBoard ? <button type="button" role="menuitem" onClick={() => { setMenu(null); onAddToBoard(menu.assetId); }}>
+              <Layers size={13} />加入无限画布
+            </button> : null}
             <button
               type="button"
               role="menuitem"

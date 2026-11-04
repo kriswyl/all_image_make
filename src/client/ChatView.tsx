@@ -22,8 +22,8 @@ import { AssetLightbox } from "./chat/AssetLightbox";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
 import type { Asset, Channel, DefaultModelGroup, TaskKind } from "../shared/types";
 import {
-  assetRef, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent,
-  type ChatMessage, type ConversationStatus, type ConversationSummary,
+  assetRef, usesPlainChat, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent, type ChatToolScope,
+  type ChatMessage, type ChatVideoFrames, type ConversationStatus, type ConversationSummary,
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
@@ -39,6 +39,7 @@ import { AssetLibrary } from "./chat/AssetLibrary";
 import { ContextSummaryControl } from "./chat/ContextSummaryControl";
 import { SelectMenu } from "./ui/SelectMenu";
 import { TemplateImportDialog } from "./board/TemplateImportDialog";
+import { CrossModeBridgeDialog } from "./board/CrossModeBridgeDialog";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
 
@@ -107,6 +108,9 @@ export function ChatView({
   const [list, setList] = useState<Array<ConversationSummary & { running: boolean }>>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [view, setView] = useState<ConversationView | null>(null);
+  const plainChat = usesPlainChat(view);
+  const unified = view?.toolScope != null;
+  const [changingScope, setChangingScope] = useState(false);
   // 发送时要在同一次事件里读到「刚上传 / 刚并入」的画布，不等 React 下一次渲染
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -125,8 +129,10 @@ export function ChatView({
   });
   const [preview, setPreview] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [boardAssetId, setBoardAssetId] = useState<string | null>(null);
   const [chatAssetIds, setChatAssetIds] = useState<string[]>([]);
-  useEffect(() => { setChatAssetIds([]); setLibraryOpen(false); }, [activeId]);
+  const [chatVideoFrames, setChatVideoFrames] = useState<ChatVideoFrames | null>(null);
+  useEffect(() => { setChatAssetIds([]); setChatVideoFrames(null); setLibraryOpen(false); setBoardAssetId(null); }, [activeId]);
   const [templateImport, setTemplateImport] = useState<{
     id: string; name: string; description?: string;
   } | null>(null);
@@ -489,18 +495,18 @@ export function ChatView({
     }
   }
 
-  async function send(text: string, assetRefs: string[] = []) {
+  async function send(text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) {
     if (!activeId) return;
     // 画布是「这一轮要带的图」：连同拖进来的产物一起写进这条消息，
     // 这样发完清空画布也不会影响助手这一轮看到的图。
-    const plain = viewRef.current?.chatMode === "chat";
+    const plain = usesPlainChat(viewRef.current);
     const refs = [...new Set([...(plain ? [] : viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
     // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
     forcedScrollConversation.current = activeId;
     setReasoning("");
     setDraft("");
     try {
-      await api.sendMessage(activeId, text, refs);
+      await api.sendMessage(activeId, text, refs, videoFrames);
       setStatus("running");
       if (refs.length && !plain) writeCanvas([]);
       return true;
@@ -527,6 +533,15 @@ export function ChatView({
     } catch (error) {
       toastError(error);
     }
+  }
+
+  async function changeToolScope(scope: ChatToolScope | null) {
+    setChangingScope(true);
+    try {
+      await patch({ toolScope: scope });
+      if ((scope !== null) !== unified) setChatAssetIds([]);
+      if (scope !== "all") setChatVideoFrames(null);
+    } finally { setChangingScope(false); }
   }
 
   /**
@@ -560,6 +575,12 @@ export function ChatView({
       return;
     }
     setChatAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : current.length >= MAX_REFERENCE_IMAGES ? current : [...current, assetId]);
+    if (chatAssetIds.includes(assetId)) clearFrameFor(assetId);
+  }
+
+  function clearFrameFor(assetId: string) {
+    setChatVideoFrames(current => current?.firstAssetId === assetId ? null
+      : current?.lastAssetId === assetId ? { firstAssetId: current.firstAssetId } : current);
   }
 
   /** 素材库单击：在画布里就移出，不在就加到末尾（参考图） */
@@ -587,6 +608,7 @@ export function ChatView({
       const next = await api.deleteConversationAsset(id, assetId);
       setView(next);
       setChatAssetIds((current) => current.filter((id) => id !== assetId));
+      clearFrameFor(assetId);
       setPreview((current) => current === assetId ? null : current);
       toast("ok", "已删除图片");
     } catch (error) {
@@ -666,7 +688,7 @@ export function ChatView({
       const next = await api.uploadConversationImages(activeId, images);
       setView(next);
       await reloadList();
-      toast("ok", viewRef.current?.chatMode === "chat" ? `已上传 ${images.length} 张图片` : images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
+      toast("ok", usesPlainChat(viewRef.current) ? `已上传 ${images.length} 张图片` : images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
       // 返回新上传的产物 id：发送时要把它们一起写进这条消息
       return next.canvasAssetIds;
     } catch (error) {
@@ -750,7 +772,7 @@ export function ChatView({
     // 图和文档分开传；文档放在最后，这样「文档消息 + 这句话」在库里是紧挨着的
     const images = files.filter((file) => !isScriptDocument(file));
     const documents = files.filter(isScriptDocument);
-    const plain = viewRef.current?.chatMode === "chat";
+    const plain = usesPlainChat(viewRef.current);
     const previousCanvas = viewRef.current?.canvasAssetIds ?? [];
     const selectedForChat = [...new Set([...chatAssetIds, ...assetIds])];
     if (plain && selectedForChat.length + images.length > MAX_REFERENCE_IMAGES) {
@@ -759,10 +781,13 @@ export function ChatView({
     }
     const uploadedIds = images.length ? await uploadImages(images) : [];
     if (uploadedIds === null) return;
-    if (plain && images.length) await flushCanvas(previousCanvas);
+    if (plain && images.length && viewRef.current?.toolScope == null && !viewRef.current?.nativeImagePilot) await flushCanvas(previousCanvas);
     if (documents.length && !(await uploadDocuments(documents))) return;
     if (plain) {
-      if (await send(text, [...new Set([...uploadedIds, ...selectedForChat])])) setChatAssetIds([]);
+      if (await send(text, [...new Set([...uploadedIds, ...selectedForChat])], viewRef.current?.toolScope === "all" ? chatVideoFrames ?? undefined : undefined)) {
+        setChatAssetIds([]);
+        setChatVideoFrames(null);
+      }
       return;
     }
     // 本地新传的、拖进来的既有产物、画布里已经挑好的，合并成「这一轮要带的图」
@@ -846,6 +871,7 @@ export function ChatView({
     }
   }
 
+  const latestPresentationResult = view?.messages.filter(message => message.role === "tool" && message.toolName === "doc_convert").at(-1);
   const rows = useMemo(() => (view ? buildRows(view.messages) : []), [view]);
   const hasStream = Boolean(reasoning || draft);
   /** 本会话出现过的全部图片（仓库，时间序）——下区渲染它 */
@@ -995,7 +1021,7 @@ export function ChatView({
                 <button
                   type="button"
                   className="chat-control chat-toggle"
-                  title={view.chatMode === "chat" ? "从本会话素材中选择图片发送" : "打开素材库：筛选、搜索、选图和设置首尾帧"}
+                  title={plainChat ? "从本会话素材中选择图片发送" : "打开素材库：筛选、搜索、选图和设置首尾帧"}
                   onClick={() => setLibraryOpen(true)}
                 >
                   <Images size={13} />
@@ -1005,11 +1031,11 @@ export function ChatView({
                 <button
                   type="button"
                   className={`chat-control chat-toggle ${view.visionEnabled ? "is-on" : ""}`}
-                  title={view.visionEnabled ? (view.chatMode === "chat" ? "模型支持视觉时可查看本轮附带图片" : "助手能看到当前画布，改图更准") : "已关闭看图，助手不能看到图片"}
+                  title={view.visionEnabled ? (plainChat ? "模型支持视觉时可查看本轮附带图片" : "助手能看到当前画布，改图更准") : "已关闭看图，助手不能看到图片"}
                   onClick={() => void patch({ visionEnabled: !view.visionEnabled })}
                 >
                   {view.visionEnabled ? <Eye size={13} /> : <EyeOff size={13} />}
-                  {view.chatMode === "chat" ? (view.visionEnabled ? "看图已开" : "看图已关") : (view.visionEnabled ? "看图改" : "盲改")}
+                  {plainChat ? (view.visionEnabled ? "看图已开" : "看图已关") : (view.visionEnabled ? "看图改" : "盲改")}
                 </button>
 
                 {capabilities.length ? (
@@ -1035,7 +1061,7 @@ export function ChatView({
               <div className="chat-thread-inner" ref={threadInnerRef}>
               {!rows.length && !hasStream ? (
                 <div className="chat-thread-empty">
-                  <p>{view.chatMode === "chat" ? "说一句话开始聊天，可以提问、讨论、写作或分析。" : "说一句话开始。可以画图、改图、拆剧本做分镜，也能生成视频、音乐和配音。"}</p>
+                  <p>{view.toolScope === "all" ? "可以提问、处理文档、生成素材，或把它们组合成一项任务。" : plainChat ? "说一句话开始聊天，可以提问、讨论、写作或分析。" : "说一句话开始。可以画图、改图、拆剧本做分镜，也能生成视频、音乐和配音。"}</p>
                 </div>
               ) : null}
 
@@ -1080,6 +1106,7 @@ export function ChatView({
                     onPreview={setPreview}
                     onDiagnostics={onDiagnostics}
                     onToast={toast}
+                    onResumePresentation={!running && plainChat && view.toolScope !== "conversation" && row.result?.id === latestPresentationResult?.id ? () => { void send("继续 PPT"); } : undefined}
                     onImportTemplate={(templateId, name, description) =>
                       setTemplateImport({ id: templateId, name, description })}
                   />
@@ -1091,36 +1118,57 @@ export function ChatView({
               {status === "waiting_task" ? (
                 <div className="chat-note"><LoaderCircle size={13} className="spin" /><span>任务在后台生成，完成后会更新结果</span></div>
               ) : null}
+              {view.toolScope === "all" && view.toolsUnsupported ? <div className="chat-note">当前模型未接受工具调用，本会话暂以文字回答。切换对话模型后可重新使用工具。</div> : null}
               </div>
             </div>
 
             <Composer
               running={running || compressing}
-              uploading={uploading}
-              placeholder={view.chatMode === "chat" ? "聊聊你的想法，或提出问题…" : canvasImages.length
+              uploading={uploading || changingScope}
+              placeholder={plainChat ? "聊聊你的想法，或提出问题…" : canvasImages.length
                 ? canvasImages.length > 1
                   ? `画布 ${canvasImages.length} 张（① 首帧 ${assetRef(canvasImages[0]!.id)} / ② 尾帧${canvasImages[1] ? ` ${assetRef(canvasImages[1].id)}` : ""}${canvasImages.length > 2 ? " / 其余参考" : ""}），直接说怎么改…`
                   : `画布 1 张（① 首帧 / 主图 ${assetRef(canvasImages[0]!.id)}），直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
               leftSlot={(
                 <>
-                  <SelectMenu
+                  {unified ? <SelectMenu
+                    className="chat-mode-select"
+                    ariaLabel="工具范围"
+                    title="选择本会话的新轮次可用的工具范围"
+                    leading={<Wand2 size={14} />}
+                    minWidth={156}
+                    disabled={running || uploading || changingScope}
+                    value={view.toolScope ?? "all"}
+                    options={[{ value: "all", label: "全部能力" }, { value: "conversation", label: "仅对话" }, { value: "legacy", label: "返回旧入口" }]}
+                    onChange={(mode) => void changeToolScope(mode === "legacy" ? null : mode as ChatToolScope)}
+                  /> : <SelectMenu
                     className="chat-mode-select"
                     ariaLabel="对话模式"
                     title="切换普通聊天或创作助手，不会取消待确认的任务"
-                    leading={view.chatMode === "chat" ? <MessageSquarePlus size={14} /> : <Wand2 size={14} />}
+                    leading={plainChat ? <MessageSquarePlus size={14} /> : <Wand2 size={14} />}
                     minWidth={158}
-                    disabled={uploading}
+                    disabled={uploading || changingScope}
                     value={view.chatMode ?? "creative"}
-                    options={[{ value: "creative", label: "创作助手" }, { value: "chat", label: "普通聊天" }]}
-                    onChange={(mode) => { setChatAssetIds([]); void patch({ chatMode: mode as "creative" | "chat" }); }}
-                  />
-                  {view.chatMode === "chat" ? (
-                    <button type="button" className="chat-control chat-choose-assets" disabled={running || uploading} onClick={() => setLibraryOpen(true)}>
-                      <Images size={13} />选择素材{chatAssetIds.length ? ` · ${chatAssetIds.length}` : ""}
-                    </button>
+                    options={[{ value: "creative", label: "创作助手" }, { value: "chat", label: "普通聊天" }, { value: "unified", label: "统一助手试用" }]}
+                    onChange={(mode) => {
+                      if (mode === "unified") { void changeToolScope("all"); return; }
+                      setChatAssetIds([]);
+                      void patch({ chatMode: mode as "creative" | "chat" });
+                    }}
+                  />}
+                  {plainChat ? (
+                    <>
+                      <button type="button" className="chat-control chat-choose-assets" disabled={running || uploading} onClick={() => setLibraryOpen(true)}>
+                        <Images size={13} />选择素材{chatAssetIds.length ? ` · ${chatAssetIds.length}` : ""}
+                      </button>
+                      {!unified ? <button type="button" className="chat-control" aria-pressed={Boolean(view.nativeImagePilot)} disabled={running || uploading}
+                        onClick={() => void patch({ nativeImagePilot: !view.nativeImagePilot })}>
+                        创作试用{view.nativeImagePilot ? "已开" : "已关"}
+                      </button> : null}
+                    </>
                   ) : null}
-                  {view.chatMode !== "chat" ? <>
+                  {!plainChat ? <>
                   {/*
                     「原话直发」：平时大脑会把口语扩写成完整画面（默认就该这样，效果更好），
                     但有些人是带着自己攒了很久的提示词来的，被「优化」一下反而不是他要的。
@@ -1184,15 +1232,20 @@ export function ChatView({
               ) : null}</>}
               onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
-              onAssetAttached={(assetId) => view.chatMode === "chat" ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
-              plainAttachments={view.chatMode === "chat"}
-              canvasItems={view.chatMode === "chat"
+              onAssetAttached={(assetId) => plainChat ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
+              plainAttachments={plainChat}
+              videoFrames={view.toolScope === "all" ? chatVideoFrames ?? {} : undefined}
+              onClearVideoFrames={() => setChatVideoFrames(null)}
+              canvasItems={plainChat
                 ? chatAssetIds.flatMap((id, index) => { const entry = sessionImages.find((item) => item.asset.id === id); return entry ? [{ asset: entry.asset, index }] : []; })
                 : canvasImages.map((asset, index) => ({ asset, index }))}
               onPreviewCanvas={setPreview}
-              onRemoveCanvas={(assetId) => view.chatMode === "chat" ? toggleChatAsset(assetId) : removeCanvasBatch([assetId])}
-              onSetCanvasFirst={setCanvasFirst}
-              onSetCanvasLast={setCanvasLast}
+              onRemoveCanvas={(assetId) => plainChat ? toggleChatAsset(assetId) : removeCanvasBatch([assetId])}
+              onSetCanvasFirst={view.toolScope === "all" ? (assetId) => setChatVideoFrames(current => ({ firstAssetId: assetId,
+                ...(current?.lastAssetId && current.lastAssetId !== assetId ? { lastAssetId: current.lastAssetId } : {}),
+              })) : setCanvasFirst}
+              onSetCanvasLast={view.toolScope === "all" ? (assetId) => setChatVideoFrames(current => current && current.firstAssetId !== assetId
+                ? { ...current, lastAssetId: assetId } : current) : setCanvasLast}
             />
           </>
         )}
@@ -1211,15 +1264,20 @@ export function ChatView({
       <AssetLibrary
         open={libraryOpen}
         assets={sessionImages}
-        canvasIds={view?.chatMode === "chat" ? chatAssetIds : canvasImages.map((asset) => asset.id)}
-        chatSelection={view?.chatMode === "chat"}
+        canvasIds={plainChat ? chatAssetIds : canvasImages.map((asset) => asset.id)}
+        chatSelection={plainChat}
         onClose={() => setLibraryOpen(false)}
         onPreview={setPreview}
-        onToggleCanvas={view?.chatMode === "chat" ? toggleChatAsset : toggleCanvasSelection}
+        onToggleCanvas={plainChat ? toggleChatAsset : toggleCanvasSelection}
+        onAddToBoard={unified ? (assetId) => { setLibraryOpen(false); setBoardAssetId(assetId); } : undefined}
         onSetFirst={setCanvasFirst}
         onSetLast={setCanvasLast}
         onDeleteAsset={deleteSessionAsset}
       />
+
+      {boardAssetId ? <CrossModeBridgeDialog mode="to-board" items={sessionImages.filter(entry => entry.asset.id === boardAssetId)
+        .map(entry => ({ assetId: entry.asset.id, title: entry.asset.title ?? undefined, prompt: entry.prompt }))}
+        onClose={() => setBoardAssetId(null)} onToast={(kind, message) => toast(kind === "success" ? "ok" : "error", message)} /> : null}
 
       {preview ? (
         <AssetLightbox

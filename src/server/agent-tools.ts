@@ -36,7 +36,7 @@ import { auditParameters, isParameterRejection, planParameterSalvage } from "./d
 import { callBrain, type BrainMessage } from "./brain.js";
 import { applyStyleSuffix } from "../shared/style-presets.js";
 import { prepareImageBytes, VIDEO_FRAME_PROFILE, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
-import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
+import { formatTtsDialogue, TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import {
   boardApplySchema, boardGenerateSchema, boardReadSchema,
   type BoardApplyArgs, type BoardGenerateArgs, type BoardReadArgs,
@@ -211,6 +211,9 @@ export const TOOL_SCHEMAS = {
 export interface ToolContext {
   db: AppDatabase;
   runner: TaskRunner;
+  operationId?: string;
+  strictSubmission?: boolean;
+  backgroundMedia?: boolean;
   sessionKeys: KeyStore;
   conversation: Conversation;
   aliases: CapabilityAlias[];
@@ -240,7 +243,7 @@ export interface ToolContext {
 
 export interface ToolOutcome {
   result: ToolResult;
-  /** 本轮到此为止，等任务完成事件再续跑（§12.2，目前只有视频会走这条） */
+  /** 本轮到此为止，等任务完成事件再续跑（§12.2） */
   terminal: boolean;
   /** 新产出的图片，Agent 据此挪动画布指针（§10.1 规则 1） */
   producedAssetId?: string;
@@ -712,7 +715,8 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
 
   input.timeoutMs = IMAGE_TASK_TIMEOUT_MS;
   try {
-    const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id);
+    ctx.signal?.throwIfAborted();
+    const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id, ctx.operationId);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
     const imagePart = selection.assets.length
@@ -742,7 +746,9 @@ async function generateVideo(ctx: ToolContext, args: GenerateVideoArgs): Promise
   }
 }
 
-async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise<ToolOutcome> {
+type AudioPreparationContext = Pick<ToolContext, "db" | "conversation" | "aliases" | "defaultAliases" | "verbatimPrompt" | "strictSubmission">;
+
+export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMusicArgs) {
   let resolution = resolveAlias(ctx.aliases, args.modelHint, "audio", ctx.defaultAliases.music);
   if (!resolution) return failResult("还没有可用的音乐渠道，请先到「渠道配置」添加", "NO_MUSIC_CHANNEL");
   let channel = ctx.db.getChannel(resolution.channelId);
@@ -781,7 +787,17 @@ async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise
 
   // 翻唱 / 混音要引用本会话里带 Suno custom_id 的歌
   const sourceAssets: AssetRow[] = [];
-  for (const ref of args.sourceAssetRefs ?? []) {
+  const sourceRefs = args.sourceAssetRefs ?? [];
+  if (ctx.strictSubmission && sourceRefs.length) {
+    const ids = [...new Set(ctx.db.listConversationAssets(ctx.conversation.id).map(({ asset }) => asset.id.toLowerCase()))];
+    for (const ref of sourceRefs) {
+      const key = ref.toLowerCase().replace(/^#/, "");
+      if (!key || (!ids.includes(key) && ids.filter(id => id.startsWith(key)).length !== 1)) {
+        return failResult(`源歌曲 ${ref} 不存在或编号不唯一，请指定会话内的歌曲编号`, "MUSIC_SOURCE_NOT_FOUND");
+      }
+    }
+  }
+  for (const ref of sourceRefs) {
     const resolved = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
     if (!resolved) return failResult(`找不到歌曲 ${ref}，请用本会话里出现过的产物编号`, "MUSIC_SOURCE_NOT_FOUND");
     if (!resolved.asset.mimeType.startsWith("audio/") || !resolved.asset.remoteClipId) {
@@ -826,9 +842,16 @@ async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise
     } : {}),
     timeoutMs: 900_000,
   };
+  return { input, resolution, channel, mode, instrumental, sourceAssets };
+}
 
+async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise<ToolOutcome> {
+  const prepared = prepareMusicInput(ctx, args);
+  if ("result" in prepared) return prepared;
+  const { input, resolution, mode, instrumental, sourceAssets } = prepared;
   try {
-    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id);
+    ctx.signal?.throwIfAborted();
+    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id, ctx.operationId);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
     const modeLabel: Record<string, string> = {
@@ -871,7 +894,7 @@ async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): Promise
  * 它和音乐同属 audio 类，但适配器不同；这里只挑 gemini-tts 的别名，
  * 不会把 Suno 渠道误当成配音渠道。
  */
-async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promise<ToolOutcome> {
+export function prepareSpeechInput(ctx: AudioPreparationContext, args: GenerateSpeechArgs) {
   const ttsAliases = ctx.aliases.filter((item) => item.adapterType === "gemini-tts");
   if (!ttsAliases.length) {
     return failResult("还没有可用的语音渠道，请先到「模型设置」添加「词元流墟-语音」", "NO_SPEECH_CHANNEL");
@@ -897,10 +920,11 @@ async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promi
   if (args.secondVoice?.trim() && !second) {
     return failResult(`第二个音色「${args.secondVoice}」不存在。可用音色：${TTS_VOICES.join("、")}`, "TTS_VOICE_INVALID");
   }
-  const text = args.text.trim();
+  let text = args.text.trim();
   if (!text) return failResult("配音正文不能为空", "SPEECH_TEXT_REQUIRED");
-  if (second && !(/A\s*[：:]/.test(text) && /B\s*[：:]/.test(text))) {
-    return failResult("双人对话正文需要用「A：」「B：」标出两段台词", "SPEECH_SPEAKERS_REQUIRED");
+  if (second) {
+    try { text = formatTtsDialogue(text); }
+    catch (error) { return failResult(describeError(error), "SPEECH_SPEAKERS_REQUIRED"); }
   }
 
   const input: GenerationInput = {
@@ -918,10 +942,20 @@ async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promi
     } : {}),
     timeoutMs: 300_000,
   };
+  return { input, resolution, channel, voice, second };
+}
 
+async function generateSpeech(ctx: ToolContext, args: GenerateSpeechArgs): Promise<ToolOutcome> {
+  const prepared = prepareSpeechInput(ctx, args);
+  if ("result" in prepared) return prepared;
+  const { input, resolution, voice, second } = prepared;
   try {
-    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id);
+    ctx.signal?.throwIfAborted();
+    const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id, ctx.operationId);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
+    if (ctx.backgroundMedia) {
+      return okResult("已提交配音任务，完成后会更新原卡片。", { async: true, taskId: created.id });
+    }
     const task = await ctx.runner.waitFor(created.id, { timeoutMs: 360_000, signal: ctx.signal });
     const asset = task.assets.find((item) => item.mimeType.startsWith("audio/"));
     if (task.status !== "succeeded" || !asset) {
@@ -999,6 +1033,10 @@ async function generateImage(
   const requiredCount = references.length;
 
   const extraRefs = isEdit ? args.extraReferences ?? [] : [];
+  if (ctx.strictSubmission && extraRefs.length) {
+    const extras = resolveImageRefs(ctx.db, ctx.conversation.id, extraRefs);
+    if (extras.error) return failResult(extras.error, "IMAGE_SELECTION_INVALID");
+  }
   for (const ref of extraRefs.slice(0, MAX_EXTRA_REFERENCES)) {
     const found = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
     if (!found) { notes.push(`额外参考图 ${ref} 找不到，已跳过`); continue; }
@@ -1019,7 +1057,7 @@ async function generateImage(
     const prepared = await prepareImageBytes(ctx.db, reference, REFERENCE_PROFILE);
     if (!prepared) {
       // 选中/画布里的图坏了就硬失败；额外参考图坏了可以跳过，它本来只是补充
-      if (index < requiredCount) {
+      if (index < requiredCount || ctx.strictSubmission) {
         return failResult(`${assetRef(reference.id)} 读取失败，没法按你选的这组图生成；可以换一张或重新上传`, "REFERENCE_IMAGE_MISSING");
       }
       notes.push(`额外参考图 ${assetRef(reference.id)} 读取失败，已跳过`);
@@ -1064,9 +1102,17 @@ async function generateImage(
   for (let attempt = 0; ; attempt += 1) {
     let taskId: string;
     try {
-      const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id);
+      ctx.signal?.throwIfAborted();
+      const created = await ctx.runner.create(input, uploads, undefined, "conversation", ctx.conversation.id, ctx.operationId);
       taskId = created.id;
       ctx.emit({ type: "progress", taskId, status: created.status, progress: created.progress });
+      if (ctx.backgroundMedia) {
+        const choice = describeAliasChoice(resolution);
+        return okResult(`已提交${isEdit ? "改图" : "生图"}任务，完成后会更新原卡片。`, {
+          async: true, taskId,
+          data: { model: resolution.model, alias: resolution.alias, usedFallback: resolution.usedFallback, ...(choice ? { aliasNote: choice } : {}) },
+        });
+      }
     } catch (error) {
       return failResult(`提交失败：${describeError(error)}`, "SUBMIT_FAILED");
     }
@@ -1134,7 +1180,7 @@ async function generateImage(
     }
 
     const failure = task.errorMessage ?? task.errorCode ?? "上游没有返回结果";
-    const salvage = attempt === 0 && isParameterRejection(task.errorCode, task.errorMessage)
+    const salvage = !ctx.strictSubmission && attempt === 0 && isParameterRejection(task.errorCode, task.errorMessage)
       ? planParameterSalvage(channel.adapterType, task.effectiveParameters, ctx.db.getSetting("geminiImageSize"))
       : null;
     if (salvage) {

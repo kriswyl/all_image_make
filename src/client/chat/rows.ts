@@ -27,6 +27,11 @@ export type Row =
 export function buildRows(messages: ChatMessage[]): Row[] {
   const rows: Row[] = [];
   const folded = new Set<string>();
+  const linked = new Map<string, ChatMessage>();
+  for (const message of messages) {
+    const operationId = message.toolResult?.data?.agentOperationId;
+    if (message.role === "tool" && typeof operationId === "string" && operationId !== message.id) linked.set(operationId, message);
+  }
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message) continue;
@@ -46,7 +51,8 @@ export function buildRows(messages: ChatMessage[]): Row[] {
     if (message.confirm) { rows.push({ kind: "confirm", message, preview: message.confirm }); continue; }
     if (message.toolName) {
       const next = messages[index + 1];
-      const paired = next && next.role === "tool" && !folded.has(next.id) ? next : null;
+      const explicit = linked.get(message.id);
+      const paired = explicit ?? (next && next.role === "tool" && !folded.has(next.id) && !next.toolResult?.data?.agentOperationId ? next : null);
       if (paired) folded.add(paired.id);
       rows.push({ kind: "tool", message, result: paired });
       continue;

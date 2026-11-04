@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
 import type { Asset } from "../../shared/types";
+import type { ChatVideoFrames } from "../../shared/agent-types";
 
 export interface CanvasTrayItem {
   asset: Asset;
@@ -25,6 +26,8 @@ function roleLabel(position: number): string {
 export function CanvasTray({
   items,
   plain = false,
+  videoFrames,
+  onClearVideoFrames,
   onPreview,
   onRemove,
   onSetFirst,
@@ -32,6 +35,8 @@ export function CanvasTray({
 }: {
   items: CanvasTrayItem[];
   plain?: boolean;
+  videoFrames?: Partial<ChatVideoFrames>;
+  onClearVideoFrames?: () => void;
   onPreview: (assetId: string) => void;
   onRemove: (assetId: string) => void;
   onSetFirst: (assetId: string) => void;
@@ -63,7 +68,7 @@ export function CanvasTray({
   function openMenu(event: React.MouseEvent<HTMLButtonElement>, item: CanvasTrayItem) {
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 150;
-    const height = 152;
+    const height = videoFrames ? 194 : 152;
     setMenu({
       id: item.asset.id,
       index: item.index,
@@ -76,50 +81,53 @@ export function CanvasTray({
 
   return (
     <>
-      {items.map((item) => (
-        <div key={item.asset.id} className="composer-attachment is-canvas">
-          <button
-            type="button"
-            className="composer-canvas-thumb"
-            title={plain ? "本轮附件 · 点击查看大图" : `${roleLabel(item.index)} · 左键看大图，右键设首帧 / 尾帧`}
-            onClick={() => onPreview(item.asset.id)}
-            onContextMenu={(event) => { event.preventDefault(); if (!plain) openMenu(event, item); }}
-          >
-            <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" loading="lazy" />
-            {!plain ? <><span className="composer-canvas-order">{item.index + 1}</span>
-            <span className={`composer-canvas-role is-${item.index === 0 ? "first" : item.index === 1 ? "last" : "ref"}`}>
-              {roleLabel(item.index)}
-            </span></> : null}
-          </button>
-          <button
-            type="button"
-            className="composer-attachment-remove"
-            title="从这一轮移除"
-            aria-label={`${plain ? "移除附件" : "从画布移除"} ${item.asset.fileName}`}
-            onClick={() => onRemove(item.asset.id)}
-          >
-            <X size={11} />
-          </button>
-        </div>
-      ))}
+      {items.map((item) => {
+        const role = !plain ? roleLabel(item.index) : videoFrames?.firstAssetId === item.asset.id ? "首帧"
+          : videoFrames?.lastAssetId === item.asset.id ? "尾帧" : null;
+        return (
+          <div key={item.asset.id} className="composer-attachment is-canvas">
+            <button
+              type="button"
+              className="composer-canvas-thumb"
+              title={videoFrames ? `${role ?? "本轮附件"} · 左键看大图，右键设置视频首尾帧` : plain ? "本轮附件 · 点击查看大图" : `${roleLabel(item.index)} · 左键看大图，右键设首帧 / 尾帧`}
+              onClick={() => onPreview(item.asset.id)}
+              onContextMenu={(event) => { event.preventDefault(); if (!plain || videoFrames) openMenu(event, item); }}
+            >
+              <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" loading="lazy" />
+              {!plain ? <span className="composer-canvas-order">{item.index + 1}</span> : null}
+              {role ? <span className={`composer-canvas-role is-${role === "首帧" ? "first" : role === "尾帧" ? "last" : "ref"}`}>{role}</span> : null}
+            </button>
+            <button
+              type="button"
+              className="composer-attachment-remove"
+              title="从这一轮移除"
+              aria-label={`${plain ? "移除附件" : "从画布移除"} ${item.asset.fileName}`}
+              onClick={() => onRemove(item.asset.id)}
+            >
+              <X size={11} />
+            </button>
+          </div>
+        );
+      })}
       {menu ? createPortal(
         <div
           ref={menuRef}
           className="canvas-bar-menu"
           role="menu"
-          aria-label="画布图片操作"
+          aria-label={plain ? "附件图片操作" : "画布图片操作"}
           style={{ left: menu.x, top: menu.y }}
           onContextMenu={(event) => event.preventDefault()}
         >
-          <div className="canvas-bar-menu-title">画布第 {menu.index + 1} 张</div>
-          <button type="button" role="menuitem" disabled={menu.index === 0}
+          <div className="canvas-bar-menu-title">{plain ? "本轮附件" : "画布"}第 {menu.index + 1} 张</div>
+          <button type="button" role="menuitem" disabled={videoFrames ? videoFrames.firstAssetId === menu.id : menu.index === 0}
             onClick={() => { onSetFirst(menu.id); setMenu(null); }}>
             设为首帧
           </button>
-          <button type="button" role="menuitem" disabled={menu.index === 1}
+          <button type="button" role="menuitem" disabled={videoFrames ? !videoFrames.firstAssetId || [videoFrames.firstAssetId, videoFrames.lastAssetId].includes(menu.id) : menu.index === 1}
             onClick={() => { onSetLast(menu.id); setMenu(null); }}>
             设为尾帧
           </button>
+          {videoFrames?.firstAssetId ? <button type="button" role="menuitem" onClick={() => { onClearVideoFrames?.(); setMenu(null); }}>清除帧设置</button> : null}
           <button type="button" role="menuitem" onClick={() => { onPreview(menu.id); setMenu(null); }}>
             <Eye size={13} />看大图
           </button>

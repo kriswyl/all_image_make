@@ -187,7 +187,7 @@ export class TaskRunner {
     });
   }
 
-  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string): Promise<Task> {
+  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string, agentOperationId?: string): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
@@ -233,7 +233,7 @@ export class TaskRunner {
       }
     }
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
-    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId });
+    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId, agentOperationId });
     queueMicrotask(() => void this.run(id));
     return this.db.getTaskView(id)!;
   }
@@ -245,12 +245,19 @@ export class TaskRunner {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
       const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
+      if (this.db.getTaskRow(taskId)?.status === "cancelled") return;
       const key = this.resolveKey(channel);
       this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
-      const result = await this.sendWithDiagnostic(taskId, prepared);
+      const result = await this.sendWithDiagnostic(taskId, prepared).catch(error => {
+        const transportInterrupted = error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name);
+        if (task.agentOperationId && transportInterrupted) {
+          throw new AppError("SUBMISSION_UNKNOWN", "生成请求在返回结果前断开，上游可能已接收，请先到渠道核对任务", 409);
+        }
+        throw error;
+      });
 
       // 用户在请求飞行中点了停止：结果不再落库，也不要把它改回 succeeded
       if (this.db.getTaskRow(taskId)?.status === "cancelled") return;
@@ -315,6 +322,7 @@ export class TaskRunner {
 
   async retry(taskId: string) {
     const task = this.requireTask(taskId);
+    if (task.errorCode === "SUBMISSION_UNKNOWN") throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对提交结果", 409);
     const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
     const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
     return this.create(input, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
@@ -332,7 +340,11 @@ export class TaskRunner {
       const channel = task.remoteTaskId ? this.db.getChannel(task.channelId) : null;
       const spec = channel ? asyncProviderSpec(channel.adapterType) : null;
       if (!channel || !spec) {
-        this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
+        if (task.agentOperationId && task.status === "submitting") {
+          this.markFailed(task.id, "SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果，请先到渠道核对任务");
+        } else {
+          this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
+        }
         continue;
       }
       // 不 await：多个任务并行恢复，任一失败都不能拖住启动

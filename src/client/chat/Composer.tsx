@@ -21,6 +21,7 @@ import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
 import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 import { CanvasTray, type CanvasTrayItem } from "./CanvasTray";
+import type { ChatVideoFrames } from "../../shared/agent-types";
 
 /**
  * 待发附件。只放**本地文件**：
@@ -63,6 +64,8 @@ export function Composer({
   onAssetAttached,
   canvasItems = [],
   plainAttachments = false,
+  videoFrames,
+  onClearVideoFrames,
   onPreviewCanvas,
   onRemoveCanvas,
   onSetCanvasFirst,
@@ -90,6 +93,8 @@ export function Composer({
   /** 这一轮画布里已经选好的图，直接排在附件区 */
   canvasItems?: CanvasTrayItem[];
   plainAttachments?: boolean;
+  videoFrames?: Partial<ChatVideoFrames>;
+  onClearVideoFrames?: () => void;
   onPreviewCanvas?: (assetId: string) => void;
   onRemoveCanvas?: (assetId: string) => void;
   onSetCanvasFirst?: (assetId: string) => void;
@@ -179,6 +184,8 @@ export function Composer({
             <CanvasTray
               items={canvasItems}
               plain={plainAttachments}
+              videoFrames={videoFrames}
+              onClearVideoFrames={onClearVideoFrames}
               onPreview={onPreviewCanvas ?? (() => undefined)}
               onRemove={onRemoveCanvas ?? (() => undefined)}
               onSetFirst={onSetCanvasFirst ?? (() => undefined)}

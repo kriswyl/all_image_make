@@ -1,3 +1,4 @@
+import { PresentationPaused } from "../presentation-execution.js";
 import fs from "node:fs";
 import path from "node:path";
 import JSZip from "jszip";
@@ -10,6 +11,8 @@ import { checkPresentation, paginatePresentation } from "../presentation-check.j
 import { markdownToDocx, markdownToMind, readDocxText } from "./markdown.js";
 import { designSchema, resolveElements, ELEMENT_DESIGN_GUIDE, type PresentationDesign } from "../presentation-elements.js";
 import { readPresentationProject, packPresentationProject, readPresentationStyle } from "../presentation-project.js";
+import { isImageAsset } from "../../shared/types.js";
+import { prepareImageBytes, REFERENCE_PROFILE } from "../vision.js";
 
 const MAX_FILE = 20 * 1024 * 1024;
 const nodeSchema: z.ZodType<DocumentNode> = z.lazy(() => z.object({ title: z.string().trim().min(1).max(2000), notes: z.string().max(10000).default(""), children: z.array(nodeSchema).max(500).default([]) }));
@@ -20,7 +23,7 @@ const schemas = {
   doc_search: z.object({ fileId: z.string().min(1), query: z.string().min(1).max(500), charOffset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(50).default(20) }),
   doc_create: z.object({ kind: z.enum(["md", "txt", "csv", "json", "xmind", "docx"]), name: z.string().trim().min(1).max(120), content: z.string().max(2_000_000).optional(), nodes: nodeSchema.optional() }),
   doc_edit: z.object({ fileId: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i), edits: z.array(z.object({ find: z.string().min(1).max(20000), replace: z.string().max(100000) })).min(1).max(20).optional(), pages: z.array(z.object({ page: z.number().int().min(1).max(200), slide: aiPresentationSchema.shape.slides.element.omit({ box: true }) }).strict()).min(1).max(30).optional(), appendSlides: z.array(aiPresentationSchema.shape.slides.element.omit({ box: true })).min(1).max(30).optional(), order: z.array(z.number().int().min(1).max(200)).min(1).max(200).optional(), design: designSchema.optional() }),
-  doc_convert: z.object({ fileId: z.string().min(1), to: z.enum(["pptx"]), referenceFileId: z.string().min(1).optional(), design: designSchema.optional() }),
+  doc_convert: z.object({ fileId: z.string().min(1), to: z.literal("pptx"), referenceFileId: z.string().min(1).optional(), coverAssetId: z.uuid().optional(), design: designSchema.optional() }),
 };
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 export const CHAT_DOCUMENT_TOOLS: BrainToolSpec[] = [
@@ -30,7 +33,7 @@ export const CHAT_DOCUMENT_TOOLS: BrainToolSpec[] = [
   { type: "function", function: { name: "doc_search", description: "在本会话文本、Word正文或PPT可编辑源方案中搜索精确文字/元素ID，返回位置、上下文和版本号；可按nextCharOffset翻页，再doc_read读取上下文。偏移按UTF-16代码单元计。", parameters: objectSchema({ fileId: { type: "string" }, query: { type: "string", minLength: 1, maxLength: 500 }, charOffset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, ["fileId", "query"]) } },
   { type: "function", function: { name: "doc_create", description: "根据用户要求创建新文件；xmind 传结构化 nodes，docx 传 Markdown 正文（按标题/列表/表格/代码块转成 Word 排版），其余类型传纯文本内容。不会覆盖已有文件。", parameters: objectSchema({ kind: { type: "string", enum: ["md", "txt", "csv", "json", "xmind", "docx"] }, name: { type: "string" }, content: { type: "string", description: "docx 传 Markdown，会按标题/列表/表格/代码块转成 Word 排版" }, nodes: { type: "object", description: "思维导图根节点：{title, notes?, children:[同结构的子节点]}" } }, ["kind", "name"]) } },
   { type: "function", function: { name: "doc_edit", description: `先doc_read获取SHA-256版本号。文本类用edits精确替换，每个find须唯一。ChatCanvas生成的PPT用pages:[{page:从1开始,slide:完整新页面}]修改指定页，可用appendSlides添加页面，order给所有页面编号的排列（包含新加页）调整顺序，design修改主题。原文件不覆盖。保留未要求修改的事实和来源；图片索引取doc_read中的images目录。外部PPT仅支持风格参考。${ELEMENT_DESIGN_GUIDE}`, parameters: z.toJSONSchema(schemas.doc_edit) as Record<string, unknown> } },
-  { type: "function", function: { name: "doc_convert", description: "直接使用原上传的XMind、Markdown、文本或CSV完整阅读、策划并生成原生可编辑PPT；不要先概括成新MD再转换，避免丢失原文细节。转换器内置阅读、设计及审校，失败应依据具体错误修正要求，不要反复改换源格式重试。referenceFileId引用本会话PPT颜色字体参考；design指定background/text/accent（6位十六进制无#）及fontFace。支持原生图文、表格、图表与关联线，不还原原布局样式。", parameters: objectSchema({ fileId: { type: "string" }, to: { type: "string", enum: ["pptx"] }, referenceFileId: { type: "string" }, design: z.toJSONSchema(designSchema) }, ["fileId", "to"]) } },
+  { type: "function", function: { name: "doc_convert", description: "直接使用原上传的XMind、Markdown、文本或CSV完整阅读、策划并生成原生可编辑PPT；不要先概括成新MD再转换，避免丢失原文细节。转换器内置阅读、设计及审校，失败应依据具体错误修正要求，不要反复改换源格式重试。referenceFileId引用本会话PPT颜色字体参考；design指定background/text/accent（6位十六进制无#）及fontFace。用户指定封面图时，coverAssetId 填本会话真实图片的完整 ID；需要先生成时，等生成工具返回成功的 assetIds 后再转换。支持原生图文、表格、图表与关联线，不还原原布局样式。", parameters: z.toJSONSchema(schemas.doc_convert) } },
 ];
 export type ChatDocResult = { ok: boolean; summary: string; data?: { fileId: string; fileName: string; byteSize: number; pendingDelete?: boolean } };
 
@@ -112,7 +115,7 @@ function decodeText(bytes: Buffer) {
   catch { throw new Error("文件不是有效的 UTF-8 文本，不能安全读取或修改"); }
 }
 function xmindTopic(item: DocumentNode): any { return { id: randomUUID(), class: "topic", title: item.title, ...(item.notes ? { notes: { plain: { content: item.notes } } } : {}), children: { attached: item.children.map(xmindTopic) } }; }
-export async function executeChatDocumentTool(db: AppDatabase, conversationId: string, name: string, raw: string, planPresentation?: (mind: MindDocument, images: MindImage[], design?: PresentationDesign) => Promise<AiPresentation>, operationId?: string, visualReview?: (plan: AiPresentation, images: Array<{ title: string; data: string }>) => Promise<{ plan: AiPresentation; summary: string }>): Promise<ChatDocResult> {
+export async function executeChatDocumentTool(db: AppDatabase, conversationId: string, name: string, raw: string, planPresentation?: (mind: MindDocument, images: MindImage[], design?: PresentationDesign, sourceFingerprint?: string, coverAssetId?: string) => Promise<AiPresentation>, operationId?: string, visualReview?: (plan: AiPresentation, images: Array<{ title: string; data: string }>) => Promise<{ plan: AiPresentation; summary: string }>): Promise<ChatDocResult> {
   try {
     if (!(name in schemas)) throw new Error("未知工具");
     let input: unknown; try { input = JSON.parse(raw); } catch { throw new Error("参数必须是有效 JSON"); }
@@ -254,13 +257,27 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
     // 只有 xmind 是 zip、才有主题图片；Markdown 来源没有可提取的图片
     const extracted = file.bytes && /\.xmind$/i.test(file.name) ? await extractMindImages(file.bytes, mind) : { images: [], skipped: 0 };
     let reference: PresentationDesign | undefined;
+    let referenceHash = "";
     if (a.referenceFileId) {
       const ref = source(db, conversationId, a.referenceFileId);
       if (!ref.bytes || !/\.pptx$/i.test(ref.name)) throw new Error("风格参考必须是本会话的 PPTX 文件");
+      referenceHash = createHash("sha256").update(ref.bytes).digest("hex");
       reference = (await readPresentationStyle(ref.bytes)).design;
     }
     const design = a.design || reference ? { ...reference, ...a.design } : undefined;
-    let presentation = paginatePresentation(await planPresentation(mind, extracted.images, design));
+    const fingerprint = createHash("sha256").update(file.bytes ?? JSON.stringify(mind)).update(referenceHash);
+    let cover: { title: string; data: string } | undefined;
+    if (a.coverAssetId) {
+      const asset = db.listConversationAssets(conversationId).find(({ asset }) => asset.id === a.coverAssetId)?.asset;
+      if (!asset || !isImageAsset(asset)) throw new Error("封面素材必须是本会话内的图片，请选择已有图片后继续制作 PPT。");
+      const image = await prepareImageBytes(db, asset, { ...REFERENCE_PROFILE, maxBytes: 4 * 1024 * 1024 });
+      if (!image || image.mimeType === "image/webp" || image.bytes.length > 4 * 1024 * 1024) {
+        throw new Error("封面图片读取失败或格式不受支持，请选择 4 MB 内的 PNG 或 JPEG 后继续制作 PPT。");
+      }
+      cover = { title: "封面图片", data: `${image.mimeType};base64,${image.bytes.toString("base64")}` };
+      fingerprint.update("\0cover\0").update(asset.id).update(image.bytes);
+    }
+    let presentation = paginatePresentation(await planPresentation(mind, extracted.images, design, fingerprint.digest("hex"), a.coverAssetId));
     if (design) presentation.design = design;
     const inserted = new Map<number, typeof presentation.slides>();
     extracted.images.forEach((image, imageIndex) => {
@@ -275,13 +292,31 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
       group.push({ layout: "image", title: image.title.slice(0, 70), subtitle: "", lines: [], notes: `原导图主题图片：${image.title}`, imageIndex }); inserted.set(after, group);
     });
     presentation.slides = presentation.slides.flatMap((slide, index) => [slide, ...(inserted.get(index) ?? [])]);
+    const images: Array<{ title: string; data: string }> = [...extracted.images];
+    if (cover) {
+      const first = presentation.slides[0]!;
+      const foreground = design?.background && design.text ? design.text : "FFFFFF";
+      presentation.slides[0] = {
+        ...first, layout: "cover", background: design?.background && design.text ? design.background : "142A43", box: undefined,
+        notes: [first.notes, `会话封面素材 ID ${a.coverAssetId}`].filter(Boolean).join("\n"),
+        elements: [
+          { id: "cover-title", type: "text", x: 0.8, y: 1.15, w: 5.3, h: 2.7, text: first.title, style: { fontSize: first.title.length > 34 ? 25 : 32, bold: true, color: foreground, valign: "middle" } },
+          ...(first.subtitle ? [{ id: "cover-subtitle", type: "text" as const, x: 0.8, y: 4, w: 5.3, h: 2.5, text: first.subtitle, style: { fontSize: first.subtitle.length > 80 ? 16 : 19, color: foreground } }] : []),
+          { id: "cover-image", type: "image", x: 6.55, y: 0.75, w: 5.95, h: 5.95, imageIndex: images.length, fit: "contain" },
+        ],
+      };
+      images.push(cover);
+    }
     if (presentation.slides.length > 200) throw new Error("包含图片的 PPT 超过 200 页，请分章节转换；没有生成文件。");
-    const visual = visualReview ? await visualReview(presentation, extracted.images) : { plan: presentation, summary: "未启用视觉检查" };
+    const visual = visualReview ? await visualReview(presentation, images) : { plan: presentation, summary: "未启用视觉检查" };
     presentation = visual.plan;
-    const rendered = await renderAiPresentation(presentation, extracted.images);
+    const rendered = await renderAiPresentation(presentation, images);
     await checkPresentation(rendered, presentation);
-    const bytes = await packPresentationProject(rendered, presentation, extracted.images);
+    const bytes = await packPresentationProject(rendered, presentation, images);
     const saved = save(db, conversationId, file.name.replace(/\.[^.]+$/, ""), "pptx", bytes, operationId);
-    return { ok: true, summary: `AI 已整理导图，生成 ${saved.name}，共 ${presentation.slides.length} 页；来源文字和关联关系保存在演讲备注中。已提取 ${extracted.images.length} 张主题图片并放在相关内容附近${extracted.skipped ? `，${extracted.skipped} 张未能导入` : ""}；其中 ${countImageDescriptions(mind)} 张已由视觉模型观察，观察可能有误。${visual.summary}。原布局没有还原，请核对内容。${!file.bytes ? " 该旧附件未保存原文件，无法提取图片，请重新上传。" : ""}${mind.warnings.length ? ` ${mind.warnings.join(" ")}` : ""}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize } };
-  } catch (error) { return { ok: false, summary: error instanceof Error ? error.message : "文档操作失败" }; }
+    return { ok: true, summary: `AI 已整理导图，生成 ${saved.name}，共 ${presentation.slides.length} 页。${cover ? "指定图片已嵌入封面。" : ""}来源文字和关联关系保存在演讲备注中。已提取 ${extracted.images.length} 张主题图片并放在相关内容附近${extracted.skipped ? `，${extracted.skipped} 张未能导入` : ""}；其中 ${countImageDescriptions(mind)} 张已由视觉模型观察，观察可能有误。${visual.summary}。原布局没有还原，请核对内容。${!file.bytes ? " 该旧附件未保存原文件，无法提取图片，请重新上传。" : ""}${mind.warnings.length ? ` ${mind.warnings.join(" ")}` : ""}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize } };
+  } catch (error) {
+    if (error instanceof PresentationPaused) throw error;
+    return { ok: false, summary: error instanceof Error ? error.message : "文档操作失败" };
+  }
 }

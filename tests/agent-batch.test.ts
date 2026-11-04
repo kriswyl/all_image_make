@@ -13,7 +13,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BATCHABLE_TOOLS, extractPlanText, looksLikeIdentityDrift, parsePlan, resolveBatch } from "../src/server/agent";
 import { MAX_BATCH_CALLS, planCalls, type PlannedCall } from "../src/shared/agent-types";
 import { createApp } from "../src/server/app";
@@ -156,26 +156,50 @@ describe("resolveBatch：卡片上问几个，就只提交几个", () => {
 });
 
 /** 假中转站：同时演大脑和生图。返回的是「怎么把这次 e2e 搭起来」用得到的把手 */
-async function startMock(plansByCall: unknown[], options: { failPrompts?: string[] } = {}) {
+async function startMock(plansByCall: unknown[], options: { failPrompts?: string[]; disconnectPrompts?: string[]; native?: boolean; video?: boolean; rejectTools?: boolean } = {}) {
   const imagePrompts: string[] = [];
+  const chatRequests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; tool_call_id?: string; content?: string }> }> = [];
   /** 每次产图请求：提示词 + 带了几张参考图。一致性批量靠它验证「第 2 张起真的带了基准图」 */
   const imageRequests: Array<{ prompt: string; references: number }> = [];
   let inflight = 0;
   let maxInflight = 0;
   let chatCalls = 0;
+  const videoRequests: unknown[] = [];
+  let videoReady = false;
 
   const mock = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     req.on("end", () => {
       const body = Buffer.concat(chunks).toString("utf8");
+      if (req.url === "/api/v3/contents/generations/tasks") {
+        videoRequests.push(JSON.parse(body));
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ id: "video-1" }));
+        return;
+      }
+      if (req.url === "/api/v3/contents/generations/tasks/video-1") {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(videoReady
+          ? { id: "video-1", status: "succeeded", content: { video_url: `${base}/result.mp4` } }
+          : { id: "video-1", status: "running" }));
+        return;
+      }
+      if (req.url === "/result.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" }).end("mock video");
+        return;
+      }
       if (req.url?.includes("/chat/completions")) {
+        const payload = JSON.parse(body);
+        chatRequests.push(payload);
+        if (options.rejectTools && payload.model === "mock-brain" && payload.tools?.length) {
+          res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: "tools not supported" } }));
+          return;
+        }
         const plan = plansByCall[Math.min(chatCalls, plansByCall.length - 1)];
         chatCalls += 1;
         res.writeHead(200, { "Content-Type": "application/json" });
         // 带上 usage：状态行的账本全靠它，测试里也要能断言真的记上了
         res.end(JSON.stringify({
-          choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }],
+          choices: [{ message: options.native ? plan : { role: "assistant", content: JSON.stringify(plan) } }],
           usage: { prompt_tokens: 100, completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 5 } },
         }));
         return;
@@ -192,6 +216,10 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
       }
       imagePrompts.push(prompt);
       imageRequests.push({ prompt, references });
+      if (options.disconnectPrompts?.includes(prompt)) {
+        res.destroy();
+        return;
+      }
       inflight += 1;
       maxInflight = Math.max(maxInflight, inflight);
       const fail = options.failPrompts?.includes(prompt);
@@ -219,26 +247,42 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
   const base = `http://127.0.0.1:${address.port}`;
 
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-batch-"));
-  const { app, context } = createApp({ dataDir });
-  cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+  let { app, context } = createApp({ dataDir });
+  cleanups.push(() => { context.agent.dispose(); context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
 
   const brain = (await request(app).post("/api/channels").send({
     name: "Brain", baseUrl: base, adapterType: "openai-chat", authType: "none",
     authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
-    models: ["mock-brain"], allowPrivateNetwork: true, enabled: true,
+    models: options.rejectTools ? ["mock-brain", "mock-brain-alt"] : ["mock-brain"], allowPrivateNetwork: true, enabled: true,
   }).expect(201)).body.data;
   await request(app).post("/api/channels").send({
     name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
     authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
     models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
   }).expect(201);
+  if (options.video) {
+    await request(app).post("/api/channels").send({
+      name: "Video", baseUrl: base, adapterType: "seedance-video", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      models: ["sd-2.5"], allowPrivateNetwork: true, enabled: true,
+    }).expect(201);
+  }
 
   const conversationId = (await request(app).post("/api/conversations").send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data.id as string;
 
   return {
-    app, context, conversationId,
-    imagePrompts,
-    imageRequests,
+    get app() { return app; },
+    get context() { return context; },
+    conversationId, brainId: brain.id as string,
+    restart() {
+      context.agent.dispose();
+      context.db.close();
+      ({ app, context } = createApp({ dataDir }));
+      context.agent.recoverStaleConversations();
+    },
+    imagePrompts, chatRequests,
+    imageRequests, videoRequests,
+    completeVideo: () => { videoReady = true; },
     getMaxInflight: () => maxInflight,
     getChatCalls: () => chatCalls,
   };
@@ -247,7 +291,7 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
 type ToolRow = {
   id: string;
   role: string; content: string | null; toolName: string | null; toolArgs: Record<string, unknown> | null;
-  toolResult: { ok: boolean; assetId?: string } | null; assetId: string | null;
+  toolResult: { ok: boolean; assetId?: string; data?: Record<string, unknown> } | null; assetId: string | null;
   confirm: { reason: string; count?: number; model: string; message: string } | null;
 };
 type View = {
@@ -441,8 +485,10 @@ describe("批量并行，端到端", () => {
     expect(mock.imagePrompts).toEqual([]);
 
     // 用户点头：4 个真提交，额度如实 +4，卡片就地变成这轮的表头（不重影）
-    await request(mock.app).post(`/api/conversations/${mock.conversationId}/confirm`)
-      .send({ messageId: cards[0]!.id, decision: "approve" }).expect(200);
+    const decisions = await Promise.all(Array.from({ length: 2 }, () =>
+      request(mock.app).post(`/api/conversations/${mock.conversationId}/confirm`)
+        .send({ messageId: cards[0]!.id, decision: "approve" })));
+    expect(decisions.map(response => response.status).sort()).toEqual([200, 409]);
     const after = await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.filter((row) => row.role === "tool").length >= 4);
 
     expect(mock.imagePrompts).toHaveLength(4);
@@ -451,6 +497,18 @@ describe("批量并行，端到端", () => {
     // 「画四张。」这句话只出现一次：卡片那行就地当表头，没有再冒一个一模一样的气泡
     expect(after.messages.filter((row) => row.content === "画四张。")).toHaveLength(1);
     expect(mock.getChatCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("基准图提交结果未知时停止续跑并保留其依赖", async () => {
+    const mock = await startMock([
+      { calls: [image("基准图"), image("变化图")], consistency: "style", say: "同画风生成。" },
+      image("重复提交"),
+    ], { disconnectPrompts: ["基准图"] });
+    await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "画一组同画风的图" }).expect(202);
+    const view = await settle(mock.app, mock.conversationId, item => item.status === "idle" && item.messages.some(row => row.content?.includes("生成提交状态待核对")));
+    expect(view.messages.some(row => row.content?.includes("依赖它的生成任务尚未提交"))).toBe(true);
+    expect(mock.imagePrompts).toEqual(["基准图"]);
+    expect(mock.getChatCalls()).toBe(1);
   });
 
   it("用户在合并卡上点「先不生成」：一个请求都不发", async () => {
@@ -474,4 +532,265 @@ describe("批量并行，端到端", () => {
     expect(after.taskCount).toBe(20);
     expect(after.messages.some((row) => row.content === "已取消本次生成")).toBe(true);
   });
+});
+
+it("普通聊天原生生图保存本轮参考图，确认一次后回填原调用", async () => {
+  const mock = await startMock([
+    { content: "", tool_calls: [{ id: "native-image-1", type: "function", function: { name: "generate_image", arguments: JSON.stringify({ prompt: "参考上传图片生成海报", count: 1 }) } }] },
+    { content: "海报已生成。" },
+  ], { native: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ chatMode: "chat", nativeImagePilot: true, visionEnabled: false }).expect(200);
+  const upload = (await request(mock.app).post(`${base}/uploads`).attach("images", Buffer.from(pngBase64, "base64"), "reference.png").expect(201)).body.data;
+  expect(upload.canvasAssetIds).toEqual([]);
+  const refId = upload.sessionImages[0].asset.id;
+  await request(mock.app).post(`${base}/messages`).send({ text: "参考这张图，生成一张海报", assetRefs: [refId] }).expect(202);
+  const waiting = await settle(mock.app, mock.conversationId, item => item.status === "awaiting_confirmation");
+  const card = waiting.messages.find(row => row.confirm)!;
+  const snapshot = mock.context.db.getNativeMediaConfirmation(card.id);
+  expect(snapshot?.callId).toBe("native-image-1");
+  expect(mock.context.db.getMessage(card.id)?.toolArgs?.imageRefs).toEqual([refId]);
+  expect(mock.chatRequests[0]?.tools?.some(tool => tool.function.name === "generate_image")).toBe(true);
+  // 看图关闭时不挂 view_images，避免生成后多出一条「无法查看图片」的失败卡
+  expect(mock.chatRequests[0]?.tools?.some(tool => tool.function.name === "view_images")).toBe(false);
+  expect(mock.imagePrompts).toEqual([]);
+  mock.restart();
+  const decisions = await Promise.all(Array.from({ length: 2 }, () =>
+    request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve" })));
+  expect(decisions.map(response => response.status).sort()).toEqual([200, 409]);
+  await settle(mock.app, mock.conversationId, item => item.status === "idle" && item.messages.some(row => row.content === "海报已生成。"));
+  expect(mock.imageRequests).toEqual([{ prompt: "参考上传图片生成海报", references: 1 }]);
+  const response = mock.chatRequests.at(-1)?.messages.find(message => message.tool_call_id === "native-image-1");
+  expect(JSON.parse(response?.content ?? "{}").assetIds).toHaveLength(1);
+});
+
+it("原生改图查看历史图片，确认时固定底图和额外参考图", async () => {
+  const viewCall = { name: "view_images", arguments: "" };
+  const editCall = { name: "edit_image", arguments: "" };
+  const mock = await startMock([
+    { content: "", tool_calls: [{ id: "view-history", type: "function", function: viewCall }] },
+    { content: "", tool_calls: [{ id: "edit-history", type: "function", function: editCall }] },
+    { content: "改图已完成。" },
+  ], { native: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ chatMode: "chat", nativeImagePilot: true, visionEnabled: true }).expect(200);
+  const upload = (await request(mock.app).post(`${base}/uploads`)
+    .attach("images", Buffer.from(pngBase64, "base64"), "base.png")
+    .attach("images", Buffer.from(pngBase64, "base64"), "style.png").expect(201)).body.data;
+  const [bottom, extra] = upload.sessionImages.map((entry: { asset: { id: string } }) => entry.asset.id);
+  viewCall.arguments = JSON.stringify({ assetRefs: [bottom] });
+  editCall.arguments = JSON.stringify({ prompt: "只调整底图色调", imageRefs: [bottom], extraReferences: [extra] });
+  await request(mock.app).post(`${base}/messages`).send({ text: "查看这张历史底图，参考另一张的风格来改图" }).expect(202);
+  const awaiting = await settle(mock.app, mock.conversationId, item => item.status === "awaiting_confirmation");
+  const card = awaiting.messages.find(row => row.confirm)!;
+  expect(card.toolName).toBe("edit_image");
+  expect(card.confirm!.message).toMatch(/底图.*额外参考图/);
+  expect(mock.context.db.getMessage(card.id)?.toolArgs).toMatchObject({ imageRefs: [bottom], extraReferences: [extra] });
+  const messages = mock.chatRequests[1]!.messages;
+  expect(messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "view-history" });
+  expect(messages.at(-1)).toMatchObject({ role: "user", content: expect.arrayContaining([expect.objectContaining({ type: "image_url" })]) });
+  expect(mock.imagePrompts).toEqual([]);
+  await request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve" }).expect(200);
+  await settle(mock.app, mock.conversationId, item => item.status === "idle" && item.messages.some(row => row.content === "改图已完成。"));
+  expect(mock.imageRequests).toEqual([{ prompt: "只调整底图色调", references: 2 }]);
+  expect(mock.chatRequests.at(-1)?.messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "edit-history" });
+});
+
+it.each(["正常完成", "期间发送新消息", "收尾前重启", "切换仅对话后确认原卡"])("原生视频完成后回填原任务卡（%s）", async (scenario) => {
+  const newMessage = scenario === "期间发送新消息";
+  const changedScope = scenario === "切换仅对话后确认原卡";
+  const mock = await startMock([
+    { content: "", tool_calls: [{ id: "native-video-1", type: "function", function: {
+      name: "generate_video", arguments: JSON.stringify({ prompt: "镜头缓慢推进", mode: changedScope ? "text-to-video" : "first-last-frame" }),
+    } }] },
+    { content: newMessage ? "这是另一项请求的回复。" : "视频已经完成。" },
+  ], { native: true, video: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send(changedScope ? { toolScope: "all" } : { chatMode: "chat", nativeImagePilot: true, videoConfirmPolicy: "never" }).expect(200);
+  const upload = (await request(mock.app).post(`${base}/uploads`)
+    .attach("images", Buffer.from(pngBase64, "base64"), "first.png")
+    .attach("images", Buffer.from(pngBase64, "base64"), "last.png").expect(201)).body.data;
+  const assetRefs = upload.sessionImages.map((entry: { asset: { id: string } }) => entry.asset.id);
+  const videoFrames = changedScope ? { firstAssetId: assetRefs[1], lastAssetId: assetRefs[0] } : undefined;
+  if (changedScope) {
+    expect(upload.canvasAssetIds).toEqual([]);
+    await request(mock.app).post(`${base}/messages`).send({ text: "重复的帧", assetRefs, videoFrames: { firstAssetId: assetRefs[0], lastAssetId: assetRefs[0] } }).expect(400);
+  }
+  await request(mock.app).post(`${base}/messages`).send({ text: "用两张图做首尾帧视频", assetRefs, videoFrames }).expect(202);
+  const awaiting = await settle(mock.app, mock.conversationId, item => item.status === "awaiting_confirmation");
+  const card = awaiting.messages.find(row => row.confirm)!;
+  expect(card.toolName).toBe("generate_video");
+  expect(card.toolArgs).toMatchObject({ mode: "first-last-frame", imageRefs: changedScope ? [...assetRefs].reverse() : assetRefs });
+  expect(mock.videoRequests).toEqual([]);
+  if (changedScope) {
+    expect(mock.context.db.listMessages(mock.conversationId).filter(row => row.role === "user").at(-1)?.videoFrames).toEqual(videoFrames);
+    await request(mock.app).patch(base).send({ toolScope: "conversation" }).expect(200);
+  }
+
+  const decisions = await Promise.all(Array.from({ length: 2 }, () =>
+    request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve", args: { duration: 6 } })));
+  expect(decisions.map(response => response.status).sort()).toEqual([200, 409]);
+  const waiting = await settle(mock.app, mock.conversationId, item => item.status === "waiting_task");
+  expect(waiting.status).toBe("waiting_task");
+  expect(mock.context.db.getNativeMediaConfirmation(card.id)?.callId).toBe("native-video-1");
+  if (newMessage) {
+    await request(mock.app).post(`${base}/messages`).send({ text: "先回答另一项请求" }).expect(202);
+    const next = await settle(mock.app, mock.conversationId, item => item.status === "idle");
+    expect(next.messages.some(row => row.content === "这是另一项请求的回复。")).toBe(true);
+  }
+
+  if (scenario === "收尾前重启") {
+    mock.context.agent.dispose();
+    mock.context.db.setConversationStatus(mock.conversationId, "running");
+  }
+  mock.completeVideo();
+  if (scenario === "收尾前重启") {
+    const task = mock.context.db.listPendingMessages(mock.conversationId).find(row => row.taskId)!;
+    await vi.waitFor(() => expect(mock.context.db.getTaskView(task.taskId!)?.status).toBe("succeeded"));
+    mock.restart();
+  }
+  const finished = await settle(mock.app, mock.conversationId, item => item.status === "idle"
+    && item.messages.some(row => row.toolName === "generate_video" && row.assetId));
+  expect(finished.messages.find(row => row.toolName === "generate_video" && row.assetId)?.toolResult?.ok).toBe(true);
+  expect(mock.context.db.getNativeMediaConfirmation(card.id)).toBeNull();
+  expect(mock.videoRequests).toEqual([expect.objectContaining({ duration: 6, content: expect.arrayContaining([
+    expect.objectContaining({ role: "first_frame" }), expect.objectContaining({ role: "last_frame" }),
+  ]) })]);
+  expect(mock.getChatCalls()).toBe(changedScope ? 1 : 2);
+  const result = mock.chatRequests[1]?.messages.find(message => message.tool_call_id === "native-video-1");
+  if (newMessage || changedScope) expect(result).toBeUndefined();
+  else expect(JSON.parse(result?.content ?? "{}").assetIds).toHaveLength(1);
+}, 15_000);
+
+it("统一助手按渠道开启新会话，旧会话保留入口，仅对话不执行渠道返回的工具", async () => {
+  const mock = await startMock([
+    { content: "可以开始。" },
+    { tool_calls: [{ id: "unexpected", type: "function", function: { name: "doc_create", arguments: JSON.stringify({ kind: "md", name: "不应创建", content: "文字" }) } }] },
+  ], { native: true });
+  const legacy = `/api/conversations/${mock.conversationId}`;
+  mock.context.db.appendMessage({ conversationId: mock.conversationId, role: "user", content: "旧对话内容" });
+  const config = `/api/channels/${mock.brainId}/unified-agent`;
+  const version = mock.context.db.getChannel(mock.brainId)?.updatedAt;
+  await request(mock.app).patch(config).send({ enabled: true }).expect(200);
+  expect(mock.context.db.getChannel(mock.brainId)?.updatedAt).toBe(version);
+  mock.restart();
+  expect((await request(mock.app).get(legacy).expect(200)).body.data).toMatchObject({ toolScope: null, chatMode: "creative" });
+  const created = (await request(mock.app).post("/api/conversations").send({ brainChannelId: mock.brainId, brainModel: "mock-brain" }).expect(201)).body.data;
+  expect(created).toMatchObject({ toolScope: "all", chatMode: "creative" });
+  const base = `/api/conversations/${created.id}`;
+  await request(mock.app).post(`${base}/messages`).send({ text: "你好" }).expect(202);
+  await settle(mock.app, created.id, item => item.status === "idle");
+  // 统一入口不再一次挂满所有工具：闲聊只给核心，能力按意图/目录开放。
+  expect(mock.chatRequests[0]?.tools?.map(tool => tool.function.name)).toEqual(["plan_update", "capability_search"]);
+  await request(mock.app).patch(base).send({ toolScope: "conversation" }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "生成一份文件" }).expect(202);
+  const finished = await settle(mock.app, created.id, item => item.status === "idle");
+  expect(mock.chatRequests[1]?.tools).toBeUndefined();
+  expect(finished.messages.some(row => row.role === "tool")).toBe(false);
+  expect(finished.messages.at(-1)?.content).toContain("仅对话");
+  await request(mock.app).patch(config).send({ enabled: false }).expect(200);
+  expect((await request(mock.app).get(base).expect(200)).body.data.toolScope).toBe("conversation");
+  const rolledBack = await request(mock.app).patch(base).send({ toolScope: null }).expect(200);
+  expect(rolledBack.body.data).toMatchObject({ toolScope: null, chatMode: "creative" });
+});
+
+it("渠道拒绝工具时仅文字回退，换模型后恢复全部能力", async () => {
+  const mock = await startMock([{ content: "收到。" }], { native: true, rejectTools: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ toolScope: "all" }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "先聊聊" }).expect(202);
+  await settle(mock.app, mock.conversationId, item => item.status === "idle");
+  expect(mock.chatRequests).toHaveLength(2);
+  expect(mock.chatRequests[0]?.tools?.length).toBeGreaterThan(0);
+  expect(mock.chatRequests[1]?.tools).toBeUndefined();
+  expect(mock.context.db.getConversation(mock.conversationId)?.toolsUnsupported).toBe(true);
+  await request(mock.app).patch(base).send({ brainModel: "mock-brain-alt" }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "现在继续" }).expect(202);
+  await settle(mock.app, mock.conversationId, item => item.status === "idle");
+  expect(mock.chatRequests[2]?.tools?.length).toBeGreaterThan(0);
+  expect(mock.context.db.getConversation(mock.conversationId)?.toolsUnsupported).toBe(false);
+});
+
+it("普通聊天生成画布模板和分镜审阅项目，由用户选择导入", async () => {
+  const mock = await startMock([
+    { content: "", tool_calls: [
+      { id: "layout", type: "function", function: { name: "create_canvas_template", arguments: JSON.stringify({
+        name: "分镜单列布局", nodes: [{ tempId: "note", type: "text", x: 0, y: 0, text: "分镜说明" }],
+      }) } },
+      { id: "shots", type: "function", function: { name: "create_storyboard_template", arguments: JSON.stringify({
+        title: "湖边散步", brief: { aspectRatio: "16:9", duration: "10秒" }, shots: [{ prompt: "夕阳下两人沿着湖边散步" }],
+      }) } },
+    ] },
+    { content: "两个模板已就绪。" },
+  ], { native: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ chatMode: "chat", nativeImagePilot: true }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "准备一个分镜单列布局和一个湖边散步的 16:9、10 秒分镜模板" }).expect(202);
+  const finished = await settle(mock.app, mock.conversationId, view => view.status === "idle");
+  const results = finished.messages.filter(message => message.role === "tool");
+  const layout = results.find(message => message.toolName === "create_canvas_template")?.toolResult;
+  const storyboard = results.find(message => message.toolName === "create_storyboard_template")?.toolResult;
+  expect(layout).toMatchObject({ ok: true, data: { templateName: "分镜单列布局" } });
+  expect(storyboard).toMatchObject({ ok: true, data: { storyboardCount: 1 } });
+  const projectId = storyboard!.data!.storyboardProjectId;
+  await request(mock.app).get(`/api/storyboard-projects/${projectId}`).expect(200);
+  const boards = (await request(mock.app).get("/api/boards").expect(200)).body.data;
+  expect(boards).toHaveLength(0);
+  expect(finished.taskCount).toBe(0);
+  await request(mock.app).post("/api/boards/from-template").send({ templateId: layout!.data!.templateId }).expect(201);
+  expect(mock.chatRequests.at(-1)?.messages.filter(message => message.role === "tool").map(message => message.tool_call_id)).toEqual(["layout", "shots"]);
+});
+
+it("原生一次返回多张生图时合并成一张确认卡，并按一致性批量执行", async () => {
+  const mock = await startMock([
+    { content: "", tool_calls: [
+      { id: "native-batch-a", type: "function", function: { name: "generate_image", arguments: JSON.stringify({
+        prompt: "第1张", fromScratch: true, consistency: "character",
+      }) } },
+      { id: "native-batch-b", type: "function", function: { name: "generate_image", arguments: JSON.stringify({
+        prompt: "第2张", fromScratch: true, consistency: "character",
+      }) } },
+    ] },
+    { content: "两张同一角色的图已完成。" },
+  ], { native: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ toolScope: "all" }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "画两张同一角色的不同场景" }).expect(202);
+  const awaiting = await settle(mock.app, mock.conversationId, item => item.status === "awaiting_confirmation");
+  const card = awaiting.messages.find(row => row.confirm)! as typeof awaiting.messages[number] & { plan?: { calls?: unknown[] } };
+  expect(card.plan?.calls).toHaveLength(2);
+  expect(card.confirm).toMatchObject({ count: 2, consistency: "character" });
+  expect(mock.imageRequests).toEqual([]);
+
+  await request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve" }).expect(200);
+  const finished = await settle(mock.app, mock.conversationId, item => item.status === "idle"
+    && item.messages.some(row => row.content === "两张同一角色的图已完成。"));
+  expect(mock.imageRequests).toHaveLength(2);
+  expect(mock.imageRequests[1]!.references).toBe(1);
+  const results = finished.messages.filter(row => row.role === "tool" && row.toolName === "generate_image");
+  expect(results).toHaveLength(2);
+  const toolMessages = mock.chatRequests.at(-1)?.messages.filter(message => message.role === "tool") ?? [];
+  expect(toolMessages.map(message => message.tool_call_id)).toEqual(["native-batch-a", "native-batch-b"]);
+  expect(JSON.parse(toolMessages[0]!.content!).assetIds).toHaveLength(1);
+  expect(JSON.parse(toolMessages[1]!.content!).assetIds).toHaveLength(1);
+});
+
+it("当前工具组不足时，capability_search 在下一轮开放能力", async () => {
+  const mock = await startMock([
+    { content: "", tool_calls: [{ id: "find-docs", type: "function", function: {
+      name: "capability_search", arguments: JSON.stringify({ query: "转换" }),
+    } }] },
+    { content: "文档能力已开启。" },
+  ], { native: true });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send({ toolScope: "all" }).expect(200);
+  await request(mock.app).post(`${base}/messages`).send({ text: "帮我转换一下" }).expect(202);
+  const finished = await settle(mock.app, mock.conversationId, item => item.status === "idle"
+    && item.messages.some(row => row.content === "文档能力已开启。"));
+  const firstTools = mock.chatRequests[0]?.tools?.map(tool => tool.function.name) ?? [];
+  const nextTools = mock.chatRequests[1]?.tools?.map(tool => tool.function.name) ?? [];
+  expect(firstTools).toEqual(["plan_update", "capability_search"]);
+  expect(nextTools).toContain("doc_convert");
+  expect(nextTools).not.toContain("generate_image");
+  expect(finished.messages.some(row => row.toolName === "capability_search" && row.toolResult?.ok)).toBe(true);
 });

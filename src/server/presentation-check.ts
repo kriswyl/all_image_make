@@ -55,6 +55,7 @@ export async function checkPresentation(bytes: Buffer, plan: AiPresentation): Pr
     let data: unknown;
     try { data = parser.parse(await file.async("string")); } catch { throw new Error(`第 ${index + 1} 页内容损坏`); }
     const text: string[] = []; const pending: unknown[] = [data];
+    let pictureCount = 0;
     while (pending.length) {
       const item = pending.pop();
       if (!item || typeof item !== "object") continue;
@@ -62,6 +63,7 @@ export async function checkPresentation(bytes: Buffer, plan: AiPresentation): Pr
       for (const [key, value] of Object.entries(item)) {
         if (key === "a:t" && (typeof value === "string" || typeof value === "number")) text.push(String(value));
         else if (value && typeof value === "object") pending.push(value);
+        if (key === "p:pic") pictureCount += Array.isArray(value) ? value.length : 1;
         if ((key === "a:xfrm" || key === "p:xfrm") && value && typeof value === "object" && !Array.isArray(value)) {
           const transform = value as Record<string, unknown>;
           const offset = transform["a:off"] as Record<string, unknown> | undefined;
@@ -75,6 +77,9 @@ export async function checkPresentation(bytes: Buffer, plan: AiPresentation): Pr
     }
     const elements = resolveElements(slide);
     if (elements) validateElements(elements);
+    const expectedPictures = elements ? elements.filter(element => element.type === "image").length
+      : slide.layout === "image" || slide.layout === "illustrated" ? 1 : 0;
+    if (pictureCount < expectedPictures) throw new Error(`第 ${index + 1} 页缺少计划中的图片`);
     const rels = archive.file(`ppt/slides/_rels/slide${index + 1}.xml.rels`);
     if (rels) {
       const relationships = parser.parse(await rels.async("string"))?.Relationships?.Relationship;

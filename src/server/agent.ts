@@ -23,10 +23,17 @@ import { AppError, isTerminalStatus } from "./tasks.js";
 import type { KeyStore } from "./key-store.js";
 import { RemoteApiError } from "./adapters.js";
 import { CHAT_DOCUMENT_TOOLS, executeChatDocumentTool } from "./chat-tools/documents.js";
-import { ChatToolRegistry, type ChatToolResult } from "./chat-tools/registry.js";
+import { ChatToolRegistry, type ChatTool, type ChatToolResult, type PreparedToolConfirmation } from "./chat-tools/registry.js";
 import { createPlanTool } from "./chat-tools/planning.js";
 import { compactNativeToolReads } from "./chat-tools/context.js";
 import { parseNativeTurnCheckpoint, type NativeTurnCheckpoint } from "./chat-tools/checkpoint.js";
+import { nativeImageSpecs, nativeImageViewSpec, prepareNativeImage, viewNativeImages, type NativeMediaConfirmation } from "./chat-tools/native-image.js";
+import { nativeVideoSpec, prepareNativeVideo } from "./chat-tools/native-video.js";
+import { nativeAudioSpecs, prepareNativeAudio } from "./chat-tools/native-audio.js";
+import { createNativeTemplateTool } from "./chat-tools/native-templates.js";
+import { createNativeUtilityTool } from "./chat-tools/native-utility.js";
+import { createCapabilitySearchTool, initialToolGroups } from "./chat-tools/capability-search.js";
+import { PresentationPaused, readPresentationSubmission, type PresentationResume } from "./presentation-execution.js";
 import { planPresentationWithAi } from "./ai-presentation.js";
 import { describeMindImages } from "./mind-image-vision.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";
@@ -53,10 +60,13 @@ import {
   planCalls,
   AUTO_TITLE_MAX_CHARS,
   DEFAULT_CONVERSATION_TITLE,
+  usesPlainChat,
+  usesNativeCreativeTools,
   type AgentPlan,
   type AgentStreamEvent,
   type AgentToolName,
   type ChatMessage,
+  type ChatVideoFrames,
   type ConfirmPreview,
   type ConfirmVideoInput,
   type Conversation,
@@ -150,6 +160,8 @@ export class AgentService {
         this.startTurn(conversationId, text, trigger),
       reportTurnFailure: (conversationId: string, error: unknown) =>
         this.reportTurnFailure(conversationId, error),
+      finishNativeTask: (conversation: Conversation, pending: ChatMessage, operation: ChatMessage, result: ToolResult, state: NativeMediaConfirmation) =>
+        this.finishNativeTask(conversation, pending, operation, result, state),
     };
   }
 
@@ -246,7 +258,7 @@ export class AgentService {
    * 抛出的异常只有「本地就能判定」的那几种（会话不存在、上一轮没结束），
    * 大脑和上游的错误一律变成 `error` 事件推给前端。
    */
-  startTurn(conversationId: string, text: string | null, trigger: TurnTrigger, assetRefs: string[] = []) {
+  startTurn(conversationId: string, text: string | null, trigger: TurnTrigger, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) {
     const conversation = this.db.getConversation(conversationId);
     if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     if (this.activeTurns.has(conversationId)) {
@@ -255,7 +267,7 @@ export class AgentService {
     if (text !== null) this.db.clearNativeTurnCheckpoint(conversationId);
     const controller = new AbortController();
     this.activeTurns.set(conversationId, controller);
-    void this.turn(conversationId, text, trigger, controller, assetRefs, conversation)
+    void this.turn(conversationId, text, trigger, controller, assetRefs, conversation, videoFrames)
       .catch((error) => this.reportTurnFailure(conversationId, error))
       .finally(() => {
         this.activeTurns.delete(conversationId);
@@ -317,7 +329,7 @@ export class AgentService {
 
     if (decision === "reject") {
       // 卡片收起来，并把「用户取消了」记进上下文——下次大脑开口时知道这件事
-      this.db.updateMessage(messageId, { confirm: null, status: "error", errorMessage: "用户取消了这次生成" });
+      if (!this.db.claimAgentConfirmation(message, decision)) throw new AppError("NOT_PENDING", "这条已经处理过了", 409);
       const recorded = this.db.appendMessage({
         conversationId, role: "system", content: "已取消本次生成",
       });
@@ -332,12 +344,16 @@ export class AgentService {
     // 批量待确认的卡上**没有** toolName——写上去 UI 会把它当成「只画一张」，
     // 整批调用存在 plan.calls 里。两条路分开走：单调用那条一个字节都不动。
     const batch = planCalls(message.plan);
+    const nativeMedia = this.db.getNativeMediaConfirmation(message.id);
     if (batch.length > 1) {
+      if (!this.db.claimAgentConfirmation(message, decision)) throw new AppError("NOT_PENDING", "这条已经处理过了", 409);
       const batchController = new AbortController();
       this.activeTurns.set(conversationId, batchController);
+      // 原生生图的批量带着断点；旧 JSON 批量没有，按原路径收尾。
+      const nativeBatch = this.db.getNativeMediaConfirmation(message.id);
       // 批量里只可能是产图工具，没有时长/分辨率这类旋钮，所以卡片上不会有 argsOverride。
       // 真有也别悄悄套上去：那些字段对生图没有意义，套上去等于编造一份「用户改过的参数」
-      void this.approveBatch(conversationId, message.id, batch, batchController, message.plan?.consistency)
+      void this.approveBatch(conversationId, message.id, batch, batchController, message.plan?.consistency, nativeBatch)
         .catch((error) => this.reportTurnFailure(conversationId, error))
         .finally(() => {
           this.activeTurns.delete(conversationId);
@@ -350,26 +366,33 @@ export class AgentService {
     if (!tool || !(AGENT_TOOL_NAMES as readonly string[]).includes(tool)) {
       throw new AppError("INVALID_PLAN", "这条待确认记录缺少工具信息", 400);
     }
-    const controller = new AbortController();
-    this.activeTurns.set(conversationId, controller);
-
     // 先落库再执行：执行中途刷新页面时，用户看到的参数必须是真正拿去生成的那份
     const merged = mergeConfirmArgs(message.toolName, message.toolArgs ?? {}, argsOverride);
     // 升级前就摆在那里的视频卡片没有 videoInputs / imageRefs：
     // 按卡片上当时显示的「主图当首帧」补回去，免得用户点确认时突然被要求重选
     const args = withConfirmedVideoSelection(merged, message.confirm);
-    const changed = JSON.stringify(args) !== JSON.stringify(message.toolArgs ?? {});
-    if (changed) {
-      this.db.updateMessage(messageId, { toolArgs: args });
-      this.broadcast(conversationId, { type: "message", message: { ...message, toolArgs: args } });
+    if (nativeMedia) {
+      const { target, checkpoint } = nativeMedia;
+      const mediaChannel = this.db.getChannel(target.channelId);
+      const brainChannel = this.db.getChannel(conversation.brainChannelId);
+      const resolved = resolveAlias(buildCapabilityAliases(this.db.listChannels()), asString(args.modelHint), target.kind);
+      if (conversation.brainChannelId !== checkpoint.channelId || conversation.brainModel !== checkpoint.model
+        || brainChannel?.updatedAt !== checkpoint.channelVersion
+        || !mediaChannel?.enabled || mediaChannel.updatedAt !== target.channelVersion
+        || resolved?.channelId !== mediaChannel.id || resolved.model !== target.model) {
+        throw new AppError("CONFIRMATION_STALE", "生成或对话渠道已改变，请取消这张确认卡后重新发起请求。", 409);
+      }
     }
+    if (!this.db.claimAgentConfirmation(message, decision, args)) throw new AppError("NOT_PENDING", "这条已经处理过了", 409);
+    const controller = new AbortController();
+    this.activeTurns.set(conversationId, controller);
 
-    void this.approve(conversationId, message.id, tool, args, controller)
+    void this.approve(conversationId, message.id, tool, args, controller, nativeMedia)
       .catch((error) => this.reportTurnFailure(conversationId, error))
       .finally(() => {
-          this.activeTurns.delete(conversationId);
-          if (this.db.getConversation(conversationId)?.status === "waiting_task") this.settleFinishedTasks(conversationId);
-        });
+        this.activeTurns.delete(conversationId);
+        if (this.db.getConversation(conversationId)?.status === "waiting_task") this.settleFinishedTasks(conversationId);
+      });
   }
 
   // ── 主循环 ─────────────────────────────────────────────────────────────────
@@ -398,8 +421,9 @@ export class AgentService {
     controller: AbortController,
     assetRefs: string[] = [],
     turnConversation: Conversation,
+    videoFrames?: ChatVideoFrames,
   ) {
-    const plain = turnConversation.kind === "chat" && turnConversation.chatMode === "chat";
+    const plain = usesPlainChat(turnConversation);
     let userMessage: ChatMessage | null = null;
     // 这一轮附带的图只算一次：工具执行到最后一条消息已经是助手计划行，
     // 再回头扫数据库找不到用户那几条，所以必须在这里锁住并一路传下去
@@ -407,12 +431,12 @@ export class AgentService {
     if (text !== null) {
       // 引用的一组装在**同一条消息**上：用户拖了三张图说了句话，界面上就是一条气泡
       // 配三张缩略图，而不是四条消息
-      userMessage = this.db.appendMessage({ conversationId, role: "user", content: text, assetRefs });
+      userMessage = this.db.appendMessage({ conversationId, role: "user", content: text, assetRefs, videoFrames });
       turnAttachmentIds = collectTurnAttachmentIds(this.db, conversationId, userMessage.seq);
       this.broadcast(conversationId, { type: "message", message: userMessage });
       this.nameFromFirstMessage(conversationId, text);
       this.db.resetAutoContinue(conversationId);
-      if (!plain) this.supersedePendingConfirmations(conversationId);
+      this.supersedePendingConfirmations(conversationId, plain);
     }
     this.setStatus(conversationId, "running");
     try {
@@ -428,43 +452,188 @@ export class AgentService {
         const maxTokens = turnConversation.chatTokenLimit ?? 0;
         const maxBrainCalls = turnConversation.chatModelCallLimit ?? 500;
         const maxTurnMinutes = turnConversation.chatTurnMinutes ?? 30;
-        const callWithBudget = async (messages: BrainMessage[], options: Parameters<typeof this.brain.callBrainRaw>[4]) => {
-          if (++brainCalls > maxBrainCalls) throw new Error(`本轮模型调用已达 ${maxBrainCalls} 次上限；已保留完成的操作，请检查结果后继续。`);
-          if (Date.now() - turnStartedAt > maxTurnMinutes * 60_000) throw new Error(`本轮处理已超过 ${maxTurnMinutes} 分钟；已保留完成的操作，请检查结果后继续。`);
-          if (maxTokens && usageMissing) throw new Error("渠道未提供完整 token 用量，无法执行本轮用量上限；已停止后续调用并保留完成的操作。");
-          if (maxTokens && usedTokens >= maxTokens) throw new Error(`本轮已用 ${usedTokens} tokens，达到 ${maxTokens} 的上限；已停止后续调用并保留完成的操作。`);
+        const callWithBudget = async (messages: BrainMessage[], options: Parameters<typeof this.brain.callBrainRaw>[4], presentation = false, onDispatch?: () => void) => {
+          const stop = (message: string): never => { throw presentation ? new PresentationPaused(message) : new Error(message); };
+          if (brainCalls >= maxBrainCalls) stop(`本轮模型调用已达 ${maxBrainCalls} 次上限`);
+          if (Date.now() - turnStartedAt > maxTurnMinutes * 60_000) stop(`本轮处理已超过 ${maxTurnMinutes} 分钟`);
+          if (maxTokens && usageMissing) stop("渠道未提供完整 token 用量，无法执行本轮用量上限");
+          if (maxTokens && usedTokens >= maxTokens) stop(`本轮已用 ${usedTokens} tokens，达到 ${maxTokens} 的上限`);
+          brainCalls++;
+          onDispatch?.();
           const result = await this.brain.callBrainRaw(turnConversation, messages, controller, conversationId, options);
           const usage = result.usage;
           if (usage?.complete && usage.promptTokens + usage.completionTokens > 0) usedTokens += usage.promptTokens + usage.completionTokens;
           else usageMissing = true;
           return result;
         };
+        const channelFingerprint = JSON.stringify([
+          turnConversation.brainChannelId, this.db.getChannel(turnConversation.brainChannelId)?.updatedAt,
+          turnConversation.brainModel, turnConversation.visionEnabled,
+        ]);
+        const resumeRequested = /^(?:请)?继续(?:\s*PPT|制作\s*PPT)[。！!\s]*$/i.test(text?.trim() ?? "");
+        const resume = resumeRequested && turnConversation.toolScope !== "conversation" ? this.db.getPresentationResume(conversationId) : null;
+        const nativeCreative = usesNativeCreativeTools(turnConversation);
+        const frameMessage = turnConversation.toolScope === "all" && trigger === "recovered"
+          ? this.db.listMessages(conversationId).filter(message => message.role === "user").at(-1)
+          : userMessage;
+        const turnVideoFrames = frameMessage?.videoFrames;
         const registry = new ChatToolRegistry();
         for (const spec of CHAT_DOCUMENT_TOOLS) {
           const name = spec.function.name;
           registry.register({
-            spec, displayName: name as AgentToolName,
+            spec, displayName: name as AgentToolName, group: "docs",
             deduplicate: name === "doc_create" || name === "doc_edit" || name === "doc_convert",
             hideResult: name === "doc_read" || name === "doc_search" || name === "doc_list",
-            run: (raw, report, operationId) => executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images, design) => {
-              if (turnConversation.visionEnabled && images.length) await describeMindImages(mind, images, (messages) => callWithBudget(messages, { silent: true }), report, controller.signal);
-              const requests = this.db.listMessages(conversationId).filter((message) => message.role === "user" && !message.documents.length && message.content && !/^(?:请)?(?:继续|重试|再试|重新试试)[。！!\s]*$/.test(message.content.trim())).slice(-5).map((message) => message.content!.slice(0, 2000));
-              return planPresentationWithAi(mind, requests.join("\n"), (messages) => callWithBudget(messages, { silent: true }), report, {
-                scope: `${turnConversation.brainChannelId}\n${turnConversation.brainModel}`,
-                get: (key) => this.db.getPresentationBatch(conversationId, key),
-                set: (key, value) => this.db.savePresentationBatch(conversationId, key, value),
-              }, (messages) => callWithBudget(messages, { silent: true }), { globalPlan: true, deepRead: true, images, design });
-            }, operationId, async (plan, images) => {
-              if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
-              const result = await reviewRenderedPresentation(plan, images, (bytes) => renderWithLocalWps(this.db, bytes, controller.signal), (messages) => callWithBudget(messages, { silent: true }), report);
-              controller.signal.throwIfAborted(); return result;
-            }),
+            run: async (raw, report, operationId) => {
+              const converting = name === "doc_convert";
+              const resumed = converting ? resume : null;
+              const requestText = resumed?.request ?? (converting ? this.db.listMessages(conversationId)
+                .filter(message => message.role === "user" && !message.documents.length && message.content && !/^(?:请)?(?:继续(?:PPT|制作PPT)?|重试|再试|重新试试)[。！!\s]*$/i.test(message.content.trim()))
+                .slice(-5).map(message => message.content!.slice(0, 2000)).join("\n") : "");
+              let calls = 0;
+              let tokens = 0;
+              let missingUsage = false;
+              let completed = 0;
+              let total: number | undefined;
+              let sourceFingerprint: string | undefined;
+              let textFallback = turnConversation.toolsUnsupported;
+              const runId = resumed?.operationId ?? operationId!;
+              const modelRequest = async (messages: BrainMessage[], schema?: Record<string, unknown>) => {
+                controller.signal.throwIfAborted();
+                if (converting && calls >= 80) throw new PresentationPaused("本次执行已达到 PPT 模型调用上限（80 次）");
+                if (converting && tokens >= 200_000) throw new PresentationPaused("本次执行已达到 PPT 用量上限（200,000 tokens）");
+                const result = await callWithBudget(messages, {
+                  silent: true,
+                  ...(schema ? {
+                    tools: [{ type: "function", function: { name: "submit_presentation_result", description: "提交当前阶段的结构化结果", parameters: schema } }],
+                    toolChoice: { type: "function", function: { name: "submit_presentation_result" } },
+                  } : {}),
+                }, converting, () => { calls++; });
+                if (result.usage?.complete) tokens += result.usage.promptTokens + result.usage.completionTokens;
+                else missingUsage = true;
+                return result;
+              };
+              const structuredCall = async (messages: BrainMessage[], schema?: Record<string, unknown>) => {
+                if (!schema || textFallback) return modelRequest(messages);
+                try {
+                  const result = await modelRequest(messages, schema);
+                  const submission = readPresentationSubmission(result.toolCalls);
+                  if (submission !== undefined) return { ...result, content: submission };
+                  if (!result.toolCalls.length && result.content.trim()) return result;
+                  if (result.truncated) return result;
+                } catch (error) {
+                  if (!(error instanceof RemoteApiError) || !/(?:tool_choice|tools|function.call).*(?:unsupported|not supported|不支持)|(?:unsupported|not supported|不支持).*(?:tools|tool_choice|function)/i.test(error.message)) throw error;
+                }
+                textFallback = true;
+                report?.("渠道未返回唯一有效的结构化结果，本次 PPT 改用文本兼容格式");
+                return modelRequest(messages);
+              };
+              const scope = channelFingerprint;
+              const cache = {
+                get: (key: string) => this.db.getPresentationBatch(conversationId, key),
+                set: (key: string, value: string) => this.db.savePresentationBatch(conversationId, key, value),
+              };
+              try {
+                if (resumed && resumed.channelFingerprint !== channelFingerprint) return { ok: false, summary: "模型、渠道配置或看图设置已改变。请恢复原设置后继续 PPT，或发起新的制作要求。" };
+                const existing = resumed ? this.db.getWorkspaceDocumentByOperation(conversationId, runId) : null;
+                if (existing) {
+                  this.db.clearPresentationResume(conversationId);
+                  return { ok: true, summary: `PPT 已生成：${existing.name}`, data: { fileId: existing.id, fileName: existing.name, byteSize: existing.byteSize } };
+                }
+                const result = await executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images, design, fingerprint, coverAssetId) => {
+                  if (resumed?.sourceFingerprint && resumed.sourceFingerprint !== fingerprint) throw new Error("源文件、风格参考或封面素材已变化，请发起新的 PPT 制作要求");
+                  sourceFingerprint = fingerprint;
+                  if (coverAssetId && !resumed) this.db.savePresentationResume(conversationId, {
+                    operationId: runId, args: raw, request: requestText, channelFingerprint, sourceFingerprint,
+                    calls: 0, tokens: 0, usageMissing: false,
+                  });
+                  if (turnConversation.visionEnabled && images.length) await describeMindImages(mind, images, async messages => {
+                    const key = createHash("sha256").update(JSON.stringify([scope, "image-v1", messages])).digest("hex");
+                    const saved = cache.get(key);
+                    if (saved) return { content: saved, truncated: false };
+                    const result = await modelRequest(messages);
+                    if (!result.truncated && result.content.trim()) cache.set(key, result.content.trim());
+                    return result;
+                  }, report, controller.signal);
+                  return planPresentationWithAi(mind, requestText, structuredCall, report, {
+                    scope: `${scope}\n${sourceFingerprint}`,
+                    ...cache,
+                  }, structuredCall, { pagewise: true, globalPlan: true, deepRead: true, images, design,
+                    onPageReady: (count, pageCount) => { completed = count; total = pageCount; },
+                  });
+                }, runId, async (plan, images) => {
+                  controller.signal.throwIfAborted();
+                  if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
+                  const result = await reviewRenderedPresentation(plan, images, bytes => renderWithLocalWps(this.db, bytes, controller.signal), modelRequest, report, converting ? { ...cache, scope } : undefined);
+                  controller.signal.throwIfAborted();
+                  return result;
+                });
+                if (converting && result.ok) this.db.clearPresentationResume(conversationId);
+                return result;
+              } catch (error) {
+                if (!(error instanceof PresentationPaused)) throw error;
+                const state: PresentationResume = {
+                  operationId: runId, args: raw, request: requestText, channelFingerprint, sourceFingerprint,
+                  calls: (resumed?.calls ?? 0) + calls, tokens: (resumed?.tokens ?? 0) + tokens,
+                  usageMissing: Boolean(resumed?.usageMissing || missingUsage),
+                };
+                this.db.savePresentationResume(conversationId, state);
+                const progress = total === undefined ? "正在准备页面目录" : `已通过内容审校 ${completed}/${total} 页`;
+                const usage = state.usageMissing ? `至少 ${state.tokens.toLocaleString()} tokens（渠道用量不完整）` : `${state.tokens.toLocaleString()} tokens`;
+                return { ok: false, paused: true, summary: `PPT 已暂停。${error.message}。${progress}。累计调用 ${state.calls} 次，${usage}。发送「继续 PPT」可从同一任务的断点继续。` };
+              }
+            },
           });
         }
         registry.register(createPlanTool());
+        registry.register(createCapabilitySearchTool(registry));
+        if (nativeCreative) {
+          const registerConfirmed = (spec: ChatTool["spec"], name: AgentToolName, prepareConfirmation: NonNullable<ChatTool["prepareConfirmation"]>) => registry.register({
+            spec, displayName: name,
+            group: name === "generate_video" ? "video" : name === "generate_music" || name === "generate_speech" ? "audio" : "image",
+            prepareConfirmation,
+            run: async () => ({ ok: false, summary: "生成或改图需要单独调用一次并等待确认" }),
+          });
+          for (const name of ["generate_image", "edit_image"] as const) {
+            registerConfirmed(nativeImageSpecs[name], name, raw => prepareNativeImage(this.db, turnConversation, name, raw, turnAttachmentIds, this.defaultAliases().image));
+          }
+          // 看图关闭时不挂 view_images：挂上去只会让模型多调一次、多一条失败卡。
+          if (turnConversation.visionEnabled && !isVisionBlocked(this.db, turnConversation)) {
+            registry.register({ spec: nativeImageViewSpec, displayName: "view_images", group: "image", run: raw => viewNativeImages(this.db, this.db.getConversation(conversationId) ?? turnConversation, raw) });
+          }
+          registerConfirmed(nativeVideoSpec, "generate_video", raw => prepareNativeVideo(this.db, turnConversation, raw, turnAttachmentIds, this.defaultAliases().video, turnVideoFrames));
+          for (const name of ["generate_music", "generate_speech"] as const) {
+            registerConfirmed(nativeAudioSpecs[name], name, raw => prepareNativeAudio(this.toolContext(turnConversation, controller, {}), name, raw));
+          }
+          for (const name of ["create_canvas_template", "create_storyboard_template"] as const) {
+            registry.register(createNativeTemplateTool(name, () => this.toolContext(turnConversation, controller, {})));
+          }
+          for (const name of ["set_canvas", "optimize_prompt"] as const) {
+            registry.register(createNativeUtilityTool(name, () => this.toolContext(turnConversation, controller, {})));
+          }
+        }
+        // 能力组：首轮按用户意图和会话状态预加载；恢复轮沿用断点里记录的组。
+        const initialGroups = initialToolGroups({
+          text: userMessage?.content ?? text ?? this.db.lastUserText(conversationId) ?? null,
+          hasAttachments: turnAttachmentIds.length > 0,
+          hasDocuments: this.db.listConversationDocuments(conversationId).length > 0
+            || this.db.listWorkspaceDocuments(conversationId).length > 0,
+          hasImages: this.db.canvasImages(turnConversation).length > 0
+            || this.db.listConversationAssets(conversationId).some(entry => entry.asset.mimeType.startsWith("image/")),
+        });
+        // 旧断点没有 activeTools：当时还没有能力组，恢复成全量工具，保持原签名可继续。
+        const restoredSpecs = checkpoint
+          ? (checkpoint.activeTools
+            ? checkpoint.activeTools.map(name => registry.get(name)?.spec).filter((spec): spec is ChatTool["spec"] => Boolean(spec))
+            : registry.specs())
+          : [];
         // 渠道明确报过「不支持 tools」之后，这次对话不再发工具定义，省掉每轮一次的失败调用
-        const toolSpecs = turnConversation.toolsUnsupported ? [] : registry.specs();
-        const toolSignature = createHash("sha256").update(JSON.stringify([...toolSpecs].sort((a, b) => a.function.name.localeCompare(b.function.name)))).digest("hex");
+        let toolSpecs = turnConversation.toolsUnsupported || turnConversation.toolScope === "conversation"
+          ? []
+          : checkpoint
+            ? restoredSpecs
+            : registry.specs(initialGroups);
+        let toolSignature = this.toolSignatureOf(toolSpecs);
         const channelVersion = this.db.getChannel(turnConversation.brainChannelId)?.updatedAt ?? "";
         if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || checkpoint.toolSignature !== toolSignature)) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
         const lastPlan = this.db.listMessages(conversationId).filter((message) => message.role === "tool" && message.toolName === "plan_update" && message.status === "ok").at(-1);
@@ -472,6 +641,7 @@ export class AgentService {
         let plainMessages = checkpoint?.messages ?? [...context, ...built.messages];
         const previousCalls = new Map<string, ChatToolResult>(checkpoint?.previousCalls ?? []);
         let toolRounds = checkpoint?.toolRounds ?? 0;
+        let nativeVisionReads = checkpoint?.messages.reduce((count, message) => count + (message.role === "assistant" ? message.tool_calls?.filter(call => call.function.name === "view_images").length ?? 0 : 0), 0) ?? 0;
         const maxToolRounds = turnConversation.chatToolRoundLimit ?? 16;
         let checkpointNoticeSent = false;
         if (checkpoint) {
@@ -480,14 +650,20 @@ export class AgentService {
         }
         let result: BrainResult;
         try {
-          result = await callWithBudget(plainMessages, { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) });
+          result = resume ? {
+            content: "", reasoning: "", finishReason: "tool_calls", usage: null, durationMs: 0, usedFallback: false, truncated: false,
+            toolCalls: [{ id: `resume-${userMessage!.id}`, name: "doc_convert", arguments: resume.args }],
+          } : await callWithBudget(plainMessages, { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) });
         } catch (error) {
           if (controller.signal.aborted) return this.finishInterrupted(conversationId);
           if (checkpoint) throw error;
           if (error instanceof RemoteApiError && error.status === 400 && /(?:tools?|function.call).{0,60}(?:not support|unsupported|not allowed|invalid parameter)|(?:not support|unsupported|unknown parameter|unrecognized).{0,60}(?:tools?|function.call)/i.test(error.message)) {
             const notice = this.db.appendMessage({ conversationId, role: "system", content: "当前渠道或模型不支持工具调用，本轮只能文字回答，不能生成文件。" });
             this.broadcast(conversationId, { type: "message", message: notice });
-            this.db.updateConversation(conversationId, { toolsUnsupported: true });
+            const current = this.db.getConversation(conversationId);
+            if (current?.brainChannelId === turnConversation.brainChannelId && current.brainModel === turnConversation.brainModel) {
+              this.db.updateConversation(conversationId, { toolsUnsupported: true });
+            }
             plainMessages = [...context, ...built.messages, { role: "system", content: "本轮工具不可用。只能回答文字，不能声称创建或修改了文件。" }];
             result = await callWithBudget(plainMessages, { plain: true });
           } else {
@@ -498,6 +674,9 @@ export class AgentService {
           plainMessages = [...context, ...retry.messages];
           result = await callWithBudget(plainMessages, { plain: true, tools: toolSpecs });
           }
+        }
+        if (turnConversation.toolScope === "conversation" && result.toolCalls.length) {
+          result = { ...result, toolCalls: [], truncated: false, content: "当前是「仅对话」。需要使用工具时，请切换到「全部能力」。" };
         }
         this.db.clearNativeTurnCheckpoint(conversationId);
         while (result.toolCalls.length && toolRounds < maxToolRounds) {
@@ -510,17 +689,112 @@ export class AgentService {
           }
           this.broadcast(conversationId, { type: "reset" });
           plainMessages = [...plainMessages, { role: "assistant", content: result.content || null, tool_calls: result.toolCalls.map((call) => ({ id: call.id, type: "function" as const, function: { name: call.name, arguments: call.arguments } })) }];
+          /**
+           * 原生生图的批量：模型在一轮里返回多个 generate_image。
+           *
+           * 不能逐个执行——每个都要求「单独确认」，最后会变成 N 张卡、N 次点击，
+           * 一致性也无从谈起。这里把它们合成一张确认卡，确认后交给现有 BatchExecutor：
+           * 一致性批量先生成基准图，其余以它为参考图并行生成。
+           */
+          if (nativeCreative && result.toolCalls.length > 1 && result.toolCalls.every((call) => call.name === "generate_image")) {
+            const prepared: PreparedToolConfirmation[] = [];
+            let batchError = "";
+            for (const call of result.toolCalls) {
+              const candidate = registry.get(call.name)?.prepareConfirmation?.(call.arguments);
+              if (!candidate || "error" in candidate) {
+                batchError = candidate && "error" in candidate ? candidate.error : "批量生图参数无效";
+                break;
+              }
+              prepared.push(candidate);
+            }
+            const first = prepared[0];
+            const sameTarget = Boolean(first) && prepared.every((item) =>
+              item.target.kind === first!.target.kind && item.target.channelId === first!.target.channelId && item.target.model === first!.target.model);
+            if (!batchError && first && sameTarget) {
+              const calls = prepared.map((item) => ({ tool: "generate_image" as const, args: item.args }));
+              const modes = new Set(calls
+                .map((call) => call.args.consistency)
+                .filter((value): value is "character" | "style" => value === "character" || value === "style"));
+              if (modes.size > 1) {
+                batchError = "同一批图片只能选择一种一致性方式；请统一写成 character 或 style，或全部留空。";
+              } else {
+                const consistency = [...modes][0];
+                const preview = {
+                  ...first.preview,
+                  count: calls.length,
+                  ...(consistency ? { consistency } : {}),
+                  message: `将提交 ${calls.length} 张图片，费用由渠道决定。${consistency
+                    ? "先生成第 1 张基准图，再以它为准并行生成其余图片。"
+                    : "将并行提交这些生成任务。"}`,
+                };
+                const state: NativeMediaConfirmation = {
+                  callId: result.toolCalls[0]!.id,
+                  callIds: result.toolCalls.map((call) => call.id),
+                  target: first.target,
+                  checkpoint: {
+                    version: 3, channelId: turnConversation.brainChannelId, channelVersion, model: turnConversation.brainModel,
+                    toolSignature, activeTools: toolSpecs.map((spec) => spec.function.name),
+                    messages: plainMessages, toolRounds, brainCalls, elapsedMs: Date.now() - turnStartedAt,
+                    usedTokens, usageMissing, previousCalls: [...previousCalls.entries()],
+                  },
+                };
+                const confirmation = this.db.appendNativeMediaConfirmation({
+                  conversationId, role: "assistant", content: "",
+                  plan: { tool: "generate_image", args: calls[0]!.args, calls, ...(consistency ? { consistency } : {}) },
+                  confirm: preview, status: "pending",
+                }, state);
+                this.broadcast(conversationId, { type: "message", message: confirmation });
+                this.broadcast(conversationId, { type: "confirm", messageId: confirmation.id, preview });
+                this.setStatus(conversationId, "awaiting_confirmation");
+                this.broadcast(conversationId, { type: "done", status: "awaiting_confirmation" });
+                return;
+              }
+            }
+            // 参数不成立时不摆确认卡：让下面的正常路径把具体错误回灌给模型，由它修正。
+            if (batchError) {
+              const notice = this.db.appendMessage({ conversationId, role: "system", status: "error", content: `批量生图未提交：${batchError}` });
+              this.broadcast(conversationId, { type: "message", message: notice });
+            }
+          }
+          const batchHasImageGeneration = nativeCreative
+            && result.toolCalls.some(call => call.name === "generate_image" || call.name === "edit_image");
+          let imageContext: BrainContentPart[] | undefined;
           for (const call of result.toolCalls) {
             if (controller.signal.aborted) return this.finishInterrupted(conversationId);
-            const tool = registry.get(call.name);
+            const registered = registry.get(call.name);
+            const tool = registered && (toolSpecs.includes(registered.spec) || resume && call.name === "doc_convert") ? registered : undefined;
             const toolName = tool?.displayName ?? "doc_read";
+            let mediaError: string | undefined;
+            if (tool?.prepareConfirmation && result.toolCalls.length === 1) {
+              const prepared = tool.prepareConfirmation(call.arguments);
+              if ("error" in prepared) mediaError = prepared.error;
+              else {
+                const state: NativeMediaConfirmation = {
+                  callId: call.id,
+                  target: prepared.target,
+                  checkpoint: { version: 3, channelId: turnConversation.brainChannelId, channelVersion, model: turnConversation.brainModel,
+                    toolSignature, activeTools: toolSpecs.map((spec) => spec.function.name),
+                    messages: plainMessages, toolRounds, brainCalls, elapsedMs: Date.now() - turnStartedAt,
+                    usedTokens, usageMissing, previousCalls: [...previousCalls.entries()] },
+                };
+                const confirmation = this.db.appendNativeMediaConfirmation({
+                  conversationId, role: "assistant", toolName, toolArgs: prepared.args,
+                  plan: { tool: toolName, args: prepared.args }, confirm: prepared.preview, status: "pending",
+                }, state);
+                this.broadcast(conversationId, { type: "message", message: confirmation });
+                this.broadcast(conversationId, { type: "confirm", messageId: confirmation.id, preview: prepared.preview });
+                this.setStatus(conversationId, "awaiting_confirmation");
+                this.broadcast(conversationId, { type: "done", status: "awaiting_confirmation" });
+                return;
+              }
+            }
             // Keep only small, non-content arguments in the visible call record.
             let visibleArgs: Record<string, unknown> = {};
             try {
               const input: unknown = JSON.parse(call.arguments);
               if (input && typeof input === "object" && !Array.isArray(input)) {
                 const values = input as Record<string, unknown>;
-                for (const key of ["fileId", "to", "kind", "name", "offset", "limit"]) {
+                for (const key of ["fileId", "to", "coverAssetId", "kind", "name", "offset", "limit"]) {
                   const value = values[key];
                   if (typeof value === "string") visibleArgs[key] = value.slice(0, 200);
                   else if (typeof value === "number" && Number.isFinite(value)) visibleArgs[key] = value;
@@ -531,34 +805,77 @@ export class AgentService {
             const pending = this.db.startNativeToolCall(conversationId, toolName, visibleArgs, call.id, call.name, createHash("sha256").update(call.arguments).digest("hex"));
             this.broadcast(conversationId, { type: "message", message: pending });
             const key = `${call.name}\n${call.arguments}`;
-            const outcome: ChatToolResult = (tool?.deduplicate ? previousCalls.get(key) : undefined) ?? (tool ? await tool.run(call.arguments, (progress) => {
+            let validationError = mediaError;
+            if (call.name === "doc_convert" && batchHasImageGeneration) {
+              validationError = "请先单独提交生图或改图，等用户确认并取得素材后再调用 PPT 转换。";
+            }
+            if (call.name === "view_images" && tool) {
+              if (!toolSpecs.includes(nativeImageViewSpec) || imageContext || nativeVisionReads >= MAX_VISION_READS_PER_ROUND) {
+                validationError = "本轮无法继续查看图片。请缩小图片范围或重新发送请求。";
+              } else {
+                nativeVisionReads++;
+              }
+            }
+            const cached = tool?.deduplicate ? previousCalls.get(key) : undefined;
+            const outcome: ChatToolResult = validationError ? { ok: false, summary: validationError } : cached ?? (tool ? await tool.run(call.arguments, (progress) => {
               if (controller.signal.aborted) return;
               const usageText = usageMissing ? "用量不完整" : `${usedTokens.toLocaleString()} tokens`;
               this.db.updateMessage(pending.id, { content: `${progress} · 模型调用 ${brainCalls}/${maxBrainCalls} · ${usageText}` });
               const updated = this.db.getMessage(pending.id);
               if (updated) this.broadcast(conversationId, { type: "message", message: updated });
             }, pending.id) : { ok: false, summary: `未知工具：${call.name}` });
+            if (outcome.imageContext) imageContext = outcome.imageContext;
+            // capability_search 的结果：把查到的工具加进下一轮的工具定义。
+            const activate = outcome.data?.activate;
+            if (Array.isArray(activate)) {
+              let changed = false;
+              for (const name of activate) {
+                if (typeof name !== "string" || toolSpecs.some((spec) => spec.function.name === name)) continue;
+                const candidate = registry.get(name);
+                if (!candidate) continue;
+                toolSpecs = [...toolSpecs, candidate.spec];
+                changed = true;
+              }
+              if (changed) toolSignature = this.toolSignatureOf(toolSpecs);
+            }
             if (tool?.deduplicate && outcome.ok) previousCalls.set(key, outcome);
             const display = outcome.ok && tool?.hideResult ? "读取完成。" : outcome.summary;
             const file = outcome.data;
             const fileData = file && typeof file.fileId === "string" && typeof file.fileName === "string" && typeof file.byteSize === "number" ? { workspaceFileId: file.fileId, workspaceFileName: file.fileName, byteSize: file.byteSize, pendingDelete: file.pendingDelete === true } : undefined;
-            const publicData = outcome.uiData || fileData ? { ...outcome.uiData, ...fileData } : undefined;
+            const publicData = outcome.uiData || fileData || outcome.paused ? { ...outcome.uiData, ...fileData, ...(outcome.paused ? { presentationPaused: true } : {}) } : undefined;
             const toolResult: ToolResult = { ok: outcome.ok, summary: display, ...(publicData ? { data: publicData } : {}) };
             const row = this.db.finishNativeToolCall(conversationId, pending.id, toolName, toolResult);
             const updated = this.db.getMessage(pending.id);
             if (updated) this.broadcast(conversationId, { type: "message", message: updated });
             this.broadcast(conversationId, { type: "message", message: row });
+            if (outcome.paused || resume) {
+              this.setStatus(conversationId, "idle");
+              this.broadcast(conversationId, { type: "done", status: "idle" });
+              return;
+            }
             plainMessages.push({ role: "tool", tool_call_id: call.id, content: `${outcome.ok ? "成功" : "失败"}：${outcome.summary}${typeof outcome.data?.fileId === "string" ? `\n文件ID：${outcome.data.fileId}` : ""}` });
           }
+          if (imageContext) plainMessages.push({ role: "user", content: imageContext });
           plainMessages = compactNativeToolReads(plainMessages);
-          const snapshot: NativeTurnCheckpoint = { version: 3, channelId: turnConversation.brainChannelId, channelVersion, model: turnConversation.brainModel, toolSignature, messages: plainMessages, toolRounds, brainCalls, elapsedMs: Date.now() - turnStartedAt, usedTokens, usageMissing, previousCalls: [...previousCalls.entries()] };
+          const snapshot: NativeTurnCheckpoint = { version: 3, channelId: turnConversation.brainChannelId, channelVersion, model: turnConversation.brainModel, toolSignature, activeTools: toolSpecs.map((spec) => spec.function.name), messages: plainMessages, toolRounds, brainCalls, elapsedMs: Date.now() - turnStartedAt, usedTokens, usageMissing, previousCalls: [...previousCalls.entries()] };
           const checkpointSaved = this.db.saveNativeTurnCheckpoint(conversationId, JSON.stringify(snapshot));
           if (!checkpointSaved && !checkpointNoticeSent) {
             checkpointNoticeSent = true;
             const notice = this.db.appendMessage({ conversationId, role: "system", content: "当前上下文过大，无法保存自动续跑断点；如程序退出，请检查已完成的操作后继续。" });
             this.broadcast(conversationId, { type: "message", message: notice });
           }
-          result = await callWithBudget(plainMessages, { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) });
+          const options = { plain: true, ...(toolRounds < maxToolRounds ? { tools: toolSpecs } : {}) };
+          try {
+            result = await callWithBudget(plainMessages, options);
+          } catch (error) {
+            if (!imageContext || !isVisionError(error) || controller.signal.aborted) throw error;
+            this.broadcast(conversationId, { type: "reset" });
+            this.brain.degradeVision(turnConversation, error);
+            plainMessages = plainMessages.map(message => message.role === "user" && Array.isArray(message.content)
+              ? { ...message, content: message.content.filter(part => part.type === "text") } : message);
+            plainMessages.push({ role: "system", content: "渠道拒绝图片输入，图片未传给模型。不得声称看到内容。请按明确的图片 ID 操作或向用户确认。" });
+            result = await callWithBudget(plainMessages, options);
+          }
           this.db.clearNativeTurnCheckpoint(conversationId);
         }
         if (result.toolCalls.length) throw new Error("工具调用次数已达上限，请缩小任务范围后重试");
@@ -630,6 +947,12 @@ export class AgentService {
     this.broadcast(conversationId, { type: "done", status: "idle" });
   }
 
+  private stopOnUnknownSubmission(conversationId: string, outcomes: ToolOutcome[]): boolean {
+    if (!outcomes.some(outcome => outcome.result.error === "SUBMISSION_UNKNOWN")) return false;
+    this.finishAfterBrainLoss(conversationId, "生成提交状态待核对。请在渠道确认原请求的结果后再决定是否重新生成。");
+    return true;
+  }
+
   /** 这一轮除了 `seq` 那条用户消息之外，还有没有落过别的消息（工具卡片、气泡、系统提示都算） */
   private nothingHappenedSince(conversationId: string, seq: number): boolean {
     return !this.db.listMessages(conversationId).some((message) => message.seq > seq && message.role !== "user");
@@ -677,20 +1000,49 @@ export class AgentService {
     tool: AgentToolName,
     args: Record<string, unknown>,
     controller: AbortController,
+    nativeMedia: NativeMediaConfirmation | null = null,
   ) {
     const conversation = this.db.getConversation(conversationId);
     if (!conversation) return;
     this.setStatus(conversationId, "running");
-    const outcome = await this.executeTool(conversation, { tool, args }, controller, {
+    const outcome = await this.executeTool(nativeMedia ? { ...conversation, verbatimPrompt: false } : conversation, { tool, args }, controller, {
       existingMessageId: messageId,
       confirmed: true,
+      strictSubmission: Boolean(nativeMedia),
+      backgroundMedia: Boolean(nativeMedia),
     });
+    if (nativeMedia && controller.signal.aborted) {
+      this.db.clearNativeMediaConfirmation(messageId);
+      this.finishInterrupted(conversationId);
+      if (outcome.terminal) this.settleFinishedTasks(conversationId);
+      return;
+    }
+    if (this.stopOnUnknownSubmission(conversationId, [outcome])) return;
+    if (nativeMedia && !outcome.terminal) {
+      this.db.clearNativeMediaConfirmation(messageId);
+      const current = this.db.getConversation(conversationId);
+      if (!current || !usesNativeCreativeTools(current)) {
+        this.setStatus(conversationId, "idle");
+        this.broadcast(conversationId, { type: "done", status: "idle" });
+        return;
+      }
+      if (!this.db.saveNativeTurnCheckpoint(conversationId, this.nativeMediaCheckpoint(nativeMedia, outcome.result))) {
+        return this.finishAfterBrainLoss(conversationId, "生成结果已保存，当前对话过长，请发送新消息继续。");
+      }
+      try {
+        await this.turn(conversationId, null, "recovered", controller, [], this.db.getConversation(conversationId) ?? conversation);
+      } catch {
+        this.db.clearNativeTurnCheckpoint(conversationId);
+        this.finishAfterBrainLoss(conversationId, "生成工具结果已保存，可以继续发送消息。");
+      }
+      return;
+    }
     if (outcome.terminal) {
       this.setStatus(conversationId, "waiting_task");
       this.broadcast(conversationId, { type: "done", status: "waiting_task" });
       return;
     }
-    if (this.db.getConversation(conversationId)?.chatMode === "chat" && conversation.kind === "chat") {
+    if (usesPlainChat(this.db.getConversation(conversationId))) {
       this.setStatus(conversationId, "idle");
       this.broadcast(conversationId, { type: "done", status: "idle" });
       return;
@@ -717,6 +1069,7 @@ export class AgentService {
     calls: PlannedCall[],
     controller: AbortController,
     consistency?: "character" | "style",
+    nativeMedia: NativeMediaConfirmation | null = null,
   ) {
     const conversation = this.db.getConversation(conversationId);
     if (!conversation) return;
@@ -729,12 +1082,34 @@ export class AgentService {
       existingMessageId: messageId,
       confirmed: true,
     });
+    if (this.stopOnUnknownSubmission(conversationId, outcome.results)) return;
+    // 原生生图批量是同步等结果的；把每个原始 tool_call_id 的结果接回断点，
+    // 让模型能接着说话，而不是像旧批量那样停在「图出来了但助手不吭声」。
+    if (nativeMedia && !outcome.terminal && outcome.results.length === calls.length) {
+      this.db.clearNativeMediaConfirmation(messageId);
+      const current = this.db.getConversation(conversationId);
+      if (!current || !usesNativeCreativeTools(current)) {
+        this.setStatus(conversationId, "idle");
+        this.broadcast(conversationId, { type: "done", status: "idle" });
+        return;
+      }
+      if (!this.db.saveNativeTurnCheckpoint(conversationId, this.nativeBatchCheckpoint(nativeMedia, outcome.results))) {
+        return this.finishAfterBrainLoss(conversationId, "图片已生成，当前对话过长，请发送新消息继续。");
+      }
+      try {
+        await this.turn(conversationId, null, "recovered", controller, [], current);
+      } catch {
+        this.db.clearNativeTurnCheckpoint(conversationId);
+        this.finishAfterBrainLoss(conversationId, "图片已生成，可以继续发送消息。");
+      }
+      return;
+    }
     if (outcome.terminal) {
       this.setStatus(conversationId, "waiting_task");
       this.broadcast(conversationId, { type: "done", status: "waiting_task" });
       return;
     }
-    if (this.db.getConversation(conversationId)?.chatMode === "chat" && conversation.kind === "chat") {
+    if (usesPlainChat(this.db.getConversation(conversationId))) {
       this.setStatus(conversationId, "idle");
       this.broadcast(conversationId, { type: "done", status: "idle" });
       return;
@@ -767,7 +1142,38 @@ export class AgentService {
    */
   recoverStaleConversations(): number {
     const resumable = this.db.recoverableNativeTurnIds();
+    const recoveredTasks = this.db.listUnlinkedAgentTasks();
+    for (const task of recoveredTasks) {
+      const operation = this.db.getMessage(task.agentOperationId!);
+      if (!operation?.toolName) continue;
+      const summary = "已找回此前提交的生成任务，正在核对结果。";
+      const toolResult: ToolResult = { ok: true, async: true, summary, taskId: task.id, data: { agentOperationId: operation.id } };
+      if (operation.role === "tool") {
+        this.db.updateMessage(operation.id, { status: "pending", content: summary, taskId: task.id, toolResult });
+      } else {
+        this.db.appendMessage({ conversationId: operation.conversationId, role: "tool", toolName: operation.toolName,
+          status: "pending", content: summary, taskId: task.id, toolResult });
+      }
+    }
+    this.db.interruptUnstartedAgentConfirmations();
+    const conversations = this.db.listConversations();
+    for (const conversation of conversations) {
+      if (conversation.status !== "running") continue;
+      const waitingOnNativeTask = this.db.listPendingMessages(conversation.id).some(message => {
+        const operationId = message.toolResult?.data?.agentOperationId;
+        if (!message.taskId || message.toolResult?.async !== true || typeof operationId !== "string") return false;
+        const operation = this.db.getMessage(operationId);
+        return operation && this.db.getNativeMediaConfirmation(operation.id)
+          && !this.db.hasUserMessageAfter(conversation.id, operation.seq);
+      });
+      if (waitingOnNativeTask) this.db.setConversationStatus(conversation.id, "waiting_task", { touch: false });
+    }
     const count = this.db.resetConversationsStuckInRunning();
+    for (const recovered of recoveredTasks) {
+      const task = this.db.getTaskView(recovered.id);
+      if (task && isTerminalStatus(task.status)) handleTaskEvent(this.taskEventHost(), { kind: "finished", task });
+    }
+    for (const conversation of conversations) this.settleFinishedTasks(conversation.id);
     for (const conversationId of resumable) this.startTurn(conversationId, null, "recovered");
     return count;
   }
@@ -778,6 +1184,60 @@ export class AgentService {
       const task = this.db.getTaskView(message.taskId);
       if (task && isTerminalStatus(task.status)) handleTaskEvent(this.taskEventHost(), { kind: "finished", task });
     }
+  }
+
+  /**
+   * 断点签名只覆盖真正会改变执行语义的工具。
+   * capability_search 只是目录查询，加不加它不应该让旧断点失效。
+   */
+  private toolSignatureOf(specs: ChatTool["spec"][]): string {
+    return createHash("sha256").update(JSON.stringify(
+      [...specs].filter((spec) => spec.function.name !== "capability_search")
+        .sort((a, b) => a.function.name.localeCompare(b.function.name)),
+    )).digest("hex");
+  }
+
+  private nativeBatchCheckpoint(state: NativeMediaConfirmation, results: ToolOutcome[]): string {
+    const callIds = state.callIds ?? [state.callId];
+    const toolMessages = results.map((outcome, index) => {
+      const ids = outcome.result.assetIds ?? (outcome.result.assetId ? [outcome.result.assetId] : []);
+      return {
+        role: "tool" as const,
+        tool_call_id: callIds[index] ?? state.callId,
+        content: JSON.stringify({ ok: outcome.result.ok, summary: outcome.result.summary, assetIds: ids }),
+      };
+    });
+    return JSON.stringify({ ...state.checkpoint, messages: [...state.checkpoint.messages, ...toolMessages] });
+  }
+
+  private nativeMediaCheckpoint(state: NativeMediaConfirmation, result: ToolResult): string {
+    const ids = result.assetIds ?? (result.assetId ? [result.assetId] : []);
+    const checkpoint = {
+      ...state.checkpoint, messages: [...state.checkpoint.messages, {
+        role: "tool" as const, tool_call_id: state.callId,
+        content: JSON.stringify({ ok: result.ok, summary: result.summary, assetIds: ids }),
+      }],
+    };
+    return JSON.stringify(checkpoint);
+  }
+
+  private finishNativeTask(conversation: Conversation, pending: ChatMessage, operation: ChatMessage, result: ToolResult, state: NativeMediaConfirmation): void {
+    const ownsWait = conversation.status === "waiting_task" && !this.isRunning(conversation.id)
+      && !this.db.hasUserMessageAfter(conversation.id, operation.seq);
+    const brainChannel = this.db.getChannel(conversation.brainChannelId);
+    const { checkpoint } = state;
+    const shouldResume = ownsWait && result.ok && usesNativeCreativeTools(conversation)
+      && conversation.brainChannelId === checkpoint.channelId && conversation.brainModel === checkpoint.model
+      && brainChannel?.updatedAt === checkpoint.channelVersion;
+    const resume = this.db.completeNativeMediaTask(conversation.id, pending.id, operation.id, result,
+      ownsWait, shouldResume ? this.nativeMediaCheckpoint(state, result) : null);
+    const updated = this.db.getMessage(pending.id);
+    if (updated) this.broadcast(conversation.id, { type: "message", message: updated });
+    if (resume) {
+      this.startTurn(conversation.id, null, "recovered");
+      return;
+    }
+    if (ownsWait) this.broadcast(conversation.id, { type: "done", status: "idle" });
   }
 
   private async runLoop(
@@ -1140,6 +1600,7 @@ export class AgentService {
       ...(plan.say ? { say: plan.say } : {}),
       ...(plan.consistency ? { consistency: plan.consistency } : {}),
     }, controller, {}, turnAttachmentIds);
+    if (this.stopOnUnknownSubmission(conversationId, outcome.results)) return "stop";
     if (outcome.terminal) {
       // 视频这类异步任务：交给 TaskRunner 的完成事件续跑（§12.2）
       this.setStatus(conversationId, "waiting_task");
@@ -1283,7 +1744,7 @@ export class AgentService {
     conversation: Conversation,
     plan: { tool: AgentToolName; args: Record<string, unknown>; say?: string },
     controller: AbortController,
-    options: { existingMessageId?: string; confirmed?: boolean },
+    options: { existingMessageId?: string; confirmed?: boolean; strictSubmission?: boolean; backgroundMedia?: boolean },
     turnAttachmentIds: string[] = [],
   ): Promise<ToolOutcome> {
     const conversationId = conversation.id;
@@ -1302,12 +1763,14 @@ export class AgentService {
     this.broadcast(conversationId, { type: "message", message: callMessage });
 
     const ctx = this.toolContext(conversation, controller, options, turnAttachmentIds);
-    const outcome = await this.batch.callToolSafely({ tool: plan.tool, args: plan.args }, ctx);
+    const outcome = await this.batch.callToolSafely({ tool: plan.tool, args: plan.args }, {
+      ...ctx, operationId: callMessage.id, strictSubmission: options.strictSubmission, backgroundMedia: options.backgroundMedia,
+    });
 
     // 新产物不自动进画布：画布是用户这一轮明确挑的图，生成结果先去素材库。
     const toolMessage = this.db.appendMessage({
       conversationId, role: "tool", content: outcome.result.summary,
-      toolName: plan.tool, toolResult: outcome.result,
+      toolName: plan.tool, toolResult: { ...outcome.result, data: { ...outcome.result.data, agentOperationId: callMessage.id } },
       taskId: outcome.result.taskId ?? null, assetId: outcome.result.assetId ?? null,
       // 异步任务先挂 pending，等完成事件再定稿（§12.2）
       status: outcome.terminal ? "pending" : outcome.result.ok ? "ok" : "error",
@@ -1327,9 +1790,12 @@ export class AgentService {
 
   // ── 收尾 ───────────────────────────────────────────────────────────────────
 
-  private supersedePendingConfirmations(conversationId: string) {
+  private supersedePendingConfirmations(conversationId: string, nativeOnly = false) {
     for (const message of this.db.listPendingMessages(conversationId)) {
       if (!message.confirm) continue;
+      const native = Boolean(this.db.getNativeMediaConfirmation(message.id));
+      if (nativeOnly && !native) continue;
+      if (native && !this.db.claimAgentConfirmation(message, "reject")) continue;
       this.db.updateMessage(message.id, { confirm: null, status: "error", errorMessage: "已被用户的新消息取代" });
       const updated = this.db.getMessage(message.id);
       if (updated) this.broadcast(conversationId, { type: "message", message: updated });

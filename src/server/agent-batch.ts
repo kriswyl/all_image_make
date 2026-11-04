@@ -176,6 +176,18 @@ export class BatchExecutor {
     const base = await this.runOneTool(calls[0]!, ctx, rows[0]!.id);
     const results: ToolOutcome[] = [base];
 
+    if (base.result.error === "SUBMISSION_UNKNOWN") {
+      for (const row of rows.slice(1)) {
+        const summary = "基准图提交状态待核对，依赖它的生成任务尚未提交。";
+        const result = { ok: false, summary, error: "DEPENDENCY_UNKNOWN" };
+        this.host.db.updateMessage(row.id, { status: "error", content: summary, toolResult: result, errorMessage: summary });
+        const updated = this.host.db.getMessage(row.id);
+        if (updated) this.host.broadcast(conversation.id, { type: "message", message: updated });
+        results.push({ result, terminal: false });
+      }
+      return this.finishBatch(conversation, calls, results);
+    }
+
     if (base.producedAssetId) {
       // 后续几张必须参考**基准图**，不能又去参考用户最开始附带的那几张
       const consistentCtx = this.host.toolContext(
@@ -236,7 +248,7 @@ export class BatchExecutor {
 
   /** 批量里的单个调用：跑它，然后把它自己那条 pending 行定稿 */
   async runOneTool(call: PlannedCall, ctx: ToolContext, rowId: string): Promise<ToolOutcome> {
-    const outcome = await this.callToolSafely(call, ctx);
+    const outcome = await this.callToolSafely(call, { ...ctx, operationId: rowId });
     this.host.db.updateMessage(rowId, {
       content: outcome.result.summary,
       toolResult: outcome.result,
@@ -259,6 +271,10 @@ export class BatchExecutor {
   /** 工具抛出来的异常翻译成一条失败结果，别让它带着堆栈冲掉整批 */
   async callToolSafely(call: PlannedCall, ctx: ToolContext): Promise<ToolOutcome> {
     try {
+      // 能力查找是编排工具，只用于下一轮开放工具，不能真的跑在批量里。
+      if (call.tool === "capability_search") {
+        return { result: { ok: false, summary: "能力查找不能放进批量调用", error: "TOOL_NOT_BATCHABLE" }, terminal: false };
+      }
       return await runAgentTool(call.tool, call.args, ctx);
     } catch (error) {
       return {

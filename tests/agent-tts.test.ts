@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/server/app";
 import { pcmToWav } from "../src/server/adapters";
@@ -15,10 +15,12 @@ afterEach(async () => {
 });
 
 describe("对话里生成配音", () => {
-  it("generate_speech 同步完成，音频回到工具卡片，且不碰画布", async () => {
+  it.each(["creative", "chat"] as const)("配音回到原工具卡并保存音频（%s）", async (chatMode) => {
+    const native = chatMode === "chat";
     let origin = "";
     let brainCalls = 0;
     let submitted: Record<string, unknown> | null = null;
+    const brainRequests: Array<{ messages: Array<{ role: string; tool_call_id?: string; content?: string }> }> = [];
     const wav = pcmToWav(Buffer.alloc(48_000), 24_000, 1);
 
     const mock = http.createServer((req, res) => {
@@ -27,12 +29,18 @@ describe("对话里生成配音", () => {
       req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       req.on("end", () => {
         if (url.pathname === "/v1/chat/completions") {
+          brainRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
           brainCalls += 1;
           const plan = brainCalls === 1
             ? { tool: "generate_speech", args: { text: "你好，欢迎收听。", voice: "Kore", style: "亲切" }, say: "这就读。" }
             : { tool: "reply", args: { text: "配音好了。" }, say: "好了。" };
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
+          const message = !native ? { content: JSON.stringify(plan) } : brainCalls === 1
+            ? { tool_calls: [{ id: "speech-call", type: "function", function: { name: "generate_speech", arguments: JSON.stringify({
+              text: "「A: 你好。」\n「B: 欢迎收听。」", voice: "kore", secondVoice: "Puck", style: "亲切",
+            }) } }] }
+            : { content: "配音好了。" };
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }] }));
           return;
         }
         if (url.pathname.includes(":generateContent")) {
@@ -69,8 +77,16 @@ describe("对话里生成配音", () => {
     }).expect(201);
 
     const conversationId = (await request(app).post("/api/conversations").send({}).expect(201)).body.data.id as string;
+    if (native) await request(app).patch(`/api/conversations/${conversationId}`).send({ chatMode, nativeImagePilot: true }).expect(200);
     await request(app).post(`/api/conversations/${conversationId}/messages`)
-      .send({ text: "把「你好，欢迎收听。」读一下" }).expect(202);
+      .send({ text: native ? "生成双人配音，Kore 读 A：你好。Puck 读 B：欢迎收听。" : "把「你好，欢迎收听。」读一下" }).expect(202);
+    if (native) {
+      await vi.waitFor(() => expect(context.db.getConversation(conversationId)?.status).toBe("awaiting_confirmation"));
+      const confirmation = context.db.listPendingMessages(conversationId).find(row => row.confirm)!;
+      expect(confirmation.confirm).toMatchObject({ prompt: "A：你好。\nB：欢迎收听。", speechVoice: "Kore", speechSecondVoice: "Puck" });
+      expect(submitted).toBeNull();
+      await request(app).post(`/api/conversations/${conversationId}/confirm`).send({ messageId: confirmation.id, decision: "approve" }).expect(200);
+    }
 
     let view: Record<string, unknown> = {};
     for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -101,7 +117,20 @@ describe("对话里生成配音", () => {
     expect(media[0]!.asset.mimeType).toBe("audio/wav");
     expect(media[0]!.asset.duration).toBe(1);
 
-    expect(submitted).toMatchObject({
+    if (native) {
+      expect(submitted).toMatchObject({
+        contents: [{ parts: [
+          { text: "你好。", speechMetadata: { speaker: "A", style: "亲切" } },
+          { text: "欢迎收听。", speechMetadata: { speaker: "B", style: "亲切" } },
+        ] }],
+        generationConfig: { speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [
+          { speaker: "A", voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } },
+          { speaker: "B", voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } } },
+        ] } } },
+      });
+      const result = brainRequests.at(-1)?.messages.find(message => message.tool_call_id === "speech-call");
+      expect(JSON.parse(result?.content ?? "{}").assetIds).toEqual([resultRow.assetId]);
+    } else expect(submitted).toMatchObject({
       contents: [{ parts: [{ text: "你好，欢迎收听。", speechMetadata: { style: "亲切" } }] }],
       generationConfig: {
         responseModalities: ["AUDIO"],

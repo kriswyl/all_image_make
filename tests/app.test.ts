@@ -1048,7 +1048,14 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
   it("resumes polling a video task after a restart instead of failing it, even with a trailing-slash Base URL", async () => {
     let origin = "";
     let pollCount = 0;
+    let disconnectedSubmissions = 0;
     origin = await startMock((req, res) => {
+      if (req.method === "POST") {
+        disconnectedSubmissions++;
+        req.resume();
+        req.on("end", () => res.destroy());
+        return;
+      }
       // Base URL 带尾斜杠时，只有走 joinEndpoint 才会请求到这里；拼字符串会变成 //api/... 而 404
       if (req.url === "/api/v1/tasks/remote-9") {
         pollCount += 1;
@@ -1082,11 +1089,23 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     first.context.db.updateTask("task-resume", { remoteTaskId: "remote-9" });
     // 还没拿到上游 id 的任务没法跨重启恢复
     first.context.db.createTask({ id: "task-no-remote", channelId, model: "wan3.0-video", prompt: "no id", input });
+    const chat = first.context.db.createConversation({ title: "恢复创作", brainChannelId: channelId, brainModel: "mock", videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false });
+    first.context.db.setConversationStatus(chat.id, "running");
+    const known = first.context.db.appendMessage({ conversationId: chat.id, role: "assistant", toolName: "generate_video", toolArgs: { prompt: "known" } });
+    const unknown = first.context.db.appendMessage({ conversationId: chat.id, role: "assistant", toolName: "generate_video", toolArgs: { prompt: "unknown" } });
+    first.context.db.createTask({ id: "agent-submitting", channelId, model: "wan3.0-video", prompt: "submitted without response", input, ownerConversationId: chat.id, agentOperationId: unknown.id, status: "submitting" });
+    first.context.db.createTask({ id: "agent-known", channelId, model: "wan3.0-video", prompt: "known", input, ownerConversationId: chat.id, agentOperationId: known.id, status: "running" });
+    first.context.db.updateTask("agent-known", { remoteTaskId: "remote-9" });
+    first.context.agent.dispose();
     first.context.db.close();
 
     const second = createApp({ dataDir });
-    cleanups.push(() => { second.context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    cleanups.push(() => { second.context.agent.dispose(); second.context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
     await second.context.runner.resume();
+    second.context.agent.recoverStaleConversations();
+    second.context.agent.recoverStaleConversations();
+    expect(second.context.db.getTaskRow("agent-submitting")).toMatchObject({ status: "failed", errorCode: "SUBMISSION_UNKNOWN", agentOperationId: unknown.id });
+    await expect(second.context.runner.retry("agent-submitting")).rejects.toMatchObject({ code: "SUBMISSION_UNKNOWN" });
 
     const resumed = await waitFor(() => {
       const row = second.context.db.getTaskRow("task-resume");
@@ -1095,6 +1114,16 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect(resumed.status).toBe("succeeded");
     expect(pollCount).toBeGreaterThanOrEqual(2);
     expect(second.context.db.getTaskRow("task-no-remote")).toMatchObject({ status: "failed", errorCode: "SERVICE_RESTARTED" });
+    const knownResult = await waitFor(() => second.context.db.listMessages(chat.id).find(message => message.taskId === "agent-known" && message.status === "ok"), "找回原任务的结果卡");
+    expect(knownResult?.toolResult?.assetId).toBeTruthy();
+    const unknownResults = second.context.db.listMessages(chat.id).filter(message => message.taskId === "agent-submitting");
+    expect(unknownResults).toHaveLength(1);
+    expect(unknownResults[0]!.content).toContain("核对");
+    const disconnected = await second.context.runner.create(input, [], undefined, "conversation", chat.id, "live-disconnect-test");
+    const disconnectedResult = await second.context.runner.waitFor(disconnected.id);
+    expect(disconnectedResult.errorCode).toBe("SUBMISSION_UNKNOWN");
+    await expect(second.context.runner.retry(disconnected.id)).rejects.toMatchObject({ code: "SUBMISSION_UNKNOWN" });
+    expect(disconnectedSubmissions).toBe(1);
 
     // 视频落盘在默认产物目录里
     const assets = second.context.db.listAssets("task-resume");

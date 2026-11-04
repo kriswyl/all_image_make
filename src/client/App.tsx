@@ -854,6 +854,7 @@ export function App() {
             onEdit={setEditorChannel}
             onDelete={deleteChannel}
             onToast={showToast}
+            onChannelUpdated={(updated) => setChannels(current => current.map(channel => channel.id === updated.id ? updated : channel))}
           />
         ) : null}
         {!loading && view === "video" ? (
