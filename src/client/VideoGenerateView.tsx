@@ -7,12 +7,13 @@ import { api } from "./api";
 import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
+import { SelectMenu, type SelectOption } from "./ui/SelectMenu";
 import { LazyVideoThumb } from "./LazyVideoThumb";
 import { PromptPolishButton } from "./PromptPolishButton";
 import { useFileDrop } from "./useFileDrop";
 import { useImagePaste } from "./useImagePaste";
 import type {
-  Asset, Channel, KlingCharacterOrientation, KlingMediaInput, KlingVideoMode, SeedanceMediaInput,
+  Asset, Channel, GenerationInput, KlingCharacterOrientation, KlingMediaInput, KlingVideoMode, SeedanceMediaInput,
   SeedanceMediaRole, SeedanceVideoMode, Task, TaskStatus, VideoMediaInput, VideoMediaType, WanVideoMode,
 } from "../shared/types";
 import {
@@ -199,8 +200,14 @@ export function VideoGenerateView(props: {
   const [klingMultiShot, setKlingMultiShot] = usePersistentState("klingMultiShot", true);
   const [urlInputs, setUrlInputs] = usePersistentState<Record<VideoMediaType, string>>("urlInputs", {} as Record<VideoMediaType, string>);
   const [submitting, setSubmitting] = useState(false);
-  const [uploadingVideo, setUploadingVideo] = useState(false);
-  const [videoUpload, setVideoUpload] = useState<{ name: string; url: string; size: number; duration: number; target: "wan" | "kling" } | null>(null);
+  const [readingVideo, setReadingVideo] = useState(false);
+  const [localVideo, setLocalVideo] = useState<{ file: File; duration: number; target: "wan" | "kling" } | null>(null);
+  const [localVideoPreview, setLocalVideoPreview] = useState("");
+  useEffect(() => {
+    const url = localVideo ? URL.createObjectURL(localVideo.file) : "";
+    setLocalVideoPreview(url);
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [localVideo]);
   const [audioUpload, setAudioUpload] = useState<{ name: string; dataUri: string; size: number; duration: number } | null>(null);
   const uploadEpoch = useRef(0);
 
@@ -232,35 +239,29 @@ export function VideoGenerateView(props: {
   const urlModeSpec = !isKling ? modeSpec as WanModeSpec | null : null;
   useEffect(() => {
     uploadEpoch.current += 1;
-    setUploadingVideo(false);
+    setReadingVideo(false);
     setAudioUpload(null);
-    setVideoUpload((old) => {
-      if (old?.target === "wan") setUrlInputs((current) => current.reference_video === old.url ? { ...current, reference_video: "" } : current);
-      if (old?.target === "kling") setKlingReferenceVideoUrl((current) => current === old.url ? "" : current);
-      return null;
-    });
+    setLocalVideo(null);
   }, [props.selectedChannelId, wanMode, klingMode]);
 
-  async function uploadVideo(file: File, target: "wan" | "kling") {
-    const epoch = uploadEpoch.current;
+  async function selectVideo(file: File, target: "wan" | "kling") {
+    const epoch = ++uploadEpoch.current;
     try {
       if (!channel?.uploadEndpoint) throw new Error("该渠道未配置视频上传服务，请手动填写公网地址");
       if (!['video/mp4', 'video/quicktime'].includes(file.type)) throw new Error("请选择 MP4 或 MOV 视频");
       if (file.size > 100 * 1024 * 1024) throw new Error("视频不能超过 100 MB");
-      setUploadingVideo(true);
+      setReadingVideo(true);
       const seconds = await mediaDuration(file, "video");
       const max = target === "kling" ? (klingCharacterOrientation === "image" ? 10 : 30) : 15;
       const min = target === "kling" ? 3 : 1;
       if (seconds < min || seconds > max) throw new Error(`视频时长需为 ${min}–${max} 秒`);
       if (epoch !== uploadEpoch.current) return;
-      const result = await api.uploadReferenceVideo(channel.id, file);
-      if (epoch !== uploadEpoch.current) return;
-      if (target === "wan") setUrlInputs((current) => ({ ...current, reference_video: result.url }));
-      else setKlingReferenceVideoUrl(result.url);
-      setVideoUpload({ name: file.name, url: result.url, size: file.size, duration: seconds, target });
+      if (target === "wan") setUrlInputs((current) => ({ ...current, reference_video: "" }));
+      else setKlingReferenceVideoUrl("");
+      setLocalVideo({ file, duration: seconds, target });
     } catch (error) {
-      if (epoch === uploadEpoch.current) props.onToast("error", error instanceof Error ? error.message : "视频上传失败");
-    } finally { if (epoch === uploadEpoch.current) setUploadingVideo(false); }
+      if (epoch === uploadEpoch.current) props.onToast("error", error instanceof Error ? error.message : "视频读取失败");
+    } finally { if (epoch === uploadEpoch.current) setReadingVideo(false); }
   }
 
   async function selectAudio(file: File) {
@@ -274,6 +275,29 @@ export function VideoGenerateView(props: {
       if (dataUri.length > 15 * 1024 * 1024 * 0.9) throw new Error("音频过大，请换成更小的音频，为其他素材留出空间");
       if (epoch === uploadEpoch.current) setAudioUpload({ name: file.name, dataUri, size: file.size, duration });
     } catch (error) { if (epoch === uploadEpoch.current) props.onToast("error", error instanceof Error ? error.message : "音频读取失败"); }
+  }
+
+  function referenceVideoPicker(target: "wan" | "kling") {
+    if (!channel?.uploadEndpoint) return <p className="mode-hint">该渠道未配置上传地址，请手动填写公网地址。</p>;
+    const selected = localVideo?.target === target ? localVideo : null;
+    return <>
+      <label className={`media-upload-button ${readingVideo ? "is-loading" : ""}`}>
+        <Upload size={14} />{readingVideo ? "读取中…" : selected ? "更换视频" : "选择视频"}
+        <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" disabled={readingVideo || submitting} onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) void selectVideo(file, target);
+        }} />
+      </label>
+      {selected ? <>
+        <div className="media-file-chip">
+          <Film size={15} />
+          <span><strong title={selected.file.name}>{selected.file.name}</strong><small>{selected.duration.toFixed(1)} 秒 · {(selected.file.size / 1024 / 1024).toFixed(1)} MB · 提交时上传</small></span>
+          <button type="button" aria-label="移除已选择视频" disabled={readingVideo || submitting} onClick={() => setLocalVideo(null)}><X size={14} /></button>
+        </div>
+        {localVideoPreview ? <video className="reference-video-preview" src={localVideoPreview} aria-label="本地参考视频预览" controls preload="metadata" /> : null}
+      </> : null}
+    </>;
   }
   const drop = useFileDrop(maxReferenceImages > 0 && !submitting && referenceImages.length < maxReferenceImages, references.dropFiles);
   const pasteImages = useCallback((files: File[]) => {
@@ -339,6 +363,7 @@ export function VideoGenerateView(props: {
     }
 
     for (const slot of spec.urlSlots) {
+      if (slot.type === "reference_video" && localVideo?.target === "wan") continue;
       if (slot.type === "reference_audio" && audioUpload) {
         media.push({ type: slot.type, url: audioUpload.dataUri });
         continue;
@@ -403,7 +428,9 @@ export function VideoGenerateView(props: {
       if (!type) return `${spec.label}最多 ${slots.length} 张图片`;
       media.push({ type, url: await fileToVideoDataUrl(item.file) });
     }
-    if (spec.needsReferenceVideo) {
+    if (spec.needsReferenceVideo && localVideo?.target === "kling") {
+      if (klingCharacterOrientation === "image" && localVideo.duration > 10) return "角色朝向选「图片」时视频需 ≤10 秒";
+    } else if (spec.needsReferenceVideo) {
       const url = klingReferenceVideoUrl.trim();
       if (!url) return "运动控制需要填写参考视频的公网地址";
       if (!/^https?:\/\//i.test(url)) return "参考视频需要 http(s):// 公网地址";
@@ -413,7 +440,7 @@ export function VideoGenerateView(props: {
   }
 
   async function generate() {
-    if (uploadingVideo) return props.onToast("error", "视频上传中，请稍候");
+    if (readingVideo) return props.onToast("error", "视频读取中，请稍候");
     if (!channel || !caps) return props.onToast("error", "请先选择视频渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
@@ -449,8 +476,11 @@ export function VideoGenerateView(props: {
         klingVideoMedia = built.length ? built : undefined;
       }
 
-      if (!confirmGeneration({ kind: "视频生成", model: props.selectedModel, channel: channel.name, detail: `时长：${caps.durations.fixed ?? duration} 秒 · 分辨率：${resolution}` })) return;
-      const task = await api.generate({
+      const sourceFile = (isWan && localVideo?.target === "wan" && urlModeSpec?.urlSlots.some(slot => slot.type === "reference_video"))
+        || (isKling && localVideo?.target === "kling" && klingCap?.needsReferenceVideo) ? localVideo?.file : undefined;
+      const detail = `时长：${caps.durations.fixed ?? duration} 秒 · 分辨率：${resolution}${sourceFile ? " · 参考视频将上传至渠道并生成公网链接" : ""}`;
+      if (!confirmGeneration({ kind: "视频生成", model: props.selectedModel, channel: channel.name, detail })) return;
+      const input: GenerationInput = {
         channelId: channel.id,
         model: props.selectedModel,
         prompt: prompt.trim(),
@@ -474,7 +504,9 @@ export function VideoGenerateView(props: {
         klingMultiShot: isKling ? klingMultiShot : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, (isWan || isSeedance || isKling) ? [] : referenceImages.map((item) => item.file));
+      };
+      const task = sourceFile ? await api.generateWithReferenceVideo(input, sourceFile)
+        : await api.generate(input, (isWan || isSeedance || isKling) ? [] : referenceImages.map((item) => item.file));
       props.onTask(task);
       props.onToast("success", "视频任务已提交");
     } catch (error) {
@@ -624,13 +656,13 @@ export function VideoGenerateView(props: {
                     <span>视频地址<em className="required-mark">必填</em></span>
                     <input
                       value={klingReferenceVideoUrl}
-                      onChange={(event) => { setKlingReferenceVideoUrl(event.target.value); if (videoUpload?.target === "kling" && event.target.value !== videoUpload.url) setVideoUpload(null); }}
+                      disabled={readingVideo || submitting}
+                      onChange={(event) => { setKlingReferenceVideoUrl(event.target.value); if (localVideo?.target === "kling") setLocalVideo(null); }}
                       placeholder="https://…/motion.mp4"
                       spellCheck={false}
                     />
                   </label>
-                  {channel?.uploadEndpoint ? <label className={`media-upload-button ${uploadingVideo ? "is-loading" : ""}`}><Upload size={14} />{uploadingVideo ? "上传中…" : "选择视频"}<input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" disabled={uploadingVideo} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void uploadVideo(f, "kling"); }} /></label> : <p className="mode-hint">该渠道未配置上传地址，请手动填写公网地址。</p>}
-                  {videoUpload?.target === "kling" ? <div className="media-file-chip"><Film size={15} /><span><strong title={videoUpload.name}>{videoUpload.name}</strong><small>{videoUpload.duration.toFixed(1)} 秒 · {(videoUpload.size / 1024 / 1024).toFixed(1)} MB · 已上传</small></span><button type="button" aria-label="移除已上传视频" onClick={() => { setKlingReferenceVideoUrl(""); setVideoUpload(null); }}><X size={14} /></button></div> : null}</div>
+                  {referenceVideoPicker("kling")}</div>
                   <p className="mode-hint">
                     上传后文件可通过公网访问，请勿上传敏感内容。
                     角色朝向选「图片」时视频需 ≤10 秒，选「视频」时 ≤30 秒。
@@ -646,14 +678,13 @@ export function VideoGenerateView(props: {
                       <span>{slot.label}{slot.required ? <em className="required-mark">必填</em> : null}</span>
                       <input
                         value={urlInputs[slot.type] ?? ""}
-                        onChange={(event) => { setUrlInputs({ ...urlInputs, [slot.type]: event.target.value }); if (slot.type === "reference_video" && videoUpload?.target === "wan" && event.target.value !== videoUpload.url) setVideoUpload(null); }}
+                        disabled={slot.type === "reference_video" && (readingVideo || submitting)}
+                        onChange={(event) => { setUrlInputs({ ...urlInputs, [slot.type]: event.target.value }); if (slot.type === "reference_video" && localVideo?.target === "wan") setLocalVideo(null); }}
                         placeholder={slot.placeholder}
                         spellCheck={false}
                       />
                     </label>
-                    {slot.type === "reference_video" && channel?.uploadEndpoint ? <label className={`media-upload-button ${uploadingVideo ? "is-loading" : ""}`}><Upload size={14} />{uploadingVideo ? "上传中…" : "选择视频"}<input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" disabled={uploadingVideo} onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void uploadVideo(f, "wan"); }} /></label> : null}
-                    {slot.type === "reference_video" && !channel?.uploadEndpoint ? <p className="mode-hint">该渠道未配置上传地址，请手动填写公网地址。</p> : null}
-                    {slot.type === "reference_video" && videoUpload?.target === "wan" ? <div className="media-file-chip"><Film size={15} /><span><strong title={videoUpload.name}>{videoUpload.name}</strong><small>{videoUpload.duration.toFixed(1)} 秒 · {(videoUpload.size / 1024 / 1024).toFixed(1)} MB · 已上传</small></span><button type="button" aria-label="移除已上传视频" onClick={() => { setUrlInputs((v) => ({ ...v, reference_video: "" })); setVideoUpload(null); }}><X size={14} /></button></div> : null}
+                    {slot.type === "reference_video" ? referenceVideoPicker("wan") : null}
                     {slot.type === "reference_audio" ? <><label className="media-upload-button"><Upload size={14} />选择音频<input type="file" accept="audio/mpeg,audio/mp4,audio/aac,audio/wav,audio/x-wav,.mp3,.m4a,.aac,.wav" onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) void selectAudio(f); }} /></label>{audioUpload ? <div className="media-file-chip"><span className="media-audio-icon">♫</span><span><strong title={audioUpload.name}>{audioUpload.name}</strong><small>{audioUpload.duration.toFixed(1)} 秒 · {(audioUpload.size / 1024 / 1024).toFixed(1)} MB · 优先于链接</small></span><button type="button" aria-label="移除已选择音频" onClick={() => setAudioUpload(null)}><X size={14} /></button></div> : <p className="media-input-note">MP3 / M4A / AAC / WAV · 最长 15 秒</p>}</> : null}
                     </div>
                   ))}
@@ -680,33 +711,53 @@ export function VideoGenerateView(props: {
                   </label>
                   <label>
                     <span>分辨率</span>
-                    <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
-                      {resolutionOptions.map((item) => <option key={item} value={item}>{item}</option>)}
-                    </select>
+                    <SelectMenu
+                      value={resolution}
+                      options={resolutionOptions.map((item) => ({ value: item, label: item }))}
+                      onChange={setResolution}
+                      ariaLabel="分辨率"
+                      className="param-select"
+                    />
                   </label>
                   {isKling && klingMode === "motion-control" ? (
                     <label>
                       <span>角色朝向</span>
-                      <select value={klingCharacterOrientation} onChange={(event) => setKlingCharacterOrientation(event.target.value as KlingCharacterOrientation)}>
-                        <option value="video">跟随参考视频（≤30 秒）</option>
-                        <option value="image">跟随角色图片（≤10 秒）</option>
-                      </select>
+                      <SelectMenu
+                        value={klingCharacterOrientation}
+                        options={[
+                          { value: "video", label: "跟随参考视频（≤30 秒）" },
+                          { value: "image", label: "跟随角色图片（≤10 秒）" },
+                        ]}
+                        onChange={(value) => setKlingCharacterOrientation(value as KlingCharacterOrientation)}
+                        ariaLabel="角色朝向"
+                        className="param-select"
+                        minWidth={220}
+                      />
                     </label>
                   ) : null}
                   {caps.ratioField === "aspectRatio" && caps.aspectRatios.length && klingAspectRatio ? (
                     <label>
                       <span>宽高比</span>
-                      <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>
-                        {caps.aspectRatios.map((item) => <option key={item} value={item}>{item}</option>)}
-                      </select>
+                      <SelectMenu
+                        value={aspectRatio}
+                        options={caps.aspectRatios.map((item) => ({ value: item, label: item }))}
+                        onChange={setAspectRatio}
+                        ariaLabel="宽高比"
+                        className="param-select"
+                      />
                     </label>
                   ) : null}
                   {caps.ratioField === "ratio" && caps.aspectRatios.length ? (
                     <label>
                       <span>宽高比</span>
-                      <select value={ratio} disabled={ratioLocked} onChange={(event) => setRatio(event.target.value)}>
-                        {caps.aspectRatios.map((item) => <option key={item} value={item}>{item === "adaptive" ? "自适应" : item}</option>)}
-                      </select>
+                      <SelectMenu
+                        value={ratio}
+                        disabled={ratioLocked}
+                        options={caps.aspectRatios.map((item) => ({ value: item, label: item === "adaptive" ? "自适应" : item }))}
+                        onChange={setRatio}
+                        ariaLabel="宽高比"
+                        className="param-select"
+                      />
                     </label>
                   ) : null}
                   {caps.supportsAudio ? (
@@ -757,14 +808,19 @@ export function VideoGenerateView(props: {
                     </label>
                     <label>
                       <span>快速选择</span>
-                      <select value={[300, 600, 900, 1200].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
-                        onChange={(event) => { if (event.target.value !== "custom") setTimeoutSeconds(Number(event.target.value)); }}>
-                        <option value="300">5 分钟</option>
-                        <option value="600">10 分钟（默认）</option>
-                        <option value="900">15 分钟</option>
-                        <option value="1200">20 分钟</option>
-                        <option value="custom">自定义</option>
-                      </select>
+                      <SelectMenu
+                        value={[300, 600, 900, 1200].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
+                        options={[
+                          { value: "300", label: "5 分钟" },
+                          { value: "600", label: "10 分钟（默认）" },
+                          { value: "900", label: "15 分钟" },
+                          { value: "1200", label: "20 分钟" },
+                          { value: "custom", label: "自定义" },
+                        ]}
+                        onChange={(value) => { if (value !== "custom") setTimeoutSeconds(Number(value)); }}
+                        ariaLabel="快速选择等待时长"
+                        className="param-select"
+                      />
                     </label>
                   </div>
                   <div className="parameter-subtitle">高级 JSON</div>
@@ -775,7 +831,7 @@ export function VideoGenerateView(props: {
 
             <div className="submit-row">
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : <span />}
-              <button className="primary-button generate-button" onClick={generate} disabled={submitting || uploadingVideo || readingImage || !channel || !props.selectedModel}>
+              <button className="primary-button generate-button" onClick={generate} disabled={submitting || readingVideo || readingImage || !channel || !props.selectedModel}>
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Film size={18} />}
                 {modeSpec ? modeSpec.label : referenceImages.length ? "图生视频" : "文生视频"}
               </button>
@@ -808,7 +864,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [theater, setTheater] = useState(false);
-  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
+  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || item.errorCode === "VIDEO_TIMEOUT" || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
   // 竖屏视频两侧会空出大片版面，用画面自身的模糊放大图垫底
   const [portraitAssetId, setPortraitAssetId] = useState<string | null>(null);
@@ -829,8 +885,12 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 
   async function retry() {
     if (!task) return;
-    if (!confirmGeneration({ kind: "视频生成", model: task.model, channel: task.channelName, retry: true })) return;
-    try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
+    const continueQuery = task.errorCode === "VIDEO_TIMEOUT";
+    if (!continueQuery && !confirmGeneration({ kind: "视频生成", model: task.model, channel: task.channelName, retry: true })) return;
+    try {
+      onTask(await (continueQuery ? api.continueTaskQuery(task.id) : api.retry(task.id)));
+      onToast("success", continueQuery ? "已继续查询原任务" : "已重新提交");
+    }
     catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }
 
@@ -867,7 +927,9 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
           </div>
         ) : null}
         {task && task.status === "failed" ? (
-          <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div>
+          <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode === "VIDEO_TIMEOUT" ? "查询已暂停" : task.errorCode}</strong><span>{task.errorMessage}</span>
+            {task.errorCode === "VIDEO_TIMEOUT" ? <button type="button" className="secondary-button" onClick={() => void retry()}>继续查询</button> : null}
+          </div>
         ) : null}
         {task && !busy && task.status !== "failed" && !task.assets.length ? <EmptyVideoResult /> : null}
         {activeAsset ? (
@@ -940,7 +1002,7 @@ function VideoResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
           <div className="recent-thumbs">
             {recentTasks.map((item) => (
               <button key={item.id} type="button" className={`recent-thumb ${item.id === task?.id ? "active" : ""}`} title={`${statusLabels[item.status]} · ${item.prompt}`} aria-label={`${statusLabels[item.status]}：${item.prompt}`} onClick={() => onSelectTask(item)}>
-                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} /> : item.assets[0] ? <LazyVideoThumb src={api.assetUrl(item.assets[0].url)} alt={item.prompt} /> : null}
+                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} /> : item.assets[0] ? <LazyVideoThumb src={api.assetUrl(item.assets[0].url)} alt={item.prompt} /> : <AlertCircle className="recent-task-error" size={18} />}
                 {item.status === "succeeded" && item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
               </button>
             ))}

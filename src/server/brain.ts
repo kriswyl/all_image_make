@@ -1,6 +1,7 @@
 import type { DbChannel } from "./db.js";
 import { RemoteApiError, applyAuth, defaultEndpoint } from "./adapters.js";
 import { joinEndpoint, safeFetch } from "./security.js";
+import { parseProviderToolText, providerToolTextStream, separateProviderToolText } from "./chat-tools/provider-tool-text.js";
 
 /**
  * Agent 的大脑调用。
@@ -40,6 +41,8 @@ export interface BrainResult {
   /** 正文。推理模型在 max_tokens 被耗尽时这里会是空串，配合 truncated 判断 */
   content: string;
   toolCalls: BrainToolCall[];
+  invalidToolText?: boolean;
+  toolProtocol?: "native" | "dsml";
   /** 推理过程全文，UI 上折叠显示；非推理模型为空串 */
   reasoning: string;
   finishReason: string | null;
@@ -68,6 +71,7 @@ export interface CallBrainOptions {
   onDelta?: (delta: BrainDelta) => void;
   tools?: BrainToolSpec[];
   toolChoice?: "auto" | "none" | { type: "function"; function: { name: string } };
+  omitToolChoice?: boolean;
 }
 
 /**
@@ -97,7 +101,7 @@ function buildRequestBody(options: CallBrainOptions) {
     stream: true,
     max_tokens: options.maxTokens ?? BRAIN_DEFAULT_MAX_TOKENS,
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-    ...(options.tools?.length ? { tools: options.tools, tool_choice: options.toolChoice ?? "auto" } : {}),
+    ...(options.tools?.length ? { tools: options.tools, ...(options.omitToolChoice ? {} : { tool_choice: options.toolChoice ?? "auto" }) } : {}),
   };
 }
 
@@ -145,6 +149,28 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
   const timeoutMs = options.timeoutMs ?? BRAIN_DEFAULT_TIMEOUT_MS;
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+  const latestUser = options.messages.filter(message => message.role === "user").at(-1)?.content;
+  const showsToolExample = typeof latestUser === "string" && /\bDSML\b/i.test(latestUser);
+  const decodeTools = (raw: string, toolCalls: BrainToolCall[], finishReason: string | null) => {
+    if (!options.tools?.length || showsToolExample) return { content: raw, toolCalls };
+    const { content, block } = separateProviderToolText(raw);
+    if (toolCalls.length) {
+      const ids = new Set<string>();
+      const valid = toolCalls.every(call => {
+        if (!call.id || ids.has(call.id) || !options.tools!.some(tool => tool.function.name === call.name)) return false;
+        ids.add(call.id);
+        // Read-only internal submissions may contain a recoverable prefix of complete pages.
+        if (call.name === "submit_presentation_result") return true;
+        if (finishReason === "length") return false;
+        try { const input = JSON.parse(call.arguments); return input !== null && typeof input === "object" && !Array.isArray(input); }
+        catch { return false; }
+      });
+      return { content, toolCalls: valid ? toolCalls : [], invalidToolText: !valid, toolProtocol: "native" as const };
+    }
+    if (!block) return { content, toolCalls };
+    const recovered = finishReason === "length" ? undefined : parseProviderToolText(block, options.tools);
+    return { content, toolCalls: recovered ?? [], invalidToolText: !recovered, toolProtocol: "dsml" as const };
+  };
 
   const response = await safeFetch(
     request.url,
@@ -173,13 +199,13 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
   if (!contentType.includes("text/event-stream")) {
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     const message = pickMessage(payload);
-    const content = typeof message.content === "string" ? message.content : "";
+    const raw = typeof message.content === "string" ? message.content : "";
     const reasoning = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
     const finishReason = pickFinishReason(payload);
-    if (content && options.onDelta) options.onDelta({ content });
+    const decoded = decodeTools(raw, parseFullToolCalls(message.tool_calls), finishReason);
+    if (decoded.content && options.onDelta) options.onDelta({ content: decoded.content });
     return {
-      content,
-      toolCalls: parseFullToolCalls(message.tool_calls),
+      ...decoded,
       reasoning,
       finishReason,
       usage: pickUsage(payload),
@@ -199,6 +225,7 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
   let finishReason: string | null = null;
   let usage: BrainUsage | null = null;
   const toolCalls = new Map<number, BrainToolCall>();
+  const filtered = options.tools?.length && options.onDelta && !showsToolExample ? providerToolTextStream(text => options.onDelta?.({ content: text })) : undefined;
 
   const consume = (block: string) => {
     const data = parseSseBlock(block);
@@ -233,7 +260,8 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
     const piece: BrainDelta = {};
     if (typeof delta.content === "string" && delta.content) {
       content += delta.content;
-      piece.content = delta.content;
+      if (filtered) filtered.write(delta.content);
+      else piece.content = delta.content;
     }
     // 推理内容字段名各站不一：reasoning_content 是 DeepSeek 系，reasoning 是部分中转站的别名
     const reasoningPiece =
@@ -263,10 +291,10 @@ export async function callBrain(options: CallBrainOptions): Promise<BrainResult>
     }
   }
   if (buffer.trim()) consume(buffer);
+  filtered?.finish();
 
   return {
-    content,
-    toolCalls: [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call),
+    ...decodeTools(content, [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call), finishReason),
     reasoning,
     finishReason,
     usage,

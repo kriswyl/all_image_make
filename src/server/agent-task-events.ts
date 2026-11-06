@@ -20,11 +20,14 @@ export interface TaskEventHost {
   hasActiveTurn(conversationId: string): boolean;
   startTurn(conversationId: string, text: null, trigger: "task_finished"): void;
   reportTurnFailure(conversationId: string, error: unknown): void;
-  finishNativeTask?(conversation: Conversation, pending: ChatMessage, operation: ChatMessage, result: ToolResult, state: NativeMediaConfirmation): void;
+  finishNativeTask?(conversation: Conversation, pending: ChatMessage, operation: ChatMessage, result: ToolResult, state: NativeMediaConfirmation): void | Promise<void>;
 }
 
 export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   const db = host.db;
+  const taskRow = db.getTaskRow(event.task.id);
+  if (taskRow?.agentOperationId && isTerminalStatus(event.task.status)) db.executions.settleTask(taskRow.agentOperationId,event.task.id,
+    event.task.errorCode === "SUBMISSION_UNKNOWN" ? "unknown_submit" : event.task.status === "succeeded" ? "completed" : event.task.status === "cancelled" ? "cancelled" : "failed",event.task.errorCode ?? undefined);
   const conversation = db.findConversationByTask(event.task.id);
   if (!conversation) return;
 
@@ -39,8 +42,10 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   // （好让 N 张卡立刻出现），它们一旦拿到 taskId 就会满足前两个条件，
   // 被这条「异步任务收口」的逻辑当成自己的任务。
   const pendingMessages = db.listPendingMessages(conversation.id);
-  const pending = pendingMessages
+  const active = pendingMessages
     .find((message) => message.taskId === event.task.id && !message.confirm && message.toolResult?.async === true);
+  const continued = active ? null : db.findTaskTimeoutMessage(conversation.id, event.task.id);
+  const pending = active ?? continued;
   if (!pending) {
     // 收尾消息已经被别人处理掉了（用户中断、会话被删）。至少别让状态卡在 waiting_task
     if (conversation.status === "waiting_task" && !pendingMessages.some(message => message.toolResult?.async)) {
@@ -79,15 +84,16 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
     : `${label}生成失败：${event.task.errorMessage ?? event.task.errorCode ?? "上游没有返回结果"}`;
   // async 标记只在「等任务」时有意义；落库时丢掉，免得回放给大脑时它以为还没做完
   const previous = pending.toolResult ?? { ok: false, summary: "" };
-  const { async: _pending, ...rest } = previous;
+  const { async: _pending, error: _previousError, ...rest } = previous;
   // Midjourney 的 U/V/R 按钮藏在任务 meta 里；带上给对话卡片直接渲染，
   // 用户不用跳去生成历史才能继续放大 / 变体 / 重绘。
   const midjourneyButtons = midjourneyUsableButtons(event.task.remoteMeta?.midjourney?.buttons ?? []);
   const imageData = state?.target.kind === "image" && operation && adapter
     ? { model: event.task.model, count: producedAssets.length, parameterNotes: auditParameters(adapter, operation.toolArgs ?? {}, event.task.effectiveParameters) }
     : undefined;
-  const data = previous.data || imageData || midjourneyButtons.length ? {
+  const data = previous.data || imageData || midjourneyButtons.length || continued ? {
     ...previous.data, ...imageData,
+    ...(continued ? { continuedQuery: true } : {}),
     ...(midjourneyButtons.length ? { midjourneyButtons, midjourneyTaskId: event.task.id } : {}),
   } : undefined;
   const result: ToolResult = {
@@ -100,8 +106,9 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
     } : {}),
     ...(data ? { data } : {}),
   };
-  if (operation && state && host.finishNativeTask) {
-    host.finishNativeTask(conversation, pending, operation, result, state);
+  if (!continued && operation && state && host.finishNativeTask) {
+    void Promise.resolve(host.finishNativeTask(conversation, pending, operation, result, state))
+      .catch((error) => host.reportTurnFailure(conversation.id, error));
     return;
   }
   db.updateMessage(pending.id, {
@@ -111,6 +118,10 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   });
   const updated = db.getMessage(pending.id);
   if (updated) host.broadcast(conversation.id, { type: "message", message: updated });
+  if (continued) {
+    host.broadcast(conversation.id, { type: "progress", taskId: event.task.id, status: event.task.status, progress: event.task.progress });
+    return;
+  }
 
   // 画布只跟着图片走：视频/音乐做完了，画布仍是那张原图
   if (conversation.status !== "waiting_task") return;

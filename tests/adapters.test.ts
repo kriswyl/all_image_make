@@ -52,6 +52,25 @@ describe("adapter request building", () => {
     });
   });
 
+  it("按模型过滤负面词，并只在 gpt-image-2.6 的 edits 请求里放行 GIF", () => {
+    const gptChannel: DbChannel = { ...channel, models: ["gpt-image-2.6-sunburst"] };
+    const gpt = buildGenerationRequest(gptChannel, {
+      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city",
+      negativePrompt: "watermark,text", outputFormat: "gif", referenceImages: [referenceImage],
+    }, "secret");
+    expect(gpt.url).toBe("https://relay.example.com/v1/images/edits");
+    expect(gpt.formData?.get("negative_prompt")).toBeNull();
+    expect(gpt.formData?.get("output_format")).toBe("gif");
+    expect(gpt.ignoredFields).toContain("负面提示词");
+
+    expect(() => buildGenerationRequest(gptChannel, {
+      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city", outputFormat: "gif",
+    }, "secret")).toThrow("底图");
+    expect(() => buildGenerationRequest({ ...channel, models: ["gpt-image-2.5-sunburst"] }, {
+      channelId: channel.id, model: "gpt-image-2.5-sunburst", prompt: "city", outputFormat: "gif", referenceImages: [referenceImage],
+    }, "secret")).toThrow("不支持 GIF");
+  });
+
   it("把渠道不认的字段记进诊断，raw 透传的不算", () => {
     const gemini: DbChannel = {
       ...channel, adapterType: "gemini-content", endpoint: "/v1beta/models/{model}:generateContent", models: ["gemini-3-pro"],

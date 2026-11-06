@@ -7,11 +7,12 @@
 import type { AppDatabase } from "./db.js";
 import { AppError } from "./tasks.js";
 import { isChatAdapter } from "../shared/types.js";
-import { VIDEO_CONFIRM_POLICIES, type VideoConfirmPolicy } from "../shared/agent-types.js";
+import { IMAGE_CONFIRM_POLICIES, VIDEO_CONFIRM_POLICIES, type ImageConfirmPolicy, type VideoConfirmPolicy } from "../shared/agent-types.js";
 import { buildCapabilityAliases } from "./capabilities.js";
 
 export interface AgentDefaults {
   videoConfirmPolicy: VideoConfirmPolicy;
+  imageConfirmPolicy: ImageConfirmPolicy;
   visionEnabled: boolean;
   defaultImageAlias: string;
   defaultVideoAlias: string;
@@ -35,10 +36,13 @@ function legacyAudioDefault(db: AppDatabase, adapterType: "suno-music" | "gemini
 /** 新建会话时的 Agent 默认值，存在 settings 表里，用户可在设置页改 */
 export function readAgentDefaults(db: AppDatabase): AgentDefaults {
   const policy = db.getSetting("agentVideoConfirmPolicy");
+  const imagePolicy = db.getSetting("agentImageConfirmPolicy");
   return {
     // 默认「自动续跑时才问」：用户明确开口要视频时不拦，链条自己往前跑时才拦一下（§13.2）
     videoConfirmPolicy: (VIDEO_CONFIRM_POLICIES as readonly string[]).includes(policy ?? "")
       ? (policy as VideoConfirmPolicy) : "auto_only",
+    imageConfirmPolicy: (IMAGE_CONFIRM_POLICIES as readonly string[]).includes(imagePolicy ?? "")
+      ? (imagePolicy as ImageConfirmPolicy) : "batch_only",
     visionEnabled: db.getSetting("agentVisionEnabled") !== "0",
     // 空串 = 没设，大脑不点名时退回类目第一个（问题 5）。alias 是否还有效不在这里判断
     defaultImageAlias: db.getSetting("agentDefaultImageAlias") ?? "",

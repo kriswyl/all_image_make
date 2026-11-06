@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import JSZip from "jszip";
-import { planPresentationWithAi } from "../src/server/ai-presentation";
+import { mergePagesToLimit, parseModelJson, planPresentationWithAi, requestedPageRange } from "../src/server/ai-presentation";
 import { renderAiPresentation, type MindDocument } from "../src/server/mind-document";
 import { checkPresentation, paginatePresentation } from "../src/server/presentation-check";
 
@@ -9,6 +9,55 @@ function parts(messages: any[]) { return JSON.parse(messages[1].content.split("�
 function response(items: any[], ids = items.map((item: any) => item.id)) {
   return { content: JSON.stringify({ title: "店铺运营入门", theme: "blue", slides: [{ layout: "content", title: items[0].text.slice(0, 50), subtitle: "", lines: ["内容整理"], notes: items.map((item: any) => item.text).join("\n").slice(0, 4000), sourceIds: ids }] }), truncated: false };
 }
+
+it("用户点名页数时解析范围，并把多拆的页面合并回去且不丢来源", () => {
+  expect(requestedPageRange("做成 8 到 12 页")).toEqual({ min: 8, max: 12 });
+  expect(requestedPageRange("控制在10页以内")).toEqual({ min: 10, max: 10 });
+  const pages = Array.from({ length: 20 }, (_, index) => ({
+    originalIndex: index,
+    section: `第${index + 1}节`,
+    parts: [{ id: `p${index}`, path: [], text: `内容${index}` }],
+  }));
+  const merged = mergePagesToLimit(pages, 11);
+  expect(merged).toHaveLength(11);
+  expect(new Set(merged.flatMap((page) => page.parts.map((part) => part.id))).size).toBe(20);
+});
+
+it("结构 JSON 带代码围栏、未加引号的键或尾逗号时仍能恢复", () => {
+  const fenced = ["```json", "{pages: [{title:\"a\", sourceIds:[\"x\"],}],}", "```"].join("\n");
+  expect(parseModelJson(fenced)).toEqual({
+    pages: [{ title: "a", sourceIds: ["x"] }],
+  });
+  expect(parseModelJson("好的，结果如下：{\"ok\":true} 以上。")).toEqual({ ok: true });
+});
+
+it("页面生成连续截断时用来源原文兜底，仍产出可交付页面", async () => {
+  const plan = await planPresentationWithAi(source, "做成 1 页", async (messages) => {
+    const system = String(messages[0]!.content);
+    if (system.includes("页面策划员")) {
+      const input = JSON.parse(String(messages[1]!.content));
+      return { content: JSON.stringify({ pages: [{ title: "物流与营销", goal: "覆盖全部来源", sourceIds: input.sources.map((part: any) => part.id) }] }), truncated: false };
+    }
+    return { content: "", truncated: true };
+  }, undefined, undefined, undefined, { pagewise: true });
+  expect(plan.slides).toHaveLength(2);
+  expect((plan.slides[1]!.lines ?? []).length).toBeGreaterThan(0);
+  expect((plan.slides[1]!.sourceIds ?? []).length).toBeGreaterThan(0);
+});
+
+it("逐页模式下页面只有标题没有可见正文时，用来源原文兜底", async () => {
+  const plan = await planPresentationWithAi(source, "做成 1 页", async (messages) => {
+    const system = String(messages[0]!.content);
+    if (system.includes("页面策划员")) {
+      const input = JSON.parse(String(messages[1]!.content));
+      return { content: JSON.stringify({ pages: [{ title: "标题", goal: "覆盖全部来源", sourceIds: input.sources.map((part: any) => part.id) }] }), truncated: false };
+    }
+    const ids = parts(messages).map((item: any) => item.id);
+    return { content: JSON.stringify({ title: "标题", theme: "ink", slides: [{ layout: "content", title: "标题", lines: [], notes: "", sourceIds: ids }] }), truncated: false };
+  }, undefined, undefined, undefined, { pagewise: true });
+  expect(plan.slides.length).toBeGreaterThan(1);
+  expect((plan.slides[1]!.lines ?? []).length).toBeGreaterThan(0);
+});
 
 it("先规划全局结构并按策划顺序组织章节，同时保留全部来源", async () => {
   const doc: MindDocument = { format: "xmind", warnings: [], sheets: [{ title: "主题", notes: "", children: Array.from({ length: 25 }, (_, i) => ({ title: `节点${i}`, notes: "", children: [] })) }] };

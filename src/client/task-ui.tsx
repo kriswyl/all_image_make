@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
 import type { TaskStatus } from "../shared/types";
 
@@ -46,6 +46,38 @@ export function optionalNumber(value: string) {
   if (!value.trim()) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Scope a draft by workspace/channel/model so a stale negative prompt or size
+ * cannot leak from one model (or from the canvas) into the next request.
+ */
+export function useScopedPersistentState<T>(scope: string, key: string, initialValue: T, prefix = "vector-image:generation-draft:") {
+  const storageKey = `${prefix}${scope}:${key}`;
+  const read = (target: string) => {
+    try {
+      const stored = window.localStorage.getItem(target);
+      return stored === null ? initialValue : JSON.parse(stored) as T;
+    } catch {
+      return initialValue;
+    }
+  };
+  const [value, setValue] = useState<T>(() => read(storageKey));
+  const keyRef = useRef(storageKey);
+  const skipSave = useRef(false);
+  useEffect(() => {
+    if (keyRef.current === storageKey) return;
+    keyRef.current = storageKey;
+    skipSave.current = true;
+    setValue(read(storageKey));
+  }, [storageKey]);
+  useEffect(() => {
+    if (skipSave.current) { skipSave.current = false; return; }
+    if (keyRef.current !== storageKey) return;
+    try { window.localStorage.setItem(storageKey, JSON.stringify(value)); }
+    catch { /* 存储不可用时表单依然可用 */ }
+  }, [storageKey, value]);
+  return [value, setValue] as const;
 }
 
 export function usePersistentState<T>(key: string, initialValue: T, prefix = "vector-image:generation-draft:") {

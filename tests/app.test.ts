@@ -10,6 +10,7 @@ const spawnMock = vi.hoisted(() => vi.fn(() => ({ on: () => undefined, unref: ()
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
 import { createApp, type AppContext } from "../src/server/app";
+import { asyncProviderSpec } from "../src/server/async-providers";
 import type { Task } from "../src/shared/types";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -1043,6 +1044,103 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect(reset.body.data.assetsDir).toBe(path.join(dataDir, "assets"));
     expect(await fs.readdir(customDir)).toHaveLength(1);
     await request(app).get(`/api/assets/${after.assets[0].id}/file`).expect(200);
+  });
+
+  it("keeps the local reference video for regeneration and requests a new upstream URL each time", async () => {
+    let uploads = 0;
+    const submitted: string[] = [];
+    const video = Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+    const origin = await startMock((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks);
+        res.setHeader("Content-Type", "application/json");
+        if (req.url === "/upload") {
+          if (!body.includes(video)) { res.writeHead(400); res.end("{}"); return; }
+          res.end(JSON.stringify({ url: `https://example.com/temporary-${++uploads}.mp4` }));
+        } else if (req.method === "POST") {
+          submitted.push(JSON.parse(body.toString()).input.media[0].url);
+          res.end(JSON.stringify({ output: { task_id: `remote-${submitted.length}` } }));
+        } else {
+          res.end(JSON.stringify({ output: { task_status: "FAILED", message: "fixture finished" } }));
+        }
+      });
+    });
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "reference-video-retry-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const channel = context.db.saveChannel({ name: "Wan", baseUrl: origin, adapterType: "wan-video", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/generate", uploadEndpoint: `${origin}/upload`, models: ["wan"], allowPrivateNetwork: true, enabled: true });
+    const original = (await request(app).post("/api/generations/reference-video")
+      .field("payload", JSON.stringify({ channelId: channel.id, model: "wan", prompt: "编辑视频", wanVideoMode: "video-edit" }))
+      .attach("file", video, { filename: "source.mp4", contentType: "video/mp4" }).expect(202)).body.data;
+    await context.runner.waitFor(original.id, { timeoutMs: 4000 });
+    const stored = JSON.parse(context.db.getTaskRow(original.id)!.inputJson);
+    expect(stored.wanVideoMedia).toBeUndefined();
+    expect(await fs.readFile(path.join(context.db.inputsDir, stored.referenceVideo.relativePath))).toEqual(video);
+
+    const retried = (await request(app).post(`/api/generations/${original.id}/retry`).expect(202)).body.data;
+    await context.runner.waitFor(retried.id, { timeoutMs: 4000 });
+    expect(retried.id).not.toBe(original.id);
+    expect(submitted).toEqual(["https://example.com/temporary-1.mp4", "https://example.com/temporary-2.mp4"]);
+    const nextInput = JSON.parse(context.db.getTaskRow(retried.id)!.inputJson);
+    await request(app).delete(`/api/generations/${original.id}`).expect(200);
+    expect(await fs.readFile(path.join(context.db.inputsDir, nextInput.referenceVideo.relativePath))).toEqual(video);
+    await expect(fs.stat(path.join(context.db.inputsDir, stored.referenceVideo.relativePath))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("pauses status checks at the deadline and continues the same upstream task after rate limiting", async () => {
+    let submits = 0;
+    let polls = 0;
+    let ready = false;
+    let origin = "";
+    origin = await startMock((req, res) => {
+      req.resume();
+      if (req.method === "POST") {
+        submits += 1;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ output: { task_id: "existing-id" } }));
+      } else if (req.url === "/result.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(Buffer.from("fixture-video"));
+      } else if (req.url === "/api/v1/tasks/existing-id") {
+        polls += 1;
+        if (ready) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ output: { task_status: "SUCCEEDED" }, video: `${origin}/result.mp4` }));
+        } else {
+          res.writeHead(429, { "Retry-After": "1", "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "failed" }));
+        }
+      } else { res.writeHead(404); res.end(); }
+    });
+    const profile = asyncProviderSpec("wan-video")!.polling;
+    const oldWindow = profile.windowMs;
+    profile.windowMs = 400;
+    cleanups.push(() => { profile.windowMs = oldWindow; });
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "continue-polling-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const channel = context.db.saveChannel({ name: "Wan", baseUrl: origin, adapterType: "wan-video", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/generate", models: ["wan"], allowPrivateNetwork: true, enabled: true });
+    const created = (await request(app).post("/api/generations").send({ channelId: channel.id, model: "wan", prompt: "生成视频" }).expect(202)).body.data;
+    const paused = await context.runner.waitFor(created.id, { timeoutMs: 4000 });
+    expect(paused.errorCode).toBe("VIDEO_TIMEOUT");
+    expect(polls).toBe(1);
+    expect(context.db.getTaskRow(created.id)?.remoteTaskId).toBe("existing-id");
+    const chat = context.db.createConversation({ title: "视频", brainChannelId: channel.id, brainModel: "mock", videoConfirmPolicy: "never", visionEnabled: false, verbatimPrompt: false });
+    const resultCard = context.db.appendMessage({ conversationId: chat.id, role: "tool", toolName: "generate_video", status: "error", taskId: created.id,
+      toolResult: { ok: false, error: "VIDEO_TIMEOUT", summary: "已暂停查询", taskId: created.id } });
+
+    ready = true;
+    profile.windowMs = 2000;
+    const continuation = `/api/generations/${created.id}/continue-query`;
+    expect((await request(app).post(continuation).expect(202)).body.data.id).toBe(created.id);
+    expect(polls).toBe(1);
+    expect((await context.runner.waitFor(created.id, { timeoutMs: 4000 })).status).toBe("succeeded");
+    expect(context.db.getMessage(resultCard.id)?.toolResult).toMatchObject({ ok: true, taskId: created.id, assetId: expect.any(String) });
+    expect((await request(app).post(continuation).expect(202)).body.data.id).toBe(created.id);
+    expect(submits).toBe(1);
+    expect(polls).toBe(2);
   });
 
   it("resumes polling a video task after a restart instead of failing it, even with a trailing-slash Base URL", async () => {

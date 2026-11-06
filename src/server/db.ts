@@ -2,12 +2,15 @@ import { DatabaseSync } from "node:sqlite";
 import { BUILTIN_STYLE_PRESETS, type StylePreset, type StylePresetInput } from "../shared/style-presets.js";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { AdapterType, AuthType, Channel, ChannelInput, Diagnostic, Task, TaskStatus, Asset, TaskKind } from "../shared/types.js";
 import { isAudioAsset, isImageAsset } from "../shared/types.js";
 import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
 import { initializeSchema } from "./db-schema.js";
+import { WorkflowStore } from "./workflow-store.js";
+import { ExecutionStore } from "./execution-store.js";
 import { BoardRepository } from "./db-board.js";
 import type {
   AgentPlan, ChatDocumentRef, ChatToolScope, ChatVideoFrames, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
@@ -22,6 +25,7 @@ import {
   type BoardDoc, type BoardUiState, type BoardViewport,
 } from "../shared/board.js";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template.js";
+import type { PresentationVersionReport, PresentationVisualCheck, TemplateReport } from "../shared/presentation-report.js";
 import { storyboardProjectDataSchema, type StoryboardProject, type StoryboardProjectData } from "../shared/storyboard-project.js";
 
 export interface DbChannel {
@@ -123,27 +127,44 @@ export class AppDatabase {
   /** 默认产物目录。用户改过素材目录后，历史记录里旧产物仍指向这个目录 */
   readonly defaultAssetsDir: string;
   private currentAssetsDir: string;
+  /** 文档产物目录；每份文档记录自己的 base_dir，切目录不会让旧文件失联 */
+  readonly defaultDocumentsDir: string;
+  private currentDocumentsDir: string;
   private readonly db: DatabaseSync;
   private readonly boards: BoardRepository;
+  readonly workflows: WorkflowStore;
+  readonly executions: ExecutionStore;
 
   /** 产物目录可以在运行时改，所以是 getter 而不是 readonly 字段 */
   get assetsDir(): string {
     return this.currentAssetsDir;
   }
 
+  get documentsDir(): string {
+    return this.currentDocumentsDir;
+  }
+
   constructor(dataDir = path.resolve("data")) {
     fs.mkdirSync(dataDir, { recursive: true });
     this.dataDir = dataDir;
     this.defaultAssetsDir = path.join(dataDir, "assets");
+    this.defaultDocumentsDir = path.join(dataDir, "documents");
     this.inputsDir = path.join(dataDir, "inputs");
     this.thumbsDir = path.join(dataDir, "thumbs");
     fs.mkdirSync(this.defaultAssetsDir, { recursive: true });
+    fs.mkdirSync(this.defaultDocumentsDir, { recursive: true });
     fs.mkdirSync(this.inputsDir, { recursive: true });
     fs.mkdirSync(this.thumbsDir, { recursive: true });
     this.filePath = path.join(dataDir, "app.db");
     this.db = new DatabaseSync(this.filePath);
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     initializeSchema(this.db, this.defaultAssetsDir);
+    // Old workspace rows predate configurable document roots; pin them to the
+    // directory they were actually written to before the user changes anything.
+    this.db.prepare("UPDATE workspace_documents SET base_dir = ? WHERE base_dir IS NULL OR base_dir = ''").run(this.defaultDocumentsDir);
+    this.backfillWorkspaceFamilies();
+    this.workflows = new WorkflowStore(this.db);
+    this.executions = new ExecutionStore(this.db);
     this.boards = new BoardRepository(this.db, (row) => this.assetFromRow(row), (asset) => this.assetView(asset));
 
     // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
@@ -154,7 +175,9 @@ export class AppDatabase {
     this.ensureBuiltinStylePresets();
 
     this.currentAssetsDir = this.resolveAssetsDir();
+    this.currentDocumentsDir = this.resolveDocumentsDir();
     fs.mkdirSync(this.currentAssetsDir, { recursive: true });
+    fs.mkdirSync(this.currentDocumentsDir, { recursive: true });
   }
 
   private ensureBuiltinStylePresets() {
@@ -253,6 +276,30 @@ export class AppDatabase {
     `).run();
   }
 
+  /** Group pre-family rows by their visible filename so the manual cleanup can see them. */
+  private backfillWorkspaceFamilies() {
+    const rows = this.db.prepare("SELECT id, conversation_id, file_name FROM workspace_documents WHERE family_id IS NULL OR family_id = ''").all() as DbRow[];
+    if (!rows.length) return;
+    const groups = new Map<string, string[]>();
+    for (const row of rows) {
+      const base = String(row.file_name)
+        .replace(/^\d{4}-\d{2}-\d{2}T[\d-]+Z-(?:\d+-)?/, "")
+        .replace(/^草稿-/, "")
+        .replace(/(?:-修改版)+(?=\.[^.]+$)/i, "")
+        .replace(/\.[^.]+$/, "");
+      const key = `${row.conversation_id}::${base || row.id}`;
+      const entries = groups.get(key) ?? [];
+      entries.push(String(row.id));
+      groups.set(key, entries);
+    }
+    const update = this.db.prepare("UPDATE workspace_documents SET family_id = ? WHERE id = ?");
+    for (const [key, ids] of groups) {
+      if (ids.length < 2) continue;
+      const family = `legacy-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+      for (const id of ids) update.run(family, id);
+    }
+  }
+
   /** 读取用户配置的产物目录；配置缺失或不可用时退回数据目录下的 assets/ */
   private resolveAssetsDir(): string {
     const stored = this.getSetting("assetsDir");
@@ -286,6 +333,38 @@ export class AppDatabase {
     return this.currentAssetsDir;
   }
 
+  /** 文档目录和素材目录同一套规则：只影响新产物，旧记录按各自 base_dir 读取 */
+  private resolveDocumentsDir(): string {
+    const stored = this.getSetting("documentsDir");
+    if (!stored || !path.isAbsolute(stored)) return this.defaultDocumentsDir;
+    try {
+      const resolved = path.resolve(stored);
+      fs.mkdirSync(resolved, { recursive: true });
+      return resolved;
+    } catch {
+      return this.defaultDocumentsDir;
+    }
+  }
+
+  setDocumentsDir(dir: string): string {
+    if (!path.isAbsolute(dir)) throw new Error("文档目录必须是绝对路径");
+    const resolved = path.resolve(dir);
+    fs.mkdirSync(resolved, { recursive: true });
+    if (resolved !== this.defaultDocumentsDir && resolved.startsWith(this.dataDir + path.sep)) {
+      throw new Error("自定义文档目录不能放在应用数据目录内部");
+    }
+    this.setSetting("documentsDir", resolved);
+    this.currentDocumentsDir = resolved;
+    return resolved;
+  }
+
+  resetDocumentsDir(): string {
+    this.setSetting("documentsDir", "");
+    this.currentDocumentsDir = this.defaultDocumentsDir;
+    fs.mkdirSync(this.currentDocumentsDir, { recursive: true });
+    return this.currentDocumentsDir;
+  }
+
   getSetting(key: string): string | null {
     const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as DbRow | undefined;
     return row ? String(row.value) : null;
@@ -296,6 +375,11 @@ export class AppDatabase {
       INSERT INTO settings (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+
+  /** Global image-confirm policy; the composer no longer exposes a per-conversation switch. */
+  setAllImageConfirmPolicy(policy: "batch_only" | "always") {
+    this.db.prepare("UPDATE conversations SET image_confirm_policy = ?").run(policy);
   }
 
   close() {
@@ -586,10 +670,12 @@ export class AppDatabase {
       referenceImages?: Array<{ relativePath?: string }>;
       referenceImage?: { relativePath?: string };
       maskImage?: { relativePath?: string };
+      referenceVideo?: { relativePath?: string };
     }>(row.input_json, {});
     const stored = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
     // 局部重绘蒙版和参考图一样落在 inputs/，删任务时要一起收走
     if (input.maskImage) stored.push(input.maskImage);
+    if (input.referenceVideo) stored.push(input.referenceVideo);
     return [...new Set(stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string"))];
   }
 
@@ -656,13 +742,14 @@ export class AppDatabase {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
+  updateTask(id: string, patch: Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remotePollAfter" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>) {
     const fields: string[] = [];
     const values: Array<string | number | bigint | null | Uint8Array> = [];
     const mapping: Record<string, string> = {
       status: "status",
       progress: "progress",
       remoteTaskId: "remote_task_id",
+      remotePollAfter: "remote_poll_after",
       remoteMeta: "remote_meta",
       effectiveJson: "effective_json",
       attemptCount: "attempt_count",
@@ -783,6 +870,7 @@ export class AppDatabase {
   createConversation(input: {
     title: string; brainChannelId: string; brainModel: string;
     videoConfirmPolicy: VideoConfirmPolicy; visionEnabled: boolean; verbatimPrompt: boolean;
+    imageConfirmPolicy?: "batch_only" | "always";
     /** 缺省是普通对话；无限画布线程由 board 服务显式传 board */
     kind?: ConversationKind;
     boardId?: string | null;
@@ -793,12 +881,12 @@ export class AppDatabase {
     this.db.prepare(`
       INSERT INTO conversations
       (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
-       video_confirm_policy, vision_enabled, verbatim_prompt, context_budget, chat_auto_continue_limit,
+       video_confirm_policy, vision_enabled, verbatim_prompt, image_confirm_policy, context_budget, chat_auto_continue_limit,
        board_max_rounds, board_auto_continue_limit, auto_continue_count, tool_scope, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?, ?)
     `).run(
       id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
-      input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, input.toolScope ?? null, at, at,
+      input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, input.imageConfirmPolicy ?? "batch_only", input.toolScope ?? null, at, at,
     );
     return this.getConversation(id)!;
   }
@@ -896,12 +984,13 @@ export class AppDatabase {
 
   /** Recover published local artifacts; unknown side effects remain interrupted and are never replayed. */
   private recoverNativeToolFiles(conversationId: string) {
-    const rows = this.db.prepare("SELECT message_id, tool_name FROM native_tool_calls WHERE conversation_id = ? AND status = 'running' AND tool_name IN ('doc_create', 'doc_edit', 'doc_convert') ORDER BY rowid").all(conversationId) as DbRow[];
+    const rows = this.db.prepare("SELECT message_id, tool_name, call_id FROM native_tool_calls WHERE conversation_id = ? AND status = 'running' AND tool_name IN ('doc_create', 'doc_edit', 'doc_convert') ORDER BY rowid").all(conversationId) as DbRow[];
     for (const row of rows) {
       const messageId = String(row.message_id);
-      const file = this.getWorkspaceDocumentByOperation(conversationId, messageId);
+      const pageOperation = row.tool_name === "doc_edit" && /^ppt-page:[\da-f-]{36}:[a-f\d]{64}:\d{1,3}$/i.test(String(row.call_id));
+      const file = this.getWorkspaceDocumentByOperation(conversationId, pageOperation ? String(row.call_id) : messageId);
       if (!file || !/^[0-9a-f-]{36}$/i.test(conversationId)) continue;
-      const root = path.resolve(this.dataDir, "documents");
+      const root = path.resolve(file.baseDir || this.currentDocumentsDir);
       const dir = path.resolve(root, conversationId);
       const full = path.resolve(dir, file.name);
       try {
@@ -911,13 +1000,52 @@ export class AppDatabase {
         if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== file.byteSize) continue;
       } catch { continue; }
       const summary = `已恢复中断前生成的文件 ${file.name}；请检查内容。`;
-      this.finishNativeToolCall(conversationId, messageId, String(row.tool_name), { ok: true, summary, data: { workspaceFileId: file.id, workspaceFileName: file.name, byteSize: file.byteSize, pendingDelete: false } });
+      const presentation = this.getPresentationVersion(conversationId, file.id)?.report;
+      this.finishNativeToolCall(conversationId, messageId, String(row.tool_name), { ok: true, summary, data: { workspaceFileId: file.id, workspaceFileName: file.name, byteSize: file.byteSize, pendingDelete: false, ...(presentation ? { presentation } : {}) } });
     }
   }
 
   getPresentationBatch(conversationId: string, key: string): string | null {
     const row = this.db.prepare("SELECT content FROM presentation_batch_cache WHERE conversation_id = ? AND cache_key = ?").get(conversationId, key) as DbRow | undefined;
     return row ? String(row.content) : null;
+  }
+
+  addPresentationVersion(fileId: string, sha256: string, report: TemplateReport) {
+    const visual: PresentationVisualCheck = { status: "queued", summary: "等待本机 WPS 检查" };
+    this.db.prepare("INSERT OR IGNORE INTO presentation_versions (file_id, sha256, report, visual, visual_state) VALUES (?, ?, ?, ?, ?)").run(fileId, sha256, JSON.stringify(report), JSON.stringify(visual), visual.status);
+  }
+
+  getPresentationVersion(conversationId: string, fileId: string): PresentationVersionReport | null {
+    const row = this.db.prepare("SELECT v.sha256, v.report, v.visual FROM presentation_versions v JOIN workspace_documents f ON f.id = v.file_id WHERE f.conversation_id = ? AND v.file_id = ?").get(conversationId, fileId) as DbRow | undefined;
+    return row ? { sha256: String(row.sha256), report: JSON.parse(String(row.report)), visual: JSON.parse(String(row.visual)) } : null;
+  }
+
+  updatePresentationAudit(fileId: string, sha256: string, report: TemplateReport) {
+    return Number(this.db.prepare("UPDATE presentation_versions SET report = ? WHERE file_id = ? AND sha256 = ?").run(JSON.stringify(report), fileId, sha256).changes) > 0;
+  }
+
+  queuePresentationCheck(fileId: string, from: "unavailable" | "running") {
+    const visual: PresentationVisualCheck = { status: "queued", summary: "等待本机 WPS 检查" };
+    this.db.prepare("UPDATE presentation_versions SET visual = ?, visual_state = ?, lease = NULL WHERE file_id = ? AND visual_state = ?").run(JSON.stringify(visual), visual.status, fileId, from);
+  }
+
+  claimPresentationCheck(lease: string) {
+    const visual: PresentationVisualCheck = { status: "running", summary: "WPS 正在检查已交付的文件" };
+    const row = this.db.prepare(`UPDATE presentation_versions SET visual = ?, visual_state = ?, lease = ?
+      WHERE file_id = (SELECT file_id FROM presentation_versions WHERE visual_state = 'queued' ORDER BY rowid LIMIT 1)
+      RETURNING file_id, sha256, (SELECT conversation_id FROM workspace_documents WHERE id = file_id) AS conversation_id`)
+      .get(JSON.stringify(visual), visual.status, lease) as DbRow | undefined;
+    return row ? { fileId: String(row.file_id), sha256: String(row.sha256), conversationId: String(row.conversation_id) } : null;
+  }
+
+  finishPresentationCheck(fileId: string, lease: string, visual: PresentationVisualCheck) {
+    this.db.prepare("UPDATE presentation_versions SET visual = ?, visual_state = ?, lease = NULL WHERE file_id = ? AND lease = ?")
+      .run(JSON.stringify(visual), visual.status, fileId, lease);
+  }
+
+  recoverPresentationChecks() {
+    const rows = this.db.prepare("SELECT file_id FROM presentation_versions WHERE visual_state = 'running'").all() as DbRow[];
+    for (const row of rows) this.queuePresentationCheck(String(row.file_id), "running");
   }
 
   getPresentationResume(conversationId: string): import("./presentation-execution.js").PresentationResume | null {
@@ -1019,21 +1147,81 @@ export class AppDatabase {
     return row ? { documentId: String(row.document_id), fileName: String(row.file_name), data: Buffer.from(row.data as unknown as Uint8Array) } : null;
   }
 
-  addWorkspaceDocument(conversationId: string, fileName: string, byteSize: number, operationId?: string): { id: string; name: string; byteSize: number; createdAt: string } {
+  addWorkspaceDocument(conversationId: string, fileName: string, byteSize: number, operationId?: string, presentation?: { sha256: string; report: TemplateReport }, baseDir = this.currentDocumentsDir, lineage?: { familyId?: string; parentId?: string }): { id: string; name: string; byteSize: number; createdAt: string; baseDir: string; familyId: string; version: number } {
     const id = crypto.randomUUID(); const createdAt = now();
-    this.db.prepare("INSERT INTO workspace_documents (id, conversation_id, file_name, byte_size, created_at, operation_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, conversationId, fileName, byteSize, createdAt, operationId ?? null);
-    return { id, name: fileName, byteSize, createdAt };
+    const familyId = lineage?.familyId ?? id;
+    let version = 1;
+    if (lineage?.parentId) {
+      const row = this.db.prepare("SELECT MAX(version) AS version FROM workspace_documents WHERE conversation_id = ? AND family_id = ?").get(conversationId, familyId) as DbRow | undefined;
+      version = Number(row?.version ?? 0) + 1;
+    }
+    if (presentation) this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO workspace_documents (id, conversation_id, file_name, byte_size, created_at, operation_id, base_dir, family_id, parent_id, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, conversationId, fileName, byteSize, createdAt, operationId ?? null, baseDir, familyId, lineage?.parentId ?? null, version);
+      if (presentation) {
+        this.addPresentationVersion(id, presentation.sha256, presentation.report);
+        this.db.exec("COMMIT");
+      }
+    } catch (error) {
+      if (presentation) this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { id, name: fileName, byteSize, createdAt, baseDir, familyId, version };
   }
-  listWorkspaceDocuments(conversationId: string): Array<{ id: string; name: string; byteSize: number; createdAt: string }> {
-    const rows = this.db.prepare("SELECT id, file_name, byte_size, created_at FROM workspace_documents WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC").all(conversationId) as DbRow[];
-    return rows.map((row) => ({ id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at) }));
+  listWorkspaceDocuments(conversationId: string): Array<{ id: string; name: string; byteSize: number; createdAt: string; baseDir: string; familyId: string; version: number }> {
+    const rows = this.db.prepare("SELECT id, file_name, byte_size, created_at, base_dir, family_id, version FROM workspace_documents WHERE conversation_id = ? AND archived = 0 ORDER BY created_at DESC, rowid DESC").all(conversationId) as DbRow[];
+    return rows.map((row) => ({
+      id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at),
+      baseDir: row.base_dir == null || row.base_dir === "" ? this.currentDocumentsDir : String(row.base_dir),
+      familyId: row.family_id == null || row.family_id === "" ? String(row.id) : String(row.family_id),
+      version: Number(row.version ?? 1),
+    }));
   }
   getWorkspaceDocument(conversationId: string, fileId: string) {
     return this.listWorkspaceDocuments(conversationId).find((item) => item.id === fileId) ?? null;
   }
   getWorkspaceDocumentByOperation(conversationId: string, operationId: string) {
-    const row = this.db.prepare("SELECT id, file_name, byte_size, created_at FROM workspace_documents WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;
-    return row ? { id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at) } : null;
+    const row = this.db.prepare("SELECT id, file_name, byte_size, created_at, base_dir, family_id, version FROM workspace_documents WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;
+    return row ? {
+      id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at),
+      baseDir: row.base_dir == null || row.base_dir === "" ? this.currentDocumentsDir : String(row.base_dir),
+      familyId: row.family_id == null || row.family_id === "" ? String(row.id) : String(row.family_id),
+      version: Number(row.version ?? 1),
+    } : null;
+  }
+
+  /**
+   * Keep a bounded history for a document family. The newest `keep` versions (and
+   * the root file) survive; older generated intermediates are removed from disk.
+   * Returns the removed file paths so callers can report what was cleaned.
+   */
+  pruneWorkspaceFamily(conversationId: string, familyId: string, keep = 3): string[] {
+    const rows = this.db.prepare("SELECT id, file_name, base_dir FROM workspace_documents WHERE conversation_id = ? AND family_id = ? AND archived = 0 ORDER BY version DESC, created_at DESC, rowid DESC").all(conversationId, familyId) as DbRow[];
+    const retained = new Set(rows.slice(0, Math.max(1, keep)).map((row) => String(row.id)));
+    const root = rows[rows.length - 1];
+    if (root) retained.add(String(root.id));
+    const removed: string[] = [];
+    for (const row of rows) {
+      const id = String(row.id);
+      if (retained.has(id)) continue;
+      const baseDir = path.resolve(row.base_dir == null || row.base_dir === "" ? this.currentDocumentsDir : String(row.base_dir));
+      const file = path.resolve(baseDir, conversationId, String(row.file_name));
+      if (path.dirname(path.dirname(file)).toLowerCase() !== baseDir.toLowerCase()) continue;
+      try { fs.rmSync(file, { force: true }); } catch { /* A missing file is already clean. */ }
+      this.db.prepare("DELETE FROM workspace_documents WHERE conversation_id = ? AND id = ?").run(conversationId, id);
+      removed.push(file);
+    }
+    return removed;
+  }
+  /** Manual cleanup for workspaces created before automatic pruning existed. */
+  cleanupWorkspaceVersions(keep = 3): number {
+    const families = this.db.prepare("SELECT DISTINCT conversation_id, family_id FROM workspace_documents WHERE family_id IS NOT NULL AND family_id != '' AND archived = 0").all() as DbRow[];
+    let removed = 0;
+    for (const row of families) {
+      if (row.family_id == null || row.family_id === "") continue;
+      removed += this.pruneWorkspaceFamily(String(row.conversation_id), String(row.family_id), keep).length;
+    }
+    return removed;
   }
 
   deleteWorkspaceDocument(conversationId: string, fileId: string): void {
@@ -1614,6 +1802,7 @@ export class AppDatabase {
       chatToolRoundLimit: "chat_tool_round_limit",
       toolsUnsupported: "tools_unsupported",
       nativeImagePilot: "native_image_pilot",
+      imageConfirmPolicy: "image_confirm_policy",
       chatModelCallLimit: "chat_model_call_limit",
       chatTurnMinutes: "chat_turn_minutes",
       chatTokenLimit: "chat_token_limit",
@@ -1677,12 +1866,17 @@ export class AppDatabase {
     if (kindRow && String(kindRow.kind) === "board") {
       throw new Error("无限画布线程不能按对话删除");
     }
-    // 只移除本会话的文档工作区；拒绝链接或越界路径。
-    const workspaceRoot = path.resolve(this.dataDir, "documents");
-    const workspaceTarget = path.resolve(workspaceRoot, id);
-    if (!/^[0-9a-f-]{36}$/i.test(id) || path.dirname(workspaceTarget).toLowerCase() !== workspaceRoot.toLowerCase()) throw new Error("文档目录路径无效");
-    if (fs.existsSync(workspaceRoot) && fs.lstatSync(workspaceRoot).isSymbolicLink()) throw new Error("文档目录不安全");
-    if (fs.existsSync(workspaceTarget)) {
+    // 只移除本会话的文档工作区；旧版本可能分布在多个已切换过的 base_dir。
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("文档目录路径无效");
+    const workspaceRoots = new Set<string>([this.currentDocumentsDir, this.defaultDocumentsDir]);
+    for (const row of this.db.prepare("SELECT DISTINCT base_dir FROM workspace_documents WHERE conversation_id = ? AND base_dir IS NOT NULL AND base_dir != ''").all(id) as DbRow[]) workspaceRoots.add(String(row.base_dir));
+    for (const rootRaw of workspaceRoots) {
+      const workspaceRoot = path.resolve(rootRaw);
+      const workspaceTarget = path.resolve(workspaceRoot, id);
+      if (path.dirname(workspaceTarget).toLowerCase() !== workspaceRoot.toLowerCase()) continue;
+      if (!fs.existsSync(workspaceRoot)) continue;
+      if (fs.lstatSync(workspaceRoot).isSymbolicLink()) throw new Error("文档目录不安全");
+      if (!fs.existsSync(workspaceTarget)) continue;
       if (fs.lstatSync(workspaceTarget).isSymbolicLink()) throw new Error("会话文档目录不安全");
       fs.rmSync(workspaceTarget, { recursive: true, force: true });
     }
@@ -2174,6 +2368,11 @@ export class AppDatabase {
     return row ? this.conversationFromRow(row) : null;
   }
 
+  findTaskTimeoutMessage(conversationId: string, taskId: string): ChatMessage | null {
+    const rows = this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND task_id = ? AND status = 'error' ORDER BY seq DESC").all(conversationId, taskId) as DbRow[];
+    return rows.map(row => this.messageFromRow(row)).find(message => message.toolResult?.error === "VIDEO_TIMEOUT") ?? null;
+  }
+
   /**
    * 分镜生成出来的产物。
    *
@@ -2360,6 +2559,7 @@ export class AppDatabase {
       chatToolRoundLimit: row.chat_tool_round_limit == null ? 16 : Number(row.chat_tool_round_limit),
       toolsUnsupported: Boolean(row.tools_unsupported),
       nativeImagePilot: Boolean(row.native_image_pilot),
+      imageConfirmPolicy: row.image_confirm_policy === "always" ? "always" : "batch_only",
       chatModelCallLimit: row.chat_model_call_limit == null ? 500 : Number(row.chat_model_call_limit),
       chatTurnMinutes: row.chat_turn_minutes == null ? 30 : Number(row.chat_turn_minutes),
       chatTokenLimit: row.chat_token_limit == null ? 0 : Number(row.chat_token_limit),
@@ -2414,21 +2614,27 @@ export class AppDatabase {
     return this.listTaskRows(limit).map((task) => this.taskView(task));
   }
 
-  listLibraryTaskViews(options?: { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records" }): Task[] {
+  listLibraryTaskViews(options?: { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records"; includeChatImages?: boolean }): Task[] {
     const videoTypes = VIDEO_ADAPTER_TYPES.map((value) => `'${value}'`).join(",");
     const audioTypes = AUDIO_ADAPTER_TYPES.map((value) => `'${value}'`).join(",");
     const kindSql = `(CASE WHEN channels.adapter_type IN (${videoTypes}) THEN 'video' WHEN channels.adapter_type IN (${audioTypes}) THEN 'audio' WHEN channels.adapter_type IS NOT NULL THEN 'image' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'audio/%') THEN 'audio' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'video/%') THEN 'video' ELSE 'image' END)`;
     const query = options?.query.trim().toLowerCase() ?? "";
+    const hasChatMessage = `EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
+      LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND (m.task_id = tasks.id OR a.task_id = tasks.id))`;
+    const chatImage = options?.includeChatImages ? `(tasks.origin = 'generate' AND ${kindSql} = 'image' AND (
+      (tasks.library_scope = 'conversation' AND tasks.owner_conversation_id IS NOT NULL)
+      OR (tasks.library_scope = 'legacy' AND ${hasChatMessage})
+    ))` : "0";
     const rows = this.db.prepare(`
       SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name,
-             channels.adapter_type AS channel_adapter_type
+             channels.adapter_type AS channel_adapter_type, CASE WHEN ${chatImage} THEN 'chat' END AS history_source
       FROM tasks LEFT JOIN channels ON channels.id = tasks.channel_id
-      WHERE (tasks.library_scope = 'public' OR (tasks.library_scope = 'legacy' AND (
+      WHERE (tasks.library_scope = 'public' OR ${chatImage} OR (tasks.library_scope = 'legacy' AND (
         EXISTS (SELECT 1 FROM board_tasks bt WHERE bt.task_id = tasks.id)
         OR EXISTS (SELECT 1 FROM assets a JOIN board_assets ba ON ba.asset_id = a.id WHERE a.task_id = tasks.id)
         OR (tasks.origin = 'upload' AND tasks.prompt = '无限画布上传')
         OR (tasks.origin = 'generate'
-          AND NOT EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND (m.task_id = tasks.id OR a.task_id = tasks.id))
+          AND NOT ${hasChatMessage}
           AND NOT EXISTS (SELECT 1 FROM conversation_shots s WHERE s.task_id = tasks.id OR s.video_task_id = tasks.id OR s.voice_task_id = tasks.id)
           AND NOT EXISTS (SELECT 1 FROM conversation_characters c WHERE c.task_id = tasks.id OR c.asset_id IN (SELECT id FROM assets WHERE task_id = tasks.id))
           AND NOT EXISTS (SELECT 1 FROM conversation_scenes s WHERE s.task_id = tasks.id OR s.asset_id IN (SELECT id FROM assets WHERE task_id = tasks.id))
@@ -2440,7 +2646,7 @@ export class AppDatabase {
       AND (? = '' OR instr(lower(tasks.prompt || ' ' || tasks.model || ' ' || COALESCE(channels.name, '')), ?) > 0 OR EXISTS (SELECT 1 FROM assets a WHERE a.task_id = tasks.id AND instr(lower(a.file_name || ' ' || a.title), ?) > 0))
       ORDER BY tasks.created_at DESC, tasks.id DESC LIMIT ? OFFSET ?
     `).all(options?.kind ?? "all", options?.kind ?? "all", options?.mode ?? "all", options?.mode ?? "all", query, query, query, options?.limit ?? -1, options?.offset ?? 0) as DbRow[];
-    return rows.map((row) => this.taskView(this.taskFromRow(row)));
+    return rows.map(row => ({ ...this.taskView(this.taskFromRow(row)), ...(row.history_source === "chat" ? { historySource: "chat" as const } : {}) }));
   }
 
   private taskView(task: TaskRow): Task {
@@ -2495,6 +2701,7 @@ export class AppDatabase {
       model: String(row.model), prompt: String(row.prompt), status: String(row.status) as TaskStatus,
       progress: row.progress == null ? null : Number(row.progress),
       remoteTaskId: row.remote_task_id == null ? null : String(row.remote_task_id),
+      remotePollAfter: row.remote_poll_after == null ? null : Number(row.remote_poll_after),
       remoteMeta: row.remote_meta == null ? null : String(row.remote_meta),
       inputJson: String(row.input_json), effectiveJson: row.effective_json == null ? null : String(row.effective_json), attemptCount: Number(row.attempt_count),
       errorCode: row.error_code == null ? null : String(row.error_code), errorMessage: row.error_message == null ? null : String(row.error_message),
@@ -2522,6 +2729,7 @@ export interface TaskRow {
   model: string; prompt: string; status: TaskStatus; progress: number | null;
   /** 上游异步任务 id：重启后用它接着轮询，不用从头发起 */
   remoteTaskId: string | null;
+  remotePollAfter: number | null;
   /** 上游附加元数据 JSON（Midjourney 按钮等） */
   remoteMeta: string | null;
   inputJson: string; effectiveJson: string | null; attemptCount: number; errorCode: string | null;

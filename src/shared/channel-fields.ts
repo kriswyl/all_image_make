@@ -70,6 +70,20 @@ export const CHANNEL_FIELD_SUPPORT: Partial<Record<AdapterType, Partial<Record<G
   "grok-video": { aspectRatio: "param", duration: "param", resolution: "param" },
 };
 
+/**
+ * Some OpenAI-compatible image models reuse the adapter but reject fields the
+ * adapter advertises globally. Keep the exception list here so UI and server
+ * agree instead of letting a stale form value reach the provider.
+ */
+export function modelSupportsNegativePrompt(model: string): boolean {
+  return !/^gpt-image-/i.test(model);
+}
+
+/** GIF output is currently declared only by the gpt-image-2.6 templates. */
+export function modelSupportsGifOutput(model: string): boolean {
+  return /^gpt-image-2\.6-(?:flare|sunburst)(?:-c)?$/i.test(model);
+}
+
 /** 画幅在渠道里可能叫 aspectRatio（16:9）也可能叫 ratio（万相/Seedance 的原生写法） */
 const ASPECT_FIELDS: GenerationField[] = ["aspectRatio", "ratio"];
 

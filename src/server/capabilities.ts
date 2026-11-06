@@ -394,5 +394,5 @@ export function looksLikeVisionRejection(status: number | undefined, message: st
   if (/too\s*many|maximum|at\s*most|limit|too\s*large|payload|request\s+entity|size|最多|张数|数量|过大|超出|尺寸/i.test(message)) {
     return false;
   }
-  return /image|vision|multimodal|content.*type|图片|视觉|不支持/i.test(message);
+  return /image|vision|multimodal|content.*type|图片|视觉|多模态/i.test(message);
 }

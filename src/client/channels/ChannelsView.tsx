@@ -5,13 +5,14 @@ import { adapterLabels } from "../labels";
 import { channelKindOf, type Channel } from "../../shared/types";
 import type { ToastKind } from "../labels";
 import { ModelLogo, type ModelKind } from "../chat/ModelLogo";
+import { ToolProtocolPanel } from "./ToolProtocolPanel";
 
 /** 模型图标按渠道类目匹配：`sd-*` 在视频里是 Seedance，在图片里是 Stable Diffusion */
 function channelModelKind(channel: Channel): ModelKind {
   return channelKindOf(channel.adapterType);
 }
 
-export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, onToast, onChannelUpdated }: {
+export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, onToast }: {
   channels: Channel[];
   onAdd: () => void;
   /** 按模型快速配置：先选模型，再自动归并成渠道配置 */
@@ -19,10 +20,8 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
   onEdit: (channel: Channel) => void;
   onDelete: (channel: Channel) => void;
   onToast: (kind: ToastKind, message: string) => void;
-  onChannelUpdated: (channel: Channel) => void;
 }) {
   const [testing, setTesting] = useState<string | null>(null);
-  const [changingDefault, setChangingDefault] = useState<string | null>(null);
   /** 展开了模型清单的渠道（只读：改模型仍然走编辑弹窗，避免在列表里误删） */
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   /** 词元流墟官方客服二维码：声明为官方联系方式，和作者不是同一个联系人 */
@@ -57,15 +56,6 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
       onToast("success", result.message ?? `连接正常 · ${result.httpStatus}${result.durationMs ? ` · ${result.durationMs} ms` : ""}`);
     } catch (error) { onToast("error", error instanceof Error ? error.message : "连接失败"); }
     finally { setTesting(null); }
-  }
-  async function toggleUnifiedDefault(channel: Channel) {
-    setChangingDefault(channel.id);
-    try {
-      const updated = await api.setUnifiedAgentDefault(channel.id, !channel.unifiedAgentDefault);
-      onChannelUpdated(updated);
-      onToast("success", updated.unifiedAgentDefault ? "此渠道的新对话默认开启统一助手试用" : "此渠道的新对话恢复旧入口");
-    } catch (error) { onToast("error", error instanceof Error ? error.message : "更新统一助手设置失败"); }
-    finally { setChangingDefault(null); }
   }
   return (
     <div className="page">
@@ -125,15 +115,13 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
                   <td>{channel.authType === "none" ? "无需密钥" : channel.hasKey ? <span className="positive"><CheckCircle2 size={15} />已配置</span> : <span className="warning"><AlertCircle size={15} />未配置</span>}</td>
                   <td>
                     <span className={`channel-state ${channel.enabled ? "enabled" : ""}`}>{channel.enabled ? "启用" : "停用"}</span>
-                    {channel.adapterType === "openai-chat" ? <button type="button" className="secondary-button compact"
-                      title="此设置仅影响使用该渠道的新对话" aria-pressed={Boolean(channel.unifiedAgentDefault)} disabled={changingDefault !== null}
-                      onClick={() => void toggleUnifiedDefault(channel)}>{channel.unifiedAgentDefault ? "新对话试用已开" : "新对话试用已关"}</button> : null}
                   </td>
                   <td><div className="table-actions"><button className="icon-button" title="测试连接" onClick={() => test(channel)} disabled={testing === channel.id}>{testing === channel.id ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}</button><button className="icon-button" title="编辑渠道" onClick={() => onEdit(channel)}><Settings2 size={16} /></button><button className="icon-button danger" title="删除渠道" onClick={() => onDelete(channel)}><Trash2 size={16} /></button></div></td>
                 </tr>
                 {open ? (
                   <tr className="channel-models-row">
                     <td colSpan={6}>
+                      {channel.adapterType === "openai-chat" ? channel.models.map(model => <ToolProtocolPanel key={model} channelId={channel.id} model={model} />) : null}
                       {channel.models.length ? (
                         <div className="chip-row channel-models-list">
                           {channel.models.map((model) => (

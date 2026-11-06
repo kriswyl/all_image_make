@@ -5,6 +5,7 @@
  * AgentService 负责主循环和状态，批量执行器负责把一批调用跑完并落库。
  */
 import type { AppDatabase } from "./db.js";
+import { createHash } from "node:crypto";
 import { runAgentTool, type ToolContext, type ToolOutcome } from "./agent-tools.js";
 import type {
   AgentPlan,
@@ -270,13 +271,24 @@ export class BatchExecutor {
 
   /** 工具抛出来的异常翻译成一条失败结果，别让它带着堆栈冲掉整批 */
   async callToolSafely(call: PlannedCall, ctx: ToolContext): Promise<ToolOutcome> {
+    const operationId=ctx.operationId;
+    const journal=this.host.db.executions;
+    if (operationId) journal.begin({ tool:call.tool,version:1,kind:["generate_image","edit_image","generate_video","generate_music","generate_speech","board_generate","board_generate_batch"].includes(call.tool)?"task":"sync",operationId,conversationId:ctx.conversation.id }, createHash("sha256").update(JSON.stringify(call.args)).digest("hex"));
     try {
       // 能力查找是编排工具，只用于下一轮开放工具，不能真的跑在批量里。
       if (call.tool === "capability_search") {
+        if(operationId)journal.finish(operationId,"failed",{reasonCode:"TOOL_NOT_BATCHABLE"});
         return { result: { ok: false, summary: "能力查找不能放进批量调用", error: "TOOL_NOT_BATCHABLE" }, terminal: false };
       }
-      return await runAgentTool(call.tool, call.args, ctx);
+      const outcome=await runAgentTool(call.tool, call.args, ctx);
+      if(operationId) {
+        const task=outcome.result.taskId?this.host.db.getTaskView(outcome.result.taskId):null;
+        const unknown=outcome.result.error==="SUBMISSION_UNKNOWN"||task?.errorCode==="SUBMISSION_UNKNOWN";
+        journal.finish(operationId,unknown?"unknown_submit":outcome.terminal?"waiting_task":outcome.result.ok?"completed":"failed",{taskId:outcome.result.taskId,reasonCode:outcome.result.error});
+      }
+      return outcome;
     } catch (error) {
+      if(operationId)journal.finish(operationId,"failed",{reasonCode:"TOOL_THREW"});
       return {
         result: {
           ok: false,

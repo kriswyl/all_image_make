@@ -30,7 +30,7 @@ export const templateConfigSchema = z.object({
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   count: z.number().int().min(1).max(BOARD_LIMITS.maxCount).optional(),
   videoMode: z.enum(BOARD_VIDEO_MODES).optional(),

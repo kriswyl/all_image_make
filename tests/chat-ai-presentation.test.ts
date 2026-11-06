@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import request from "supertest";
-import { expect, it, vi } from "vitest";
+import { expect, it, vi, beforeEach, afterEach } from "vitest";
+// Preserve explicit regression coverage of the migration baseline.
+beforeEach(() => vi.stubEnv("CHATCANVAS_PPT_ENGINE", "legacy"));
+afterEach(() => vi.unstubAllEnvs());
 vi.mock("../src/server/wps-auto-render", () => ({ renderWithLocalWps: async () => { throw new Error("测试环境未启用 WPS"); } }));
 import { createApp } from "../src/server/app";
 import { executeChatDocumentTool } from "../src/server/chat-tools/documents";
@@ -62,12 +65,13 @@ it.each([
           ] },
           ] }) };
         }
-      } else if (++ordinaryCalls <= 2 && cover) {
+      } else if (++ordinaryCalls === 1 && cover) {
         const imageCall = { id: "make-cover", type: "function", function: { name: "generate_image", arguments: JSON.stringify({ prompt: "物流培训封面，抽象线条与纸箱插画", fromScratch: true }) } };
         const premature = { id: "premature", type: "function", function: { name: "doc_convert", arguments: JSON.stringify({ fileId, to: "pptx" }) } };
-        message = { tool_calls: ordinaryCalls === 1 ? [{ ...imageCall, id: "batched-image" }, premature] : [imageCall] };
-      } else if (ordinaryCalls === (cover ? 3 : 1)) {
+        message = { tool_calls: [imageCall, premature] };
+      } else if (ordinaryCalls === (cover ? 2 : 1)) {
         if (cover) {
+          expect(body.messages.find((item: { tool_call_id?: string }) => item.tool_call_id === "premature")?.content).toContain("等待本批图片");
           const generated = body.messages.find((item: { tool_call_id?: string }) => item.tool_call_id === "make-cover");
           coverAssetId = JSON.parse(generated.content).assetIds[0];
         }
@@ -88,7 +92,7 @@ it.each([
   try {
     await request(app).post("/api/channels").send({ name: "Brain", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-chat", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions", models: ["mock"], allowPrivateNetwork: true, enabled: true }).expect(201);
     const id = (await request(app).post("/api/conversations").send({}).expect(201)).body.data.id;
-    await request(app).patch(`/api/conversations/${id}`).send({ visionEnabled: true, ...(cover ? { toolScope: "all" } : { chatMode: "chat" }) }).expect(200);
+    await request(app).patch(`/api/conversations/${id}`).send({ visionEnabled: true, ...(cover ? { toolScope: "all", imageConfirmPolicy: "always" } : { chatMode: "chat" }) }).expect(200);
     if (cover) await request(app).post("/api/channels").send({ name: "Images", baseUrl: `http://127.0.0.1:${address.port}`, adapterType: "openai-images", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations", models: ["mock-image"], allowPrivateNetwork: true, enabled: true }).expect(201);
     const zip = new JSZip(); zip.file("content.json", JSON.stringify([{ rootTopic: { id: "root", title: "店铺运营", children: { attached: [{ id: "logistics", title: "物流", image: { src: "xap:resources/test.png" }, notes: { plain: { content: "FBA 与自发货" } } }, ...(pause ? Array.from({ length: 273 }, (_, i) => ({ id: `topic-${i}`, title: `运营案例 ${i + 1}` })) : [])] } }, relationships: [{ end1Id: "root", end2Id: "logistics", title: "支持" }] }]));
     zip.file("resources/test.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aV8AAAAASUVORK5CYII=", "base64"));
@@ -99,7 +103,7 @@ it.each([
       await vi.waitFor(() => expect(context.db.getConversation(id)?.status).toBe("awaiting_confirmation"));
       expect(imageRequests).toBe(0);
       const premature = context.db.listMessages(id).find(row => row.role === "tool" && row.toolName === "doc_convert");
-      expect(premature?.toolResult).toMatchObject({ ok: false, summary: expect.stringContaining("取得素材后") });
+      expect(premature).toBeUndefined();
       expect(readingCalls).toBe(0);
       const confirmation = context.db.listPendingMessages(id).find(row => row.confirm)!;
       await request(app).post(`/api/conversations/${id}/confirm`).send({ messageId: confirmation.id, decision: "approve" }).expect(200);
@@ -119,7 +123,7 @@ it.each([
     async function waitForResults(count: number) {
       for (let n = 0; n < 150; n++) {
         const view = (await request(app).get(`/api/conversations/${id}`)).body.data;
-        if (view.status === "idle" && view.messages.filter((m: any) => m.role === "tool" && m.toolName === "doc_convert").length >= count + Number(cover)) return view;
+        if (view.status === "idle" && view.messages.filter((m: any) => m.role === "tool" && m.toolName === "doc_convert").length >= count) return view;
         await new Promise(resolve => setTimeout(resolve, 40));
       }
       throw new Error("PPT 转换未在测试时限内结束");
@@ -129,7 +133,7 @@ it.each([
       const paused = view.messages.findLast((m: any) => m.role === "tool" && m.toolName === "doc_convert");
       expect(paused.toolResult.data.presentationPaused).toBe(true);
       expect(paused.content).toMatch(/已达到 PPT 用量上限.*已通过内容审校 1\//);
-      expect(ordinaryCalls).toBe(cover ? 3 : 1);
+      expect(ordinaryCalls).toBe(cover ? 2 : 1);
       expect(reviewCalls).toBe(1);
       const savedReadings = readingCalls;
       const savedRun = context.db.getPresentationResume(id)!;
@@ -140,7 +144,7 @@ it.each([
       ({ app, context } = createApp({ dataDir: dir }));
       await request(app).post(`/api/conversations/${id}/messages`).send({ text: "继续 PPT" }).expect(202);
       view = await waitForResults(2);
-      expect(ordinaryCalls).toBe(cover ? 3 : 1);
+      expect(ordinaryCalls).toBe(cover ? 2 : 1);
       expect(readingCalls).toBe(savedReadings);
       expect(plannerInput.match(/当前批次：1\//g)).toHaveLength(1);
       expect(context.db.getPresentationResume(id)).toBeNull();

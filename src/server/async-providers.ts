@@ -49,8 +49,22 @@ export interface AsyncProviderSpec {
   extractResults(payload: unknown): AsyncResult[];
   successStatuses: readonly string[];
   failureStatuses: readonly string[];
-  pollIntervalMs?: number;
-  maxPolls?: number;
+  polling: { initialMs: number; runningMs: number; nearDoneMs: number; windowMs: number };
+}
+
+const VIDEO_POLLING = { initialMs: 20_000, runningMs: 15_000, nearDoneMs: 6_000, windowMs: 20 * 60_000 };
+
+export function nextPollDelay(profile: AsyncProviderSpec["polling"], status: Pick<AsyncStatus, "status" | "progress">): number {
+  if (/^(pending|queued|queueing|submitted|not_start|waiting|unknown)$/.test(status.status ?? "")) return profile.initialMs;
+  return (status.progress ?? 0) >= 80 ? profile.nearDoneMs : profile.runningMs;
+}
+
+export function readRetryAfter(value: string | null, now = Date.now()): number {
+  if (!value?.trim()) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : 0;
 }
 
 /** 上游与中转对“生成完成”的叫法不统一，逐个列出 */
@@ -64,9 +78,9 @@ export const ASYNC_SUCCESS_STATUSES = [
  * `{ status: "unknown", progress: 0 }`，把它当失败会误杀仍在生成的任务。
  * `fail` 是 Suno 的写法；`FAILURE` 归一后也是 `failure`。
  */
-/** MJ 文档建议 3~5 秒轮询；测试沿用 VIDEO_POLL_INTERVAL_MS 的压缩值 */
+/** Midjourney 的快任务保留单独的轮询节奏。 */
 const MJ_POLL_INTERVAL_MS = (() => {
-  const raw = Number(process.env.MJ_POLL_INTERVAL_MS ?? process.env.VIDEO_POLL_INTERVAL_MS);
+  const raw = Number(process.env.MJ_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 4_000;
 })();
 
@@ -179,6 +193,7 @@ function videoSpec(pollPath: (remoteTaskId: string) => string): AsyncProviderSpe
     })),
     successStatuses: ASYNC_SUCCESS_STATUSES,
     failureStatuses: ASYNC_FAILURE_STATUSES,
+    polling: VIDEO_POLLING,
   };
 }
 
@@ -330,8 +345,7 @@ export const ASYNC_PROVIDER_SPECS: Partial<Record<AdapterType, AsyncProviderSpec
     },
     successStatuses: ["succeeded"],
     failureStatuses: ["failed"],
-    pollIntervalMs: 10_000,
-    maxPolls: 120,
+    polling: { ...VIDEO_POLLING, runningMs: 12_000 },
   },
   midjourney: {
     // 提交响应是 { code: 1, result: "179..." }；result 才是任务 id
@@ -374,8 +388,7 @@ export const ASYNC_PROVIDER_SPECS: Partial<Record<AdapterType, AsyncProviderSpec
     },
     successStatuses: ["success"],
     failureStatuses: ["failure"],
-    pollIntervalMs: MJ_POLL_INTERVAL_MS,
-    maxPolls: 150,
+    polling: { initialMs: MJ_POLL_INTERVAL_MS, runningMs: MJ_POLL_INTERVAL_MS, nearDoneMs: MJ_POLL_INTERVAL_MS, windowMs: 15 * 60_000 },
   },
   "suno-music": {
     pollPath: (id) => `/api/midjourney/drawInfo4?id=${encodeURIComponent(id)}`,
@@ -383,7 +396,7 @@ export const ASYNC_PROVIDER_SPECS: Partial<Record<AdapterType, AsyncProviderSpec
     extractResults: sunoResults,
     successStatuses: ["success"],
     failureStatuses: ["fail", "failure", "failed"],
-    maxPolls: 120,
+    polling: { initialMs: 15_000, runningMs: 12_000, nearDoneMs: 6_000, windowMs: 20 * 60_000 },
   },
 };
 

@@ -7,6 +7,7 @@ import { api } from "./api";
 import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
+import { SelectMenu } from "./ui/SelectMenu";
 import {
   StatusBadge, formatDuration, formatTime, statusLabels, terminalStatuses, usePersistentState,
 } from "./task-ui";
@@ -350,9 +351,14 @@ export function MusicGenerateView(props: {
                   </label>
                   <label className="field">
                     <span>调性</span>
-                    <select value={soundKey} onChange={(event) => setSoundKey(event.target.value)} disabled={submitting}>
-                      {MUSIC_KEYS.map((key) => <option key={key} value={key}>{key}</option>)}
-                    </select>
+                    <SelectMenu
+                      value={soundKey}
+                      options={MUSIC_KEYS.map((key) => ({ value: key, label: key }))}
+                      onChange={setSoundKey}
+                      disabled={submitting}
+                      ariaLabel="调性"
+                      className="param-select"
+                    />
                   </label>
                 </div>
               ) : null}
@@ -361,9 +367,15 @@ export function MusicGenerateView(props: {
               <div className="field-row">
                 <label className="field">
                   <span>模型版本</span>
-                  <select value={effectiveVersion} onChange={(event) => setVersion(event.target.value)} disabled={submitting}>
-                    {versionOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                  </select>
+                  <SelectMenu
+                    value={effectiveVersion}
+                    options={versionOptions.map((item) => ({ value: item.value, label: item.label }))}
+                    onChange={setVersion}
+                    disabled={submitting}
+                    ariaLabel="模型版本"
+                    className="param-select"
+                    minWidth={200}
+                  />
                 </label>
                 <label className="field">
                   <span>等待上限（秒）</span>
@@ -436,7 +448,7 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 }) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const recent = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 8);
+  const recent = tasks.filter((item) => !terminalStatuses.includes(item.status) || item.errorCode === "VIDEO_TIMEOUT" || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 8);
 
   async function cancel() {
     if (!task) return;
@@ -446,8 +458,12 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
 
   async function retry() {
     if (!task) return;
-    if (!confirmGeneration({ kind: "音乐生成", model: task.model, channel: task.channelName, detail: "一次生成两首", retry: true })) return;
-    try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
+    const continueQuery = task.errorCode === "VIDEO_TIMEOUT";
+    if (!continueQuery && !confirmGeneration({ kind: "音乐生成", model: task.model, channel: task.channelName, detail: "一次生成两首", retry: true })) return;
+    try {
+      onTask(await (continueQuery ? api.continueTaskQuery(task.id) : api.retry(task.id)));
+      onToast("success", continueQuery ? "已继续查询原任务" : "已重新提交");
+    }
     catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }
 
@@ -484,7 +500,9 @@ function MusicResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, on
           </div>
         ) : null}
         {task && task.status === "failed" ? (
-          <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div>
+          <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode === "VIDEO_TIMEOUT" ? "查询已暂停" : task.errorCode}</strong><span>{task.errorMessage}</span>
+            {task.errorCode === "VIDEO_TIMEOUT" ? <button type="button" className="secondary-button" onClick={() => void retry()}>继续查询</button> : null}
+          </div>
         ) : null}
         {task && !busy && task.status !== "failed" && !task.assets.length ? <MusicEmpty /> : null}
         {task && task.assets.length ? (

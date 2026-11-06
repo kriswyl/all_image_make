@@ -37,8 +37,8 @@ const GROUP_LABELS: Record<ChatToolGroup, string> = {
 };
 
 const GROUP_HINTS: Record<Exclude<ChatToolGroup, "core">, RegExp> = {
-  docs: /(word|docx|excel|xlsx|ppt|pptx|文档|表格|报告|周报|方案|大纲|导图|xmind|markdown|csv|json|文件|总结|改写|排版)/i,
-  image: /(图片|照片|海报|插画|封面|生图|改图|绘图|画一|画个|画张|画两|参考图|抠图|修图|这张图|那张图|这几张图|画面|图中|图里)/i,
+  docs: /(word|docx|excel|xlsx|pdf|ppt|pptx|文档|表格|报告|周报|方案|大纲|导图|xmind|markdown|csv|json|文件|总结|改写|排版)/i,
+  image: /(图片|照片|海报|插画|封面|配图|生图|出图|改图|绘图|画一|画个|画张|画两|参考图|抠图|修图|这张图|那张图|这几张图|画面|图中|图里)/i,
   video: /(视频|动起来|首帧|尾帧|镜头|运镜|字幕)/i,
   audio: /(音乐|歌曲|写一首|一首歌|配乐|配音|朗读|旁白|音效|翻唱|混音|口播|歌|唱|曲)/i,
   templates: /(模板|分镜|工作流|流程图)/i,

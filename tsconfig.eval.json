@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.server.json",
+  "compilerOptions": { "outDir": "artifacts/eval-runtime", "rootDir": "." },
+  "include": ["scripts/evaluate-presentation.ts", "scripts/verify-local-wps.ts", "scripts/evaluate-presentation-visual.ts", "scripts/evaluate-native-edit.ts", "src/server", "src/shared"]
+}

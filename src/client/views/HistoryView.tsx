@@ -3,7 +3,7 @@ import { Download, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGri
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "../board/CrossModeBridgeDialog";
 import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
-import { StatusBadge, formatTime } from "../task-ui";
+import { StatusBadge, formatTime, terminalStatuses } from "../task-ui";
 import { taskKind, type ClearScope, type Channel, type Task } from "../../shared/types";
 import type { ReferenceController, Toast } from "../app-shared";
 
@@ -27,6 +27,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [chatRevision, setChatRevision] = useState(0);
   const requestId = useRef(0);
   const libraryRef = useRef(library);
   libraryRef.current = library;
@@ -36,6 +37,20 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return;
+    let timer: number | undefined;
+    const refresh = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setChatRevision(value => value + 1), 250);
+    };
+    const close = api.openTaskStream({
+      onTask: task => { if (task.status === "queued" || terminalStatuses.includes(task.status)) refresh(); },
+      onOpen: refresh,
+      onError: () => undefined,
+    }, "chat-images");
+    return () => { window.clearTimeout(timer); close(); };
+  }, []);
   useEffect(() => {
     const current = ++requestId.current;
     const filterKey = JSON.stringify([query, filter, mode]);
@@ -49,7 +64,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         const items: Task[] = [];
         let more = true;
         while (more && items.length < targetCount && current === requestId.current) {
-          const page = await api.libraryPage({ offset: items.length, query, kind: filter, mode });
+          const page = await api.libraryPage({ offset: items.length, query, kind: filter, mode, includeChatImages: true });
           items.push(...page.items);
           more = page.hasMore && page.items.length > 0;
         }
@@ -60,13 +75,13 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         .finally(() => { if (current === requestId.current) setLoading(false); });
     }, query ? 250 : 0);
     return () => { window.clearTimeout(timer); requestId.current++; };
-  }, [tasks, query, filter, mode]);
+  }, [tasks, query, filter, mode, chatRevision]);
   async function loadMore() {
     if (loading || !hasMore) return;
     const current = requestId.current;
     setLoading(true);
     try {
-      const page = await api.libraryPage({ offset: library.length, query, kind: filter, mode });
+      const page = await api.libraryPage({ offset: library.length, query, kind: filter, mode, includeChatImages: true });
       if (current === requestId.current) { setLibrary((items) => [...items, ...page.items]); setHasMore(page.hasMore); setVisibleCount((count) => count + 60); setLoadError(""); }
     } catch (error) { if (current === requestId.current) setLoadError(error instanceof Error ? error.message : "加载素材失败"); }
     finally { if (current === requestId.current) setLoading(false); }
@@ -163,8 +178,8 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       {mode === "assets" ? <div className="library-grid">
         {visibleAssets.map(({task, asset, index}) => <div className="library-card-wrap" key={asset.id}><button type="button" className="library-card" onClick={() => { setPreviewIndex(index); setPreview(task); }}>
           <span className="library-card-media">{asset.mimeType.startsWith("video/") ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt="视频预览" /> : asset.mimeType.startsWith("audio/") ? asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" loading="lazy" /> : <Music size={32} /> : <img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</span>
-          <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
-        </button><button type="button" className="library-card-delete" title="删除素材" aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
+          <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.historySource === "chat" ? "聊天生成" : task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
+        </button>{task.historySource !== "chat" ? <button type="button" className="library-card-delete" title="删除素材" aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
           if (!window.confirm("确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
           void api.deleteLibraryAsset(asset.id).then(() => {
             // 作废删除前开始的分页请求，避免旧结果把刚删掉的素材重新带回列表。
@@ -174,7 +189,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             onRefresh();
             onToast("success", "素材已删除");
           }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除素材失败"));
-        }}><Trash2 size={16} /></button></div>)}
+        }}><Trash2 size={16} /></button> : null}</div>)}
         {!loading && !filtered.some((task) => task.assets.length) && !loadError ? <div className="table-empty"><ImageIcon size={28} /><span>没有符合条件的素材</span></div> : null}
       </div> :
       <div className="data-table-wrap">
@@ -203,7 +218,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
                     {task.assets.length > 1 ? <span className="history-thumb-count">{task.assets.length}</span> : null}
                   </button>
                 </td>
-                <td><button className="prompt-cell" title={task.assets.length ? "查看详情" : task.prompt} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>{task.prompt}</button></td>
+                <td><button className="prompt-cell" title={task.assets.length ? "查看详情" : task.prompt} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>{task.historySource === "chat" ? "聊天生成 · " : ""}{task.prompt}</button></td>
                 <td>{task.channelName}</td><td>{task.model}</td>
                 <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
                 <td><div className="table-actions">
@@ -276,7 +291,7 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
         )}
         <div className="history-preview-bar">
           <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
-          <button type="button" className="secondary-button" onClick={() => onSendToBoard(asset)}><LayoutGrid size={16} />加入画布</button>
+          {task.historySource !== "chat" ? <button type="button" className="secondary-button" onClick={() => onSendToBoard(asset)}><LayoutGrid size={16} />加入画布</button> : null}
           {!isVideo && kind !== "audio" ? <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button> : null}
           {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => {
             const thumbIsVideo = item.mimeType.startsWith("video/");

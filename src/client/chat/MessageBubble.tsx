@@ -1,8 +1,8 @@
 /**
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
-import { AlertCircle, Check, Copy, FileText, Info, Maximize2, Play, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { AlertCircle, Check, Copy, Download, FileText, Info, Maximize2, Play, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage } from "../../shared/agent-types";
 import { api } from "../api";
 import { MindPptPreview } from "./MindPptPreview";
@@ -102,7 +102,10 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
               <span key={document.id} className="chat-document-chip" title={/\.pptx$/i.test(document.name) ? "PPT 风格参考，可用于提取颜色和字体" : "会话文档，可由助手读取"}>
                 <FileText size={13} />
                 <span>{document.name}</span>
-                {/\.xmind$/i.test(document.name) ? <button type="button" className="mind-export-link" onClick={() => setMind({ id: document.id, name: document.name })}>按结构预览</button> : /\.pptx$/i.test(document.name) ? <small>风格参考</small> : <small>{document.charCount.toLocaleString()} 字</small>}
+                {/\.xmind$/i.test(document.name) ? <button type="button" className="mind-export-link" onClick={() => setMind({ id: document.id, name: document.name })}>按结构预览</button>
+                  : /\.pptx$/i.test(document.name) ? <small>风格参考</small>
+                    : /\.(docx|xlsx|pdf)$/i.test(document.name) ? <small>{document.name.slice(document.name.lastIndexOf(".") + 1).toUpperCase()}</small>
+                      : <small>{document.charCount.toLocaleString()} 字</small>}
               </span>
             ))}
           </div>
@@ -126,13 +129,37 @@ export function AssistantBubble({
   options = [],
   disabled = false,
   onPick,
+  onToast,
 }: {
   message: ChatMessage;
   /** 可点的答案；只有「还没被回答的那一条」才由外面传进来 */
   options?: string[];
   disabled?: boolean;
   onPick?: (option: string) => void;
+  onToast?: (kind: "ok" | "error", text: string) => void;
 }) {
+  const components = useMemo<Components>(() => ({
+    ...markdownComponents,
+    a({ href, children, node: _node, ...props }) {
+      const target = typeof href === "string" ? href : "";
+      const fileId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target) ? target : null;
+      if (!fileId) return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+      return <a {...props} href={target} className="chat-file-link" title="下载会话文件" onClick={(event) => {
+        event.preventDefault();
+        void (async () => {
+          try {
+            const files = await api.workspaceFiles(message.conversationId);
+            const label = typeof children === "string" ? children : "";
+            const name = files.find(file => file.id === fileId)?.name
+              ?? (/\.(?:pptx|md|markdown|txt|csv|json|xmind|docx|xlsx)$/i.test(label) ? label : "下载文件");
+            if (await api.downloadWorkspaceFile(message.conversationId, fileId, name)) onToast?.("ok", "文件已保存");
+          } catch (error) {
+            onToast?.("error", error instanceof Error ? error.message : "文件下载失败");
+          }
+        })();
+      }}>{children}<Download size={12} /></a>;
+    },
+  }), [message.conversationId, onToast]);
   // 批量那一轮的表头行可能没有 `say`（`say` 在协议里是可选的），只带着 plan.calls。
   // 它要落库——大脑回放时得看见自己请求过什么——但没必要在界面上占一个空气泡。
   if (!message.content?.trim() && !options.length) return null;
@@ -140,7 +167,7 @@ export function AssistantBubble({
     <div className="chat-row chat-row-assistant">
       {message.content?.trim() ? (
         <div className={`chat-bubble chat-bubble-assistant ${message.status === "error" ? "is-error" : ""}`}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{message.content}</ReactMarkdown>
         </div>
       ) : null}
       {options.length ? (

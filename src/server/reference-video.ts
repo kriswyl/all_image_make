@@ -1,12 +1,22 @@
 import { assertSafeUrl, safeFileName } from "./security.js";
-import { AppError } from "./tasks.js";
+import { AppError } from "./app-error.js";
 import type { DbChannel } from "./db.js";
 import type { KeyStore } from "./key-store.js";
 
-export async function uploadReferenceVideo(channel: DbChannel, keys: KeyStore, file: { buffer: Buffer; mimetype: string; originalname: string }): Promise<string> {
-  if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
+export interface ReferenceVideoUpload {
+  buffer: Buffer;
+  mimetype: string;
+  originalname: string;
+}
+
+export function validateReferenceVideo(file: ReferenceVideoUpload) {
   if (!['video/mp4', 'video/quicktime'].includes(file.mimetype) || file.buffer.length < 12 || file.buffer.subarray(4, 8).toString("ascii") !== "ftyp") throw new AppError("REFERENCE_VIDEO_INVALID", "仅支持有效的 MP4 / MOV 视频", 400);
   if (file.buffer.length > 100 * 1024 * 1024) throw new AppError("REFERENCE_VIDEO_INVALID", "视频不能超过 100 MB", 400);
+}
+
+export async function uploadReferenceVideo(channel: DbChannel, keys: KeyStore, file: ReferenceVideoUpload): Promise<string> {
+  if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
+  validateReferenceVideo(file);
   await assertSafeUrl(channel.uploadEndpoint, channel.allowPrivateNetwork);
   const headers = new Headers();
   for (const [name, value] of Object.entries(channel.uploadHeaders ?? {})) {

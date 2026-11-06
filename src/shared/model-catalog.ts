@@ -53,7 +53,7 @@ export const MODEL_GROUP_SECTIONS: Array<{ kind: ModelGroupKind; label: string; 
 /** 推荐组合：新用户不知道选什么时，一键选一组覆盖三种用途的常用模型 */
 export const RECOMMENDED_MODELS: Record<string, string> = {
   // 生图推荐 -c 系列：独立计费与密钥，出图更稳，也不会和标准 gpt 渠道混用
-  "tiantoken-gpt-c:gpt-c": "gpt-image-2.5-sunburst-c",
+  "tiantoken-gpt-c:gpt-c": "gpt-image-2.6-sunburst-c",
   "tiantoken-wan-video:wan-video": "wan3.0-video",
   "tiantoken-kling-video:kling-video": "kling-3.0",
   "tiantoken-suno:suno-music": "suno_damobi_music",

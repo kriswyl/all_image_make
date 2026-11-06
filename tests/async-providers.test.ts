@@ -5,6 +5,8 @@ import {
   asyncProviderSpec,
   extractAsyncTaskId,
   extractProviderStatus,
+  nextPollDelay,
+  readRetryAfter,
 } from "../src/server/async-providers.js";
 
 describe("远端任务 id", () => {
@@ -50,6 +52,17 @@ describe("状态解析", () => {
 });
 
 describe("厂商描述表", () => {
+  it("视频排队时降频，只在有完成进度时加快，快图保持自己的节奏", () => {
+    const video = asyncProviderSpec("wan-video")!.polling;
+    const queued = nextPollDelay(video, { status: "queued", progress: 95 });
+    const running = nextPollDelay(video, { status: "running", progress: null });
+    const finishing = nextPollDelay(video, { status: "running", progress: 95 });
+    expect(queued).toBeGreaterThan(running);
+    expect(running).toBeGreaterThan(finishing);
+    expect(asyncProviderSpec("midjourney")!.polling.initialMs).toBeLessThan(running);
+    expect(readRetryAfter("30")).toBe(30_000);
+    expect(readRetryAfter("Fri, 06 Nov 2026 00:01:00 GMT", Date.UTC(2026, 10, 6))).toBe(60_000);
+  });
   it("三个现有视频渠道都有轮询路径", () => {
     expect(asyncProviderSpec("wan-video")?.pollPath("abc")).toBe("/api/v1/tasks/abc");
     expect(asyncProviderSpec("grok-video")?.pollPath("abc")).toBe("/v1/videos/abc");

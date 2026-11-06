@@ -579,6 +579,8 @@ export function App() {
     }
   }
 
+  const Brand = view === "board" ? "button" : "div";
+
   return (
     <div
       className={`app-shell ${sidebarHidden ? "is-sidebar-hidden" : ""} ${boardOverlay ? "is-board-sidebar-overlay" : ""} ${customChrome ? "has-custom-chrome" : ""}`}
@@ -652,22 +654,17 @@ export function App() {
                 <PanelLeftClose size={15} />
               </button>
             ) : null}
-            {/*
-              logo 点击切换「对话创作 ↔ 无限画布」；旁边的下拉箭头才打开设置菜单。
-              这样既满足「点 logo 进画布」，又不把原来的设置入口吞掉。
-            */}
-            <button
+            <Brand
               className="brand"
-              title={view === "board" ? "返回对话创作" : "进入无限画布"}
-              onClick={() => {
-                setWorkspaceMenuOpen(false);
-                if (view === "board") {
+              {...(view === "board" ? {
+                type: "button" as const,
+                title: "返回对话创作",
+                onClick: () => {
+                  setWorkspaceMenuOpen(false);
                   dismissWelcome();
                   switchView("chat");
-                } else {
-                  enterBoard();
-                }
-              }}
+                },
+              } : {})}
             >
               <span className="brand-mark"><BrandMark size={18} /></span>
               {/* 两行：英文主名在上，中文名「语布」压成小字在下。代价是侧栏高 10px */}
@@ -675,7 +672,7 @@ export function App() {
                 <span className="brand-name">ChatCanvas</span>
                 <span className="brand-sub">语布</span>
               </span>
-            </button>
+            </Brand>
             <button
               type="button"
               className="brand-menu"
@@ -854,7 +851,6 @@ export function App() {
             onEdit={setEditorChannel}
             onDelete={deleteChannel}
             onToast={showToast}
-            onChannelUpdated={(updated) => setChannels(current => current.map(channel => channel.id === updated.id ? updated : channel))}
           />
         ) : null}
         {!loading && view === "video" ? (

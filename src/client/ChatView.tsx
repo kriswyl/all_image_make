@@ -12,7 +12,7 @@
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
 import {
-  Brain, Eye, EyeOff, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -37,6 +37,7 @@ import { buildRows } from "./chat/rows";
 import { ToolCard, type TaskProgress } from "./chat/ToolCard";
 import { AssetLibrary } from "./chat/AssetLibrary";
 import { ContextSummaryControl } from "./chat/ContextSummaryControl";
+import { BINARY_DOCUMENT_ATTACHMENT, OFFICE_ATTACHMENT } from "../shared/document-formats";
 import { SelectMenu } from "./ui/SelectMenu";
 import { TemplateImportDialog } from "./board/TemplateImportDialog";
 import { CrossModeBridgeDialog } from "./board/CrossModeBridgeDialog";
@@ -401,6 +402,7 @@ export function ChatView({
             if (event.message.role === "assistant") { setReasoning(""); setDraft(""); }
             return { ...current, messages: upsert(current.messages, event.message) };
           });
+          if (event.message.toolResult?.ok && event.message.toolResult.data?.continuedQuery === true) void reloadView(activeId);
           break;
         case "progress":
           setProgress((current) => ({ ...current, [event.taskId]: { status: event.status, progress: event.progress } }));
@@ -487,7 +489,7 @@ export function ChatView({
   async function createConversation() {
     if (!brains.length) { onToast("error", "先在「模型配置」里加一个对话模型，助手才有大脑"); return; }
     try {
-      const created = await api.createConversation({});
+      const created = await api.createConversation({ toolScope: "all" });
       await reloadList();
       setActiveId(created.id);
     } catch (error) {
@@ -523,23 +525,25 @@ export function ChatView({
   }
 
   async function patch(patchBody: Parameters<typeof api.updateConversation>[1]) {
-    if (!activeId) return;
+    if (!activeId) return false;
     // 先领号：这一下写出去之后，在途的旧 GET 就作废了（见 viewSeq 的注释）
     const seq = ++viewSeq.current;
     try {
       const next = await api.updateConversation(activeId, patchBody);
-      if (seq !== viewSeq.current) return;
+      if (seq !== viewSeq.current || activeIdRef.current !== activeId) return false;
       setView(next);
+      return true;
     } catch (error) {
       toastError(error);
+      return false;
     }
   }
 
-  async function changeToolScope(scope: ChatToolScope | null) {
+  async function changeToolScope(scope: ChatToolScope) {
     setChangingScope(true);
     try {
-      await patch({ toolScope: scope });
-      if ((scope !== null) !== unified) setChatAssetIds([]);
+      if (!await patch({ toolScope: scope })) return;
+      if (!unified) setChatAssetIds([]);
       if (scope !== "all") setChatVideoFrames(null);
     } finally { setChangingScope(false); }
   }
@@ -713,7 +717,7 @@ export function ChatView({
       const documents: Array<{ name: string; content: string }> = [];
       let total = 0;
       for (const file of files) {
-        if (/\.(xmind|pptx)$/i.test(file.name)) continue;
+        if (BINARY_DOCUMENT_ATTACHMENT.test(file.name)) continue;
         const content = (await file.text()).replace(/^﻿/, "").replace(/\0/g, "");
         if (!content.trim()) {
           toast("error", `${file.name} 是空的`);
@@ -731,7 +735,9 @@ export function ChatView({
         documents.push({ name: file.name, content });
       }
       if (documents.length) setView(await api.uploadConversationDocuments(activeId, documents));
-      for (const file of files.filter((item) => /\.(xmind|pptx)$/i.test(item.name))) setView(await api.uploadMindDocument(activeId, file));
+      for (const file of files.filter(item => BINARY_DOCUMENT_ATTACHMENT.test(item.name))) {
+        setView(await (OFFICE_ATTACHMENT.test(file.name) ? api.uploadOfficeDocument(activeId, file) : api.uploadMindDocument(activeId, file)));
+      }
       await reloadList();
       toast("ok", `已上传 ${files.length} 个文档`);
       return true;
@@ -1028,16 +1034,6 @@ export function ChatView({
                   素材 {mediaAssets.length}
                 </button>
 
-                <button
-                  type="button"
-                  className={`chat-control chat-toggle ${view.visionEnabled ? "is-on" : ""}`}
-                  title={view.visionEnabled ? (plainChat ? "模型支持视觉时可查看本轮附带图片" : "助手能看到当前画布，改图更准") : "已关闭看图，助手不能看到图片"}
-                  onClick={() => void patch({ visionEnabled: !view.visionEnabled })}
-                >
-                  {view.visionEnabled ? <Eye size={13} /> : <EyeOff size={13} />}
-                  {plainChat ? (view.visionEnabled ? "看图已开" : "看图已关") : (view.visionEnabled ? "看图改" : "盲改")}
-                </button>
-
                 {capabilities.length ? (
                   <ModelPanel
                     capabilities={capabilities}
@@ -1078,6 +1074,7 @@ export function ChatView({
                       options={options}
                       disabled={running}
                       onPick={(text) => void send(text)}
+                      onToast={toast}
                     />
                   );
                 }
@@ -1106,6 +1103,7 @@ export function ChatView({
                     onPreview={setPreview}
                     onDiagnostics={onDiagnostics}
                     onToast={toast}
+                    presentationActionsEnabled={!running && view.toolScope !== "conversation"}
                     onResumePresentation={!running && plainChat && view.toolScope !== "conversation" && row.result?.id === latestPresentationResult?.id ? () => { void send("继续 PPT"); } : undefined}
                     onImportTemplate={(templateId, name, description) =>
                       setTemplateImport({ id: templateId, name, description })}
@@ -1125,6 +1123,8 @@ export function ChatView({
             <Composer
               running={running || compressing}
               uploading={uploading || changingScope}
+              imageVisionWarning={!view.visionEnabled ? "本会话已关闭看图，可在「对话设置」开启。"
+                : view.visionBlocked ? "当前模型不接受图片输入，可切换到支持看图的模型。" : undefined}
               placeholder={plainChat ? "聊聊你的想法，或提出问题…" : canvasImages.length
                 ? canvasImages.length > 1
                   ? `画布 ${canvasImages.length} 张（① 首帧 ${assetRef(canvasImages[0]!.id)} / ② 尾帧${canvasImages[1] ? ` ${assetRef(canvasImages[1].id)}` : ""}${canvasImages.length > 2 ? " / 其余参考" : ""}），直接说怎么改…`
@@ -1132,42 +1132,7 @@ export function ChatView({
                 : "说你想画什么，或者要改哪张图…"}
               leftSlot={(
                 <>
-                  {unified ? <SelectMenu
-                    className="chat-mode-select"
-                    ariaLabel="工具范围"
-                    title="选择本会话的新轮次可用的工具范围"
-                    leading={<Wand2 size={14} />}
-                    minWidth={156}
-                    disabled={running || uploading || changingScope}
-                    value={view.toolScope ?? "all"}
-                    options={[{ value: "all", label: "全部能力" }, { value: "conversation", label: "仅对话" }, { value: "legacy", label: "返回旧入口" }]}
-                    onChange={(mode) => void changeToolScope(mode === "legacy" ? null : mode as ChatToolScope)}
-                  /> : <SelectMenu
-                    className="chat-mode-select"
-                    ariaLabel="对话模式"
-                    title="切换普通聊天或创作助手，不会取消待确认的任务"
-                    leading={plainChat ? <MessageSquarePlus size={14} /> : <Wand2 size={14} />}
-                    minWidth={158}
-                    disabled={uploading || changingScope}
-                    value={view.chatMode ?? "creative"}
-                    options={[{ value: "creative", label: "创作助手" }, { value: "chat", label: "普通聊天" }, { value: "unified", label: "统一助手试用" }]}
-                    onChange={(mode) => {
-                      if (mode === "unified") { void changeToolScope("all"); return; }
-                      setChatAssetIds([]);
-                      void patch({ chatMode: mode as "creative" | "chat" });
-                    }}
-                  />}
-                  {plainChat ? (
-                    <>
-                      <button type="button" className="chat-control chat-choose-assets" disabled={running || uploading} onClick={() => setLibraryOpen(true)}>
-                        <Images size={13} />选择素材{chatAssetIds.length ? ` · ${chatAssetIds.length}` : ""}
-                      </button>
-                      {!unified ? <button type="button" className="chat-control" aria-pressed={Boolean(view.nativeImagePilot)} disabled={running || uploading}
-                        onClick={() => void patch({ nativeImagePilot: !view.nativeImagePilot })}>
-                        创作试用{view.nativeImagePilot ? "已开" : "已关"}
-                      </button> : null}
-                    </>
-                  ) : null}
+                  {view.toolScope === "conversation" ? <span className="chat-control">工具已关闭</span> : null}
                   {!plainChat ? <>
                   {/*
                     「原话直发」：平时大脑会把口语扩写成完整画面（默认就该这样，效果更好），
@@ -1208,7 +1173,7 @@ export function ChatView({
                   }}
                 />
               )}
-              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onAutoContinueChange={(chatAutoContinueLimit) => void patch({ chatAutoContinueLimit })} onChatLimitsChange={(limits) => void patch(limits)} onCompress={() => {
+              statusSlot={<>{compressing ? <span className="context-compress-progress" role="status">正在压缩上下文…</span> : null}<ContextSummaryControl key={view.id} view={view} compressing={compressing} disabled={running || uploading || changingScope} onToolScopeChange={scope => void changeToolScope(scope)} onVisionChange={visionEnabled => void patch({ visionEnabled })} onBudgetChange={(contextBudget) => void patch({ contextBudget })} onAutoContinueChange={(chatAutoContinueLimit) => void patch({ chatAutoContinueLimit })} onChatLimitsChange={(limits) => void patch(limits)} onCompress={() => {
                 if (!activeId) return;
                 setCompressing(true);
                 void api.compressConversation(activeId).then(() => { setCompressing(false); void reloadView(activeId); }).catch((error) => { setCompressing(false); toastError(error); });

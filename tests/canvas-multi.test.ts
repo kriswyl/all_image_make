@@ -65,6 +65,10 @@ async function startMock(plan: unknown | unknown[]) {
         res.end(JSON.stringify({ output: { task_id: "remote-1", task_status: "RUNNING" } }));
         return;
       }
+      if (req.url === "/api/v1/tasks/remote-1") {
+        res.end(JSON.stringify({ output: { task_status: "FAILED", message: "fixture does not render video" } }));
+        return;
+      }
       imageHits.push({ url: req.url ?? "", raw });
       res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
     });

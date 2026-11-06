@@ -233,13 +233,13 @@ body:has(.ink-onboarding) .sidebar-resizer {
   letter-spacing: -.015em;
   text-align: left;
 }
-.brand:hover { background: var(--accent-soft); }
+button.brand:hover { background: var(--accent-soft); }
 /* 主名 + 中文副名：副名用小字压在主名下面，两行一起占 40px 的按钮高度 */
 .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .brand-sub { color: var(--muted); font-size: 10.5px; font-weight: 400; letter-spacing: 0; line-height: 1.2; }
 .brand-chevron { flex: 0 0 auto; color: var(--muted); }
-.brand:hover .brand-chevron { color: var(--ink-soft); }
+button.brand:hover .brand-chevron { color: var(--ink-soft); }
 
 .sidebar-menu {
   position: absolute;
@@ -1378,6 +1378,7 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 .media-file-chip > span:not(.media-audio-icon) { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .media-file-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 12px; font-weight: 550; }
 .media-file-chip small, .media-input-note { color: var(--muted); font-size: 11px; }
+.reference-video-preview { grid-column: 1 / -1; display: block; width: 100%; max-height: 160px; border-radius: 10px; background: #000; }
 .media-file-chip button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
 .media-file-chip button:hover { background: var(--surface-soft); color: var(--ink); }
 .media-input-note { grid-column: 1 / -1; margin: 0; }
@@ -1939,6 +1940,10 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .wps-preview-pages img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius-control); }
 .tool-card-template-action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; }
 .tool-card-template-action span { color: var(--muted); font-size: 10.5px; }
+.presentation-file-report { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.presentation-file-report summary { cursor: pointer; line-height: 2; }
+.presentation-file-report summary span { margin-right: 6px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; }
+.presentation-file-report-details { padding: 6px 2px; line-height: 1.65; overflow-wrap: anywhere; }
 /* 结果缩略图（问题 3）：视频也走这里，但用的是客户端解码的 <video>，服务端缩略图解不了视频 */
 .tool-card-thumb { display: block; width: 216px; max-width: 100%; height: 134px; margin-top: 8px; padding: 0; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-control); cursor: zoom-in; }
 .tool-card-thumb img, .tool-card-thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }
@@ -2070,6 +2075,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 
 /* 待发附件：图只是挂在输入框里，还没上传、还没进画布，所以用缩略图排开、可逐张删 */
 .composer-attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 4px 10px; }
+.composer-image-warning { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--muted); }
 .composer-attachment { position: relative; width: 56px; height: 56px; overflow: hidden; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-control); }
 .composer-attachment img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .composer-attachment-remove { position: absolute; top: 3px; right: 3px; display: grid; width: 16px; height: 16px; place-items: center; padding: 0; color: #fff; background: rgba(0, 0, 0, .55); border: 0; border-radius: 50%; }
@@ -3047,3 +3053,8 @@ body:has(.story-review-overlay) > .style-preset-overlay { z-index: 1020; }
 .mind-preview-list input, .mind-preview-list textarea { width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); padding: 9px 10px; }
 .mind-preview-list input { height: 42px; padding: 0 10px; }
 .mind-preview-list textarea { resize: vertical; line-height: 1.5; }
+.tool-protocol-panel { display: grid; gap: 9px; margin: 12px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.tool-protocol-panel > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.tool-protocol-panel > button { justify-self: start; }
+.tool-protocol-panel small { color: var(--muted); }
+.chat-file-link { display: inline-flex; align-items: baseline; gap: 4px; }

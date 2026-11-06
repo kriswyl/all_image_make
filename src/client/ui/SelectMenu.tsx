@@ -8,13 +8,15 @@
  * 浮层挂在 body 上，避免被镜头列表的滚动容器裁掉；键盘支持上下/Home/End/Enter/Esc。
  */
 import { Check, ChevronDown, Images } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 
 export interface SelectOption {
   value: string;
   label: string;
+  /** 分组标题；同一组的选项连续排列，只画一次标题 */
+  group?: string;
 }
 
 function useMenuStyle(open: boolean, triggerRef: RefObject<HTMLElement | null>, width: number, maxHeight: number) {
@@ -159,7 +161,7 @@ export function SelectMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
-        title={title ?? current?.label}
+        title={title ?? (open ? undefined : current?.label)}
         onClick={() => setOpen((previous) => !previous)}
         onKeyDown={(event) => {
           if (event.key !== "ArrowDown") return;
@@ -184,19 +186,23 @@ export function SelectMenu({
           onMouseDown={(event) => event.stopPropagation()}
         >
           {options.length ? options.map((option, index) => (
-            <button
-              key={option.value}
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              tabIndex={-1}
-              className={`select-menu-option ${option.value === value ? "is-selected" : ""} ${index === active ? "is-active" : ""}`}
-              onMouseEnter={() => setActive(index)}
-              onClick={() => choose(option)}
-            >
-              <span>{option.label}</span>
-              {option.value === value ? <Check size={13} /> : null}
-            </button>
+            <Fragment key={`${option.group ?? ""}:${option.value}`}>
+              {option.group && option.group !== options[index - 1]?.group
+                ? <p className="select-menu-group" role="presentation">{option.group}</p>
+                : null}
+              <button
+                type="button"
+                role="option"
+                aria-selected={option.value === value}
+                tabIndex={-1}
+                className={`select-menu-option ${option.value === value ? "is-selected" : ""} ${index === active ? "is-active" : ""}`}
+                onMouseEnter={() => setActive(index)}
+                onClick={() => choose(option)}
+              >
+                <span>{option.label}</span>
+                {option.value === value ? <Check size={13} /> : null}
+              </button>
+            </Fragment>
           )) : <p className="select-menu-empty">没有可选项</p>}
         </div>,
         document.body,

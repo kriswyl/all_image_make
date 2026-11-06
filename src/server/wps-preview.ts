@@ -26,6 +26,12 @@ export function isWpsServiceRunning(): Promise<boolean> {
 /** Short-lived capabilities let the add-in render only a server-created copy of a specific PPTX. */
 export class WpsPreviewJobs {
   private jobs = new Map<string, PreviewJob>();
+  private apiOrigin?: string;
+  setOrigin(origin: string) {
+    if (!/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(origin) || Number(new URL(origin).port) > 65535) throw new Error("WPS 后端地址必须是本机回环地址");
+    this.apiOrigin = origin;
+  }
+  get origin() { return this.apiOrigin; }
   constructor(private readonly db: AppDatabase) {}
   async create(conversationId: string, fileId: string, first: number) {
     this.cleanupExpired();

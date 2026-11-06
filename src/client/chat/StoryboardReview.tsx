@@ -4,6 +4,7 @@ import { ArrowDown, ArrowUp, Check, LayoutGrid, LoaderCircle, Plus, Trash2, X } 
 import { api } from "../api";
 import { confirmGeneration } from "../generation-confirm";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
+import { modelSupportsNegativePrompt } from "../../shared/channel-fields";
 import { defaultImageDraft, imageGenerationParameters, type ImageDraft } from "./storyboard-image-params";
 import { statusLabels, terminalStatuses } from "../task-ui";
 import { assembleStoryboardPrompt, type StoryboardProject, type StoryboardProjectData } from "../../shared/storyboard-project";
@@ -342,6 +343,7 @@ function StoryboardAssetGenerator({ kind, item, style, onClose, onChoose }: {
     finally { setSubmitting(false); }
   }
   const images = task?.assets.filter((asset) => asset.mimeType.startsWith("image/")) ?? [];
+  const selectedModel = choices.find((entry) => entry.alias === alias)?.model ?? "";
   const adapter = choices.find((entry) => entry.alias === alias)?.adapterType ?? "";
   const openai = ["openai-images", "openai-chat-image", "generic-json"].includes(adapter);
   const gemini = adapter === "gemini-content";
@@ -365,7 +367,7 @@ function StoryboardAssetGenerator({ kind, item, style, onClose, onChoose }: {
         {mj ? <label>模型版本<select value={params.midjourneyVersion} disabled={generating} onChange={(e) => updateParam("midjourneyVersion", e.target.value)}><option value="">默认</option>{["8.2", "7", "6.1", "6"].map((value) => <option key={value}>{value}</option>)}</select></label> : null}
       </div>
       <details className="story-generator-advanced"><summary>高级参数</summary><div className="story-generator-grid">
-        {openai || mj ? <label className="wide">负面提示词<textarea rows={2} maxLength={10000} value={params.negativePrompt} disabled={generating} placeholder="不希望出现的内容" onChange={(e) => updateParam("negativePrompt", e.target.value)} /></label> : null}
+        {openai && !modelSupportsNegativePrompt(selectedModel) ? null : openai || mj ? <label className="wide">负面提示词<textarea rows={2} maxLength={10000} value={params.negativePrompt} disabled={generating} placeholder="不希望出现的内容" onChange={(e) => updateParam("negativePrompt", e.target.value)} /></label> : null}
         {openai ? <>
           <label>背景<select value={params.background} disabled={generating} onChange={(e) => updateParam("background", e.target.value)}><option value="">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label>
           <label>风格<select value={params.style} disabled={generating} onChange={(e) => updateParam("style", e.target.value)}><option value="">自动</option><option value="vivid">Vivid</option><option value="natural">Natural</option></select></label>

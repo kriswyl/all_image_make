@@ -1228,6 +1228,7 @@ it("普通模式下后台任务完成只更新结果，不自动续跑", async (
   const pending = { id: "message", taskId: "task", confirm: null, toolResult: { async: true, ok: true, summary: "已提交" } };
   const db = {
     findConversationByTask: () => conversation,
+    getTaskRow: () => null,
     listPendingMessages: () => [pending],
     getChannel: () => ({ adapterType: "seedance-video" }),
     updateMessage: vi.fn(), getMessage: () => ({ ...pending, status: "ok" }),

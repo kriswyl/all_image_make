@@ -6,7 +6,7 @@
  */
 import type { BrainContentPart } from "./brain.js";
 import type { AppDatabase, AssetRow } from "./db.js";
-import { assetThumbDataUri } from "./vision.js";
+import { assetVisionParts } from "./vision.js";
 import { modelFingerprint, readVisionUnsupported } from "./capabilities.js";
 import { resolveImageRefs } from "./agent-tools.js";
 import { MAX_VISION_IMAGES } from "./agent-constants.js";
@@ -69,15 +69,22 @@ export async function observeImages(
         ? `[view_images] 下面是当前画布上的 ${assets.length} 张图，按顺序编号。看完再决定 imageRefs；如果用户说的画面这里看不出是哪张，用 ask 问清楚，不要猜。`
         : `[view_images] 下面是你要看的 ${assets.length} 张图。看完再决定 imageRefs；仍然拿不准就 ask。`,
     });
+    // 动图要抽帧，多张一起看时每张少抽几帧；总量仍不超过一次看图的图片上限
+    let remaining = MAX_VISION_IMAGES;
     for (const [index, asset] of assets.entries()) {
-      const uri = await assetThumbDataUri(db, asset);
-      if (!uri) { notes.push(`${assetRef(asset.id)} 的缩略图读取失败`); continue; }
-      parts.push({
-        type: "text",
-        text: `${assetRef(asset.id)}${fromCanvas ? `（画布第 ${index + 1} 张）` : `（第 ${index + 1} 张）`}`,
-      });
-      parts.push({ type: "image_url", image_url: { url: uri } });
+      if (remaining <= 0) { notes.push("附图数量已达上限，剩余图片只给了编号"); break; }
+      const maxFrames = Math.max(1, Math.min(remaining, assets.length === 1 ? 6 : 2));
+      const view = await assetVisionParts(
+        db,
+        asset,
+        `${assetRef(asset.id)}${fromCanvas ? `（画布第 ${index + 1} 张）` : `（第 ${index + 1} 张）`}`,
+        maxFrames,
+      );
+      if (!view.loaded) { notes.push(`${assetRef(asset.id)} 的画面读取失败`); continue; }
+      parts.push(...view.parts);
+      remaining -= view.parts.filter((part) => part.type === "image_url").length;
       attached = true;
+      if (view.animated) notes.push(`${assetRef(asset.id)} 是动图，已按时间附上抽样帧（原图共 ${view.frameCount} 帧）`);
     }
   }
   if (notes.length) parts.push({ type: "text", text: `[view_images 提示] ${notes.join("；")}` });

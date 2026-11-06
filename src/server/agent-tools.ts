@@ -66,6 +66,8 @@ export const generateImageSchema = z.object({
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
   count: z.coerce.number().int().min(1).max(8).optional(),
   fromScratch: z.coerce.boolean().optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional()
+    .describe("输出格式。gif 只改变文件封装，是否多帧由模型决定；不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
   imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
 });
 
@@ -77,6 +79,8 @@ export const editImageSchema = z.object({
   // 改图照样能定输出尺寸：改完的画面未必沿用原图的形状
   aspectRatio: z.string().trim().max(20).optional(),
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional()
+    .describe("输出格式。gif 只改变文件封装，是否多帧由模型决定；不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
 });
 
 export const viewImagesSchema = z.object({
@@ -1088,6 +1092,7 @@ async function generateImage(
     aspectRatio: args.aspectRatio,
     imageSize: args.imageSize,
     count: args.count ?? 1,
+    outputFormat: args.outputFormat,
     timeoutMs: IMAGE_TASK_TIMEOUT_MS,
   };
 

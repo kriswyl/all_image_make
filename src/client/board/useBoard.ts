@@ -110,7 +110,7 @@ export interface UseBoardResult {
     seed?: number;
     style?: "auto" | "vivid" | "natural";
     background?: "auto" | "opaque" | "transparent";
-    outputFormat?: "png" | "jpeg" | "webp";
+    outputFormat?: "png" | "jpeg" | "webp" | "gif";
     moderation?: "auto" | "low";
     count?: number;
     videoMode?: BoardVideoMode;
@@ -810,7 +810,7 @@ export function useBoard(
     seed?: number;
     style?: "auto" | "vivid" | "natural";
     background?: "auto" | "opaque" | "transparent";
-    outputFormat?: "png" | "jpeg" | "webp";
+    outputFormat?: "png" | "jpeg" | "webp" | "gif";
     moderation?: "auto" | "low";
     count?: number;
     videoMode?: BoardVideoMode;

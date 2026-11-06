@@ -18,7 +18,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Jimp, JimpMime } from "jimp";
 import { MAX_REFERENCE_IMAGE_BYTES } from "../shared/types.js";
+import type { BrainContentPart } from "./brain.js";
 import type { AppDatabase, AssetRow } from "./db.js";
+import { GIF_VISION_MAX_FRAMES, readGifAnimation } from "./media-frames.js";
 
 /** 长边像素。512 实测 2000x1200 的 PNG 压到 36KB，base64 后约 48KB（§11.6） */
 export const THUMB_MAX_EDGE = 512;
@@ -55,7 +57,7 @@ export const REFERENCE_PROFILE: EncodeProfile = { maxEdge: 2048, maxBytes: MAX_R
  * 直接用声明的 mimeType 去发给上游，会在「参考图格式与文件内容不匹配」那道校验上炸掉。
  * 所以落盘和当参考图之前都以字节为准。
  */
-export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | null {
+export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | "image/gif" | null {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
     return "image/png";
   }
@@ -63,6 +65,7 @@ export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "im
   if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
     return "image/webp";
   }
+  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a")) return "image/gif";
   return null;
 }
 /** 视频首帧：必须挤进内容长度限制，1280 对绝大多数视频模型已经够用 */
@@ -93,6 +96,7 @@ export function videoInlineProfile(count: number): EncodeProfile {
 function extensionFor(mimeType: string) {
   if (mimeType.includes("jpeg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("gif")) return "gif";
   return "png";
 }
 
@@ -184,6 +188,84 @@ export async function readThumbBytes(db: AppDatabase, asset: AssetRow): Promise<
   return readFileOrNull(thumbAbsolutePath(db, fileName));
 }
 
+export interface AssetVisionView {
+  parts: BrainContentPart[];
+  /** 至少附了一张实际画面 */
+  loaded: boolean;
+  /** 是多帧 GIF，已附抽样帧 */
+  animated: boolean;
+  frameCount?: number;
+}
+
+function formatSeconds(ms: number) {
+  const seconds = ms / 1000;
+  return Number.isInteger(seconds) ? `${seconds} 秒` : `${seconds.toFixed(1)} 秒`;
+}
+
+/**
+ * 一张资产交给大脑“看”的内容块。
+ *
+ * 普通图片就是一张缩略图；多帧 GIF 会按时间抽几帧并明确写出总帧数和时长，
+ * 这样大脑能判断“动作到底发没发生”，而不是把第一帧当成整段动画。
+ * 单帧 GIF 会说明它是静态图，避免模型声称看到了动画。
+ */
+export async function assetVisionParts(
+  db: AppDatabase,
+  asset: AssetRow,
+  label: string,
+  maxFrames = GIF_VISION_MAX_FRAMES,
+): Promise<AssetVisionView> {
+  // 普通图片直接走缩略图，不为了探测格式去读整张原图
+  const gifCandidate = asset.mimeType === "image/gif" || /\.gif$/i.test(asset.fileName);
+  const original = gifCandidate ? await readFileOrNull(assetAbsolutePath(db, asset)) : null;
+  if (original && detectImageMime(original) === "image/gif") {
+    const gif = await readGifAnimation(original, maxFrames);
+    if (gif) {
+      if (gif.frameCount > 1) {
+        const duration = gif.durationMs > 0 ? `，总时长约 ${formatSeconds(gif.durationMs)}` : "，帧延迟为 0，无法判断播放时长";
+        const parts: BrainContentPart[] = [{
+          type: "text",
+          text: `${label}：动图 GIF，共 ${gif.frameCount} 帧${duration}。下面按时间顺序附 ${gif.frames.length} 个抽样帧；请以这些帧判断动作是否真的发生、画面是否在动，不要假设没附上的帧。`,
+        }];
+        for (const [position, frame] of gif.frames.entries()) {
+          parts.push({
+            type: "text",
+            text: `第 ${position + 1}/${gif.frames.length} 个抽样帧（原第 ${frame.index + 1} 帧，约 ${(frame.timeMs / 1000).toFixed(1)} 秒）`,
+          });
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${frame.jpeg.toString("base64")}` },
+          });
+        }
+        return { parts, loaded: true, animated: true, frameCount: gif.frameCount };
+      }
+      const uri = await assetThumbDataUri(db, asset);
+      if (uri) {
+        return {
+          parts: [
+            { type: "text", text: `${label}：GIF 文件，但只有 1 帧，是静态图，不会动。` },
+            { type: "image_url", image_url: { url: uri } },
+          ],
+          loaded: true,
+          animated: false,
+          frameCount: 1,
+        };
+      }
+    }
+  }
+
+  const uri = await assetThumbDataUri(db, asset);
+  if (!uri) return { parts: [{ type: "text", text: `${label}：读取失败，没有看到画面。` }], loaded: false, animated: false };
+  return {
+    parts: [
+      { type: "text", text: label },
+      { type: "image_url", image_url: { url: uri } },
+    ],
+    loaded: true,
+    animated: false,
+  };
+}
+
 /**
  * 把产物转成可以当参考图 / 视频首帧用的字节流。
  *
@@ -195,7 +277,7 @@ export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profil
   if (!original) return null;
   // 以字节为准：老资产可能声明 image/png、实际是 JPEG
   const actualMime = detectImageMime(original);
-  if (actualMime && original.length <= profile.maxBytes) {
+  if (actualMime && actualMime !== "image/gif" && original.length <= profile.maxBytes) {
     return { bytes: original, mimeType: actualMime, fileName: asset.fileName };
   }
 

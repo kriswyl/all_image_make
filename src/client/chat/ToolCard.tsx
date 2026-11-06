@@ -10,6 +10,9 @@ import { useState } from "react";
 import { api, isTauriRuntime } from "../api";
 import { StoryboardReview } from "./StoryboardReview";
 import { WpsPreview } from "./WpsPreview";
+import { PresentationFileReport } from "./PresentationFileReport";
+import { WorkflowProgress } from "./WorkflowProgress";
+import { presentationReportSchema } from "../../shared/presentation-report";
 import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
 import { LazyVideoThumb } from "../LazyVideoThumb";
@@ -118,6 +121,7 @@ export function ToolCard({
   onToast,
   onImportTemplate,
   onResumePresentation,
+  presentationActionsEnabled = false,
 }: {
   message: ChatMessage;
   result: ChatMessage | null;
@@ -131,6 +135,7 @@ export function ToolCard({
   onDiagnostics?: (taskId: string) => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
   onResumePresentation?: () => void;
+  presentationActionsEnabled?: boolean;
   onImportTemplate?: (templateId: string, name: string, description?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -141,6 +146,15 @@ export function ToolCard({
   const tool = message.toolName ?? "reply";
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
   const payload = result?.toolResult ?? null;
+  const [resumingQuery, setResumingQuery] = useState(false);
+  const pausedTaskId = payload?.error === "VIDEO_TIMEOUT" ? result?.taskId : null;
+  const querying = resumingQuery || Boolean(pausedTaskId && progress?.status === "running");
+  async function continueQuery(taskId: string) {
+    setResumingQuery(true);
+    try { await api.continueTaskQuery(taskId); }
+    catch (error) { onToast?.("error", error instanceof Error ? error.message : "继续查询失败"); }
+    finally { setResumingQuery(false); }
+  }
   /*
    * 「等结果」和「等一个永远不会来的结果」是两件事。
    *
@@ -151,12 +165,15 @@ export function ToolCard({
   const orphaned = !result && (stale || message.status === "error");
   const isPending = !orphaned && (!result || result.status === "pending");
   const paused = payload?.data?.presentationPaused === true;
+  const workflow = payload?.data?.workflow;
+  const workflowRunId = workflow && typeof workflow === "object" && typeof (workflow as Record<string,unknown>).runId === "string" ? String((workflow as Record<string,unknown>).runId) : null;
+  const presentation = presentationReportSchema.safeParse(payload?.data?.presentation).data;
   const failed = !paused && ((result && result.status === "error") || payload?.ok === false);
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
   const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "plan_update"].includes(tool);
-  const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数" };
+  const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数", page: "页码" };
   const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;
   // set_canvas 的 assetId 是「切到哪张」，一样值得点开看一眼
@@ -280,7 +297,11 @@ export function ToolCard({
         {orphaned ? <div className="tool-card-result">{message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
         {nativeTool && isPending && message.content ? <div className="tool-card-result" aria-live="polite">{message.content}</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
-        {paused && onResumePresentation ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" onClick={onResumePresentation}>继续 PPT</button></div> : null}
+        {pausedTaskId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={querying} onClick={() => void continueQuery(pausedTaskId)}>{querying ? "正在查询…" : "继续查询原任务"}</button></div> : null}
+        {presentation && !deletedWorkspaceFile ? <PresentationFileReport key={workspaceFileId ?? result?.id} conversationId={message.conversationId} fileId={workspaceFileId}
+          initial={presentation} canUseModel={presentationActionsEnabled} onToast={onToast} /> : null}
+        {workflowRunId ? <WorkflowProgress conversationId={message.conversationId} runId={workflowRunId} enabled={presentationActionsEnabled} onToast={onToast} /> : null}
+        {paused && !workflowRunId && onResumePresentation ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" onClick={onResumePresentation}>继续 PPT</button></div> : null}
 
         {workspaceFileId && pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId) || deletedWorkspaceFile} onClick={() => void deleteWorkspaceFile()}>{deletedWorkspaceFile ? "已删除" : "确认删除"}</button><span>{workspaceFileName}</span></div> : null}
         {workspaceFileId && !pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadWorkspaceFile()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载文件</button>{isTauriRuntime() ? <button type="button" className="secondary-button compact" onClick={() => { void api.revealWorkspaceFile(message.conversationId, workspaceFileId).catch((error) => onToast?.("error", error instanceof Error ? error.message : "无法打开目录")); }}>打开所在文件夹</button> : null}{/\.pptx$/i.test(workspaceFileName) ? <button type="button" className="secondary-button compact" onClick={() => setWpsOpen(true)}><Eye size={12} />WPS 预览</button> : null}<span>{workspaceFileName}</span></div> : null}

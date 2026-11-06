@@ -111,7 +111,7 @@ const generationParamShape = {
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   videoMode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference"]).optional(),
   durationSeconds: z.number().int().min(1).max(30).optional(),
@@ -207,7 +207,7 @@ export const configNodeSchema = z.object({
   seed: z.number().int().min(0).max(2_147_483_647).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   count: z.number().int().min(1).max(BOARD_LIMITS.maxCount).default(1),
   /** 不填 = 按上游图片的 first-frame / last-frame / reference 角色自动判断 */

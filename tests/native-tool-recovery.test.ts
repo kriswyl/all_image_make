@@ -10,6 +10,34 @@ import { executeChatDocumentTool } from "../src/server/chat-tools/documents";
 import { CHAT_DOCUMENT_TOOLS } from "../src/server/chat-tools/documents";
 import { createPlanTool } from "../src/server/chat-tools/planning";
 import { createHash } from "node:crypto";
+it("渠道只拒绝 tool_choice 时保留工具，后续请求省略该参数", async () => {
+  const bodies:any[]=[];
+  const mock=http.createServer((req,res)=>{
+    let data="";req.on("data",chunk=>{data+=chunk;});req.on("end",()=>{
+      const body=JSON.parse(data);bodies.push(body);
+      if("tool_choice" in body) {res.writeHead(400,{"content-type":"application/json"}).end(JSON.stringify({error:{message:"tool_choice is not supported"}}));return;}
+      const message=body.messages.some((m:any)=>m.role==="tool")?{content:"文件已创建"}:{tool_calls:[{id:"create",type:"function",function:{name:"doc_create",arguments:JSON.stringify({kind:"md",name:"虚构记录",content:"虚构正文"})}}]};
+      res.writeHead(200,{"content-type":"application/json"}).end(JSON.stringify({choices:[{message,finish_reason:"stop"}],usage:{prompt_tokens:10,completion_tokens:10}}));
+    });
+  });
+  await new Promise<void>(resolve=>mock.listen(0,"127.0.0.1",resolve));
+  const address=mock.address();if(!address||typeof address==="string")throw new Error("mock");
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),"choice-only-rejection-")),{app,context}=createApp({dataDir:dir});
+  try{
+    const channel=(await request(app).post("/api/channels").send({name:"mock",baseUrl:`http://127.0.0.1:${address.port}`,adapterType:"openai-chat",authType:"none",models:["mock"],allowPrivateNetwork:true,enabled:true}).expect(201)).body.data;
+    const c=context.db.createConversation({title:"工具兼容",brainChannelId:channel.id,brainModel:"mock",videoConfirmPolicy:"auto_only",visionEnabled:false,verbatimPrompt:false});
+    context.db.updateConversation(c.id,{chatMode:"chat"});
+    await request(app).post(`/api/conversations/${c.id}/messages`).send({text:"生成一份Markdown文件"}).expect(202);
+    for(let i=0;i<200&&context.db.getConversation(c.id)?.status!=="idle";i++)await new Promise(resolve=>setTimeout(resolve,10));
+    // startTurn claims synchronously, completion is persisted before becoming idle.
+    expect(context.db.listWorkspaceDocuments(c.id)).toHaveLength(1);
+    expect(context.db.getConversation(c.id)?.toolsUnsupported).not.toBe(true);
+    expect(bodies[0].tool_choice).toBe("auto");
+    expect(bodies[1].tools.length).toBeGreaterThan(0);
+    expect(bodies[1].tool_choice).toBeUndefined();
+    expect(context.db.executions.list(c.id)).toMatchObject([{capability:"doc_create",state:"completed",version:1}]);
+  }finally{context.agent.dispose();context.db.close();await new Promise<void>(resolve=>mock.close(()=>resolve()));await fs.rm(dir,{recursive:true,force:true});}
+});
 
 it("重启后标记未完成的工具调用，并提示副作用可能已发生", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "native-recover-"));

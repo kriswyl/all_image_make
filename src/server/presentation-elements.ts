@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { presentationInk, presentationPanel } from "./presentation-palette.js";
 type Presentation = InstanceType<typeof import("pptxgenjs").default>;
 type PresentationSlide = ReturnType<Presentation["addSlide"]>;
 
@@ -164,6 +165,8 @@ export function connectorRoute(elements: PresentationElement[], connector: Extra
 export function renderElements(ppt: Presentation, slide: PresentationSlide, elements: PresentationElement[], images: Array<{ data: string }>, design: PresentationDesign = {}): void {
   validateElements(elements, images.length);
   const accent = design.accent ?? "286D9C", ink = design.text ?? "243443", font = design.fontFace ?? "Microsoft YaHei";
+  const paper = design.background ?? "FFFFFF", panel = presentationPanel(paper);
+  const chartInk = presentationInk(paper, ink);
   for (const element of elements) {
     if (element.type === "connector") continue;
     const rect = { x: element.x, y: element.y, w: element.w, h: element.h, objectName: element.id };
@@ -175,8 +178,17 @@ export function renderElements(ppt: Presentation, slide: PresentationSlide, elem
       }
       case "image": slide.addImage({ ...rect, data: images[element.imageIndex]!.data, sizing: { type: element.fit ?? "contain", w: element.w, h: element.h } }); break;
       case "shape": slide.addShape(ppt.ShapeType[element.shape], { ...rect, ...(element.fill ? { fill: { color: element.fill } } : { fill: { color: "FFFFFF", transparency: 100 } }), line: { color: element.line?.color ?? element.fill ?? accent, width: element.line?.width ?? 1 }, ...(element.shape === "roundRect" ? { rectRadius: 0.12 } : {}) }); break;
-      case "table": slide.addTable(element.rows.map((row, rowIndex) => row.map((text) => ({ text, options: { bold: Boolean(element.header && rowIndex === 0), color: element.header && rowIndex === 0 ? "FFFFFF" : ink, fill: { color: element.header && rowIndex === 0 ? accent : rowIndex % 2 ? "F0F4F7" : "FFFFFF" } } }))), { ...rect, fontFace: font, fontSize: element.fontSize ?? 16, border: { color: "D7E0E6", pt: 0.5 }, margin: 5, rowH: element.h / element.rows.length, autoPage: false }); break;
-      case "chart": slide.addChart(ppt.ChartType[element.chartType], element.series.map((series) => ({ name: series.name, labels: element.categories, values: series.values })), { ...rect, showLegend: element.series.length > 1 || element.chartType === "pie", showValue: true, showTitle: false, chartColors: [accent, "77A6B6", "D8A657", "778CA3", "7DA87B", "BD8D99", "9A8EB8", "B5B584"], showLabel: element.chartType === "pie", catAxisLabelFontFace: font, catAxisLabelFontSize: 12, valAxisLabelFontFace: font, valAxisLabelFontSize: 12, legendFontSize: 12 }); break;
+      case "table": {
+        const rows = element.rows.map((row, index) => {
+          const header = Boolean(element.header && index === 0);
+          const background = header ? accent : index % 2 ? panel : paper;
+          const color = presentationInk(background, header ? undefined : ink);
+          return row.map(text => ({ text, options: { bold: header, color, fill: { color: background } } }));
+        });
+        slide.addTable(rows, { ...rect, fontFace: font, fontSize: element.fontSize ?? 16, border: { color: panel, pt: 0.5 }, margin: 5, rowH: element.h / element.rows.length, autoPage: false });
+        break;
+      }
+      case "chart": slide.addChart(ppt.ChartType[element.chartType], element.series.map((series) => ({ name: series.name, labels: element.categories, values: series.values })), { ...rect, showLegend: element.series.length > 1 || element.chartType === "pie", showValue: true, showTitle: false, chartArea: { fill: { color: paper } }, plotArea: { fill: { color: paper } }, chartColors: [accent, "77A6B6", "D8A657", "778CA3", "7DA87B", "BD8D99", "9A8EB8", "B5B584"], showLabel: element.chartType === "pie", catAxisLabelFontFace: font, catAxisLabelFontSize: 12, catAxisLabelColor: chartInk, valAxisLabelFontFace: font, valAxisLabelFontSize: 12, valAxisLabelColor: chartInk, dataLabelColor: chartInk, legendColor: chartInk, legendFontSize: 12 }); break;
       case "icon": {
         const c = element.color ?? accent;
         if (element.icon === "target" || element.icon === "info") {
@@ -205,4 +217,4 @@ export function renderElements(ppt: Presentation, slide: PresentationSlide, elem
   }
 }
 
-export const ELEMENT_DESIGN_GUIDE = `优先输出元素级页面：{layout:"content",title,subtitle:"",lines:[],notes,sourceIds,elements:[...]}；旧 layout 仍兼容。画布 13.333333×7.5 英寸，安全边距左右0.6上下0.45。每个元素有稳定唯一 id（字母数字_-）和 type。普通元素必填 x,y,w,h；不得越界。text:{text,style?:{fontSize,bold,color,align,valign,fontFace,lineSpacing,margin}}；align只能为left/center/right，valign只能为top/middle/bottom（垂直居中用middle）；image:{imageIndex,fit:"contain"|"cover"}；shape:{shape:"rect"|"roundRect"|"ellipse"|"line",fill?,line?:{color,width}}；icon:{icon:"check"|"target"|"trend"|"info"|"arrow",color?}；table:{rows:二维字符串数组,header?,fontSize?}；chart:{chartType:"bar"|"line"|"pie",categories:[分类],series:[{name,values:[有限数字]}]}；connector:{id,type:"connector",from:端点元素id,to:端点元素id,label?,arrow?:布尔,color?}，连线无x/y/w/h。所有颜色为6位十六进制无#。表格各行列数相同，图表每组数据长度等于分类数，无真实数据不得编造图表。图片只能引用提供的图片编号。原生文本框可编辑，标题必须实际出现在text元素中。style.lineSpacing可填0.8–3的倍数（如1.2），或12–120的磅值；style.margin单位英寸。正文建议18–22pt，标题28–36pt，注释至少12pt；按文本容量给足宽高，禁止依赖自动缩字。每页围绕一个主张，提供必要支撑、事实和条件，密集内容拆页。可用无方向的connector表达来源中明确的关联，不擅自添加因果箭头。每页最多160元素。约束布局可用box代替elements：box:{x,y,w,h,layout:{direction:"row"|"column",gap:英寸,children:[{flex:比例,element:完整普通元素}|{flex:比例,box:递归布局}]}}，element坐标会被槽位覆盖；box和elements不能同时给。`;
+export const ELEMENT_DESIGN_GUIDE = `优先输出元素级页面：{layout:"content",title,subtitle:"",lines:[],notes,sourceIds,elements:[...]}；旧 layout 仍兼容。画布 13.333333×7.5 英寸，安全边距左右0.6上下0.45。每个元素有稳定唯一 id（字母数字_-）和 type。普通元素必填 x,y,w,h；不得越界。text 元素的 text 字段**必须是字符串**，样式放在同级的 style；不能写成 text:{text,style}。text:{text,style?:{fontSize,bold,color,align,valign,fontFace,lineSpacing,margin}}；align只能为left/center/right，valign只能为top/middle/bottom（垂直居中用middle）；image:{imageIndex,fit:"contain"|"cover"}；shape:{shape:"rect"|"roundRect"|"ellipse"|"line",fill?,line?:{color,width}}；icon:{icon:"check"|"target"|"trend"|"info"|"arrow",color?}；table:{rows:二维字符串数组,header?,fontSize?}；chart:{chartType:"bar"|"line"|"pie",categories:[分类],series:[{name,values:[有限数字]}]}；connector:{id,type:"connector",from:端点元素id,to:端点元素id,label?,arrow?:布尔,color?}，连线无x/y/w/h。所有颜色为6位十六进制无#。表格各行列数相同，图表每组数据长度等于分类数，无真实数据不得编造图表。图片只能引用提供的图片编号。原生文本框可编辑，标题必须实际出现在text元素中。style.lineSpacing可填0.8–3的倍数（如1.2），或12–120的磅值；style.margin单位英寸。正文建议18–22pt，标题28–36pt，注释至少12pt；按文本容量给足宽高，禁止依赖自动缩字。每页围绕一个主张，提供必要支撑、事实和条件，密集内容拆页。可用无方向的connector表达来源中明确的关联，不擅自添加因果箭头。每页最多160元素。约束布局可用box代替elements：box:{x,y,w,h,layout:{direction:"row"|"column",gap:英寸,children:[{flex:比例,element:完整普通元素}|{flex:比例,box:递归布局}]}}，element坐标会被槽位覆盖；box和elements不能同时给。`;

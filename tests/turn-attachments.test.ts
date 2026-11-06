@@ -5,11 +5,12 @@
  * 这里钉住三条：紧挨着的上传算本轮、上一条文字消息之后的不算、非图片不算。
  */
 import crypto from "node:crypto";
+import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/server/app";
 import { collectTurnAttachmentIds } from "../src/server/agent";
@@ -20,15 +21,15 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()?.();
 });
 
-async function setup() {
+async function setup(baseUrl = "http://127.0.0.1:1") {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-attach-"));
   const { app, context } = createApp({ dataDir });
   cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
 
   const brain = (await request(app).post("/api/channels").send({
-    name: "Brain", baseUrl: "http://127.0.0.1:1", adapterType: "openai-chat", authType: "none",
+    name: "Brain", baseUrl, adapterType: "openai-chat", authType: "none",
     authHeaderName: "", secretEnv: "", endpoint: "/v1/chat/completions",
-    models: ["mock-brain"], allowPrivateNetwork: true, enabled: true,
+    models: ["mock-brain", "vision-brain"], allowPrivateNetwork: true, enabled: true,
   }).expect(201)).body.data;
   const conversationId = (await request(app).post("/api/conversations")
     .send({ brainChannelId: brain.id, brainModel: "mock-brain" }).expect(201)).body.data.id as string;
@@ -45,7 +46,7 @@ async function setup() {
     return assetId;
   };
 
-  return { db, conversationId, addAsset };
+  return { app, db, conversationId, addAsset };
 }
 
 describe("collectTurnAttachmentIds", () => {
@@ -89,4 +90,53 @@ describe("collectTurnAttachmentIds", () => {
     // 视频那条紧挨着文字消息，但不是图片 → 过滤；更早的 old 不在本轮 → 不收
     expect(collectTurnAttachmentIds(db, conversationId, text.seq)).toEqual([image]);
   });
+});
+
+it("切换到支持图片的模型后恢复看图，用户手动关闭时继续只发文字", async () => {
+  const received: Array<{ model: string; image: boolean }> = [];
+  const mock = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const image = body.messages.some((message: { content: unknown }) => Array.isArray(message.content)
+      && message.content.some((part: { type: string }) => part.type === "image_url"));
+    received.push({ model: body.model, image });
+    res.setHeader("Content-Type", "application/json");
+    if (body.model === "mock-brain" && image) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: { message: "image input is not supported" } }));
+      return;
+    }
+    res.end(JSON.stringify({ choices: [{ message: { content: "收到。" }, finish_reason: "stop" }] }));
+  });
+  await new Promise<void>(resolve => mock.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise<void>(resolve => mock.close(() => resolve())));
+  const address = mock.address();
+  if (!address || typeof address === "string") throw new Error("mock server unavailable");
+  const { app, db, conversationId } = await setup(`http://127.0.0.1:${address.port}`);
+  const base = `/api/conversations/${conversationId}`;
+  await request(app).patch(base).send({ toolScope: "all" }).expect(200);
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const upload = (await request(app).post(`${base}/uploads`).attach("images", png, "vision.png").expect(201)).body.data;
+  const assetRefs = [upload.sessionImages[0].asset.id];
+  async function send(expectedCalls: number) {
+    await request(app).post(`${base}/messages`).send({ text: "请看看这张图", assetRefs }).expect(202);
+    await vi.waitFor(() => {
+      expect(received).toHaveLength(expectedCalls);
+      expect(db.getConversation(conversationId)?.status).toBe("idle");
+    });
+  }
+  await send(2);
+  const unsupported = (await request(app).get(base).expect(200)).body.data;
+  expect(unsupported).toMatchObject({ visionEnabled: true, visionBlocked: true });
+  expect(unsupported.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "system", content: expect.stringContaining("不接受图片输入") })]));
+  const switched = (await request(app).patch(base).send({ brainModel: "vision-brain" }).expect(200)).body.data;
+  expect(switched).toMatchObject({ visionEnabled: true, visionBlocked: false });
+  await send(3);
+  await request(app).patch(base).send({ visionEnabled: false }).expect(200);
+  await send(4);
+  expect(received).toEqual([
+    { model: "mock-brain", image: true }, { model: "mock-brain", image: false },
+    { model: "vision-brain", image: true }, { model: "vision-brain", image: false },
+  ]);
 });

@@ -15,12 +15,20 @@ export function readPresentationSubmission(calls: BrainToolCall[]): string | und
 }
 
 export interface PresentationResume {
+  engine?: "legacy" | "template";
   operationId: string;
   args: string;
   request: string;
+  currentRequest?: string;
+  targetPages?: number;
   channelFingerprint: string;
   sourceFingerprint?: string;
   calls: number;
   tokens: number;
   usageMissing: boolean;
+}
+
+/** Old checkpoints without an engine were produced by legacy. New tasks default to templates. */
+export function presentationEngine(resume?: Pick<PresentationResume,"engine"> | null, configured = process.env.CHATCANVAS_PPT_ENGINE): "template" | "legacy" {
+  return resume ? resume.engine ?? "legacy" : configured === "legacy" ? "legacy" : "template";
 }

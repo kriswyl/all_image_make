@@ -5,7 +5,7 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     testTimeout: 20000,
-    // 视频轮询默认 8 秒一次，测试里压到 20ms 才能跑完整个提交流程
+    // 缩短异步任务的查询间隔，测试仍会走完整提交流程。
     env: { VIDEO_POLL_INTERVAL_MS: "20" },
   },
 });

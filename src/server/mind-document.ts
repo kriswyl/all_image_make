@@ -3,6 +3,7 @@ import { XMLParser } from "fast-xml-parser";
 import pptxgen from "pptxgenjs";
 import { z } from "zod";
 import { AppError } from "./tasks.js";
+import { presentationInk } from "./presentation-palette.js";
 import { designSchema, elementSchema, slideBoxSchema, resolveElements, validateElements, renderElements, MAX_SLIDES, MAX_LEGACY_LINES, type PresentationElement, type ElementSlide } from "./presentation-elements.js";
 
 export type DocumentNode = { title: string; notes: string; children: DocumentNode[]; id?: string; image?: string; imageDescription?: string };
@@ -179,7 +180,7 @@ export async function renderAiPresentation(plan: AiPresentation, images: Array<{
     slide.background = { color: item.background ?? (isDark && !elements ? dark : plan.design?.background ?? "FAFAF8") };
     if (elements) {
       validateElements(elements, images.length);
-      renderElements(ppt, slide, elements, images, { text: dark, accent, ...plan.design });
+      renderElements(ppt, slide, elements, images, { text: dark, accent, ...plan.design, background: slide.background.color });
     } else if (isDark) {
       slide.addText(item.title, { x: 0.9, y: 2.2, w: 11.4, h: 1.35, fontFace: font, fontSize: item.layout === "cover" ? 36 : 32, bold: true, color: "FFFFFF", valign: "middle", margin: 0, fit: "shrink" });
       if (item.subtitle) slide.addText(item.subtitle, { x: 0.92, y: 3.85, w: 11.45, h: 1.0, fontFace: font, fontSize: item.subtitle.length > 45 ? 16 : 20, color: "D1DEE1", margin: 0, valign: "top", fit: "shrink" });
@@ -229,7 +230,16 @@ export async function renderAiPresentation(plan: AiPresentation, images: Array<{
         }));
       }
     }
-    slide.addText(String(index + 1).padStart(2, "0"), { x: 12.05, y: 7.05, w: 0.45, h: 0.2, fontFace: font, fontSize: 10, color: isDark ? "B7C5CC" : "7B8588", align: "right", margin: 0 });
+    const customPageNumber = elements?.some(element => {
+      if (element.id === "page-number") return true;
+      if (element.type !== "text" || element.x + element.w < 11.5 || element.y + element.h < 6.9) return false;
+      const number = /^(?:第\s*)?(\d{1,3})(?:\s*(?:[/／]\s*\d{1,3}|页))?$/.exec(element.text.trim());
+      return Number(number?.[1]) === index + 1;
+    });
+    if (!customPageNumber) {
+      slide.addText(String(index + 1).padStart(2, "0"), { x: 12.05, y: 7.05, w: 0.45, h: 0.2, fontFace: font, fontSize: 10,
+        color: presentationInk(slide.background.color ?? "FFFFFF", isDark ? "B7C5CC" : "7B8588"), align: "right", margin: 0 });
+    }
     if (item.notes) slide.addNotes(item.notes);
   });
   return Buffer.from(await ppt.write({ outputType: "nodebuffer" }) as Buffer);

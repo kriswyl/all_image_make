@@ -52,10 +52,10 @@ describe("model catalog", () => {
     }
   });
 
-  it("生图推荐落在 -c 系列：gpt-image-2.5-sunburst-c", () => {
-    expect(RECOMMENDED_MODELS["tiantoken-gpt-c:gpt-c"]).toBe("gpt-image-2.5-sunburst-c");
+  it("生图推荐落在 -c 系列：gpt-image-2.6-sunburst-c", () => {
+    expect(RECOMMENDED_MODELS["tiantoken-gpt-c:gpt-c"]).toBe("gpt-image-2.6-sunburst-c");
     const recommended = recommendedModelFor("image");
-    expect(recommended?.model).toBe("gpt-image-2.5-sunburst-c");
+    expect(recommended?.model).toBe("gpt-image-2.6-sunburst-c");
     expect(recommended?.group.kind).toBe("image");
   });
 

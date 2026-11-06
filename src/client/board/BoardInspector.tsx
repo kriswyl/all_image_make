@@ -780,13 +780,14 @@ export function BoardInspector({
                         <select
                           value={node.outputFormat ?? ""}
                           onChange={(event) => onUpdateNode(node.id, {
-                            outputFormat: event.target.value ? event.target.value as "png" | "jpeg" | "webp" : undefined,
+                            outputFormat: event.target.value ? event.target.value as "png" | "jpeg" | "webp" | "gif" : undefined,
                           } as Partial<BoardNode>)}
                         >
                           <option value="">自动</option>
                           <option value="png">PNG</option>
                           <option value="jpeg">JPEG</option>
                           <option value="webp">WebP</option>
+                          {/^gpt-image-2\.6-(?:flare|sunburst)(?:-c)?$/i.test(node.model ?? "") && node.type === "image" && Boolean(node.assetId) ? <option value="gif">GIF</option> : null}
                         </select>
                       </label>
                       <label className="board-field">

@@ -46,8 +46,8 @@ export interface ChannelDraft {
   input: ChannelInput;
 }
 
-const GPT_MODELS = ["gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"];
-const GPT_C_MODELS = ["gpt-image-2-c", "gpt-image-2.5-sunburst-c", "gpt-image-2.5-flare-c"];
+const GPT_MODELS = ["gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"];
+const GPT_C_MODELS = ["gpt-image-2-c", "gpt-image-2.5-sunburst-c", "gpt-image-2.5-flare-c", "gpt-image-2.6-flare-c", "gpt-image-2.6-sunburst-c"];
 const GEMINI_MODELS = [
   "gemini-3.1-flash-image",
   "gemini-3.1-flash-image-preview",

@@ -7,6 +7,7 @@ import { useFileDrop } from "./useFileDrop";
 import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
+import { SelectMenu } from "./ui/SelectMenu";
 import {
   StatusBadge, formatDuration, statusLabels, terminalStatuses, usePersistentState,
 } from "./task-ui";
@@ -178,23 +179,38 @@ export function SpeechGenerateView(props: {
               <div className="parameter-grid">
                 <label>
                   <span>{mode === "duo" ? "说话人 A 音色" : "音色"}</span>
-                  <select value={voice} onChange={(event) => setVoice(event.target.value)}>
-                    {TTS_VOICES.map((item) => <option key={item} value={item}>{item}</option>)}
-                  </select>
+                  <SelectMenu
+                    value={voice}
+                    options={TTS_VOICES.map((item) => ({ value: item, label: item }))}
+                    onChange={setVoice}
+                    ariaLabel={mode === "duo" ? "说话人 A 音色" : "音色"}
+                    className="param-select"
+                    minWidth={200}
+                  />
                 </label>
                 {mode === "duo" ? (
                   <label>
                     <span>说话人 B 音色</span>
-                    <select value={secondVoice} onChange={(event) => setSecondVoice(event.target.value)}>
-                      {TTS_VOICES.map((item) => <option key={item} value={item}>{item}</option>)}
-                    </select>
+                    <SelectMenu
+                      value={secondVoice}
+                      options={TTS_VOICES.map((item) => ({ value: item, label: item }))}
+                      onChange={setSecondVoice}
+                      ariaLabel="说话人 B 音色"
+                      className="param-select"
+                      minWidth={200}
+                    />
                   </label>
                 ) : null}
                 <label>
                   <span>语种</span>
-                  <select value={language} onChange={(event) => setLanguage(event.target.value)}>
-                    {TTS_LANGUAGES.map((item) => <option key={item.value || "auto"} value={item.value}>{item.label}</option>)}
-                  </select>
+                  <SelectMenu
+                    value={language}
+                    options={TTS_LANGUAGES.map((item) => ({ value: item.value, label: item.label }))}
+                    onChange={setLanguage}
+                    ariaLabel="语种"
+                    className="param-select"
+                    minWidth={180}
+                  />
                 </label>
                 <label className="tts-style-field">
                   <span>风格 <small>会被当作语气标注，不会读出来</small></span>

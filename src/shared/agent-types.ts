@@ -42,6 +42,8 @@ export function usesNativeCreativeTools(conversation: Conversation): boolean {
 /** §13.2 视频确认策略 */
 export const VIDEO_CONFIRM_POLICIES = ["always", "auto_only", "never"] as const;
 export type VideoConfirmPolicy = (typeof VIDEO_CONFIRM_POLICIES)[number];
+export const IMAGE_CONFIRM_POLICIES = ["batch_only", "always"] as const;
+export type ImageConfirmPolicy = (typeof IMAGE_CONFIRM_POLICIES)[number];
 
 export const videoConfirmPolicyLabels: Record<VideoConfirmPolicy, string> = {
   always: "每次都问",
@@ -220,6 +222,8 @@ export interface GenerateImageArgs {
    */
   imageSize?: string;
   count?: number;
+  /** 输出格式；GIF 仅 gpt-image-2.6 edits 链路支持 */
+  outputFormat?: "png" | "jpeg" | "webp" | "gif";
   /** true 表示不带参考图，纯粹重画 */
   fromScratch?: boolean;
   /**
@@ -247,6 +251,7 @@ export interface EditImageArgs {
   /** 改图同样能指定输出尺寸与宽高比——改完的画面未必沿用原图的形状 */
   aspectRatio?: string;
   imageSize?: string;
+  outputFormat?: "png" | "jpeg" | "webp" | "gif";
 }
 
 /** 看画布/会话里图片的缩略图。不生成、不花钱，由 Agent 主循环直接处理 */
@@ -563,6 +568,7 @@ export interface Conversation {
   /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
   toolsUnsupported?: boolean;
   nativeImagePilot?: boolean;
+  imageConfirmPolicy?: ImageConfirmPolicy;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;
   chatTokenLimit?: number;
@@ -591,6 +597,8 @@ export interface ConversationUsage {
 }
 
 export interface ConversationView extends Conversation {
+  /** The current channel and model previously rejected image inputs. */
+  visionBlocked?: boolean;
   contextSummary: { text: string; throughSeq: number } | null;
   messages: ChatMessage[];
   /** token 用量；状态行用它，接口不可用时全 0 */
@@ -691,6 +699,8 @@ export interface ConversationInput {
   videoConfirmPolicy?: VideoConfirmPolicy;
   visionEnabled?: boolean;
   verbatimPrompt?: boolean;
+  imageConfirmPolicy?: ImageConfirmPolicy;
+  toolScope?: ChatToolScope;
 }
 
 export interface ConversationPatch {
@@ -700,6 +710,7 @@ export interface ConversationPatch {
   /** 当前对话模型不支持 tools：置位后不再发送工具定义 */
   toolsUnsupported?: boolean;
   nativeImagePilot?: boolean;
+  imageConfirmPolicy?: ImageConfirmPolicy;
   toolScope?: ChatToolScope | null;
   chatModelCallLimit?: number;
   chatTurnMinutes?: number;

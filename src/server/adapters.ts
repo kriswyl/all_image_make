@@ -1,6 +1,6 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
-import { normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
+import { modelSupportsGifOutput, modelSupportsNegativePrompt, normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
 import { TTS_DEFAULT_VOICE, splitTtsDialogue } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
@@ -62,7 +62,7 @@ function withMaskInstruction(prompt: string) {
 
 function openAiImageParameters(input: GenerationInput) {
   return compact({
-    negative_prompt: input.negativePrompt,
+    ...(modelSupportsNegativePrompt(input.model) ? { negative_prompt: input.negativePrompt } : {}),
     size: input.size,
     n: input.count,
     quality: input.quality,
@@ -73,6 +73,13 @@ function openAiImageParameters(input: GenerationInput) {
     response_format: input.responseFormat,
     stream: input.stream,
   });
+}
+
+/** Raw advanced JSON follows the same model capability whitelist as the built-in fields. */
+function filteredRawParameters(model: string, raw: Record<string, unknown>) {
+  return modelSupportsNegativePrompt(model)
+    ? raw
+    : Object.fromEntries(Object.entries(raw).filter(([field]) => field !== "negative_prompt"));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -244,6 +251,10 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     input = { ...input, aspectRatio: aspect.aspectRatio, ratio: aspect.ratio };
   }
   const references = referenceImages(input);
+  if (input.outputFormat === "gif") {
+    if (!modelSupportsGifOutput(input.model)) throw new Error("当前模型不支持 GIF 输出，请选择 gpt-image-2.6-flare / sunburst");
+    if (!references.length) throw new Error("GIF 输出需要在改图/edits 模式提供底图");
+  }
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
   if (references.length && channel.adapterType === "openai-images"
     && (!channel.endpoint || channel.endpoint === defaultEndpoint(channel.adapterType))) {
@@ -263,7 +274,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   let body: Record<string, unknown> | undefined;
   let formData: FormData | undefined;
   let diagnosticBody: Record<string, unknown> | undefined;
-  const raw = input.rawParameters ?? {};
+  const raw = filteredRawParameters(input.model, input.rawParameters ?? {});
 
   if (channel.adapterType === "wan-video") {
     // 万相视频生成必须启用异步，否则会超时
@@ -680,6 +691,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     moderation: input.moderation,
     count: input.count,
   });
+  if (input.negativePrompt && !modelSupportsNegativePrompt(input.model) && !ignoredFields.includes("负面提示词")) ignoredFields.push("负面提示词");
   return {
     url, method: "POST", headers, body, formData, diagnosticBody,
     allowPrivateNetwork: channel.allowPrivateNetwork,

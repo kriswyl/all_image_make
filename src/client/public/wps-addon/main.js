@@ -5,8 +5,10 @@ function RenderPreview(raw) {
   try {
     var input = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!input || !/^[0-9a-f-]{36}$/i.test(input.id) || !/^[a-f0-9]{64}$/.test(input.secret)) throw new Error("预览任务参数无效");
+    var origin = input.origin || location.origin;
+    if (!/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(origin) || Number(origin.split(":").pop()) > 65535) throw new Error("预览后端地址无效");
     var request = new XMLHttpRequest();
-    request.open("GET", location.origin + "/api/wps-preview/" + encodeURIComponent(input.id) + "/claim", false);
+    request.open("GET", origin + "/api/wps-preview/" + encodeURIComponent(input.id) + "/claim", false);
     request.setRequestHeader("Authorization", "Bearer " + input.secret);
     request.send();
     if (request.status !== 200) throw new Error("预览任务不可用或已过期");

@@ -8,6 +8,7 @@ import type {
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template";
 import type { StoryboardPreviewBoard, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
+import type { PresentationVersionReport } from "../shared/presentation-report";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -99,20 +100,23 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   createHtmlPreview: (html: string) => request<{ id: string }>("/api/html-previews", { method: "POST", body: JSON.stringify({ html }) }),
-  uploadReferenceVideo: (channelId: string, file: File) => {
+  generateWithReferenceVideo: (input: GenerationInput, file: File) => {
     const form = new FormData();
-    form.append("channelId", channelId);
+    form.append("payload", JSON.stringify(input));
     form.append("file", file, file.name);
-    return request<{ url: string }>("/api/uploads/reference-video", { method: "POST", body: form });
+    return request<Task>("/api/generations/reference-video", { method: "POST", body: form });
   },
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
+  workflow: (id: string, runId: string) => request<import("../shared/workflow").WorkflowRun & { steps: import("../shared/workflow").WorkflowStep[] }>(`/api/conversations/${id}/workflows/${runId}`),
+  workflowAction: (id: string, runId: string, action: "resume" | "cancel") => request<import("../shared/workflow").WorkflowRun>(`/api/conversations/${id}/workflows/${runId}`, { method:"POST", body:JSON.stringify({ action }) }),
   saveChannel: (input: ChannelInput, id?: string) => request<Channel>(id ? `/api/channels/${id}` : "/api/channels", {
     method: id ? "PATCH" : "POST",
     body: JSON.stringify(input),
   }),
   deleteChannel: (id: string) => request<{ deleted: true }>(`/api/channels/${id}`, { method: "DELETE" }),
   testChannel: (id: string) => request<{ reachable: boolean; httpStatus: number; durationMs?: number; message?: string }>(`/api/channels/${id}/test`, { method: "POST" }),
-  setUnifiedAgentDefault: (id: string, enabled: boolean) => request<Channel>(`/api/channels/${id}/unified-agent`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+  toolProtocol: (id: string, model: string) => request<import("../shared/tool-protocol").ToolProtocol>(`/api/channels/${id}/tool-protocol?model=${encodeURIComponent(model)}`),
+  probeToolProtocol: (id: string, model: string) => request<{ protocol: import("../shared/tool-protocol").ToolProtocol; results: Array<{ scenario: string; status: string; tokens: number|null; durationMs: number }> }>(`/api/channels/${id}/tool-protocol`, { method: "POST", body: JSON.stringify({ model }) }),
   /**
    * `maskFile` 是局部重绘蒙版（PNG）。有蒙版时必须走 multipart，哪怕参考图数组为空——
    * 服务端会明确拒绝「只有蒙版没有底图」，但不该在这之前把蒙版悄悄丢掉。
@@ -129,12 +133,14 @@ export const api = {
   task: (id: string) => request<Task>(`/api/generations/${id}`),
   tasks: () => request<Task[]>("/api/generations"),
   library: () => request<Task[]>("/api/library"),
-  libraryPage: (options: { offset?: number; query?: string; kind?: string; mode?: string }) => {
+  libraryPage: (options: { offset?: number; query?: string; kind?: string; mode?: string; includeChatImages?: boolean }) => {
     const params = new URLSearchParams({ limit: "60", offset: String(options.offset ?? 0), q: options.query ?? "", kind: options.kind ?? "all", mode: options.mode ?? "all" });
+    if (options.includeChatImages) params.set("includeChatImages", "1");
     return request<{ items: Task[]; hasMore: boolean }>(`/api/library?${params}`);
   },
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
+  continueTaskQuery: (id: string) => request<Task>(`/api/generations/${id}/continue-query`, { method: "POST" }),
   midjourneyAction: (id: string, customId: string, label?: string) =>
     request<Task>(`/api/generations/${id}/action`, {
       method: "POST",
@@ -158,6 +164,8 @@ export const api = {
   /** assetsDir 传空串表示恢复默认目录；默认模型 alias 传空串表示「不指定，用类目第一个」 */
   updateSettings: (input: {
     assetsDir?: string;
+    documentsDir?: string;
+    agentImageConfirmPolicy?: "batch_only" | "always";
     geminiImageSize?: ImageSizeValue;
     agentDefaultImageAlias?: string;
     agentDefaultVideoAlias?: string;
@@ -169,6 +177,7 @@ export const api = {
     method: "PATCH",
     body: JSON.stringify(input),
   }),
+  cleanupDocuments: () => request<{ deleted: number }>("/api/settings/cleanup-documents", { method: "POST" }),
   revealMedia: (kind: "assets" | "inputs" | "data" = "assets") => request<{ opened: string }>("/api/system/reveal-media", {
     method: "POST",
     body: JSON.stringify({ kind }),
@@ -249,6 +258,11 @@ export const api = {
     const form = new FormData(); form.append("file", file, file.name);
     return request<ConversationView>(`/api/conversations/${id}/mind-documents`, { method: "POST", body: form });
   },
+  uploadOfficeDocument: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<ConversationView>(`/api/conversations/${id}/documents/upload`, { method: "POST", body: form });
+  },
   mindDocumentPlan: (id: string, documentId: string) => request<{ slides: Array<{ title: string; lines: string[]; notes: string }>; warnings: string[]; sourceAvailable: boolean }>(`/api/conversations/${id}/mind-documents/${documentId}/plan`),
   saveMindDocumentPlan: (id: string, documentId: string, slides: Array<{ title: string; lines: string[]; notes: string }>) => request<{ slides: typeof slides }>(`/api/conversations/${id}/mind-documents/${documentId}/plan`, { method: "PUT", body: JSON.stringify({ slides }) }),
   downloadMindSource: async (id: string, documentId: string, filename: string) => {
@@ -264,8 +278,12 @@ export const api = {
     const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
     const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
   },
+  workspaceFiles: (id: string) => request<Array<{ id: string; name: string; byteSize: number; createdAt: string }>>(`/api/conversations/${id}/documents/files`),
   deleteWorkspaceFile: (id: string, fileId: string) => request<{ deleted: boolean }>(`/api/conversations/${id}/documents/files/${fileId}`, { method: "DELETE" }),
   revealWorkspaceFile: (id: string, fileId: string) => request<{ opened: boolean }>(`/api/conversations/${id}/documents/files/${fileId}/reveal`, { method: "POST" }),
+  presentationStatus: (id: string, fileId: string, signal?: AbortSignal) => request<PresentationVersionReport>(`/api/conversations/${id}/documents/files/${fileId}/presentation-status`, { signal }),
+  updatePresentation: (id: string, fileId: string, action: { sha256: string } & ({ kind: "audit" | "visual" | "review" } | { kind: "page"; page: number })) =>
+    request<{ fileId: string }>(`/api/conversations/${id}/documents/files/${fileId}/presentation-status`, { method: "POST", body: JSON.stringify(action) }),
   createWpsPreview: (id: string, fileId: string, first = 1) => request<{ id: string; secret: string; first: number; last: number; total: number }>(`/api/conversations/${id}/documents/files/${fileId}/wps-preview`, { method: "POST", body: JSON.stringify({ first }) }),
   wpsPreviewStatus: () => request<{ serviceAvailable: boolean }>("/api/wps-preview/status"),
   wpsPreviewPage: async (id: string, secret: string, page: number) => {
@@ -510,8 +528,8 @@ export const api = {
    * 而「发消息」和「收事件」分成两个请求之后，重连时不需要重放任何东西——
    * 重连成功会触发一次 `open`，调用方在那里重新拉一遍会话即可补齐错过的消息。
    */
-  openTaskStream(handlers: { onTask: (task: Task) => void; onOpen: () => void; onError: () => void }): () => void {
-    const source = new EventSource(apiUrl("/api/generations/events"));
+  openTaskStream(handlers: { onTask: (task: Task) => void; onOpen: () => void; onError: () => void }, scope?: "chat-images"): () => void {
+    const source = new EventSource(apiUrl(scope ? `/api/generations/events?scope=${scope}` : "/api/generations/events"));
     source.onmessage = (event: MessageEvent<string>) => {
       try { handlers.onTask(JSON.parse(event.data) as Task); } catch { /* 忽略无效事件 */ }
     };

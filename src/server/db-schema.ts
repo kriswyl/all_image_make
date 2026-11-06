@@ -32,6 +32,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         status TEXT NOT NULL,
         progress REAL,
         remote_task_id TEXT,
+        remote_poll_after INTEGER,
         remote_meta TEXT NOT NULL DEFAULT '',
         input_json TEXT NOT NULL,
         effective_json TEXT,
@@ -178,9 +179,23 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         file_name TEXT NOT NULL,
         byte_size INTEGER NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        base_dir TEXT,
+        family_id TEXT,
+        parent_id TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        archived INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS workspace_documents_conv_idx ON workspace_documents(conversation_id, created_at);
+      CREATE TABLE IF NOT EXISTS presentation_versions (
+        file_id TEXT PRIMARY KEY REFERENCES workspace_documents(id) ON DELETE CASCADE,
+        sha256 TEXT NOT NULL,
+        report TEXT NOT NULL,
+        visual TEXT NOT NULL,
+        visual_state TEXT NOT NULL,
+        lease TEXT
+      );
+      CREATE INDEX IF NOT EXISTS presentation_versions_queue_idx ON presentation_versions(visual_state);
       CREATE TABLE IF NOT EXISTS native_tool_calls (
         message_id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -475,11 +490,20 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     if (!taskColumns.some((col) => col.name === "remote_meta")) {
       db.exec("ALTER TABLE tasks ADD COLUMN remote_meta TEXT NOT NULL DEFAULT ''");
     }
+    if (!taskColumns.some((col) => col.name === "remote_poll_after")) {
+      db.exec("ALTER TABLE tasks ADD COLUMN remote_poll_after INTEGER");
+    }
     // 画布从一根指针改成一组图（有序列表）：加列 + 把老指针搬进来
     const conversationColumns = db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>;
     const workspaceColumns = db.prepare("PRAGMA table_info(workspace_documents)").all() as Array<{ name: string }>;
     if (!workspaceColumns.some((col) => col.name === "operation_id")) db.exec("ALTER TABLE workspace_documents ADD COLUMN operation_id TEXT");
+    if (!workspaceColumns.some((col) => col.name === "base_dir")) db.exec("ALTER TABLE workspace_documents ADD COLUMN base_dir TEXT");
+    if (!workspaceColumns.some((col) => col.name === "family_id")) db.exec("ALTER TABLE workspace_documents ADD COLUMN family_id TEXT");
+    if (!workspaceColumns.some((col) => col.name === "parent_id")) db.exec("ALTER TABLE workspace_documents ADD COLUMN parent_id TEXT");
+    if (!workspaceColumns.some((col) => col.name === "version")) db.exec("ALTER TABLE workspace_documents ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+    if (!workspaceColumns.some((col) => col.name === "archived")) db.exec("ALTER TABLE workspace_documents ADD COLUMN archived INTEGER NOT NULL DEFAULT 0");
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS workspace_documents_operation_idx ON workspace_documents(conversation_id, operation_id) WHERE operation_id IS NOT NULL");
+    db.exec("CREATE INDEX IF NOT EXISTS workspace_documents_family_idx ON workspace_documents(conversation_id, family_id, version)");
     if (!conversationColumns.some((col) => col.name === "canvas_asset_ids")) {
       db.exec("ALTER TABLE conversations ADD COLUMN canvas_asset_ids TEXT");
     }
@@ -497,6 +521,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       // 渠道明确报过「不支持 tools」后置 1，之后不再发工具，省掉每轮一次的失败调用
       ["tools_unsupported", "INTEGER NOT NULL DEFAULT 0"],
       ["native_image_pilot", "INTEGER NOT NULL DEFAULT 0"],
+      ["image_confirm_policy", "TEXT NOT NULL DEFAULT 'batch_only'"],
       ["tool_scope", "TEXT"],
       ["chat_model_call_limit", "INTEGER NOT NULL DEFAULT 500"],
       ["chat_turn_minutes", "INTEGER NOT NULL DEFAULT 30"],

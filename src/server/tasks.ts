@@ -17,27 +17,31 @@ import {
 import {
   asyncProviderSpec,
   extractAsyncTaskId,
+  nextPollDelay,
+  readRetryAfter,
   type AsyncProviderSpec,
   type AsyncResult,
 } from "./async-providers.js";
 import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
 import { detectImageMime, writeThumbnail } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
+import { AppError } from "./app-error.js";
+import { uploadReferenceVideo, validateReferenceVideo, type ReferenceVideoUpload } from "./reference-video.js";
+
+export { AppError } from "./app-error.js";
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 // 参考图的张数和体积都住在 shared/types.ts（前端校验、上传出口、这里三处共用一份）
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
-const VIDEO_POLL_INTERVAL_MS = 8000;
-const VIDEO_MAX_POLLS = 100;
 
 /** 应用侧 15 MiB 字符预算，base64 约放大 4/3，原始素材约 11.25 MiB；不是上游硬限制。 */
 const MAX_INLINE_MEDIA_CHARS = 15 * 1024 * 1024;
 
 /** 轮询节奏可被环境变量覆盖，测试里用短间隔跑完整个提交流程 */
-const VIDEO_POLL_DELAY_MS = (() => {
+const POLL_DELAY_OVERRIDE_MS = (() => {
   const raw = Number(process.env.VIDEO_POLL_INTERVAL_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : VIDEO_POLL_INTERVAL_MS;
+  return Number.isFinite(raw) && raw >= 0 ? Math.max(1, raw) : undefined;
 })();
 
 /**
@@ -80,6 +84,7 @@ interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage" |
   referenceImage?: StoredReferenceImage;
   referenceImages?: StoredReferenceImage[];
   maskImage?: StoredMaskImage;
+  referenceVideo?: { relativePath: string; mimeType: string; fileName: string };
 }
 
 export interface ReferenceImageUpload {
@@ -187,7 +192,7 @@ export class TaskRunner {
     });
   }
 
-  async create(input: GenerationInput, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string, agentOperationId?: string): Promise<Task> {
+  async create({ referenceVideoUpload, ...input }: GenerationInput & { referenceVideoUpload?: ReferenceVideoUpload }, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string, agentOperationId?: string): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
@@ -232,8 +237,32 @@ export class TaskRunner {
         throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
       }
     }
+    if (referenceVideoUpload) {
+      validateReferenceVideo(referenceVideoUpload);
+      const wanMode = input.wanVideoMode;
+      const wan = channel.adapterType === "wan-video" && (wanMode === "reference" || wanMode === "video-edit" || wanMode === "video-extend");
+      const kling = channel.adapterType === "kling-video" && input.klingVideoMode === "motion-control";
+      if (!wan && !kling) throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道或模式不支持本地参考视频", 400);
+      if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
+      if (input.wanVideoMedia?.some((item) => item.type === "reference_video") || input.klingVideoMedia?.some((item) => item.type === "video")) {
+        throw new AppError("REFERENCE_VIDEO_CONFLICT", "本地参考视频和视频链接只能选择一种", 400);
+      }
+    }
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
-    this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId, agentOperationId });
+    const videoPath = referenceVideoUpload ? path.join(this.db.inputsDir, `${id}-reference.${referenceVideoUpload.mimetype === "video/quicktime" ? "mov" : "mp4"}`) : undefined;
+    try {
+      if (referenceVideoUpload && videoPath) {
+        await fs.writeFile(videoPath, referenceVideoUpload.buffer, { flag: "wx" });
+        storedInput.referenceVideo = { relativePath: path.basename(videoPath), mimeType: referenceVideoUpload.mimetype, fileName: safeFileName(referenceVideoUpload.originalname) };
+      }
+      this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId, agentOperationId });
+    } catch (error) {
+      const paths = [...(storedInput.referenceImages ?? []), ...(storedInput.maskImage ? [storedInput.maskImage] : [])]
+        .map((file) => path.join(this.db.inputsDir, file.relativePath));
+      if (videoPath) paths.push(videoPath);
+      await Promise.allSettled(paths.map((file) => fs.rm(file, { force: true })));
+      throw error;
+    }
     queueMicrotask(() => void this.run(id));
     return this.db.getTaskView(id)!;
   }
@@ -244,14 +273,32 @@ export class TaskRunner {
     try {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
-      const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
-      if (this.db.getTaskRow(taskId)?.status === "cancelled") return;
+      const { referenceVideo, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
+      const input = await this.hydrateInputImages(storedInput);
+      const current = this.db.getTaskRow(taskId);
+      if (!current || current.status === "cancelled") return;
       const key = this.resolveKey(channel);
       this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
+      if (referenceVideo) {
+        const file = await this.readReferenceVideo(referenceVideo);
+        const url = await uploadReferenceVideo(channel, this.sessionKeys, file);
+        if (this.db.getTaskRow(taskId)?.status !== "validating") return;
+        if (channel.adapterType === "kling-video") {
+          input.klingVideoMedia = [...(input.klingVideoMedia ?? []), { type: "video", url }];
+        } else if (channel.adapterType === "wan-video") {
+          input.wanVideoMedia = [...(input.wanVideoMedia ?? []), { type: "reference_video", url }];
+        } else {
+          throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道不支持此参考视频", 400);
+        }
+      }
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared).catch(error => {
+        const hasExternalVideo = !referenceVideo && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video"));
+        if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
+          throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
+        }
         const transportInterrupted = error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name);
         if (task.agentOperationId && transportInterrupted) {
           throw new AppError("SUBMISSION_UNKNOWN", "生成请求在返回结果前断开，上游可能已接收，请先到渠道核对任务", 409);
@@ -260,7 +307,7 @@ export class TaskRunner {
       });
 
       // 用户在请求飞行中点了停止：结果不再落库，也不要把它改回 succeeded
-      if (this.db.getTaskRow(taskId)?.status === "cancelled") return;
+      if (this.db.getTaskRow(taskId)?.status !== "submitting") return;
 
       // 异步厂商（视频 / 音乐）：提交响应里拿远端 id，交给统一的轮询器
       const spec = asyncProviderSpec(channel.adapterType);
@@ -323,9 +370,35 @@ export class TaskRunner {
   async retry(taskId: string) {
     const task = this.requireTask(taskId);
     if (task.errorCode === "SUBMISSION_UNKNOWN") throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对提交结果", 409);
-    const input = await this.hydrateInputImages(JSON.parse(task.inputJson) as StoredGenerationInput);
+    if (!isTerminalStatus(task.status)) throw new AppError("TASK_IN_FLIGHT", "任务正在处理，请等待结果", 409);
+    if (task.errorCode === "VIDEO_TIMEOUT") return this.continuePolling(taskId);
+    const { referenceVideo, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
+    const input = await this.hydrateInputImages(storedInput);
+    const referenceVideoUpload = referenceVideo ? await this.readReferenceVideo(referenceVideo) : undefined;
     const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
-    return this.create(input, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
+    return this.create({ ...input, referenceVideoUpload }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
+  }
+
+  continuePolling(taskId: string): Task {
+    const task = this.requireTask(taskId);
+    if (task.remoteTaskId && (task.status === "running" || task.status === "succeeded")) return this.db.getTaskView(taskId)!;
+    if (!task.remoteTaskId || task.errorCode !== "VIDEO_TIMEOUT") {
+      throw new AppError("TASK_NOT_RESUMABLE", "该任务无法继续查询", 409);
+    }
+    const channel = this.requireChannel(task.channelId);
+    const spec = asyncProviderSpec(channel.adapterType);
+    if (!spec) throw new AppError("CHANNEL_UNSUPPORTED", "当前渠道不能查询该任务", 400);
+    const key = this.resolveKey(channel);
+    void this.resumePolling(taskId, task.remoteTaskId, channel, spec, key);
+    return this.db.getTaskView(taskId)!;
+  }
+
+  private async readReferenceVideo(file: NonNullable<StoredGenerationInput["referenceVideo"]>): Promise<ReferenceVideoUpload> {
+    if (!/^[a-f0-9-]{36}-reference\.(mp4|mov)$/i.test(file.relativePath)) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频路径无效", 400);
+    const fullPath = path.join(this.db.inputsDir, file.relativePath);
+    const stat = await fs.lstat(fullPath).catch(() => null);
+    if (!stat?.isFile() || stat.size > 100 * 1024 * 1024) throw new AppError("REFERENCE_VIDEO_MISSING", "找不到本地参考视频，请重新选择原视频", 400);
+    return { buffer: await fs.readFile(fullPath), mimetype: file.mimeType, originalname: file.fileName };
   }
 
   /**
@@ -352,11 +425,11 @@ export class TaskRunner {
     }
   }
 
-  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel, spec: AsyncProviderSpec) {
+  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel, spec: AsyncProviderSpec, key?: string) {
     if (this.running.has(taskId)) return;
     this.running.add(taskId);
     try {
-      await this.pollAsyncTask(taskId, remoteTaskId, channel, this.resolveKey(channel), spec, { immediate: true });
+      await this.pollAsyncTask(taskId, remoteTaskId, channel, key ?? this.resolveKey(channel), spec, { immediate: true });
     } catch (error) {
       const current = this.db.getTaskRow(taskId);
       if (current && !["succeeded", "failed", "cancelled", "expired"].includes(current.status)) {
@@ -410,7 +483,7 @@ export class TaskRunner {
     spec: AsyncProviderSpec,
     options: { immediate?: boolean } = {},
   ) {
-    this.updateTask(localTaskId, { status: "running", remoteTaskId });
+    this.updateTask(localTaskId, { status: "running", remoteTaskId, errorCode: null, errorMessage: null, finishedAt: null });
     // 提交路径走 joinEndpoint（会吃掉 Base URL 的尾斜杠），轮询这里必须一致，
     // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
     const url = joinEndpoint(channel.baseUrl, spec.pollPath(remoteTaskId));
@@ -419,8 +492,7 @@ export class TaskRunner {
     if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
     else if (channel.authType === "x-api-key") headers[channel.authHeaderName || "x-api-key"] = key;
 
-    // 一个视频任务最多轮询 100 次，每次都写完整响应能堆到几 MB。这里只让
-    // 「最后一次」保留完整响应，之前的行等下一次轮询到来时按精简格式落库
+    // 只为最近一次查询保留完整响应，较早的查询写状态摘要。
     let pending: { index: number; payload: unknown; httpStatus: number; durationMs: number } | null = null;
     const flushPending = () => {
       if (!pending) return;
@@ -434,31 +506,35 @@ export class TaskRunner {
       pending = null;
     };
 
-    const maxPolls = spec.maxPolls ?? VIDEO_MAX_POLLS;
-    const delayMs = spec.pollIntervalMs ?? VIDEO_POLL_DELAY_MS;
+    const deadline = Date.now() + spec.polling.windowMs;
+    const initialDelay = POLL_DELAY_OVERRIDE_MS ?? spec.polling.initialMs;
+    const resumeDelay = (this.db.getTaskRow(localTaskId)?.remotePollAfter ?? 0) - Date.now();
+    let delayMs = Math.max(resumeDelay, options.immediate ? 0 : initialDelay);
+    let temporaryFailures = 0;
 
     try {
-      for (let poll = 0; poll < maxPolls; poll += 1) {
-        const current = this.db.getTaskRow(localTaskId);
-        if (current?.status === "cancelled") return;
-
-        // 重启恢复时第一轮不再等：上游要是早没了，没必要再耗一个间隔
-        if (poll > 0 || !options.immediate) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
+      for (let poll = 0; Date.now() < deadline; poll += 1) {
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, deadline - Date.now())));
+        if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
+        if (Date.now() >= deadline) break;
 
         let response: Response;
         let payload: unknown;
-        let durationMs: number;
+        const startedAt = Date.now();
         try {
-          const startedAt = Date.now();
-          response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-          durationMs = Date.now() - startedAt;
+          const signal = AbortSignal.timeout(Math.max(1, Math.min(30_000, deadline - startedAt)));
+          response = await safeFetch(url, { method: "GET", headers, signal }, { allowPrivateNetwork: channel.allowPrivateNetwork });
           // 网关出错时多半回的是 HTML，强行 json() 会抛 SyntaxError 掩盖真实状态码
           payload = await response.json().catch(() => null);
         } catch (error) {
+          if (error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name)) {
+            temporaryFailures += 1;
+            delayMs = Math.min(60_000, initialDelay * 2 ** Math.min(temporaryFailures, 5));
+            continue;
+          }
           throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询任务状态失败", 502);
         }
+        if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
 
         // 上一次轮询既然不是终点，就降级成一条状态摘要
         if (pending) {
@@ -475,12 +551,20 @@ export class TaskRunner {
             durationMs: pending.durationMs,
           });
         }
-        pending = { index: poll + 1, payload, httpStatus: response.status, durationMs };
+        pending = { index: poll + 1, payload, httpStatus: response.status, durationMs: Date.now() - startedAt };
 
-        // 上游已经不认这个任务了，再轮询 100 次也没有结果
         if (response.status === 404) {
           throw new AppError("REMOTE_TASK_NOT_FOUND", "上游已找不到该任务，可能已过期或被清理", 502);
         }
+        if (response.status === 429 || response.status === 408 || response.status >= 500) {
+          temporaryFailures += 1;
+          const retryAfter = readRetryAfter(response.headers.get("retry-after"));
+          if (retryAfter > 0) this.db.updateTask(localTaskId, { remotePollAfter: Date.now() + retryAfter });
+          delayMs = Math.max(retryAfter, Math.min(60_000, initialDelay * 2 ** Math.min(temporaryFailures, 5)));
+          continue;
+        }
+        if (!response.ok) throw new AppError("VIDEO_POLL_FAILED", `查询任务失败（HTTP ${response.status}）`, 502);
+        temporaryFailures = 0;
 
         const status = spec.extractStatus(payload);
         if (status.progress !== null) this.updateTask(localTaskId, { progress: status.progress });
@@ -511,14 +595,15 @@ export class TaskRunner {
           }
           // 下载失败时会把产物链接带进报错，方便手动打开核对
           await this.saveResults(localTaskId, chosen, channel);
+          if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
           this.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
         }
 
-        // Still running, continue polling
+        delayMs = POLL_DELAY_OVERRIDE_MS ?? nextPollDelay(spec.polling, status);
       }
 
-      throw new AppError("VIDEO_TIMEOUT", `生成超时（已轮询 ${maxPolls} 次）`, 504);
+      throw new AppError("VIDEO_TIMEOUT", "已暂停查询，上游任务可能仍在运行。可继续查询原任务。", 504);
     } finally {
       // 最后一条轮询（成功、失败、超时都一样）保留完整响应：排查时最有用的是它
       flushPending();
@@ -935,12 +1020,6 @@ function inlineMediaSize(input: GenerationInput) {
 
 export function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
   return detectImageMime(bytes) === mimeType;
-}
-
-export class AppError extends Error {
-  constructor(public code: string, message: string, public status = 500, public details?: unknown) {
-    super(message);
-  }
 }
 
 export function normalizeError(error: unknown) {

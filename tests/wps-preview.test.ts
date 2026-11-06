@@ -26,6 +26,9 @@ it("WPS 任务只允许持有令牌者读取临时副本和预览页", async () 
     await request(app).get(`/api/wps-preview/${job.id}/claim`).set("Authorization", `Bearer ${"0".repeat(64)}`).expect(404);
     const claimed = (await request(app).get(`/api/wps-preview/${job.id}/claim`).set("Authorization", `Bearer ${job.secret}`).expect(200)).body.data;
     expect(await fs.readFile(claimed.source)).toEqual(ppt);
+    await request(app).options(`/api/wps-preview/${job.id}/claim`).set("Origin", "http://127.0.0.1:17892").expect("Access-Control-Allow-Origin", "http://127.0.0.1:17892").expect(204);
+    const deniedCors = await request(app).options(`/api/wps-preview/${job.id}/claim`).set("Origin", "https://untrusted.example").expect(204);
+    expect(deniedCors.headers["access-control-allow-origin"]).toBeUndefined();
     const png = Buffer.alloc(45); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png); png.writeUInt32BE(13, 8); png.write("IHDR", 12); png.writeUInt32BE(1600, 16); png.writeUInt32BE(900, 20); Buffer.from("0000000049454e44ae426082", "hex").copy(png, png.length - 12);
     await fs.writeFile(path.join(claimed.dir, "page-001"), png);
     expect((await request(app).get(`/api/wps-preview/${job.id}/diagnostics`).set("Authorization", `Bearer ${job.secret}`).expect(200)).body.data.ready).toBe(1);

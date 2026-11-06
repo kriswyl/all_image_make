@@ -5,8 +5,7 @@
  * 这里只做"够用"的转换：标题、段落、列表、引用、代码块、表格、常见行内样式。
  * 复杂排版（分栏、页眉页脚、图表）不在范围内——需要的话应该给模板，而不是硬解析。
  */
-import JSZip from "jszip";
-import { XMLParser } from "fast-xml-parser";
+export { readDocxText } from "./word-document.js";
 import {
   AlignmentType, Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType,
 } from "docx";
@@ -140,62 +139,6 @@ export async function markdownToDocx(markdown: string, title = "文档"): Promis
   return Buffer.from(await Packer.toBuffer(doc));
 }
 
-/** Word → 纯文本。标题按 Word 的样式还原成 #，表格按 | 拼 */
-export async function readDocxText(bytes: Buffer): Promise<string> {
-  let zip: JSZip;
-  try { zip = await JSZip.loadAsync(bytes); } catch { throw new Error("无法读取 Word 文件，可能已损坏"); }
-  const file = zip.file("word/document.xml");
-  if (!file) throw new Error("Word 文件里没有正文（可能不是 .docx）");
-  const xml = await file.async("string");
-  const parsed = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: "@_",
-    removeNSPrefix: true,
-    isArray: (name) => ["p", "t", "tbl", "tr", "tc"].includes(name),
-  }).parse(xml) as Record<string, any>;
-  const body = parsed?.document?.body ?? {};
-  const lines: string[] = [];
-
-  const styleOf = (paragraph: any): string => {
-    const raw = paragraph?.pPr?.pStyle?.["@_val"] ?? paragraph?.pPr?.pStyle?.["@_w:val"] ?? "";
-    const match = /heading\s*(\d)/i.exec(String(raw));
-    return match ? "#".repeat(Math.min(6, Number(match[1]))) : "";
-  };
-  const textOf = (node: any): string => {
-    const pieces: string[] = [];
-    const walk = (value: any) => {
-      if (Array.isArray(value)) { value.forEach(walk); return; }
-      if (!value || typeof value !== "object") return;
-      if (Array.isArray(value.t)) value.t.forEach((t: any) => pieces.push(typeof t === "string" ? t : String(t?.["#text"] ?? "")));
-      else if (typeof value.t === "string") pieces.push(value.t);
-      else {
-        for (const [key, child] of Object.entries(value)) {
-          if (key.startsWith("@_")) continue;
-          if (key === "t") continue;
-          walk(child);
-        }
-      }
-    };
-    walk(node);
-    return pieces.join("");
-  };
-
-  for (const item of Array.isArray(body.p) ? body.p : body.p ? [body.p] : []) {
-    const text = textOf(item).trim();
-    if (!text) continue;
-    lines.push(`${styleOf(item)} ${text}`.trim());
-  }
-  for (const table of Array.isArray(body.tbl) ? body.tbl : body.tbl ? [body.tbl] : []) {
-    const rows = Array.isArray(table.tr) ? table.tr : table.tr ? [table.tr] : [];
-    for (const row of rows) {
-      const cells = (Array.isArray(row.tc) ? row.tc : row.tc ? [row.tc] : []).map((cell: any) => textOf(cell).trim());
-      if (cells.length) lines.push(`| ${cells.join(" | ")} |`);
-    }
-  }
-  if (!lines.length) throw new Error("Word 文档里没有可读文字");
-  return lines.join("\n");
-}
-
 /**
  * 把 Markdown 大纲变成导图结构，用来走现有的"导图 → PPT"流水线。
  *
@@ -207,6 +150,7 @@ export function markdownToMind(markdown: string, title: string): MindDocument {
   const root: DocumentNode = { title: title.trim() || "演示文稿", notes: "", children: [] };
   let section: DocumentNode = root;
   let subsection: DocumentNode | null = null;
+  const preamble: string[] = [];
 
   for (const line of lines) {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line.trim());
@@ -222,16 +166,17 @@ export function markdownToMind(markdown: string, title: string): MindDocument {
     }
     const bullet = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
     if (bullet && bullet[1]!.trim()) {
-      (subsection ?? section).children.push({ title: bullet[1]!.trim().slice(0, 500), notes: "", children: [] });
+      (subsection ?? section).children.push({ title: bullet[1]!.trim(), notes: "", children: [] });
       continue;
     }
     const plain = line.trim();
-    if (plain && section !== root) {
-      (subsection ?? section).children.push({ title: plain.slice(0, 500), notes: "", children: [] });
-    }
+    if (!plain) continue;
+    if (section === root) preamble.push(plain);
+    else (subsection ?? section).children.push({ title: plain, notes: "", children: [] });
   }
 
-  if (!root.children.length) {
+  if (root.children.length) root.notes = preamble.join("\n");
+  else {
     const paragraphs = markdown.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
     for (const paragraph of paragraphs) {
       root.children.push({ title: paragraph.split("\n")[0]!.slice(0, 60), notes: paragraph, children: [] });

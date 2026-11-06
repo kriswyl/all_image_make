@@ -12,6 +12,7 @@ import { parseXmind, planMindSlides, renderMindPptx, type MindDocument } from ".
 import { readPresentationStyle } from "./presentation-project.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
+import { taskKindFor } from "../shared/kinds.js";
 import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
 import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../shared/types.js";
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
@@ -26,14 +27,19 @@ import { buildCapabilityAliases, buildCapabilityManifest } from "./capabilities.
 import { pickBrainChannel, readAgentDefaults } from "./agent-settings.js";
 import { optimizePromptForWorkbench } from "./prompt-optimizer.js";
 import { callBrain } from "./brain.js";
+import { probeToolProtocol, readToolProtocol, recordToolProtocol } from "./tool-protocol.js";
 import { readThumbBytes, writeThumbnail } from "./vision.js";
 import {
-  VIDEO_CONFIRM_POLICIES, assetRef, DEFAULT_CONVERSATION_TITLE,
+  VIDEO_CONFIRM_POLICIES, IMAGE_CONFIRM_POLICIES, assetRef, DEFAULT_CONVERSATION_TITLE,
   type AgentStreamEvent, type ConversationInput, type ConversationPatch, type VideoConfirmPolicy,
 } from "../shared/agent-types.js";
 import { isChatAdapter } from "../shared/types.js";
 import { midjourneyModelForCustomId } from "../shared/midjourney.js";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard.js";
+import { MAX_BINARY_DOCUMENT_BYTES, OFFICE_ATTACHMENT } from "../shared/document-formats.js";
+import { readDocxText } from "./chat-tools/word-document.js";
+import { inspectXlsx } from "./chat-tools/spreadsheet-document.js";
+import { inspectPdf } from "./chat-tools/pdf-document.js";
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 import { claimBoardFrame, completeBoardFrame } from "./board-frame-broker.js";
 import { resolveStoryboardSelection } from "./storyboard-selection.js";
@@ -89,10 +95,10 @@ const boardUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 0 },
 });
-const mindUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 0 } });
+const binaryDocumentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BINARY_DOCUMENT_BYTES, files: 1, fields: 0 } });
 const referenceVideoUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 + 1, files: 1, fields: 1 },
+  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 1, fields: 1 },
   fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime"].includes(file.mimetype)
     ? callback(null, true) : callback(new AppError("REFERENCE_VIDEO_INVALID", "仅支持 MP4 / MOV 视频", 400)),
 });
@@ -116,8 +122,11 @@ const channelSchema = z.object({
 /** assetsDir 传空串表示恢复默认目录 */
 const settingsSchema = z.object({
   assetsDir: z.string().trim().max(1000).optional(),
+  documentsDir: z.string().trim().max(1000).optional(),
   /** 新建会话时的视频确认策略默认值（§13.2） */
   agentVideoConfirmPolicy: z.enum(VIDEO_CONFIRM_POLICIES).optional(),
+  /** 单张生图/改图是否直接提交；批量始终确认 */
+  agentImageConfirmPolicy: z.enum(IMAGE_CONFIRM_POLICIES).optional(),
   /** 新建会话时默认是否开「看图改」（§11.7） */
   agentVisionEnabled: z.boolean().optional(),
   /** gemini 渠道缺省补的尺寸（需求.md 问题 1）。大小写敏感，所以在这里就把非法值拦掉 */
@@ -140,8 +149,10 @@ const conversationCreateSchema = z.object({
   brainChannelId: z.string().uuid().optional(),
   brainModel: z.string().trim().min(1).max(200).optional(),
   videoConfirmPolicy: z.enum(VIDEO_CONFIRM_POLICIES).optional(),
+  imageConfirmPolicy: z.enum(IMAGE_CONFIRM_POLICIES).optional(),
   visionEnabled: z.boolean().optional(),
   verbatimPrompt: z.boolean().optional(),
+  toolScope: z.enum(["all", "conversation"]).optional(),
 });
 
 const conversationPatchSchema = z.object({
@@ -157,6 +168,7 @@ const conversationPatchSchema = z.object({
   /** 统一入口的工具范围；null 表示回到旧模式，交给 chatMode 决定 */
   toolScope: z.enum(["all", "conversation"]).nullable().optional(),
   nativeImagePilot: z.boolean().optional(),
+  imageConfirmPolicy: z.enum(IMAGE_CONFIRM_POLICIES).optional(),
   title: z.string().trim().min(1).max(120).optional(),
   brainChannelId: z.string().uuid().optional(),
   brainModel: z.string().trim().min(1).max(200).optional(),
@@ -251,7 +263,7 @@ const boardGenerateSchema = z.object({
     seed: z.coerce.number().int().min(0).max(2_147_483_647).optional(),
     style: z.enum(["auto", "vivid", "natural"]).optional(),
     background: z.enum(["auto", "opaque", "transparent"]).optional(),
-    outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+    outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
     moderation: z.enum(["auto", "low"]).optional(),
     count: z.coerce.number().int().min(1).max(8).optional(),
     videoMode: z.enum(BOARD_VIDEO_MODES).optional(),
@@ -343,7 +355,7 @@ const generationSchema = z.object({
   aspectRatio: z.string().max(20).optional(),
   count: z.number().int().min(1).max(8).optional(),
   quality: z.string().max(60).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
@@ -457,7 +469,9 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.use(express.json({ limit: "300mb" }));
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173") {
+    const wpsCapabilityRead = /^\/api\/wps-preview\/[0-9a-f-]{36}\/(?:claim|diagnostics|pages\/\d+)$/.test(req.path)
+      && origin && /^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(origin);
+    if (origin === "http://tauri.localhost" || origin === "tauri://localhost" || origin === "http://127.0.0.1:5173" || wpsCapabilityRead) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
@@ -1016,6 +1030,8 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({
       assetsDir: db.assetsDir,
       defaultAssetsDir: db.defaultAssetsDir,
+      documentsDir: db.documentsDir,
+      defaultDocumentsDir: db.defaultDocumentsDir,
       geminiImageSize: readGeminiImageSize(db),
       ...readAgentDefaults(db),
     }));
@@ -1032,7 +1048,21 @@ export function createApp(options: { dataDir?: string } = {}) {
         throw new AppError("INVALID_ASSETS_DIR", error instanceof Error ? error.message : "素材目录无效", 400);
       }
     }
+    let documentsDir = db.documentsDir;
+    if (input.documentsDir !== undefined) {
+      try {
+        documentsDir = input.documentsDir === "" ? db.resetDocumentsDir() : db.setDocumentsDir(input.documentsDir);
+      } catch (error) {
+        throw new AppError("INVALID_DOCUMENTS_DIR", error instanceof Error ? error.message : "文档目录无效", 400);
+      }
+    }
     if (input.agentVideoConfirmPolicy !== undefined) db.setSetting("agentVideoConfirmPolicy", input.agentVideoConfirmPolicy);
+    if (input.agentImageConfirmPolicy !== undefined) {
+      db.setSetting("agentImageConfirmPolicy", input.agentImageConfirmPolicy);
+      // The composer no longer exposes a per-conversation switch; keep existing
+      // conversations in sync so changing the global setting takes effect now.
+      db.setAllImageConfirmPolicy(input.agentImageConfirmPolicy);
+    }
     if (input.agentVisionEnabled !== undefined) db.setSetting("agentVisionEnabled", input.agentVisionEnabled ? "1" : "0");
     if (input.geminiImageSize !== undefined) db.setSetting("geminiImageSize", input.geminiImageSize);
     if (input.agentDefaultImageAlias !== undefined) db.setSetting("agentDefaultImageAlias", input.agentDefaultImageAlias);
@@ -1043,10 +1073,16 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({
       assetsDir,
       defaultAssetsDir: db.defaultAssetsDir,
+      documentsDir,
+      defaultDocumentsDir: db.defaultDocumentsDir,
       geminiImageSize: readGeminiImageSize(db),
       ...readAgentDefaults(db),
     }));
   }));
+
+  app.post("/api/settings/cleanup-documents", (_req, res) => {
+    res.json(ok({ deleted: db.cleanupWorkspaceVersions(3) }));
+  });
 
   app.get("/api/channels", (_req, res) => {
     res.json(ok(db.listChannels().map((channel) => publicChannel(channel, sessionKeys))));
@@ -1096,6 +1132,33 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok({ deleted: true }));
   });
 
+  const protocolProbes = new Set<string>();
+  app.get("/api/channels/:id/tool-protocol", (req, res) => {
+    const channel = db.getChannel(routeParam(req.params.id));
+    const model = z.string().min(1).parse(req.query.model);
+    if (!channel || channel.adapterType !== "openai-chat" || !channel.models.includes(model)) throw new AppError("CHANNEL_NOT_FOUND", "找不到该对话渠道或模型", 404);
+    res.json(ok(readToolProtocol(db, channel, model)));
+  });
+  app.post("/api/channels/:id/tool-protocol", asyncHandler(async (req, res) => {
+    const channel = db.getChannel(routeParam(req.params.id));
+    const { model } = z.object({ model: z.string().min(1) }).parse(req.body);
+    if (!channel || !channel.enabled || channel.adapterType !== "openai-chat" || !channel.models.includes(model)) throw new AppError("CHANNEL_NOT_FOUND", "对话渠道或模型不可用", 404);
+    if (protocolProbes.has(channel.id)) throw new AppError("PROBE_IN_PROGRESS", "此渠道正在检测工具协议", 409);
+    const key = sessionKeys.get(channel.id) || (channel.secretEnv ? process.env[channel.secretEnv] ?? "" : "");
+    if (!key && channel.authType !== "none") throw new AppError("CHANNEL_AUTH_FAILED", "渠道尚未配置密钥", 400);
+    protocolProbes.add(channel.id);
+    try {
+      const result = await probeToolProtocol(options => callBrain({ ...options, channel, key, model, timeoutMs:90_000 }));
+      // A concurrent configuration edit must not certify the new channel with old evidence.
+      if (db.getChannel(channel.id)?.updatedAt !== channel.updatedAt) throw new AppError("CHANNEL_CHANGED", "检测期间渠道配置已变化，请重新检测", 409);
+      const protocol = recordToolProtocol(db, channel, model, result.features, "probe");
+      if (result.features.tools) for (const conversation of db.listConversations()) {
+        if (conversation.brainChannelId === channel.id && conversation.brainModel === model && conversation.toolsUnsupported) db.updateConversation(conversation.id, { toolsUnsupported:false });
+      }
+      res.json(ok({ protocol, results: result.results }));
+    } finally { protocolProbes.delete(channel.id); }
+  }));
+
   app.post("/api/channels/:id/test", asyncHandler(async (req, res) => {
     const channel = db.getChannel(routeParam(req.params.id));
     if (!channel) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在", 404);
@@ -1109,6 +1172,16 @@ export function createApp(options: { dataDir?: string } = {}) {
       if (normalized.status === 404) return res.json(ok({ reachable: true, httpStatus: 404, message: "已连接到服务，但模型列表路径不存在" }));
       throw error;
     }
+  }));
+
+  app.post("/api/generations/reference-video", referenceVideoUpload.single("file"), asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到视频文件", 400);
+    let body: unknown;
+    try { body = JSON.parse(req.body.payload); }
+    catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
+    const input = generationSchema.parse(body);
+    const task = await runner.create({ ...input, referenceVideoUpload: req.file });
+    res.status(202).json(ok(task));
   }));
 
   app.post("/api/generations", referenceUpload.fields([
@@ -1146,12 +1219,15 @@ export function createApp(options: { dataDir?: string } = {}) {
   }));
 
   app.get("/api/library", (req, res) => {
-    if (req.query.limit === undefined) return res.json(ok(db.listLibraryTaskViews()));
+    const includeChatImages = req.query.includeChatImages === "1";
+    if (req.query.limit === undefined) return res.json(ok(db.listLibraryTaskViews(includeChatImages
+      ? { limit: -1, offset: 0, query: "", kind: "all", mode: "all", includeChatImages }
+      : undefined)));
     const limit = Math.max(1, Math.min(100, Math.floor(Number(req.query.limit) || 60)));
     const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
     const kind = req.query.kind === "image" || req.query.kind === "video" || req.query.kind === "audio" ? req.query.kind : "all";
     const mode = req.query.mode === "assets" || req.query.mode === "records" ? req.query.mode : "all";
-    const items = db.listLibraryTaskViews({ limit: limit + 1, offset, query: String(req.query.q ?? "").slice(0, 200), kind, mode });
+    const items = db.listLibraryTaskViews({ limit: limit + 1, offset, query: String(req.query.q ?? "").slice(0, 200), kind, mode, includeChatImages });
     res.json(ok({ items: items.slice(0, limit), hasMore: items.length > limit }));
   });
 
@@ -1171,8 +1247,9 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.json(ok(db.listTaskViews(limit)));
   });
 
-  // 工作台任务状态流：仅广播公共任务，不把对话私有素材推到工作台。
+  // 生成历史单独订阅聊天图片，工作台仍订阅公共任务。
   app.get("/api/generations/events", (req, res) => {
+    const chatImagesOnly = req.query.scope === "chat-images";
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
@@ -1181,7 +1258,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     });
     res.write(":ok\n\n");
     const unsubscribe = runner.onTaskEvent((event) => {
-      if (db.getTaskRow(event.task.id)?.libraryScope === "public") {
+      const task = db.getTaskRow(event.task.id);
+      const chatImage = task?.libraryScope === "conversation" && Boolean(task.ownerConversationId) && task.origin === "generate"
+        && taskKindFor(task.channelAdapterType ?? undefined, event.task.assets.map(asset => asset.mimeType)) === "image";
+      if (chatImagesOnly ? chatImage : task?.libraryScope === "public") {
         res.write(`data: ${JSON.stringify(event.task)}\n\n`);
       }
     });
@@ -1204,6 +1284,10 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.post("/api/generations/:id/retry", asyncHandler(async (req, res) => {
     res.status(202).json(ok(await runner.retry(routeParam(req.params.id))));
   }));
+
+  app.post("/api/generations/:id/continue-query", (req, res) => {
+    res.status(202).json(ok(runner.continuePolling(routeParam(req.params.id))));
+  });
 
   /**
    * Midjourney 的后续动作：把结果卡片上的 U1 / V2 / 重绘按钮变成一条新任务。
@@ -1361,10 +1445,11 @@ export function createApp(options: { dataDir?: string } = {}) {
       brainChannelId: brain.channelId,
       brainModel: brain.model,
       videoConfirmPolicy: input.videoConfirmPolicy ?? readAgentDefaults(db).videoConfirmPolicy,
+      imageConfirmPolicy: input.imageConfirmPolicy ?? readAgentDefaults(db).imageConfirmPolicy,
       visionEnabled: input.visionEnabled ?? readAgentDefaults(db).visionEnabled,
       verbatimPrompt: input.verbatimPrompt ?? false,
-      // 渠道级灰度：只影响之后新建的会话，旧会话保留自己的入口
-      ...(db.getChannel(brain.channelId)?.unifiedAgentDefault ? { toolScope: "all" as const } : {}),
+      // 新客户端显式创建统一会话。未发送范围的旧客户端仍按渠道配置创建。
+      toolScope: input.toolScope ?? (db.getChannel(brain.channelId)?.unifiedAgentDefault ? "all" : undefined),
     });
     res.status(201).json(ok(agent.buildView(conversation.id)));
   });
@@ -1380,6 +1465,15 @@ export function createApp(options: { dataDir?: string } = {}) {
     const conversation = db.getConversation(id);
     if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const patch = conversationPatchSchema.parse(req.body ?? {}) as ConversationPatch;
+    if (conversation.kind === "chat" && conversation.toolScope == null && patch.toolScope != null) {
+      const hasPendingTask = db.listPendingMessages(id).some((message) => {
+        const task = message.taskId ? db.getTaskRow(message.taskId) : null;
+        return task && ["queued", "validating", "submitting", "running"].includes(task.status);
+      });
+      if (agent.isRunning(id) || conversation.status === "awaiting_confirmation" || conversation.status === "waiting_task" || hasPendingTask) {
+        throw new AppError("TURN_IN_FLIGHT", "请先处理待确认卡或等待任务完成，再启用统一助手", 409);
+      }
+    }
     // 画布线程只开放这两类设置：上下文预算，和「用哪个对话模型」。
     // 模型是成对切的，只给一半时用现有的另一半补齐，再整体校验一遍，
     // 免得把 channelId 和 model 拼成上游不认的组合。
@@ -1587,6 +1681,65 @@ export function createApp(options: { dataDir?: string } = {}) {
     try { const file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); res.type("application/octet-stream").send(file.bytes); }
     catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }
   });
+  const versionSha = z.string().regex(/^[a-f0-9]{64}$/);
+    app.get("/api/conversations/:id/executions", (req, res) => {
+      const id=routeParam(req.params.id);
+      if(!db.getConversation(id))throw new AppError("CONVERSATION_NOT_FOUND","会话不存在",404);
+      res.json(ok(db.executions.list(id)));
+    });
+    app.get("/api/conversations/:id/workflows", (req, res) => {
+      const conversationId = routeParam(req.params.id);
+      if (!db.getConversation(conversationId)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+      res.json(ok(db.workflows.list(conversationId)));
+    });
+    app.get("/api/conversations/:id/workflows/:runId", (req, res) => {
+      const conversationId = routeParam(req.params.id), runId = routeParam(req.params.runId);
+      const run = db.workflows.get(conversationId, runId);
+      if (!run) throw new AppError("WORKFLOW_NOT_FOUND", "找不到本会话的工作流", 404);
+      res.json(ok({ ...run, steps: db.workflows.steps(conversationId, runId) }));
+    });
+    app.post("/api/conversations/:id/workflows/:runId", asyncHandler(async (req, res) => {
+      const conversationId = routeParam(req.params.id), runId = routeParam(req.params.runId);
+      const input = z.object({ action: z.enum(["resume", "cancel"]) }).parse(req.body);
+      const run = db.workflows.get(conversationId, runId);
+      if (!run) throw new AppError("WORKFLOW_NOT_FOUND", "找不到本会话的工作流", 404);
+      const resume = db.getPresentationResume(conversationId);
+      if (input.action === "cancel") {
+        if (db.workflows.cancel(conversationId, runId) && resume?.operationId === runId) {
+          agent.interrupt(conversationId);
+          db.clearPresentationResume(conversationId);
+        }
+        res.json(ok(db.workflows.get(conversationId, runId)));
+        return;
+      }
+      if (run.status === "running" || run.status === "completed") { res.json(ok(run)); return; }
+      if (run.status === "cancelled" || run.capability !== "doc_convert" || resume?.operationId !== runId) throw new AppError("WORKFLOW_NOT_RESUMABLE", "此任务没有可直接续做的检查点，请发起新的制作要求", 409);
+      if (db.getConversation(conversationId)?.toolScope === "conversation") throw new AppError("TOOLS_DISABLED", "请在对话设置中开启工具", 409);
+      if (agent.isRunning(conversationId)) throw new AppError("TURN_IN_FLIGHT", "会话正在处理其他任务", 409);
+      // Existing turn handling retains confirmation, channel binding and continuation budgets.
+      agent.startTurn(conversationId, "继续 PPT", "user");
+      res.status(202).json(ok(db.workflows.get(conversationId, runId)));
+    }));
+  app.get("/api/conversations/:id/documents/files/:fileId/presentation-status", (req, res) => {
+    const result = db.getPresentationVersion(routeParam(req.params.id), routeParam(req.params.fileId));
+    if (!result) return res.status(404).json(fail("DOCUMENT_NOT_FOUND", "没有对应的 PPT 文件版本报告"));
+    res.json(ok(result));
+  });
+  app.post("/api/conversations/:id/documents/files/:fileId/presentation-status", asyncHandler(async (req, res) => {
+    const conversationId = routeParam(req.params.id), fileId = routeParam(req.params.fileId);
+    const input = z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("page"), page: z.number().int().min(1).max(200), sha256: versionSha }),
+      z.object({ kind: z.literal("audit"), sha256: versionSha }),
+      z.object({ kind: z.literal("visual"), sha256: versionSha }),
+        z.object({ kind: z.literal("review"), sha256: versionSha }),
+    ]).parse(req.body);
+    if (input.kind === "visual") {
+      agent.retryPresentationCheck(conversationId, fileId, input.sha256);
+      res.status(202).json(ok({ fileId }));
+      return;
+    }
+    res.json(ok(await agent.applyPresentationAction(conversationId, fileId, input.sha256, input)));
+  }));
   app.post("/api/conversations/:id/documents/files/:fileId/wps-preview", asyncHandler(async (req, res) => {
     const origin = req.headers.origin;
     const host = req.headers.host;
@@ -1610,7 +1763,26 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.delete("/api/wps-preview/:id", (req, res) => {
     wpsPreviews.close(routeParam(req.params.id), previewSecret(req)); res.json(ok({ closed: true }));
   });
-  app.post("/api/conversations/:id/mind-documents", mindUpload.single("file"), asyncHandler(async (req, res) => {
+  app.post("/api/conversations/:id/documents/upload", binaryDocumentUpload.single("file"), asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    const file = req.file;
+    const format = file && OFFICE_ATTACHMENT.exec(file.originalname)?.[1]?.toLowerCase();
+    if (!file || !format) throw new AppError("DOCUMENT_INVALID", "请选择 Word (.docx)、Excel (.xlsx) 或 PDF 文件", 400);
+    let details: object;
+    try {
+      if (format === "xlsx") details = { sheets: await inspectXlsx(file.buffer) };
+      else if (format === "pdf") details = { totalPages: await inspectPdf(file.buffer) };
+      else details = { characters: (await readDocxText(file.buffer)).length };
+    } catch (error) {
+      throw new AppError("DOCUMENT_INVALID", error instanceof Error ? error.message : "无法读取文档", 400);
+    }
+    const originalName = Buffer.from(file.originalname, "latin1").toString("utf8");
+    const name = displayFileName(originalName.includes("�") ? file.originalname : originalName);
+    const stored = db.addBinaryConversationDocument(id, name, JSON.stringify({ format, ...details }), file.buffer);
+    db.appendMessage({ conversationId: id, role: "user", content: `上传了文件附件 《${name}》`, documents: [{ id: stored.id, name: stored.fileName, charCount: stored.charCount }] });
+    res.status(201).json(ok(agent.buildView(id)));
+  }));
+  app.post("/api/conversations/:id/mind-documents", binaryDocumentUpload.single("file"), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     if (!req.file || !/\.(xmind|pptx)$/i.test(req.file.originalname)) throw new AppError("DOCUMENT_INVALID", "请选择 XMind 或 PPTX 文件", 400);
@@ -1798,7 +1970,10 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (error instanceof multer.MulterError) {
       // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
       if (error.code === "LIMIT_FILE_SIZE") {
-        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
+        if (/\/api\/conversations\/[^/]+\/(?:documents\/upload|mind-documents)$/.test(req.path)) {
+          return res.status(400).json(fail("DOCUMENT_TOO_LARGE", "文档不能超过 10 MB", requestId));
+        }
+        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" || req.path === "/api/generations/reference-video" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
         return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
       }
       if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {

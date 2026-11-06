@@ -61,12 +61,12 @@ describe("Word 文档", () => {
     expect(payload.lines.join("\n")).toContain("会议纪要");
   });
 
-  it("doc_edit 仍然只接受文本格式，不会去改二进制", async () => {
+  it("doc_edit 拒绝用旧版本哈希修改 Word", async () => {
     const { db, id } = await temp();
     const created = await executeChatDocumentTool(db, id, "doc_create", JSON.stringify({ kind: "docx", name: "方案", content: "# 标题" }));
     const edited = await executeChatDocumentTool(db, id, "doc_edit", JSON.stringify({ fileId: created.data!.fileId, expectedSha256: "0".repeat(64), edits: [{ find: "标题", replace: "新标题" }] }));
     expect(edited.ok).toBe(false);
-    expect(edited.summary).toContain("仅支持修改");
+    expect(edited.summary).toContain("文件版本已变化");
   });
 });
 

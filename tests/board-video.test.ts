@@ -221,9 +221,12 @@ describe("无限画布视频生成", () => {
     const result = await request(app).post(`/api/boards/${boardId}/generate`).send({ nodeId: target.id }).expect(202);
     const input = JSON.parse(context.db.getTaskRow(result.body.data.task.id)!.inputJson);
     expect(input.klingVideoMode).toBe("motion-control");
-    expect(input.klingVideoMedia).toContainEqual({ type: "video", url: "https://files.example.com/reference.mp4" });
+    expect(input.referenceVideo).toMatchObject({ mimeType: "video/mp4" });
+    expect(input.klingVideoMedia.some((item: { type: string }) => item.type === "video")).toBe(false);
     expect(input.klingVideoMedia.some((item: { type: string; url: string }) => item.type === "image" && item.url.startsWith("data:image/"))).toBe(true);
     await waitForTask(app, result.body.data.task.id);
+    const submit = mock.requests.find((item) => item.url !== "/upload" && item.body.includes("https://files.example.com/reference.mp4"));
+    expect(submit).toBeDefined();
   });
   for (const targetType of ["config", "video"] as const) it(`${targetType} 节点从连线读取视频和音频并提交万相`, async () => {
     const { app, context } = await tempApp();

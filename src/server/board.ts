@@ -35,7 +35,7 @@ import { BRAIN_RETRY_MAX_TOKENS, callBrain } from "./brain.js";
 import type { KeyStore } from "./key-store.js";
 import { boardView, requireBoard } from "./board-core.js";
 import { resolveBoardVideoSelection } from "./board-video-selection.js";
-import { uploadReferenceVideo } from "./reference-video.js";
+import type { ReferenceVideoUpload } from "./reference-video.js";
 export { resolveBoardVideoSelection } from "./board-video-selection.js";
 export { addAssetsToBoard, appendConversationCanvasAssets, storeBoardUpload, removeBoardAsset, detachAssetFromBoards, listBoardAssets, linkBoardAsset } from "./board-assets.js";
 export type { BoardBridgeItem } from "./board-assets.js";
@@ -445,7 +445,7 @@ export interface BoardGenerateOverrides {
   seed?: number;
   style?: "auto" | "vivid" | "natural";
   background?: "auto" | "opaque" | "transparent";
-  outputFormat?: "png" | "jpeg" | "webp";
+  outputFormat?: "png" | "jpeg" | "webp" | "gif";
   moderation?: "auto" | "low";
   count?: number;
   videoMode?: BoardVideoMode;
@@ -478,7 +478,7 @@ function requireBoardTask(db: AppDatabase, boardId: string, taskId: string) {
 }
 
 /** 视频节点经渠道图床上传，音频节点作为内联素材；生成确认中会提示公网上传。 */
-async function appendBoardMediaInputs(db: AppDatabase, keys: KeyStore, channel: DbChannel, doc: BoardDoc, nodeId: string, generation: GenerationInput): Promise<void> {
+async function appendBoardMediaInputs(db: AppDatabase, channel: DbChannel, doc: BoardDoc, nodeId: string, generation: GenerationInput): Promise<ReferenceVideoUpload | undefined> {
   const links = directInputLinks(doc, nodeId);
   const audioNode = links.find((link) => link.node.type === "audio")?.node;
   const videoNode = links.find((link) => link.node.type === "video")?.node;
@@ -505,15 +505,13 @@ async function appendBoardMediaInputs(db: AppDatabase, keys: KeyStore, channel: 
   }
   if (videoNode?.type === "video" && videoNode.assetId) {
     const { asset, bytes } = await readAsset(videoNode.assetId, "video");
-    const url = await uploadReferenceVideo(channel, keys, { buffer: bytes, mimetype: asset.mimeType, originalname: asset.fileName });
     if (channel.adapterType === "kling-video") {
       generation.klingVideoMode = "motion-control";
-      generation.klingVideoMedia = [...(generation.klingVideoMedia ?? []), { type: "video", url }];
       generation.klingCharacterOrientation = "video";
     } else {
       generation.wanVideoMode = "reference";
-      generation.wanVideoMedia = [...(generation.wanVideoMedia ?? []), { type: "reference_video", url }];
     }
+    return { buffer: bytes, mimetype: asset.mimeType, originalname: asset.fileName };
   }
 }
 
@@ -531,20 +529,21 @@ export async function retryBoardTask(input: {
   const rows = requireBoardTask(input.db, input.boardId, input.taskId);
   const resultNodeIds = rows.map((row) => row.resultNodeId);
   const task = await input.runner.retry(input.taskId);
-  input.db.addBoardTaskRows({
-    taskId: task.id,
-    boardId: input.boardId,
-    configNodeId: rows[0]!.configNodeId,
-    resultNodeIds,
-    kind: rows[0]!.kind,
-  });
+  if (task.id !== input.taskId) {
+    input.db.addBoardTaskRows({
+      taskId: task.id,
+      boardId: input.boardId,
+      configNodeId: rows[0]!.configNodeId,
+      resultNodeIds,
+      kind: rows[0]!.kind,
+    });
+  }
   return { task, resultNodeIds, configNodeId: rows[0]!.configNodeId };
 }
 
 async function generateBoardVideo(input: {
   db: AppDatabase;
   runner: TaskRunner;
-  keys: KeyStore;
   boardId: string;
   board: BoardRecord;
   config: ConfigBoardNode;
@@ -666,8 +665,8 @@ async function generateBoardVideo(input: {
     generation.aspectRatio = generation.aspectRatio ?? "16:9";
   }
 
-  await appendBoardMediaInputs(db, input.keys, channel, board.doc, config.id, generation);
-  const task = await runner.create(generation, uploads);
+  const referenceVideoUpload = await appendBoardMediaInputs(db, channel, board.doc, config.id, generation);
+  const task = await runner.create({ ...generation, referenceVideoUpload }, uploads);
 
   const at = now();
   const allocated = allocateNodeRef(board.doc);
@@ -1122,7 +1121,7 @@ export async function generateBoardConfig(input: {
 
   if (config.mode === "video") {
     return generateBoardVideo({
-      db, runner, keys: input.keys,
+      db, runner,
       boardId: input.boardId,
       board,
       config,
@@ -1520,8 +1519,8 @@ async function generateBoardMediaNode(input: {
       generation.klingVideoMode = "text-to-video";
       generation.aspectRatio = generation.aspectRatio ?? "16:9";
     }
-    await appendBoardMediaInputs(db, input.keys, channel, board.doc, node.id, generation);
-    task = await runner.create(generation, uploads);
+    const referenceVideoUpload = await appendBoardMediaInputs(db, channel, board.doc, node.id, generation);
+    task = await runner.create({ ...generation, referenceVideoUpload }, uploads);
     kind = "video";
     modelAlias = resolution.alias;
     referenceCount = selection.inputs.length;

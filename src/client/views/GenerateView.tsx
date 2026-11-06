@@ -13,15 +13,51 @@ import { MaskEditorDialog } from "../MaskEditorDialog";
 import { PromptPolishButton } from "../PromptPolishButton";
 import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
-import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "../task-ui";
+import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState, useScopedPersistentState } from "../task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES } from "../../shared/types";
 import { OPENAI_SIZE_GROUPS } from "../../shared/image-sizes";
+import { modelSupportsGifOutput, modelSupportsNegativePrompt } from "../../shared/channel-fields";
 import { isMidjourneyActionModel, midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
+import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
 import type { Asset, Channel, ImageSizeValue, Task, TaskStatus } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
 const openAiSizeGroups = OPENAI_SIZE_GROUPS;
+
+const openAiSizeOptions: SelectOption[] = [
+  { value: "auto", label: "自动" },
+  ...openAiSizeGroups.flatMap((group) => group.sizes.map((item) => ({ value: item, label: item, group: group.label }))),
+  { value: "custom", label: "自定义" },
+];
+const qualityOptions: SelectOption[] = [
+  { value: "auto", label: "自动" }, { value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" },
+];
+const responseFormatOptions: SelectOption[] = [
+  { value: "auto", label: "自动" }, { value: "b64_json", label: "Base64" }, { value: "url", label: "URL" },
+];
+const aspectRatioOptions: SelectOption[] = ["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+  .map((value) => ({ value, label: value === "auto" ? "自动" : value }));
+const imageSizeOptions: SelectOption[] = ["auto", "1K", "2K", "4K"].map((value) => ({ value, label: value === "auto" ? "自动" : value }));
+const mjVersionOptions: SelectOption[] = [
+  { value: "", label: "默认" }, { value: "8.2", label: "8.2" }, { value: "7", label: "7" }, { value: "6.1", label: "6.1" }, { value: "6", label: "6" },
+];
+const backgroundOptions: SelectOption[] = [
+  { value: "auto", label: "自动" }, { value: "opaque", label: "不透明" }, { value: "transparent", label: "透明" },
+];
+const moderationOptions: SelectOption[] = [
+  { value: "auto", label: "自动" }, { value: "low", label: "低限制" },
+];
+const styleOptions: SelectOption[] = [
+  { value: "auto", label: "自动" }, { value: "vivid", label: "Vivid" }, { value: "natural", label: "Natural" },
+];
+const responseModalityOptions: SelectOption[] = [
+  { value: "IMAGE", label: "仅图片" }, { value: "TEXT,IMAGE", label: "文字 + 图片" },
+];
+const timeoutQuickOptions: SelectOption[] = [
+  { value: "60", label: "1 分钟" }, { value: "180", label: "3 分钟（默认）" }, { value: "300", label: "5 分钟" },
+  { value: "600", label: "10 分钟" }, { value: "900", label: "15 分钟" }, { value: "custom", label: "自定义" },
+];
 
 /** 任务最新一次活动的时间：跑完的算完成时间，还在跑的算创建时间 */
 function taskActivityAt(task: Task) {
@@ -53,29 +89,31 @@ export function GenerateView(props: {
   onChannelChange: (id: string) => void; onModelChange: (model: string) => void; onAddChannel: () => void; onConfigureChannel: (channel: Channel) => void;
   onTask: (task: Task) => void; onSelectTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void; onDiagnostics: (task: Task) => void;
 }) {
+  const draftAdapter = props.channels.find((item) => item.id === props.selectedChannelId)?.adapterType ?? "none";
+  const draftScope = `${draftAdapter}:${props.selectedChannelId}:${props.selectedModel}`;
   const [prompt, setPrompt] = usePersistentState("prompt", "");
-  const [negativePrompt, setNegativePrompt] = usePersistentState("negativePrompt", "");
-  const [size, setSize] = usePersistentState("size", "1024x1024");
-  const [customWidth, setCustomWidth] = usePersistentState("customWidth", "1024");
-  const [customHeight, setCustomHeight] = usePersistentState("customHeight", "1024");
-  const [aspectRatio, setAspectRatio] = usePersistentState("aspectRatio", "auto");
-  const [mjVersion, setMjVersion] = usePersistentState("mjVersion", "");
-  const [quality, setQuality] = usePersistentState("quality", "auto");
-  const [background, setBackground] = usePersistentState<"auto" | "opaque" | "transparent">("background", "auto");
-  const [outputFormat, setOutputFormat] = usePersistentState<"png" | "jpeg" | "webp">("outputFormat", "png");
-  const [moderation, setModeration] = usePersistentState<"auto" | "low">("moderation", "auto");
-  const [style, setStyle] = usePersistentState<"auto" | "vivid" | "natural">("style", "auto");
-  const [responseFormat, setResponseFormat] = usePersistentState<"auto" | "url" | "b64_json">("responseFormat", "auto");
-  const [imageSize, setImageSize] = usePersistentState("imageSize", "auto");
-  const [temperature, setTemperature] = usePersistentState("temperature", "");
-  const [topP, setTopP] = usePersistentState("topP", "");
-  const [topK, setTopK] = usePersistentState("topK", "");
-  const [maxOutputTokens, setMaxOutputTokens] = usePersistentState("maxOutputTokens", "");
-  const [responseModalities, setResponseModalities] = usePersistentState<"IMAGE" | "TEXT,IMAGE">("responseModalities", "IMAGE");
-  const [seed, setSeed] = usePersistentState("seed", "");
-  const [timeoutSeconds, setTimeoutSeconds] = usePersistentState("timeoutSeconds", 180);
-  const [count, setCount] = usePersistentState("count", 1);
-  const [raw, setRaw] = usePersistentState("raw", "{}");
+  const [negativePrompt, setNegativePrompt] = useScopedPersistentState(draftScope, "negativePrompt", "");
+  const [size, setSize] = useScopedPersistentState(draftScope, "size", "1024x1024");
+  const [customWidth, setCustomWidth] = useScopedPersistentState(draftScope, "customWidth", "1024");
+  const [customHeight, setCustomHeight] = useScopedPersistentState(draftScope, "customHeight", "1024");
+  const [aspectRatio, setAspectRatio] = useScopedPersistentState(draftScope, "aspectRatio", "auto");
+  const [mjVersion, setMjVersion] = useScopedPersistentState(draftScope, "mjVersion", "");
+  const [quality, setQuality] = useScopedPersistentState(draftScope, "quality", "auto");
+  const [background, setBackground] = useScopedPersistentState<"auto" | "opaque" | "transparent">(draftScope, "background", "auto");
+  const [outputFormat, setOutputFormat] = useScopedPersistentState<"png" | "jpeg" | "webp" | "gif">(draftScope, "outputFormat", "png");
+  const [moderation, setModeration] = useScopedPersistentState<"auto" | "low">(draftScope, "moderation", "auto");
+  const [style, setStyle] = useScopedPersistentState<"auto" | "vivid" | "natural">(draftScope, "style", "auto");
+  const [responseFormat, setResponseFormat] = useScopedPersistentState<"auto" | "url" | "b64_json">(draftScope, "responseFormat", "auto");
+  const [imageSize, setImageSize] = useScopedPersistentState(draftScope, "imageSize", "auto");
+  const [temperature, setTemperature] = useScopedPersistentState(draftScope, "temperature", "");
+  const [topP, setTopP] = useScopedPersistentState(draftScope, "topP", "");
+  const [topK, setTopK] = useScopedPersistentState(draftScope, "topK", "");
+  const [maxOutputTokens, setMaxOutputTokens] = useScopedPersistentState(draftScope, "maxOutputTokens", "");
+  const [responseModalities, setResponseModalities] = useScopedPersistentState<"IMAGE" | "TEXT,IMAGE">(draftScope, "responseModalities", "IMAGE");
+  const [seed, setSeed] = useScopedPersistentState(draftScope, "seed", "");
+  const [timeoutSeconds, setTimeoutSeconds] = useScopedPersistentState(draftScope, "timeoutSeconds", 180);
+  const [count, setCount] = useScopedPersistentState(draftScope, "count", 1);
+  const [raw, setRaw] = useScopedPersistentState(draftScope, "raw", "{}");
   const [submitting, setSubmitting] = useState(false);
   const [maskEditorOpen, setMaskEditorOpen] = useState(false);
   const references = props.references;
@@ -85,7 +123,17 @@ export function GenerateView(props: {
   const adapterType = channel?.adapterType;
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const isMidjourney = adapterType === "midjourney";
+  const supportsNegativePrompt = modelSupportsNegativePrompt(props.selectedModel);
+  const supportsGif = modelSupportsGifOutput(props.selectedModel);
+  const gifAvailable = supportsGif && referenceImages.length > 0;
+  const outputFormatOptions: SelectOption[] = [
+    { value: "png", label: "PNG" },
+    { value: "jpeg", label: "JPEG" },
+    { value: "webp", label: "WebP" },
+    ...(gifAvailable ? [{ value: "gif", label: "GIF" }] : []),
+  ];
   const showAspectRatio = adapterType === "gemini-content" || isMidjourney;
+  useEffect(() => { if (outputFormat === "gif" && !gifAvailable) setOutputFormat("png"); }, [outputFormat, gifAvailable]);
   /**
    * 局部重绘：OpenAI Images 渠道 + 恰好一张底图。
    * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
@@ -130,7 +178,8 @@ export function GenerateView(props: {
     setSubmitting(true);
     try {
       const task = await api.generate({
-        channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(), negativePrompt: negativePrompt.trim() || undefined,
+        channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(),
+        negativePrompt: supportsNegativePrompt ? negativePrompt.trim() || undefined : undefined,
         // 尺寸只有 OpenAI 系适配器认（`openAiImageParameters`）；gemini 和视频渠道收到它只会
         // 丢掉，然后在新加的「请求参数」里留一条扎眼的「未发出」——那是我们自己多发的，
         // 不该让用户以为是他的配置有问题
@@ -139,7 +188,7 @@ export function GenerateView(props: {
         midjourneyVersion: isMidjourney ? mjVersion || undefined : undefined,
         count,
         quality: quality === "auto" ? undefined : quality,
-        outputFormat,
+        outputFormat: outputFormat === "gif" && !gifAvailable ? undefined : outputFormat,
         background: background === "auto" ? undefined : background,
         moderation: isOpenAi && moderation !== "auto" ? moderation : undefined,
         style: isOpenAi && style !== "auto" ? style : undefined,
@@ -276,37 +325,39 @@ export function GenerateView(props: {
               <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>基础参数</h2></div></div>
               <div className="parameter-grid">
                 {isOpenAi ? <>
-                  <label><span>尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>
-                    <option value="auto">自动</option>
-                    {openAiSizeGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.sizes.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup>)}
-                    <option value="custom">自定义</option>
-                  </select></label>
+                  <label><span>尺寸</span>
+                    <SelectMenu value={size} options={openAiSizeOptions} onChange={setSize} ariaLabel="尺寸" className="param-select" minWidth={220} />
+                  </label>
                   {size === "custom" ? <div className="custom-size-fields wide-field" aria-label="自定义尺寸">
                     <label><span>宽度</span><input type="number" min={64} max={3840} step={16} value={customWidth} onChange={(event) => setCustomWidth(event.target.value)} /></label>
                     <span aria-hidden="true">x</span>
                     <label><span>高度</span><input type="number" min={64} max={3840} step={16} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
                   </div> : null}
-                  <label><span>质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
-                  <label><span>格式</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as typeof outputFormat)}><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
-                  <label><span>响应格式</span><select value={responseFormat} onChange={(event) => setResponseFormat(event.target.value as typeof responseFormat)}><option value="auto">自动</option><option value="b64_json">Base64</option><option value="url">URL</option></select></label>
+                  <label><span>质量</span>
+                    <SelectMenu value={quality} options={qualityOptions} onChange={setQuality} ariaLabel="质量" className="param-select" />
+                  </label>
+                  <label><span>格式</span>
+                    <SelectMenu value={outputFormat} options={outputFormatOptions} onChange={(value) => setOutputFormat(value as typeof outputFormat)} ariaLabel="格式" className="param-select" />
+                  </label>
+                  <label><span>响应格式</span>
+                    <SelectMenu value={responseFormat} options={responseFormatOptions} onChange={(value) => setResponseFormat(value as typeof responseFormat)} ariaLabel="响应格式" className="param-select" />
+                  </label>
                 </> : null}
                 {showAspectRatio ? (
-                  <label><span>宽高比</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="auto">自动</option><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>4:5</option><option>5:4</option><option>9:16</option><option>16:9</option><option>21:9</option></select></label>
+                  <label><span>宽高比</span>
+                    <SelectMenu value={aspectRatio} options={aspectRatioOptions} onChange={setAspectRatio} ariaLabel="宽高比" className="param-select" />
+                  </label>
                 ) : null}
                 {adapterType === "gemini-content" ? (
-                  <label><span>输出尺寸</span><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}><option value="auto">自动</option><option>1K</option><option>2K</option><option>4K</option></select></label>
+                  <label><span>输出尺寸</span>
+                    <SelectMenu value={imageSize} options={imageSizeOptions} onChange={setImageSize} ariaLabel="输出尺寸" className="param-select" />
+                  </label>
                 ) : null}
                 {isMidjourney ? (
                   <>
                     <label>
                       <span>模型版本 <small>--v</small></span>
-                      <select value={mjVersion} onChange={(event) => setMjVersion(event.target.value)}>
-                        <option value="">默认</option>
-                        <option value="8.2">8.2</option>
-                        <option value="7">7</option>
-                        <option value="6.1">6.1</option>
-                        <option value="6">6</option>
-                      </select>
+                      <SelectMenu value={mjVersion} options={mjVersionOptions} onChange={setMjVersion} ariaLabel="模型版本" className="param-select" />
                     </label>
                     <label className="mj-no-field">
                       <span>排除内容 <small>--no</small></span>
@@ -320,16 +371,22 @@ export function GenerateView(props: {
               <details className="advanced-panel">
                 <summary><Settings2 size={16} /><span>高级参数</span><ChevronRight className="details-chevron" size={16} /></summary>
                 <div className="advanced-body">
-                  {!isMidjourney ? (
+                  {!isMidjourney && supportsNegativePrompt ? (
                     <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
-                  ) : null}
+                  ) : !isMidjourney ? <div className="field-block"><span>负面提示词</span><small>当前模型不支持这个字段，已停止发送，避免请求被上游拒绝。</small></div> : null}
                   {isOpenAi ? <>
                     <div className="parameter-subtitle">OpenAI Images</div>
                     <div className="parameter-grid">
                       <label><span>数量</span><input type="number" min={1} max={8} value={count} onChange={(event) => setCount(Math.max(1, Math.min(8, Number(event.target.value))))} /></label>
-                      <label><span>背景</span><select value={background} onChange={(event) => setBackground(event.target.value as typeof background)}><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label>
-                      <label><span>内容审核</span><select value={moderation} onChange={(event) => setModeration(event.target.value as typeof moderation)}><option value="auto">自动</option><option value="low">低限制</option></select></label>
-                      <label><span>风格</span><select value={style} onChange={(event) => setStyle(event.target.value as typeof style)}><option value="auto">自动</option><option value="vivid">Vivid</option><option value="natural">Natural</option></select></label>
+                      <label><span>背景</span>
+                        <SelectMenu value={background} options={backgroundOptions} onChange={(value) => setBackground(value as typeof background)} ariaLabel="背景" className="param-select" />
+                      </label>
+                      <label><span>内容审核</span>
+                        <SelectMenu value={moderation} options={moderationOptions} onChange={(value) => setModeration(value as typeof moderation)} ariaLabel="内容审核" className="param-select" />
+                      </label>
+                      <label><span>风格</span>
+                        <SelectMenu value={style} options={styleOptions} onChange={(value) => setStyle(value as typeof style)} ariaLabel="风格" className="param-select" />
+                      </label>
                     </div>
                   </> : null}
                   {adapterType === "gemini-content" ? <>
@@ -341,7 +398,9 @@ export function GenerateView(props: {
                       <label><span>Top K</span><input type="number" min={1} max={100} step={1} value={topK} onChange={(event) => setTopK(event.target.value)} placeholder="1 - 100" /></label>
                       <label><span>最大输出 Token</span><input type="number" min={1} max={32768} step={1} value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} placeholder="可选" /></label>
                       <label><span>Seed</span><input type="number" min={0} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="可选" /></label>
-                      <label><span>响应模态</span><select value={responseModalities} onChange={(event) => setResponseModalities(event.target.value as typeof responseModalities)}><option value="IMAGE">仅图片</option><option value="TEXT,IMAGE">文字 + 图片</option></select></label>
+                      <label><span>响应模态</span>
+                        <SelectMenu value={responseModalities} options={responseModalityOptions} onChange={(value) => setResponseModalities(value as typeof responseModalities)} ariaLabel="响应模态" className="param-select" />
+                      </label>
                     </div>
                   </> : null}
                   <div className="parameter-subtitle">生成超时</div>
@@ -353,15 +412,13 @@ export function GenerateView(props: {
                     </label>
                     <label>
                       <span>快速选择</span>
-                      <select value={[60, 180, 300, 600, 900].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
-                        onChange={(event) => { if (event.target.value !== "custom") setTimeoutSeconds(Number(event.target.value)); }}>
-                        <option value="60">1 分钟</option>
-                        <option value="180">3 分钟（默认）</option>
-                        <option value="300">5 分钟</option>
-                        <option value="600">10 分钟</option>
-                        <option value="900">15 分钟</option>
-                        <option value="custom">自定义</option>
-                      </select>
+                      <SelectMenu
+                        value={[60, 180, 300, 600, 900].includes(timeoutSeconds) ? String(timeoutSeconds) : "custom"}
+                        options={timeoutQuickOptions}
+                        onChange={(value) => { if (value !== "custom") setTimeoutSeconds(Number(value)); }}
+                        ariaLabel="快速选择等待时长"
+                        className="param-select"
+                      />
                     </label>
                   </div>
                   <div className="parameter-subtitle">高级 JSON</div>
@@ -415,7 +472,7 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
    */
   const activeAssetBlob = useRef<{ id: string; blob: Blob } | null>(null);
   // 生成中的任务占据固定位置，完成后原位变成缩略图。
-  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
+  const recentTasks = tasks.filter((item) => !terminalStatuses.includes(item.status) || item.errorCode === "VIDEO_TIMEOUT" || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 12);
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
   useEffect(() => { setSelectedAssetId(task?.assets[0]?.id ?? null); }, [task?.id, task?.assets.length]);
   useEffect(() => {
@@ -482,8 +539,12 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
   }
   async function retry() {
     if (!task) return;
-    if (!confirmGeneration({ kind: "图片生成", model: task.model, channel: task.channelName, retry: true })) return;
-    try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
+    const continueQuery = task.errorCode === "VIDEO_TIMEOUT";
+    if (!continueQuery && !confirmGeneration({ kind: "图片生成", model: task.model, channel: task.channelName, retry: true })) return;
+    try {
+      onTask(await (continueQuery ? api.continueTaskQuery(task.id) : api.retry(task.id)));
+      onToast("success", continueQuery ? "已继续查询原任务" : "已重新提交");
+    } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
   }
   async function download(asset: Asset) {
     setDownloadingAssetId(asset.id);
@@ -524,7 +585,9 @@ function ResultPanel({ task, tasks, references, onDiagnostics, onTask, onSelectT
       <div className={`result-stage ${activeAsset ? "has-image" : ""}`}>
         {!task ? <EmptyResult /> : null}
         {busy ? <div className="task-progress"><LoaderCircle className="spin" size={30} /><strong>{statusLabels[task.status]}</strong>{task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}<span>{task.model}</span></div> : null}
-        {task && task.status === "failed" ? <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div> : null}
+        {task && task.status === "failed" ? <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode === "VIDEO_TIMEOUT" ? "查询已暂停" : task.errorCode}</strong><span>{task.errorMessage}</span>
+          {task.errorCode === "VIDEO_TIMEOUT" ? <button type="button" className="secondary-button" onClick={() => void retry()}>继续查询</button> : null}
+        </div> : null}
         {task && !busy && task.status !== "failed" && !task.assets.length ? <EmptyResult /> : null}
         {activeAsset ? <figure className="stage-image"><img src={api.assetUrl(activeAsset.url)} alt="生成结果" title="双击放大" onDoubleClick={() => setPreviewAsset(activeAsset)} /></figure> : null}
       </div>

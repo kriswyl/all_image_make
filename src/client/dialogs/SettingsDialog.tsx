@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, Eye, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, X } from "lucide-react";
+import { AlertCircle, Eye, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, Trash2, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { IMAGE_SIZE_VALUES, type ImageSizeValue } from "../../shared/types";
 import { setThemeMode, useTheme, type ThemeMode } from "../theme";
@@ -33,11 +33,32 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
   const isDefault = assetsDir === defaultAssetsDir;
   const canPick = isTauriRuntime();
   const [imageSize, setImageSize] = useState<ImageSizeValue | null>(null);
+  const [imageConfirmPolicy, setImageConfirmPolicy] = useState<"batch_only" | "always" | null>(null);
+  const [documentsDir, setDocumentsDir] = useState("");
+  const [defaultDocumentsDir, setDefaultDocumentsDir] = useState("");
   const { mode: theme } = useTheme();
 
   useEffect(() => {
-    void api.settings().then((current) => setImageSize(current.geminiImageSize)).catch(() => undefined);
+    void api.settings().then((current) => {
+      setImageSize(current.geminiImageSize);
+      setImageConfirmPolicy(current.imageConfirmPolicy);
+      setDocumentsDir(current.documentsDir);
+      setDefaultDocumentsDir(current.defaultDocumentsDir);
+    }).catch(() => undefined);
   }, []);
+
+  async function applyImageConfirm(next: "batch_only" | "always") {
+    setBusy(true);
+    try {
+      const result = await api.updateSettings({ agentImageConfirmPolicy: next });
+      setImageConfirmPolicy(result.imageConfirmPolicy);
+      onToast("success", next === "always" ? "已改为每次生图/改图都确认" : "已改为单张生图/改图直接提交");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "生图确认方式更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function applyImageSize(next: ImageSizeValue) {
     setBusy(true);
@@ -75,6 +96,42 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
     }
   }
 
+  async function applyDocuments(next: string) {
+    setBusy(true);
+    try {
+      const result = await api.updateSettings({ documentsDir: next });
+      setDocumentsDir(result.documentsDir);
+      setDefaultDocumentsDir(result.defaultDocumentsDir);
+      onToast("success", next === "" ? "已恢复默认文档目录" : "文档目录已更新");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "文档目录更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseDocuments() {
+    try {
+      const picked = await api.pickDirectory();
+      if (!picked) return;
+      await applyDocuments(picked);
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "无法打开目录选择器");
+    }
+  }
+
+  async function cleanupDocuments() {
+    setBusy(true);
+    try {
+      const result = await api.cleanupDocuments();
+      onToast("success", result.deleted ? `已清理 ${result.deleted} 个旧版本文档` : "没有可清理的旧版本文档");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "旧版本文档清理失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reveal() {
     try {
       const result = await api.revealMedia();
@@ -107,6 +164,33 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
                   {option.icon}{option.label}
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>生图确认方式</h3>
+            <p className="modal-lead">
+              单张明确生图或改图可以直接提交；一次产出多张时始终合并成一张确认卡。底图不明确时会先问你选哪一张，不会直接生成。
+            </p>
+            <div className="settings-segment">
+              <button
+                type="button"
+                className={`secondary-button ${imageConfirmPolicy === "batch_only" ? "is-on" : ""}`}
+                aria-pressed={imageConfirmPolicy === "batch_only"}
+                disabled={busy || imageConfirmPolicy === null}
+                onClick={() => void applyImageConfirm("batch_only")}
+              >单张直接提交</button>
+              <button
+                type="button"
+                className={`secondary-button ${imageConfirmPolicy === "always" ? "is-on" : ""}`}
+                aria-pressed={imageConfirmPolicy === "always"}
+                disabled={busy || imageConfirmPolicy === null}
+                onClick={() => void applyImageConfirm("always")}
+              >每次确认</button>
+            </div>
+            <div className="modal-note">
+              <AlertCircle size={15} />
+              <span>这是全局默认；改完会同步当前所有会话。旧会话里已经记录的显式策略不会再单独显示在输入框里。</span>
             </div>
           </div>
 
@@ -147,6 +231,27 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
                   ? "更改目录只影响之后生成的产物。历史记录里的旧图片、视频仍从原来的目录读取，不会被搬动，也不会失效。"
                   : "只有桌面版支持用原生对话框选择目录；Web 开发模式下这里不可用。"}
               </span>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>文档目录</h3>
+            <p className="modal-lead">PPT、Markdown、Word 等会话文档保存到下面这个目录。{documentsDir && documentsDir === defaultDocumentsDir ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
+            <div className="settings-path">{documentsDir || "（未获取到）"}</div>
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={() => void chooseDocuments()} disabled={busy || !canPick}>
+                <FolderOpen size={16} />更改目录
+              </button>
+              <button className="secondary-button" onClick={() => void applyDocuments("")} disabled={busy || !documentsDir || documentsDir === defaultDocumentsDir}>
+                <RotateCcw size={16} />恢复默认
+              </button>
+              <button className="secondary-button" onClick={() => void cleanupDocuments()} disabled={busy}>
+                <Trash2 size={16} />清理旧版本
+              </button>
+            </div>
+            <div className="modal-note">
+              <AlertCircle size={15} />
+              <span>切换只影响之后生成的文档；历史文档仍按各自记录的目录读取，不会失效。每次生成新版本会自动保留最近 3 个版本和根文件，更早的中间版本会清理。</span>
             </div>
           </div>
 

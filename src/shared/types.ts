@@ -271,7 +271,7 @@ export interface GenerationInput {
   aspectRatio?: string;
   count?: number;
   quality?: string;
-  outputFormat?: "png" | "jpeg" | "webp";
+  outputFormat?: "png" | "jpeg" | "webp" | "gif";
   background?: "auto" | "opaque" | "transparent";
   moderation?: "auto" | "low";
   style?: "auto" | "vivid" | "natural";
@@ -374,6 +374,7 @@ export interface Asset {
 export interface Task {
   id: string;
   origin?: "generate" | "upload";
+  historySource?: "chat";
   channelId: string;
   channelName: string;
   model: string;
@@ -445,8 +446,12 @@ export type DefaultModelGroup = "image" | "video" | "music" | "speech";
 export interface Settings {
   assetsDir: string;
   defaultAssetsDir: string;
+  documentsDir: string;
+  defaultDocumentsDir: string;
   /** gemini 渠道缺省补的尺寸（需求.md 问题 1）；1K / 2K / 4K */
   geminiImageSize: ImageSizeValue;
+  /** 生图 / 改图的确认策略：单张直出或每次确认；批量始终确认 */
+  imageConfirmPolicy: "batch_only" | "always";
   /** 默认生图 / 生视频 / 音乐 / 语音模型，存 alias，空串表示没设 */
   defaultImageAlias: string;
   defaultVideoAlias: string;
