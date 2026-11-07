@@ -2,6 +2,7 @@ import path from "node:path";
 import { createApp } from "./app.js";
 import { loadEnvFiles } from "./security.js";
 import { getWpsPreviewJobs } from "./wps-preview.js";
+import { cleanupExpiredCandidates, reconcileCandidates } from "./document-publish.js";
 
 loadEnvFiles();
 
@@ -18,6 +19,17 @@ const server = app.listen(port, "127.0.0.1", () => {
   // 上一进程留下的 running 会话已经不存在了，收回 idle，否则界面永远转圈
   const recovered = context.agent.recoverStaleConversations();
   if (recovered) console.log(`收拾了 ${recovered} 条卡在「进行中」的会话`);
+  // B：重启后核对候选登记与已有字节，补齐/清理未发布孤儿；不重新生成，也不重复增加版本。
+  const publishRecovery = reconcileCandidates(context.db);
+  const expired = cleanupExpiredCandidates(context.db);
+  const cleaned = publishRecovery.removedOrphans.length + expired.length;
+  if (cleaned) console.log(`清理了 ${cleaned} 份未发布的候选产物`);
+  // 暂停保护引用是粗粒度开关（命中就整族不清理）；没有断点的残留会让磁盘永远清不下去。
+  const orphanRefs = context.db.specs.releaseOrphanPausedRefs();
+  if (orphanRefs) console.log(`释放了 ${orphanRefs} 条已无断点的家族保护引用`);
+  // 低频清理跑在同一进程里，不引入独立常驻进程；unref 保证不阻止退出。
+  const sweep = setInterval(() => cleanupExpiredCandidates(context.db), 6 * 60 * 60 * 1000);
+  sweep.unref();
 });
 
 function shutdown() {

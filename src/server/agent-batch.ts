@@ -280,7 +280,8 @@ export class BatchExecutor {
         if(operationId)journal.finish(operationId,"failed",{reasonCode:"TOOL_NOT_BATCHABLE"});
         return { result: { ok: false, summary: "能力查找不能放进批量调用", error: "TOOL_NOT_BATCHABLE" }, terminal: false };
       }
-      const outcome=await runAgentTool(call.tool, call.args, ctx);
+      // 新加入的文档契约工具不属于旧创作助手的 TOOL_SCHEMAS 清单，批量路径仅做类型收窄。
+      const outcome=await runAgentTool(call.tool as Parameters<typeof runAgentTool>[0], call.args, ctx);
       if(operationId) {
         const task=outcome.result.taskId?this.host.db.getTaskView(outcome.result.taskId):null;
         const unknown=outcome.result.error==="SUBMISSION_UNKNOWN"||task?.errorCode==="SUBMISSION_UNKNOWN";

@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { AiPresentation } from "./mind-document.js";
 import { PAGE_HEIGHT, layoutIssues, resolveElements, validateElements, type PresentationDesign, type PresentationElement } from "./presentation-elements.js";
 import { presentationInk, presentationPanel } from "./presentation-palette.js";
+import { DEFAULT_THEME_ID, getTheme, type ThemeTokens } from "../shared/presentation-theme.js";
+
+const DEFAULT_THEME = getTheme(DEFAULT_THEME_ID);
 
 const line = z.string().trim().min(1).max(160);
 export const slideContentSchema = z.object({
@@ -49,16 +52,20 @@ export function validSlideContent(content: SlideContent, images: number[]): bool
 /** Stable editable geometry, shared typography, and full-length text retained in notes. */
 export function renderContentSlide(
   content: SlideContent, design: PresentationDesign, sourceIds: string[], sourceNotes: string,
-  status?: "精简页" | "待补全", imageIndex?: number,
+  status?: "精简页" | "待补全", imageIndex?: number, theme: ThemeTokens = DEFAULT_THEME,
 ): { slide: Slide; overflow: boolean } {
   const elements: PresentationElement[] = [];
   const moved: string[] = [];
-  const paper = design.background ?? "F8FAFC", panel = presentationPanel(paper);
-  const ink = presentationInk(paper, design.text), panelInk = presentationInk(panel, design.text);
-  const accent = design.accent ?? "286D9C";
+  const paper = design.background ?? theme.colors.background;
+  // 面板/墨色仍由对比度推导兜底：主题可以给建议色，但不能把文字压到看不清。
+  const panel = design.background ? presentationPanel(paper) : theme.colors.panel ?? presentationPanel(paper);
+  const ink = presentationInk(paper, design.text ?? theme.colors.ink), panelInk = presentationInk(panel, design.text ?? theme.colors.ink);
+  const accent = design.accent ?? theme.colors.accent;
+  const fontFace = design.fontFace ?? theme.typography.fontFace;
+  const { layout: geometry, typography } = theme;
   const add = (id: string, value: string | undefined, rect: Rect, size: number, min: number, color = ink, bold = false) => {
     if (!value) return;
-    const item: Text = { type: "text", id, ...rect, text: xmlText(value), style: { fontSize: size, color, bold, margin: 0, valign: "middle" } };
+    const item: Text = { type: "text", id, ...rect, text: xmlText(value), style: { fontSize: size, color, bold, margin: 0, valign: "middle", fontFace } };
     while (layoutIssues([item]).length && item.style!.fontSize! > min) item.style!.fontSize! -= 1;
     if (layoutIssues([item]).length) {
       moved.push(value);
@@ -77,71 +84,79 @@ export function renderContentSlide(
   const shape = (id: string, rect: Rect, fill: string, round = false) => elements.push({
     type: "shape", id, shape: round ? "roundRect" : "rect", ...rect, fill, line: { color: fill, width: 0 },
   });
-  shape("accent-rule", { x: 0.76, y: 0.45, w: 0.48, h: 0.055 }, accent);
-  add("title", content.title, { x: 0.76, y: 0.62, w: 11.8, h: 1.08 }, 32, 20, ink, true);
-  add("takeaway", content.takeaway, { x: 0.76, y: 1.76, w: 11.8, h: 0.76 }, 19, 15, ink);
-  const top = content.takeaway ? 2.78 : 2.05, bottom = 6.78, width = 11.8;
+  shape("accent-rule", { x: geometry.marginX, y: geometry.ruleY, w: geometry.ruleWidth, h: geometry.ruleHeight }, accent);
+  add("title", content.title, { x: geometry.marginX, y: geometry.titleY, w: geometry.contentWidth, h: geometry.titleHeight },
+    typography.title, typography.titleMin, ink, true);
+  add("takeaway", content.takeaway, { x: geometry.marginX, y: geometry.takeawayY, w: geometry.contentWidth, h: geometry.takeawayHeight },
+    typography.takeaway, typography.takeawayMin, ink);
+  const top = content.takeaway ? geometry.bodyTopWithTakeaway : geometry.bodyTop, bottom = geometry.bottom;
+  const width = geometry.contentWidth;
   const body = content.bullets ?? [];
   const groups = content.groups ?? [];
   const media = content.imageIndex ?? imageIndex;
   const picture = (index: number) => elements.push({
-    type: "image", id: "picture", x: 6.58, y: top, w: 5.98, h: bottom - top, imageIndex: index, fit: "contain",
+    type: "image", id: "picture", x: geometry.mediaX, y: top, w: geometry.mediaWidth, h: bottom - top, imageIndex: index, fit: "contain",
   });
   if (content.layout === "table" && content.table) {
     const columns = content.table[0]!.length;
-    const cellCapacity = Math.floor((width / columns - 0.18) * 72 / 13);
+    const cellCapacity = Math.floor((width / columns - 0.18) * 72 / typography.small);
     const rows = content.table.map(row => row.map(cell => {
       const flat = singleLine(cell);
       if (Array.from(flat).length <= cellCapacity) return flat;
       moved.push(flat);
       return Array.from(flat).slice(0, cellCapacity - 1).join("") + "…";
     }));
-    elements.push({ id: "table", type: "table", x: 0.76, y: top, w: width, h: bottom - top, rows, header: true, fontSize: 13 });
+    elements.push({ id: "table", type: "table", x: geometry.marginX, y: top, w: width, h: bottom - top, rows, header: true, fontSize: typography.small });
   } else if (content.layout === "chart" && content.chart) {
     const { type, categories, series } = content.chart;
-    elements.push({ id: "chart", type: "chart", x: 0.76, y: top, w: width, h: bottom - top, chartType: type,
+    elements.push({ id: "chart", type: "chart", x: geometry.marginX, y: top, w: width, h: bottom - top, chartType: type,
       categories: categories.map(singleLine), series: series.map(item => ({ ...item, name: singleLine(item.name) })) });
   } else if (["cards", "comparison", "process"].includes(content.layout) && groups.length) {
     const columns = content.layout === "process" ? groups.length : 2;
-    const gap = 0.24, rows = Math.ceil(groups.length / columns);
+    const gap = geometry.gap, rows = Math.ceil(groups.length / columns);
     const w = (width - gap * (columns - 1)) / columns;
     const h = (bottom - top - gap * (rows - 1)) / rows;
     groups.forEach((group, index) => {
-      const x = 0.76 + (index % columns) * (w + gap);
+      const x = geometry.marginX + (index % columns) * (w + gap);
       const y = top + Math.floor(index / columns) * (h + gap);
       const heading = content.layout === "process" ? `${index + 1}  ${group.title}` : group.title;
-      shape(`panel-${index}`, { x, y, w, h }, panel, true);
-      add(`heading-${index}`, heading, { x: x + 0.22, y: y + 0.16, w: w - 0.44, h: 0.52 }, 20, 14, panelInk, true);
+      shape(`panel-${index}`, { x, y, w, h }, panel, geometry.panelShape === "roundRect");
+      add(`heading-${index}`, heading, { x: x + 0.22, y: y + 0.16, w: w - 0.44, h: 0.52 }, typography.cardTitle, 14, panelInk, true);
       const rowH = (h - 0.94) / group.items.length;
       group.items.forEach((value, row) => add(`item-${index}-${row}`, value,
-        { x: x + 0.22, y: y + 0.78 + row * rowH, w: w - 0.44, h: rowH - 0.035 }, 17, 13, panelInk));
+        { x: x + 0.22, y: y + 0.78 + row * rowH, w: w - 0.44, h: rowH - 0.035 }, typography.cardItem, 13, panelInk));
     });
   } else {
     if (media !== undefined) picture(media);
-    const rowH = Math.min(1.15, (bottom - top) / Math.max(1, body.length));
+    const rowH = Math.min(geometry.rowCap, (bottom - top) / Math.max(1, body.length));
     body.forEach((value, index) => {
       const y = top + index * rowH;
-      shape(`marker-${index}`, { x: 0.81, y: y + rowH / 2 - 0.025, w: 0.12, h: 0.05 }, accent);
-      add(`item-${index}`, value, { x: 1.06, y, w: media === undefined ? 11.5 : 5.13, h: rowH - 0.045 }, 21, 15);
+      shape(`marker-${index}`, { x: geometry.markerX, y: y + rowH / 2 - geometry.markerHeight / 2, w: geometry.markerWidth, h: geometry.markerHeight }, accent);
+      add(`item-${index}`, value, { x: geometry.bulletX, y, w: media === undefined ? geometry.bulletWidth : geometry.bulletWidthWithMedia, h: rowH - 0.045 },
+        typography.body, typography.bodyMin);
     });
   }
   if (body.length && !elements.some(item => item.id === "item-0")) moved.push(...body);
-  if (status) add("page-status", status, { x: 0.76, y: 6.96, w: 2, h: 0.29 }, 13, 13, ink, true);
-  if (moved.length) add("overflow-note", "补充内容见演讲备注", { x: 3.3, y: 6.96, w: 5.2, h: 0.29 }, 13, 13);
-  add("page-number", String(content.page).padStart(2, "0"), { x: 12.1, y: 6.96, w: 0.46, h: 0.29 }, 13, 12, ink, true);
+  if (status) add("page-status", status, { x: geometry.marginX, y: 6.96, w: 2, h: 0.29 }, typography.small, typography.small, ink, true);
+  if (moved.length) add("overflow-note", "补充内容见演讲备注", { x: 3.3, y: 6.96, w: 5.2, h: 0.29 }, typography.small, typography.small);
+  add("page-number", String(content.page).padStart(2, "0"), { x: 12.1, y: 6.96, w: 0.46, h: 0.29 }, typography.small, 12, ink, true);
   validateElements(elements);
   const notes = xmlText([content.notes, moved.length ? `页面补充\n${moved.join("\n")}` : "", sourceNotes].filter(Boolean).join("\n\n"));
   return { slide: { title: xmlText(content.title), subtitle: xmlText(content.takeaway ?? ""), layout: "content", background: paper, lines: [], sourceIds, notes, elements }, overflow: moved.length > 0 };
 }
 
-export function renderTemplateCover(title: string, subtitle: string, design: PresentationDesign, imageIndex?: number): Slide {
-  const background = design.background ?? "142A43", color = presentationInk(background, design.text);
+export function renderTemplateCover(title: string, subtitle: string, design: PresentationDesign, imageIndex?: number, theme: ThemeTokens = DEFAULT_THEME): Slide {
+  const background = design.background ?? theme.colors.coverBackground;
+  const color = presentationInk(background, design.text ?? theme.colors.ink ?? "FFFFFF");
+  const fontFace = design.fontFace ?? theme.typography.fontFace;
+  const accent = design.accent ?? theme.colors.coverAccent;
   const width = imageIndex === undefined ? 11.5 : 5.6;
+  const coverTitle = imageIndex === undefined ? theme.typography.coverTitle : Math.round(theme.typography.coverTitle * (title.length > 42 ? 0.75 : 0.94));
   const elements: PresentationElement[] = [
-    { id: "cover-rule", type: "shape", shape: "rect", x: 0.9, y: 1.52, w: 0.62, h: 0.06, fill: design.accent ?? "6EA9C7" },
-    { id: "cover-title", type: "text", x: 0.9, y: 1.78, w: width, h: 2.08, text: singleLine(title), style: { color, fontSize: imageIndex === undefined ? 32 : title.length > 42 ? 24 : 30, bold: true, valign: "middle" } },
+    { id: "cover-rule", type: "shape", shape: "rect", x: 0.9, y: theme.cover.ruleY, w: theme.cover.ruleWidth, h: theme.cover.ruleHeight, fill: accent },
+    { id: "cover-title", type: "text", x: 0.9, y: theme.cover.titleY, w: width, h: theme.cover.titleHeight, text: singleLine(title), style: { color, fontSize: coverTitle, bold: true, valign: "middle", fontFace } },
   ];
-  if (subtitle) elements.push({ id: "cover-subtitle", type: "text", x: 0.9, y: 4.12, w: width, h: 1.75, text: singleLine(subtitle), style: { color, fontSize: 17 } });
+  if (subtitle) elements.push({ id: "cover-subtitle", type: "text", x: 0.9, y: theme.cover.subtitleY, w: width, h: theme.cover.subtitleHeight, text: singleLine(subtitle), style: { color, fontSize: theme.typography.takeaway - 2, fontFace } });
   if (imageIndex !== undefined) elements.push({ id: "cover-image", type: "image", x: 6.9, y: 0.75, w: 5.6, h: 6, imageIndex, fit: "contain" });
   return { layout: "cover", title: singleLine(title), subtitle: singleLine(subtitle), lines: [], notes: "", background, elements };
 }

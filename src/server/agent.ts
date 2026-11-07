@@ -37,6 +37,10 @@ import { createCapabilitySearchTool, initialToolGroups } from "./chat-tools/capa
 import { PresentationPaused, presentationEngine, readPresentationSubmission, type PresentationResume } from "./presentation-execution.js";
 import { planPresentationWithAi } from "./ai-presentation.js";
 import { evidencedPageCount, runTemplatePresentation } from "./presentation-workflow.js";
+import { resolveThemeId } from "../shared/presentation-theme.js";
+import { resolvePresentationSpec, runPresentationSpecUpdate } from "./chat-tools/presentation-spec-tool.js";
+import { totalize } from "../shared/presentation-spec.js";
+import { specCacheKey } from "./presentation-spec-store.js";
 import { readProviderOutputCap, type StructuredWorkflowCall } from "./structured-workflow.js";
 import { PresentationCheckQueue } from "./presentation-check-queue.js";
 import { presentationPageOperation, revisePresentation, type PresentationAction } from "./presentation-revision.js";
@@ -646,12 +650,29 @@ export class AgentService {
             deduplicate: name === "doc_create" || name === "doc_edit" || name === "doc_convert",
             hideResult: name === "doc_read" || name === "doc_search" || name === "doc_list",
             run: async (raw, report, operationId) => {
+              if (name === "presentation_spec_update") {
+                // 证据必须来自会话里真实存在的用户消息，不能用模型提交的文本充当原文。
+                const stored = userMessage?.id ? this.db.getMessage(userMessage.id) : null;
+                const verifiedText = stored?.role === "user" && typeof stored.content === "string" ? stored.content : (text ?? "");
+                return runPresentationSpecUpdate(this.db, conversationId, verifiedText, userMessage?.id ?? "current", raw);
+              }
               const converting = name === "doc_convert";
               const resumed = converting ? resume : null;
               const engine = presentationEngine(resumed);
               const templated = converting && engine === "template";
               const currentRequest = resumed?.currentRequest ?? (resumed ? resumed.request : (userMessage ?? recoveredUser)?.content ?? "").slice(0, 8000);
               let targetPages = resumed?.targetPages;
+              // A：优先用断点绑定的契约，其次继承唯一的 prepared 任务，最后才从当前消息新建。
+              const specResolution = converting
+                ? resolvePresentationSpec(this.db, conversationId, currentRequest, userMessage?.id ?? "current", resumed ?? undefined)
+                : { spec: null, conflict: undefined };
+              if (converting && specResolution.conflict) return { ok: false, summary: specResolution.conflict };
+              let spec = specResolution.spec;
+              // prepared 契约进入实际生成后必须激活，否则发布门禁按会话查不到当前任务，
+              // 页数与必需内容校验会被整段跳过。续跑沿用已绑定的 revision，不重复激活。
+              if (converting && spec && !resumed && spec.lifecycle !== "active") {
+                spec = this.db.specs.setLifecycleOwned(conversationId, spec.specId, "active");
+              }
               const requestText = resumed?.request ?? (converting ? this.db.listMessages(conversationId)
                 .filter(message => message.role === "user" && (templated || !message.documents.length) && message.content && !/^(?:请)?(?:继续(?:PPT|制作PPT)?|重试|再试|重新试试)[。！!\s]*$/i.test(message.content.trim()))
                 .slice(-5).map(message => message.content!.slice(0, 2000)).join("\n") : "");
@@ -673,7 +694,8 @@ export class AgentService {
               const capKey = this.presentationCapKey(turnConversation);
               const persistResume = () => {
                 const state: PresentationResume = {
-                  engine, operationId: runId, args: raw, request: requestText, currentRequest, targetPages, channelFingerprint, sourceFingerprint,
+                  engine, operationId: runId, args: raw, request: requestText, currentRequest, targetPages,
+                  specId: spec?.specId, specRevision: spec?.revision, channelFingerprint, sourceFingerprint,
                   calls: (resumed?.calls ?? 0) + calls, tokens: (resumed?.tokens ?? 0) + tokens,
                   usageMissing: Boolean(resumed?.usageMissing || missingUsage),
                 };
@@ -741,7 +763,7 @@ export class AgentService {
                   return { ok: true, summary: `PPT 已生成：${existing.name}`, data: { fileId: existing.id, fileName: existing.name, byteSize: existing.byteSize } };
                 }
                 ensureWorkflow();
-                const result = await executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images, design, fingerprint, coverAssetId, pageCount, pageCountEvidence) => {
+                const result = await executeChatDocumentTool(this.db, conversationId, name, raw, async (mind, images, design, fingerprint, coverAssetId, pageCount, pageCountEvidence, style) => {
                   if (resumed?.sourceFingerprint && resumed.sourceFingerprint !== fingerprint) throw new Error("源文件、风格参考或封面素材已变化，请发起新的 PPT 制作要求");
                   sourceFingerprint = fingerprint;
                   if (converting) persistResume();
@@ -756,9 +778,26 @@ export class AgentService {
                   if (templated) return runTemplatePresentation(mind, structuredCall, {
                     request: requestText, currentRequest, targetPages,
                     pageCount: resumed && resumed.currentRequest === undefined ? pageCount : evidencedPageCount(currentRequest, pageCount, pageCountEvidence),
+                    // 契约里的页数优先于当前消息与资料章节数，实现跨轮继承。
+                    ...(spec?.pageCount ? { pageCountConstraint: totalize(spec.pageCount, spec.pageCountBasis) } : {}),
+                    // 结构要求必须传给总策划，否则模型不知道要分配几个案例页。
+                    ...(spec?.structure?.some(item => item.kind === "case_count")
+                      ? { requiredCaseCount: spec.structure.find(item => item.kind === "case_count")!.value }
+                      : {}),
+                    // D2：主题只决定皮肤，坐标仍由确定性渲染器计算。
+                    // 优先级：本次调用的 style 参数 > 契约里记录的风格原文。
+                    ...(resolveThemeId(style) ?? resolveThemeId(spec?.styleRequest?.text)
+                      ? { themeId: (resolveThemeId(style) ?? resolveThemeId(spec?.styleRequest?.text))! }
+                      : {}),
+                    ...(style ?? spec?.styleRequest?.text
+                      ? { styleRequest: String(style ?? spec?.styleRequest?.text) }
+                      : {}),
+                    // A 修复：把执行开始时的契约版本一直传到发布入口，
+                    // 不让 saveWorkspaceDocument 用 findActive 重新猜当前任务。
+                    ...(spec ? { specRef: { specId: spec.specId, specRevision: spec.revision } } : {}),
                     onPageCount: count => { targetPages = count; persistResume(); },
                     images, design, hasCover: Boolean(coverAssetId),
-                    scope: `${scope}\n${sourceFingerprint}`, ...cache, signal: controller.signal, progress: report,
+                    scope: `${scope}\n${sourceFingerprint}\n${specCacheKey(spec)}`, ...cache, signal: controller.signal, progress: report,
                   });
                   return planPresentationWithAi(mind, requestText, structuredCall, report, {
                     scope: `${scope}\n${sourceFingerprint}`,
@@ -766,11 +805,14 @@ export class AgentService {
                   }, structuredCall, { pagewise: true, globalPlan: true, deepRead: true, images, design,
                     onPageReady: (count, pageCount) => { completed = count; total = pageCount; },
                   });
-                }, runId, async (plan, images) => {
+                }, runId, async (plan, images, pageNumbers) => {
                   controller.signal.throwIfAborted();
                   if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
                   if (isVisionBlocked(this.db, turnConversation)) return { plan, summary: "当前模型不接受图片，未进行实际页面视觉检查" };
-                  const result = await reviewRenderedPresentation(plan, images, bytes => renderWithLocalWps(this.db, bytes, controller.signal), modelRequest, report, converting ? { ...cache, scope } : undefined);
+                  // C：doc_edit 与 doc_convert 共用视觉缓存；键按「页内容+截图+主题+策略」复用，
+                  // 不再因文件哈希变化而整体失效。doc_edit 传入 ChangeScope 推导的原页码集合。
+                  const visualCache = { ...cache, scope, engineVersion: "visual-v2", modelFingerprint: scope };
+                  const result = await reviewRenderedPresentation(plan, images, bytes => renderWithLocalWps(this.db, bytes, controller.signal), modelRequest, report, visualCache, pageNumbers);
                   controller.signal.throwIfAborted();
                   return result;
                 });
@@ -782,7 +824,11 @@ export class AgentService {
                     typeof result.data?.fileId === "string" ? result.data.fileId : undefined);
                   result.uiData = { ...result.uiData, workflow: { runId, ...usage } };
                 }
-                if (converting && result.ok && !result.paused) this.db.clearPresentationResume(conversationId);
+                if (converting && result.ok && !result.paused) {
+                  this.db.clearPresentationResume(conversationId);
+                  // 任务真正完成才释放家族引用，暂停期间旧版本仍受保护。
+                  this.db.specs.releaseFamilyRef(`ppt-run:${runId}`);
+                }
                 if (templated && sourceFingerprint && !result.ok && !result.paused) {
                   return { ...result, paused: true, summary: `${result.summary}。已保存通过的页面，发送「继续 PPT」可从断点续做。` };
                 }
@@ -858,8 +904,11 @@ export class AgentService {
             ? restoredSpecs
             : registry.specs(initialGroups);
         let toolSignature = this.toolSignatureOf(toolSpecs);
+        // A 新增 presentation_spec_update：旧版本保存的断点不含它，签名按「排除新工具」兼容一次。
+        // 该工具只记录要求、不改变已有操作的执行语义，因此允许带旧签名继续恢复。
+        const legacyToolSignature = this.toolSignatureOf(toolSpecs.filter(spec => spec.function.name !== "presentation_spec_update"));
         const channelVersion = this.db.getChannel(turnConversation.brainChannelId)?.updatedAt ?? "";
-        if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || checkpoint.toolSignature !== toolSignature)) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
+        if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || (checkpoint.toolSignature !== toolSignature && checkpoint.toolSignature !== legacyToolSignature))) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
         const lastPlan = this.db.listMessages(conversationId).filter((message) => message.role === "tool" && message.toolName === "plan_update" && message.status === "ok").at(-1);
         const context: BrainMessage[] = [{ role: "system", content: `复杂任务应分步规划、使用工具并检查结果；仅在实际完成后声称完成。${lastPlan?.content ? `\n本会话最近的任务计划（可能属于之前的任务，仅在相关时参考）：\n${lastPlan.content}` : ""}` }];
         let plainMessages = checkpoint?.messages ?? [...context, ...built.messages];

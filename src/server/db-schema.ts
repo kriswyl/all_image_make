@@ -653,4 +653,67 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       WHERE kind = 'board' AND board_id IS NOT NULL AND title LIKE '创作板%'
     `).run();
 
+    // 文档可靠性改造 A：任务契约、不可变 revision、门禁结果与家族活跃引用。
+    // 只保存「用户要求」和验证结论，不复制 workflow_runs / workspace_documents。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS presentation_specs (
+        spec_id TEXT PRIMARY KEY,
+        -- 不加会话外键：契约可在用户说完要求、会话行尚未就绪时先落库；
+        -- 会话删除由 deleteConversation 显式清理这三张表。
+        conversation_id TEXT NOT NULL,
+        current_revision INTEGER NOT NULL,
+        family_id TEXT,
+        lifecycle TEXT NOT NULL DEFAULT 'prepared',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS presentation_specs_conv_idx ON presentation_specs(conversation_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS presentation_spec_revisions (
+        spec_id TEXT NOT NULL REFERENCES presentation_specs(spec_id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        source_message_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (spec_id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS presentation_validations (
+        validation_id TEXT PRIMARY KEY,
+        spec_id TEXT NOT NULL,
+        spec_revision INTEGER NOT NULL,
+        file_sha256 TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS presentation_family_refs (
+        family_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        owner TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS presentation_family_refs_family_idx ON presentation_family_refs(family_id);
+    `);
+
+    // 文档可靠性改造 B：候选状态与发布日志。
+    // 历史记录默认 published，保证 A 之前的所有文件继续可读、可下载、可进入版本链。
+    const documentColumns = db.prepare("PRAGMA table_info(workspace_documents)").all() as Array<{ name: string }>;
+    if (!documentColumns.some(col => col.name === "state")) db.exec("ALTER TABLE workspace_documents ADD COLUMN state TEXT NOT NULL DEFAULT 'published'");
+    if (!documentColumns.some(col => col.name === "candidate_meta")) db.exec("ALTER TABLE workspace_documents ADD COLUMN candidate_meta TEXT");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS document_publish_log (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        candidate_sha256 TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        published_id TEXT,
+        validation_id TEXT,
+        disposition TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (conversation_id, operation_id)
+      );
+      CREATE INDEX IF NOT EXISTS workspace_documents_state_idx ON workspace_documents(conversation_id, state);
+    `);
 }

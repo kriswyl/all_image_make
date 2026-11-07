@@ -11,6 +11,8 @@ import { auditParameters } from "./diagnose.js";
 import { initializeSchema } from "./db-schema.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { ExecutionStore } from "./execution-store.js";
+import { PresentationSpecStore } from "./presentation-spec-store.js";
+import { CANDIDATE_OPERATION_PREFIX, type CandidateMeta } from "../shared/document-publish.js";
 import { BoardRepository } from "./db-board.js";
 import type {
   AgentPlan, ChatDocumentRef, ChatToolScope, ChatVideoFrames, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
@@ -134,6 +136,7 @@ export class AppDatabase {
   private readonly boards: BoardRepository;
   readonly workflows: WorkflowStore;
   readonly executions: ExecutionStore;
+  readonly specs: PresentationSpecStore;
 
   /** 产物目录可以在运行时改，所以是 getter 而不是 readonly 字段 */
   get assetsDir(): string {
@@ -165,6 +168,7 @@ export class AppDatabase {
     this.backfillWorkspaceFamilies();
     this.workflows = new WorkflowStore(this.db);
     this.executions = new ExecutionStore(this.db);
+    this.specs = new PresentationSpecStore(this.db);
     this.boards = new BoardRepository(this.db, (row) => this.assetFromRow(row), (asset) => this.assetView(asset));
 
     // 老分镜可能把「林小满、老陈」当成一个角色存下来了。启动时拆成独立角色，
@@ -1168,20 +1172,28 @@ export class AppDatabase {
     }
     return { id, name: fileName, byteSize, createdAt, baseDir, familyId, version };
   }
-  listWorkspaceDocuments(conversationId: string): Array<{ id: string; name: string; byteSize: number; createdAt: string; baseDir: string; familyId: string; version: number }> {
-    const rows = this.db.prepare("SELECT id, file_name, byte_size, created_at, base_dir, family_id, version FROM workspace_documents WHERE conversation_id = ? AND archived = 0 ORDER BY created_at DESC, rowid DESC").all(conversationId) as DbRow[];
+  /** B：普通列表、下载、文件卡和 family 历史默认只暴露 published；候选需显式 include。 */
+  listWorkspaceDocuments(conversationId: string, options: { includeCandidates?: boolean } = {}): Array<{ id: string; name: string; byteSize: number; createdAt: string; baseDir: string; familyId: string; version: number; state: "candidate" | "published" }> {
+    const stateFilter = options.includeCandidates ? "" : "AND state = 'published'";
+    const rows = this.db.prepare(`SELECT id, file_name, byte_size, created_at, base_dir, family_id, version, state FROM workspace_documents WHERE conversation_id = ? AND archived = 0 ${stateFilter} ORDER BY created_at DESC, rowid DESC`).all(conversationId) as DbRow[];
     return rows.map((row) => ({
       id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at),
       baseDir: row.base_dir == null || row.base_dir === "" ? this.currentDocumentsDir : String(row.base_dir),
       familyId: row.family_id == null || row.family_id === "" ? String(row.id) : String(row.family_id),
       version: Number(row.version ?? 1),
+      state: row.state === "candidate" ? "candidate" as const : "published" as const,
     }));
   }
   getWorkspaceDocument(conversationId: string, fileId: string) {
     return this.listWorkspaceDocuments(conversationId).find((item) => item.id === fileId) ?? null;
   }
+  /** 内部读取（发布前校验、重启对账）用；调用方必须自行验证运行归属。 */
+  getAnyWorkspaceDocument(conversationId: string, fileId: string) {
+    return this.listWorkspaceDocuments(conversationId, { includeCandidates: true }).find((item) => item.id === fileId) ?? null;
+  }
+  /** 旧的 operationId 幂等查询不得把 candidate 当作成功结果。 */
   getWorkspaceDocumentByOperation(conversationId: string, operationId: string) {
-    const row = this.db.prepare("SELECT id, file_name, byte_size, created_at, base_dir, family_id, version FROM workspace_documents WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;
+    const row = this.db.prepare("SELECT id, file_name, byte_size, created_at, base_dir, family_id, version FROM workspace_documents WHERE conversation_id = ? AND operation_id = ? AND state = 'published'").get(conversationId, operationId) as DbRow | undefined;
     return row ? {
       id: String(row.id), name: String(row.file_name), byteSize: Number(row.byte_size), createdAt: String(row.created_at),
       baseDir: row.base_dir == null || row.base_dir === "" ? this.currentDocumentsDir : String(row.base_dir),
@@ -1190,13 +1202,95 @@ export class AppDatabase {
     } : null;
   }
 
+  // ── B：候选产物与统一发布 ────────────────────────────────────────────────
+  addCandidateDocument(input: {
+    conversationId: string; fileName: string; byteSize: number; baseDir: string;
+    operationId: string; meta: CandidateMeta;
+  }) {
+    const id = crypto.randomUUID(); const createdAt = now();
+    this.db.prepare(`INSERT INTO workspace_documents
+      (id, conversation_id, file_name, byte_size, created_at, operation_id, base_dir, family_id, parent_id, version, state, candidate_meta)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, 'candidate', ?)`)
+      .run(id, input.conversationId, input.fileName, input.byteSize, createdAt,
+        `${CANDIDATE_OPERATION_PREFIX}${input.operationId}`, input.baseDir, id, JSON.stringify(input.meta));
+    return { id, name: input.fileName, byteSize: input.byteSize, createdAt, baseDir: input.baseDir, familyId: id, version: 1 };
+  }
+  getCandidateByOperation(conversationId: string, operationId: string) {
+    const row = this.db.prepare("SELECT id, file_name, base_dir, candidate_meta FROM workspace_documents WHERE conversation_id = ? AND operation_id = ? AND state = 'candidate'")
+      .get(conversationId, `${CANDIDATE_OPERATION_PREFIX}${operationId}`) as DbRow | undefined;
+    return row ? { id: String(row.id), name: String(row.file_name), baseDir: String(row.base_dir ?? ""), meta: parseJson<CandidateMeta | null>(row.candidate_meta, null) } : null;
+  }
+  getCandidateById(conversationId: string, candidateId: string) {
+    const row = this.db.prepare("SELECT id, file_name, base_dir, candidate_meta FROM workspace_documents WHERE conversation_id = ? AND id = ? AND state = 'candidate'")
+      .get(conversationId, candidateId) as DbRow | undefined;
+    return row ? { id: String(row.id), name: String(row.file_name), baseDir: String(row.base_dir ?? ""), meta: parseJson<CandidateMeta | null>(row.candidate_meta, null) } : null;
+  }
+  listCandidateDocuments(): Array<{ id: string; conversationId: string; name: string; baseDir: string; meta: CandidateMeta | null }> {
+    const rows = this.db.prepare("SELECT id, conversation_id, file_name, base_dir, candidate_meta FROM workspace_documents WHERE state = 'candidate'").all() as DbRow[];
+    return rows.map(row => ({
+      id: String(row.id), conversationId: String(row.conversation_id), name: String(row.file_name),
+      baseDir: String(row.base_dir ?? ""), meta: parseJson<CandidateMeta | null>(row.candidate_meta, null),
+    }));
+  }
+  deleteCandidateDocument(candidateId: string) {
+    return Number(this.db.prepare("DELETE FROM workspace_documents WHERE id = ? AND state = 'candidate'").run(candidateId).changes) > 0;
+  }
+  getPublishLog(conversationId: string, operationId: string) {
+    const row = this.db.prepare("SELECT * FROM document_publish_log WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;
+    return row ? {
+      id: String(row.id), candidateId: String(row.candidate_id), candidateSha256: String(row.candidate_sha256),
+      targetName: String(row.target_name), publishedId: row.published_id == null ? null : String(row.published_id),
+      validationId: row.validation_id == null ? null : String(row.validation_id),
+      disposition: String(row.disposition) as "ready" | "draft", createdAt: String(row.created_at),
+    } : null;
+  }
+  /** publish 是唯一把 state 改为 published 的入口；正式版本号在此分配。 */
+  publishCandidateDocument(input: {
+    conversationId: string; candidateId: string; operationId: string;
+    familyId?: string; parentId?: string;
+    presentation?: { sha256: string; report: TemplateReport };
+    log: { candidateSha256: string; targetName: string; validationId: string | null; disposition: "ready" | "draft" };
+  }) {
+    const familyId = input.familyId ?? input.candidateId;
+    const versionRow = input.parentId
+      ? this.db.prepare("SELECT MAX(version) AS version FROM workspace_documents WHERE conversation_id = ? AND family_id = ? AND state = 'published'").get(input.conversationId, familyId) as DbRow | undefined
+      : undefined;
+    const version = input.parentId ? Number(versionRow?.version ?? 0) + 1 : 1;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db.prepare(`UPDATE workspace_documents
+        SET state = 'published', operation_id = ?, family_id = ?, parent_id = ?, version = ?, candidate_meta = NULL
+        WHERE id = ? AND conversation_id = ? AND state = 'candidate'`)
+        .run(input.operationId, familyId, input.parentId ?? null, version, input.candidateId, input.conversationId);
+      if (Number(changed.changes) !== 1) throw new Error("候选已被发布或已失效，不能重复增加版本");
+      if (input.presentation) this.addPresentationVersion(input.candidateId, input.presentation.sha256, input.presentation.report);
+      this.db.prepare(`INSERT INTO document_publish_log
+        (id, conversation_id, operation_id, candidate_id, candidate_sha256, target_name, published_id, validation_id, disposition, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(crypto.randomUUID(), input.conversationId, input.operationId, input.candidateId,
+          input.log.candidateSha256, input.log.targetName, input.candidateId,
+          input.log.validationId, input.log.disposition, now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { fileId: input.candidateId, familyId, version };
+  }
+
   /**
    * Keep a bounded history for a document family. The newest `keep` versions (and
    * the root file) survive; older generated intermediates are removed from disk.
    * Returns the removed file paths so callers can report what was cleaned.
    */
   pruneWorkspaceFamily(conversationId: string, familyId: string, keep = 3): string[] {
-    const rows = this.db.prepare("SELECT id, file_name, base_dir FROM workspace_documents WHERE conversation_id = ? AND family_id = ? AND archived = 0 ORDER BY version DESC, created_at DESC, rowid DESC").all(conversationId, familyId) as DbRow[];
+    // A：运行、暂停、等待任务/确认或待视觉检查的 family 是活跃基线，不能被固定 keep=3 删掉。
+    if (this.specs?.hasActiveFamilyRef(familyId)) return [];
+    // 更精确的一层：断点仍指向这一族时必须整族保留，不能只靠引用登记是否被调用过。
+    const resume = this.getPresentationResume(conversationId);
+    if (resume && familyId === `ppt-run:${resume.operationId.split(":draft:")[0]}`) return [];
+    // B：候选不参与正式版本清理，它们由 TTL / 重启对账单独处理。
+    const rows = this.db.prepare("SELECT id, file_name, base_dir FROM workspace_documents WHERE conversation_id = ? AND family_id = ? AND archived = 0 AND state = 'published' ORDER BY version DESC, created_at DESC, rowid DESC").all(conversationId, familyId) as DbRow[];
     const retained = new Set(rows.slice(0, Math.max(1, keep)).map((row) => String(row.id)));
     const root = rows[rows.length - 1];
     if (root) retained.add(String(root.id));
@@ -1215,7 +1309,7 @@ export class AppDatabase {
   }
   /** Manual cleanup for workspaces created before automatic pruning existed. */
   cleanupWorkspaceVersions(keep = 3): number {
-    const families = this.db.prepare("SELECT DISTINCT conversation_id, family_id FROM workspace_documents WHERE family_id IS NOT NULL AND family_id != '' AND archived = 0").all() as DbRow[];
+    const families = this.db.prepare("SELECT DISTINCT conversation_id, family_id FROM workspace_documents WHERE family_id IS NOT NULL AND family_id != '' AND archived = 0 AND state = 'published'").all() as DbRow[];
     let removed = 0;
     for (const row of families) {
       if (row.family_id == null || row.family_id === "") continue;
@@ -1921,6 +2015,13 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM conversation_scenes WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_graph_positions WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM brain_calls WHERE conversation_id = ?").run(id);
+    // A：契约表没有会话外键，删除会话时按归属显式清理，避免留下孤立要求。
+    const ownedSpecs = "SELECT spec_id FROM presentation_specs WHERE conversation_id = ?";
+    this.db.prepare(`DELETE FROM presentation_validations WHERE spec_id IN (${ownedSpecs})`).run(id);
+    this.db.prepare(`DELETE FROM presentation_spec_revisions WHERE spec_id IN (${ownedSpecs})`).run(id);
+    this.db.prepare("DELETE FROM presentation_specs WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM presentation_family_refs WHERE conversation_id = ?").run(id);
+    this.db.prepare("DELETE FROM document_publish_log WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
     return { assets };
   }

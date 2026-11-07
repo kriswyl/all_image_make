@@ -17,8 +17,12 @@ import { readPresentationProject, packPresentationProject, readPresentationStyle
 import { isImageAsset } from "../../shared/types.js";
 import { prepareImageBytes, REFERENCE_PROFILE } from "../vision.js";
 import type { TemplatePresentation } from "../presentation-workflow.js";
-import type { TemplateReport } from "../../shared/presentation-report.js";
+import type { TemplateReport, VisualReviewMetrics } from "../../shared/presentation-report.js";
 import { placePresentationImages } from "../presentation-templates.js";
+import { checkPresentationContract } from "../presentation-contract-check.js";
+import { carryDeckReport } from "../presentation-deck-carry.js";
+import { createCandidateDocument, publishDocument } from "../document-publish.js";
+import { deriveChangeScope, resolveCheckSets, type CheckSets } from "../../shared/change-scope.js";
 
 const MAX_FILE = 20 * 1024 * 1024;
 const nodeSchema: z.ZodType<DocumentNode> = z.lazy(() => z.object({ title: z.string().trim().min(1).max(2000), notes: z.string().max(10000).default(""), children: z.array(nodeSchema).max(500).default([]) }));
@@ -31,7 +35,9 @@ const schemas = {
   doc_edit: z.object({ fileId: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i), edits: z.array(z.object({ find: z.string().min(1).max(20000), replace: z.string().max(100000) })).min(1).max(20).optional(), cells: z.array(cellEditSchema).min(1).max(500).optional(), matchRows: matchRowsSchema.optional(), pages: z.array(z.object({ page: z.number().int().min(1).max(200), slide: aiPresentationSchema.shape.slides.element.omit({ box: true }) }).strict()).min(1).max(30).optional(), appendSlides: z.array(aiPresentationSchema.shape.slides.element.omit({ box: true })).min(1).max(30).optional(), imageAssetIds: z.array(z.uuid()).min(1).max(8).optional(), order: z.array(z.number().int().min(1).max(200)).min(1).max(200).optional(), design: designSchema.optional() }),
   doc_convert: z.object({ fileId: z.string().min(1), to: z.literal("pptx"), referenceFileId: z.string().min(1).optional(), coverAssetId: z.uuid().optional(),
     pageImages: z.array(z.object({ page: z.number().int().min(1).max(200), assetId: z.uuid() }).strict()).min(1).max(8).optional(),
-    pageCount: z.number().int().min(1).max(200).optional(), pageCountEvidence: z.string().trim().min(1).max(140).optional(), design: designSchema.optional() }),
+    pageCount: z.number().int().min(1).max(200).optional(), pageCountEvidence: z.string().trim().min(1).max(140).optional(), design: designSchema.optional(),
+    // D2：style 可以是主题 id（blue/magazine/mono/warm），也可以是一句风格描述（如「杂志风」）。
+    style: z.string().trim().min(1).max(40).optional() }),
 };
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 
@@ -140,7 +146,8 @@ export const CHAT_DOCUMENT_TOOLS: BrainToolSpec[] = [
   { type: "function", function: { name: "doc_search", description: "在本会话文本、Word正文或PPT可编辑源方案中搜索精确文字/元素ID，返回位置、上下文和版本号；可按nextCharOffset翻页，再doc_read读取上下文。偏移按UTF-16代码单元计。", parameters: objectSchema({ fileId: { type: "string" }, query: { type: "string", minLength: 1, maxLength: 500 }, charOffset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, ["fileId", "query"]) } },
   { type: "function", function: { name: "doc_create", description: "创建新文件。XMind 传结构化 nodes；Word 传 Markdown 正文 content；Excel 传 sheets:[{name,rows:[[单元格,...],...]}]，单元格可填字符串、数字、布尔、null 或 {formula}，公式由 Excel/WPS 打开后计算；其他类型传文本 content。", parameters: objectSchema({ kind: { type: "string", enum: ["md", "txt", "csv", "json", "xmind", "docx", "xlsx"] }, name: { type: "string" }, content: { type: "string", description: "docx 传 Markdown，会按标题/列表/表格/代码块转成 Word 排版" }, sheets: { type: "array", minItems: 1, maxItems: 20, items: z.toJSONSchema(sheetSchema) }, nodes: { type: "object", description: "仅在 kind=xmind 时使用。根节点必须有 title；notes 可选；children 可递归", properties: { title: { type: "string", minLength: 1, maxLength: 2000 }, notes: { type: "string", maxLength: 10000 }, children: { type: "array", items: { type: "object" }, maxItems: 500 } }, required: ["title"], additionalProperties: false } }, ["kind", "name"]) } },
   { type: "function", function: { name: "doc_edit", description: `先用 doc_read 获取文件的 SHA-256，或者直接使用上次 doc_edit 返回的同一新文件 ID 和 SHA-256。文本和 Word 用 edits 精确替换，每个 find 须唯一；Word 仅限段落内普通正文，整篇重写用 doc_create。Excel 用 cells:[{sheet,address,value}] 修改指定单元格，null 清空。按 ID 批量处理用 matchRows，提供目标 sheet、column 和 ids（字符串，保留前导零）或 list（同会话 XLSX 的 fileId、sheet、column）；两边默认从第 2 行到末行，可指定 startRow/endRow。标红填 fontColor="FF0000"，默认只改 ID 字体；用户明确要整行时指定 colorColumns:{from,to}。只有用户要求写标记时才传 marker，默认使用「标记」表头和数值 1。直接用文件 ID 引用清单，无需逐格读出或转抄。PDF 只读。ChatCanvas 生成的 PPT 用 pages:[{page:从1开始,slide:完整新页面}] 修改指定页，appendSlides 添加页面，order 调整顺序，design 修改主题。原文件不覆盖。现有图片索引取 doc_read 的 images。要把本会话生成或上传的图片放入页面，填 imageAssetIds（真实素材 ID）；这些图片按列表顺序接在原 images 之后，imageIndex 从原 images 的长度开始。外部 PPT 仅支持风格参考。${ELEMENT_DESIGN_GUIDE}`, parameters: z.toJSONSchema(schemas.doc_edit) as Record<string, unknown> } },
-  { type: "function", function: { name: "doc_convert", description: "直接使用原上传的XMind、Markdown、文本或CSV策划并生成原生可编辑PPT；to 只能填 pptx。封面图片用 coverAssetId，正文配图用 pageImages:[{page,assetId}]，从第1页开始计数，封面计入。根据用户指定页或内容顺序分配图片，只填写本会话已有或生图成功返回的真实素材 ID。用户本轮明确要求总页数时填写 pageCount 和本轮逐字原话 pageCountEvidence；参考资料和历史任务的页数不算。转换失败后告知用户，禁止自行换源、创建替代骨架或反复调用。referenceFileId 引用本会话PPT的颜色字体；design 指定 background/text/accent（6位十六进制无#）及 fontFace。", parameters: z.toJSONSchema(schemas.doc_convert) } },
+  { type: "function", function: { name: "presentation_spec_update", description: "记录本次 PPT 任务的明确要求（页数、必需保留的内容、风格），可只保存不生成。用户说「先不定，等下开始」「必须保留三个案例」「换成杂志风」或明确页数时调用。只传业务意图，不填写证据、文件哈希或引擎参数；服务端从当前用户消息回读原文校验。prepareOnly=true 表示只保存要求，不触发生成。", parameters: objectSchema({ intent: { type: "string", enum: ["create", "update", "fork"] }, specId: { type: "string" }, prepareOnly: { type: "boolean" }, pageCountText: { type: "string", maxLength: 200 }, requiredContent: { type: "array", items: { type: "string", maxLength: 500 }, maxItems: 20 }, styleText: { type: "string", maxLength: 500 } }, ["intent"]) } },
+  { type: "function", function: { name: "doc_convert", description: "直接使用原上传的XMind、Markdown、文本或CSV策划并生成原生可编辑PPT；to 只能填 pptx。封面图片用 coverAssetId，正文配图用 pageImages:[{page,assetId}]，从第1页开始计数，封面计入。根据用户指定页或内容顺序分配图片，只填写本会话已有或生图成功返回的真实素材 ID。用户本轮明确要求总页数时填写 pageCount 和本轮逐字原话 pageCountEvidence；参考资料和历史任务的页数不算。转换失败后告知用户，禁止自行换源、创建替代骨架或反复调用。referenceFileId 引用本会话PPT的颜色字体；design 指定 background/text/accent（6位十六进制无#）及 fontFace；用户提到整体风格（如「杂志风」「极简」「暖色教学」）时填 style：magazine / mono / warm / blue，只想改单页颜色仍用 design。", parameters: z.toJSONSchema(schemas.doc_convert) } },
 ];
 export type ChatDocResult = { ok: boolean; summary: string; paused?: boolean; uiData?: { presentation?: TemplateReport; workflow?: { runId: string; calls: number; tokens: number; usageMissing: boolean } }; data?: { fileId: string; fileName: string; byteSize: number; sha256?: string; pendingDelete?: boolean } };
 
@@ -155,20 +162,6 @@ function templateSummary(report: TemplateReport) {
   ].filter(Boolean).join("。") + "。";
 }
 
-function safeName(name: string, extension: string) {
-  let base = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").trim().slice(0, 70) || "文档";
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base)) base = `_${base}`;
-  if (!base.toLowerCase().endsWith(`.${extension}`)) base += `.${extension}`;
-  return base;
-}
-function workspaceDir(db: AppDatabase, conversationId: string) {
-  if (!/^[0-9a-f-]{36}$/i.test(conversationId) || !db.getConversation(conversationId)) throw new Error("会话不存在");
-  const root = path.resolve(db.documentsDir);
-  const dir = path.resolve(root, conversationId);
-  if (path.dirname(dir).toLowerCase() !== root.toLowerCase()) throw new Error("文件路径越界");
-  for (const part of [root, dir]) { if (!fs.existsSync(part)) fs.mkdirSync(part); if (fs.lstatSync(part).isSymbolicLink() || !fs.statSync(part).isDirectory()) throw new Error("工作目录不安全"); }
-  return dir;
-}
 export function readWorkspaceFile(db: AppDatabase, conversationId: string, fileId: string) {
   const entry = db.getWorkspaceDocument(conversationId, fileId); if (!entry) throw new Error("文件不存在或不属于当前会话");
   const root = path.resolve((entry as { baseDir?: string }).baseDir || db.documentsDir);
@@ -177,36 +170,131 @@ export function readWorkspaceFile(db: AppDatabase, conversationId: string, fileI
   if (path.dirname(full).toLowerCase() !== dir.toLowerCase() || stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_FILE) throw new Error("文件路径不安全或文件超过大小限制");
   return { ...entry, bytes: fs.readFileSync(full), full };
 }
-export function saveWorkspaceDocument(db: AppDatabase, conversationId: string, name: string, ext: string, bytes: Buffer, operationId?: string, report?: TemplateReport, lineage?: { familyId?: string; parentId?: string }) {
+export type ContractCheckContext = {
+  plan: AiPresentation;
+  baselinePlan?: AiPresentation;
+  targets?: number[];
+  expectedSpecId?: string;
+  expectedSpecRevision?: number;
+  /** B：用户明确要求「检查完成再交付」时传 before_publish，默认走 Spec 的策略。 */
+  visualPolicy?: "background" | "before_publish";
+  /** A：本次执行绑定的契约版本；缺省时才回退到「会话当前活动契约」。 */
+  specRef?: { specId: string; specRevision: number };
+  /** 素材身份绑定：assetId → imageIndex，供门禁核对「是不是用户指定的那张」。 */
+  assetBindings?: Array<{ assetId: string; imageIndex: number }>;
+  visualReview?: { status: "complete" | "running" | "unavailable"; blocking?: string[] };
+  /** C：由服务端推导的三个检查集合，写进报告供性能验收核对。 */
+  checkSets?: CheckSets;
+  /** C：视觉阶段实际用量（模型调用页数、缓存命中、WPS 导出页数与耗时）。 */
+  visualMetrics?: VisualReviewMetrics;
+};
+
+export function saveWorkspaceDocument(db: AppDatabase, conversationId: string, name: string, ext: string, bytes: Buffer, operationId?: string, report?: TemplateReport, lineage?: { familyId?: string; parentId?: string }, contract?: ContractCheckContext) {
+  // B：正式发布幂等。getByOperation 只认 published，晚到结果不会把候选误当成成功产物。
   if (operationId) {
     const previous = db.getWorkspaceDocumentByOperation(conversationId, operationId);
     if (previous) {
       const stored = readWorkspaceFile(db, conversationId, previous.id);
       if (report) db.addPresentationVersion(previous.id, createHash("sha256").update(stored.bytes).digest("hex"), report);
-      return previous;
+      // 幂等重放也必须返回磁盘上的最终报告，调用方不能拿检查前的报告宣布完成。
+      const storedReport = db.getPresentationVersion(conversationId, previous.id)?.report ?? report;
+      return {
+        ...previous,
+        ...(storedReport ? { report: storedReport } : {}),
+        disposition: (storedReport && !storedReport.draft ? "ready" : "draft") as "ready" | "draft",
+      };
     }
   }
   if (bytes.length > MAX_FILE) throw new Error("单个文件不能超过 20 MB");
-  const files = db.listWorkspaceDocuments(conversationId);
-  if (files.length >= 200 || files.reduce((sum, file) => sum + file.byteSize, 0) + bytes.length > 200 * 1024 * 1024) throw new Error("会话文档数量或总容量已达上限");
-  const dir = workspaceDir(db, conversationId); const safe = safeName(name, ext);
-  const version = report ? { sha256: createHash("sha256").update(bytes).digest("hex"), report } : undefined;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  for (let i = 0; i < 1000; i++) {
-    const candidate = `${stamp}-${i ? `${i}-` : ""}${safe}`; const full = path.join(dir, candidate);
-    const temporary = path.join(dir, `.pending-${randomUUID()}`);
-    try {
-      fs.writeFileSync(temporary, bytes, { flag: "wx" });
-      // 硬链接只在目标不存在时成功；先写完临时文件，再原子发布，避免覆盖和半文件。
-      fs.linkSync(temporary, full);
-      try { return db.addWorkspaceDocument(conversationId, candidate, bytes.length, operationId, version, path.dirname(dir), lineage); }
-      catch (error) { fs.rmSync(full, { force: true }); throw error; }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-      throw error;
-    } finally { fs.rmSync(temporary, { force: true }); }
+  // 候选仍计入磁盘容量配额，防止用隐藏状态绕过限制。
+  const allFiles = db.listWorkspaceDocuments(conversationId, { includeCandidates: true });
+  if (allFiles.length >= 200 || allFiles.reduce((sum, file) => sum + file.byteSize, 0) + bytes.length > 200 * 1024 * 1024) throw new Error("会话文档数量或总容量已达上限");
+
+  // 只认本次执行绑定的那一版契约：保存时重新 findActive 会在「制作中另开任务」时校验错对象。
+  const spec = contract && ext === "pptx"
+    ? (contract.specRef
+      ? db.specs.ownedRevision(conversationId, contract.specRef.specId, contract.specRef.specRevision)
+      : db.specs.findActive(conversationId))
+    : null;
+  // 1. 创建候选：只属于工作流产物，不进入用户文件版本链。
+  const created = createCandidateDocument(db, {
+    conversationId, name, ext, bytes, operationId,
+    owner: operationId ?? "ad-hoc",
+    ...(spec ? { specId: spec.specId, specRevision: spec.revision } : {}),
+  });
+
+  // 2. 统一硬检查（A 门禁），结果持久化成 validationId 供 publish 复核。
+  let effectiveReport = report;
+  let validationId: string | null = null;
+  let validationOk = true;
+  if (contract && ext === "pptx" && spec) {
+    const checked = checkPresentationContract(db.specs, {
+      conversationId, spec, plan: contract.plan, bytes, report,
+      baselinePlan: contract.baselinePlan, targets: contract.targets,
+      expectedSpecId: contract.expectedSpecId, expectedSpecRevision: contract.expectedSpecRevision,
+    });
+    if (checked.blocking.length) throw new Error(`文档契约校验未通过：${checked.blocking.map(item => item.detail).join("；")}`);
+    if (checked.validation) {
+      const validation = checked.validation;
+      validationId = validation.validationId;
+      validationOk = validation.ok;
+      const failures = validation.failures.map(item => item.detail).join("；");
+      const base: TemplateReport = report ?? {
+        draft: false, resume: false, fallbackPages: [], pendingPages: [], overflowPages: [],
+        sourceLimitedPages: [], notesLimitedPages: [], unplacedImages: 0,
+        planningFallback: false, audit: "unavailable", issues: [],
+      };
+      const at = new Date().toISOString();
+      effectiveReport = {
+        ...base,
+        draft: !validation.ok, resume: !validation.ok, ...(failures ? { reason: failures } : {}),
+        contractValidation: validation.validationId,
+        specRef: { specId: spec.specId, specRevision: spec.revision },
+        readiness: validation.readiness, visibleCoverage: validation.visibleCoverage,
+        ...(contract.checkSets ? { checkSets: {
+          contentPages: contract.checkSets.contentPages, auditPages: contract.checkSets.auditPages,
+          visualPages: contract.checkSets.visualPages, widened: contract.checkSets.widened,
+          reason: contract.checkSets.reason,
+        } } : {}),
+        ...(contract.visualMetrics ? { metrics: {
+          visual: {
+            pages: contract.visualMetrics.pages, modelCalls: contract.visualMetrics.modelCalls,
+            cacheHits: contract.visualMetrics.cacheHits, modelMs: contract.visualMetrics.modelMs,
+          },
+          wps: contract.visualMetrics.wps,
+        } } : {}),
+        ...(validation.ok
+          ? { usableReadyAt: at, requiredWorkCompletedAt: at }
+          : { draftReadyAt: at }),
+      };
+    }
   }
-  throw new Error("无法创建文件，请稍后重试");
+
+  // 3. publish 是唯一把 state 改为 published 的入口；失败的必需约束只走显式 draft 分支。
+  const published = publishDocument(db, {
+    conversationId,
+    operationId: created.operationId,
+    candidateId: created.id,
+    expectedCandidateSha256: created.sha256,
+    ...(spec ? { specId: spec.specId, specRevision: spec.revision } : {}),
+    validationId,
+    disposition: validationOk ? "ready" : "draft",
+    // 策略以 Spec 为准；未传时不能再默认「直接发布」。
+    ...((contract?.visualPolicy ?? spec?.visualPolicy) ? { visualPolicy: (contract?.visualPolicy ?? spec!.visualPolicy) } : {}),
+    ...(contract?.visualReview ? { visualReview: contract.visualReview } : {}),
+    ...(effectiveReport ? { report: effectiveReport } : {}),
+    lineage,
+  });
+  if (contract && ext === "pptx" && spec) db.specs.bindFamilyOnly(spec.specId, published.familyId);
+  const saved = db.getWorkspaceDocument(conversationId, published.fileId);
+  if (!saved) throw new Error("发布后找不到正式文件");
+  // 把门禁算出的最终报告和处置结果一起返回：
+  // 否则调用方会拿「检查前的报告」去宣布完成，而数据库里其实是草稿。
+  return {
+    ...saved,
+    ...(effectiveReport ? { report: effectiveReport } : {}),
+    disposition: (validationOk ? "ready" : "draft") as "ready" | "draft",
+  };
 }
 function source(db: AppDatabase, conversationId: string, rawId: string): { name: string; bytes?: Buffer; mind?: MindDocument } {
   const id = resolveDocumentId(db, conversationId, rawId);
@@ -253,7 +341,7 @@ function decodeText(bytes: Buffer) {
   catch { throw new Error("文件不是有效的 UTF-8 文本，不能安全读取或修改"); }
 }
 function xmindTopic(item: DocumentNode): any { return { id: randomUUID(), class: "topic", title: item.title, ...(item.notes ? { notes: { plain: { content: item.notes } } } : {}), children: { attached: item.children.map(xmindTopic) } }; }
-export async function executeChatDocumentTool(db: AppDatabase, conversationId: string, name: string, raw: string, planPresentation?: (mind: MindDocument, images: MindImage[], design?: PresentationDesign, sourceFingerprint?: string, coverAssetId?: string, pageCount?: number, pageCountEvidence?: string) => Promise<AiPresentation | TemplatePresentation>, operationId?: string, visualReview?: (plan: AiPresentation, images: Array<{ title: string; data: string }>) => Promise<{ plan: AiPresentation; summary: string }>): Promise<ChatDocResult> {
+export async function executeChatDocumentTool(db: AppDatabase, conversationId: string, name: string, raw: string, planPresentation?: (mind: MindDocument, images: MindImage[], design?: PresentationDesign, sourceFingerprint?: string, coverAssetId?: string, pageCount?: number, pageCountEvidence?: string, style?: string) => Promise<AiPresentation | TemplatePresentation>, operationId?: string, visualReview?: (plan: AiPresentation, images: Array<{ title: string; data: string }>, pageNumbers?: number[]) => Promise<{ plan: AiPresentation; summary: string; metrics?: VisualReviewMetrics }>): Promise<ChatDocResult> {
   try {
     if (!(name in schemas)) throw new Error("未知工具");
     let input: unknown; try { input = JSON.parse(raw); } catch { throw new Error("参数必须是有效 JSON"); }
@@ -415,12 +503,43 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           plan.design = { ...plan.design, ...design };
         }
         plan = paginatePresentation(aiPresentationSchema.parse(plan));
-        const visual = visualReview ? await visualReview(plan, images) : { plan, summary: "未启用视觉检查" };
+        // C：ChangeScope 只能由服务端按操作参数推导；共享主题/资源/页序/页数变化自动扩域到全稿。
+        const changeScope = deriveChangeScope({
+          fileId: resolvedFileId,
+          sha256: createHash("sha256").update(file.bytes).digest("hex"),
+          totalPages: project.plan.slides.length,
+          pages: [...touched],
+          appendSlides: appendSlides?.length,
+          order: Boolean(order), design: Boolean(design),
+          imageAssetIds: imageAssetIds?.length,
+        });
+        const checkSets = resolveCheckSets(changeScope, plan.slides.length);
+        const visual = visualReview
+          ? await visualReview(plan, images, checkSets.visualPages)
+          : { plan, summary: "未启用视觉检查" };
         plan = visual.plan;
         const rendered = await renderAiPresentation(plan, images); await checkPresentation(rendered, plan);
         const bytes = await packPresentationProject(rendered, plan, images);
         const base = file.name.replace(/^(?:\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z-(?:\d+-)?)+/, "").replace(/(?:-修改版)*\.pptx$/i, "");
-        const saved = saveWorkspaceDocument(db, conversationId, `${base}-修改版`, "pptx", bytes, operationId, undefined, lineage);
+        // A：只有未扩域的局部页修改才做非目标页结构化对比；整稿换色/重排会影响全部页面。
+        const localOnly = !checkSets.widened && Boolean(pages?.length);
+        // 修改入口不重新生成整稿，但原报告的整稿职责计划必须继承下去，
+        // 否则结构要求（如「保留 N 个案例」）在修改版上会退化成「未知」。
+        const carriedReport = carryDeckReport({
+          plan,
+          parentReport: db.getPresentationVersion(conversationId, resolvedFileId)?.report,
+          parentPlan: project.plan,
+          touched: [...touched],
+        });
+        // 修改入口按「这份文件当初绑定的契约版本」校验，不取家族当前 revision。
+        const boundSpecRef = carriedReport?.specRef;
+        const saved = saveWorkspaceDocument(db, conversationId, `${base}-修改版`, "pptx", bytes, operationId, carriedReport, lineage,
+          {
+            plan, checkSets,
+            ...(boundSpecRef ? { specRef: boundSpecRef } : {}),
+            ...(localOnly ? { baselinePlan: project.plan, targets: [...touched] } : {}),
+            ...(visual.metrics ? { visualMetrics: visual.metrics } : {}),
+          });
         db.pruneWorkspaceFamily(conversationId, parentDocument?.familyId ?? saved.familyId, 3);
         const sha256 = createHash("sha256").update(readWorkspaceFile(db, conversationId, saved.id).bytes).digest("hex");
         return { ok: true, summary: `已生成可继续编辑的新版本 ${saved.name}，共 ${plan.slides.length} 页；原文件保留。${visual.summary}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize, sha256 } };
@@ -497,7 +616,7 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
     if (mapped.length) fingerprint.update(JSON.stringify(mapped));
     const placements = mapped.map(({ page, assetId }) => ({ page, imageIndex: indexes.get(assetId)! }));
     const imageSummary = mapped.length ? `已放置 ${mapped.length} 张指定配图，涉及第 ${[...new Set(mapped.map(item => item.page))].sort((a, b) => a - b).join("、")} 页。` : "";
-    const planned = await planPresentation(mind, extracted.images, design, fingerprint.digest("hex"), a.coverAssetId, a.pageCount, a.pageCountEvidence);
+    const planned = await planPresentation(mind, extracted.images, design, fingerprint.digest("hex"), a.coverAssetId, a.pageCount, a.pageCountEvidence, a.style);
     if ("template" in planned) {
       const { plan: basePlan, template } = planned;
       const summary = templateSummary(template);
@@ -513,10 +632,31 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
         : operationId;
       const base = file.name.replace(/\.[^.]+$/, "");
       const runFamily = operationId ? `ppt-run:${operationId.split(":draft:")[0]}` : undefined;
-      const saved = saveWorkspaceDocument(db, conversationId, template.draft ? `草稿-${base}` : base, "pptx", bytes, snapshot, template, runFamily ? { familyId: runFamily } : undefined);
+      // 素材身份：把「哪张 asset 落在哪个 imageIndex」记下来，门禁才不会拿图片数量冒充指定素材。
+      const assetBindings = [...indexes.entries()].map(([assetId, imageIndex]) => ({ assetId, imageIndex }));
+      const saved = saveWorkspaceDocument(db, conversationId, template.draft ? `草稿-${base}` : base, "pptx", bytes, snapshot, template, runFamily ? { familyId: runFamily } : undefined,
+        { plan, ...(template.specRef ? { specRef: template.specRef } : {}), ...(assetBindings.length ? { assetBindings } : {}) });
       if (runFamily) db.pruneWorkspaceFamily(conversationId, runFamily, 3);
-      return { ok: true, paused: template.resume, summary: `${template.draft ? "PPT 草稿已导出" : "PPT 已导出"}，共 ${plan.slides.length} 页。${summary}${cover ? "指定封面图已嵌入。" : ""}${imageSummary}${extracted.images.length ? `已观察 ${countImageDescriptions(mind)}/${extracted.images.length} 张原图的内容。` : ""}${extracted.skipped ? `有 ${extracted.skipped} 张源文件图片未能提取。` : ""}`, uiData,
-        data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize } };
+      // 门禁可能把文件判成草稿；工具结果、UI 和工作流都必须看这一份最终报告，
+      // 不然会出现「数据库是草稿、聊天显示完成、断点已清」。
+      const finalReport = saved.report ?? template;
+      const paused = Boolean(finalReport.resume || saved.disposition === "draft");
+      // 活跃引用保护：暂停/待补全的 PPT 家族在断点期间不能被 keep=3 清掉，
+      // 完成时由调用方释放（agent 清理断点的同一处）。
+      const runOwner = `ppt-run:${(operationId ?? snapshot ?? "").split(":draft:")[0]}`;
+      if (runFamily) {
+        if (paused) db.specs.registerFamilyRef({ familyId: runFamily, conversationId, owner: runOwner, kind: "paused" });
+        else db.specs.releaseFamilyRef(runOwner);
+      }
+      const headline = saved.disposition === "draft"
+        ? (finalReport.resume ? "PPT 草稿已导出" : "PPT 已导出，但未达到可用成品")
+        : "PPT 已导出";
+      return {
+        ok: true, paused,
+        summary: `${headline}，共 ${plan.slides.length} 页。${summary}${cover ? "指定封面图已嵌入。" : ""}${imageSummary}${extracted.images.length ? `已观察 ${countImageDescriptions(mind)}/${extracted.images.length} 张原图的内容。` : ""}${extracted.skipped ? `有 ${extracted.skipped} 张源文件图片未能提取。` : ""}${finalReport.reason ? ` 尚未满足：${finalReport.reason}` : ""}`,
+        uiData: { ...uiData, presentation: finalReport },
+        data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize },
+      };
     }
     let presentation = paginatePresentation(planned);
     if (design) presentation.design = design;
@@ -556,7 +696,7 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
     const rendered = await renderAiPresentation(presentation, images);
     await checkPresentation(rendered, presentation);
     const bytes = await packPresentationProject(rendered, presentation, images);
-    const saved = saveWorkspaceDocument(db, conversationId, file.name.replace(/\.[^.]+$/, ""), "pptx", bytes, operationId);
+    const saved = saveWorkspaceDocument(db, conversationId, file.name.replace(/\.[^.]+$/, ""), "pptx", bytes, operationId, undefined, undefined, { plan: presentation });
     return { ok: true, summary: `AI 已整理导图，生成 ${saved.name}，共 ${presentation.slides.length} 页。${cover ? "指定图片已嵌入封面。" : ""}${imageSummary}来源文字和关联关系保存在演讲备注中。已提取 ${extracted.images.length} 张主题图片并放在相关内容附近${extracted.skipped ? `，${extracted.skipped} 张未能导入` : ""}；其中 ${countImageDescriptions(mind)} 张已由视觉模型观察，观察可能有误。${visual.summary}。原布局没有还原，请核对内容。${!file.bytes ? " 该旧附件未保存原文件，无法提取图片，请重新上传。" : ""}${mind.warnings.length ? ` ${mind.warnings.join(" ")}` : ""}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize } };
   } catch (error) {
     if (error instanceof PresentationPaused) throw error;

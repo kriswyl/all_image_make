@@ -35,3 +35,30 @@ it("文件报告列出精简页，补做请求使用文件版本校验值", asyn
     update.mockRestore();
   }
 });
+
+it("契约门禁后的文件区分可用状态、视觉状态与正文可见覆盖", async () => {
+  const report: TemplateReport = {
+    draft: false, resume: false, fallbackPages: [], pendingPages: [], overflowPages: [],
+    sourceLimitedPages: [], notesLimitedPages: [], unplacedImages: 0, planningFallback: false,
+    audit: "complete", issues: [], readiness: "ready", contractValidation: "validation-1",
+    visibleCoverage: { required: 3, satisfied: 3, unknown: 0 },
+    usableReadyAt: "2026-11-07T06:00:00.000Z",
+  };
+  const status = vi.spyOn(api, "presentationStatus").mockResolvedValue({
+    sha256: "b".repeat(64), report, visual: { status: "unavailable", summary: "未检查" },
+  });
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(React.createElement(PresentationFileReport, { conversationId: "chat", fileId: "original", initial: report, canUseModel: true })));
+    expect(host.querySelector("summary")?.textContent).toContain("可用成品");
+    expect(host.textContent).toContain("正文可见覆盖 · 3/3");
+    expect(host.textContent).toContain("视觉检查 · 未完成");
+    expect(host.textContent).toContain("首次可用");
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    status.mockRestore();
+  }
+});

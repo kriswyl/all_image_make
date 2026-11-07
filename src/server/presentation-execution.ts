@@ -21,6 +21,9 @@ export interface PresentationResume {
   request: string;
   currentRequest?: string;
   targetPages?: number;
+  /** A：断点绑定的任务契约；续跑必须沿用同一 revision，不能热改约束。 */
+  specId?: string;
+  specRevision?: number;
   channelFingerprint: string;
   sourceFingerprint?: string;
   calls: number;

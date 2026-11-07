@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.server.json",
   "compilerOptions": { "outDir": "artifacts/eval-runtime", "rootDir": "." },
-  "include": ["scripts/evaluate-presentation.ts", "scripts/verify-local-wps.ts", "scripts/evaluate-presentation-visual.ts", "scripts/evaluate-native-edit.ts", "src/server", "src/shared"]
+  "include": ["scripts/evaluate-presentation.ts", "scripts/measure-presentation-diversity.ts", "scripts/evaluate-presentation-contract.ts", "scripts/evaluate-presentation-contract-real.ts", "scripts/verify-presentation-local-visual.ts", "scripts/verify-local-wps.ts", "scripts/evaluate-presentation-visual.ts", "scripts/evaluate-native-edit.ts", "tests/fixtures/presentation-contract", "src/server", "src/shared"]
 }

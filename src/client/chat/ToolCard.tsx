@@ -54,6 +54,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   doc_create: FileDown,
   doc_edit: FileDown,
   doc_convert: FileDown,
+  presentation_spec_update: FileText,
   plan_update: CheckCircle2,
   board_read: Eye,
   board_apply: SlidersHorizontal,
@@ -172,7 +173,7 @@ export function ToolCard({
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
-  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "plan_update"].includes(tool);
+  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update"].includes(tool);
   const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数", page: "页码" };
   const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;

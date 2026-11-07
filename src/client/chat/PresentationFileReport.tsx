@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { PresentationVersionReport, TemplateReport } from "../../shared/presentation-report";
+import { projectPresentationStatus } from "../../shared/presentation-status";
 
 type Action = { kind: "audit" | "visual" | "review" } | { kind: "page"; page: number };
 const auditLabels = { complete: "已审校", partial: "部分审校", unavailable: "未审校" };
@@ -44,6 +45,7 @@ export function PresentationFileReport({ conversationId, fileId, initial, canUse
       onToast?.("error", error instanceof Error ? error.message : "操作失败");
     } finally { setBusy(undefined); }
   };
+  const status = projectPresentationStatus(report, visual ?? undefined);
   const rows: Array<[string, number[]]> = [
     ["精简页", report.fallbackPages], ["待补全页", report.pendingPages], ["部分文字移至备注", report.overflowPages],
     ["模型仅读取部分原文", report.sourceLimitedPages], ["原文备注达到长度上限", report.notesLimitedPages],
@@ -51,13 +53,23 @@ export function PresentationFileReport({ conversationId, fileId, initial, canUse
   return (
     <details className="presentation-file-report">
       <summary>
-        {report.draft ? <span>草稿</span> : null}
+        {/* 只有经过契约门禁的文件才展示可用状态，历史文件保持原样 */}
+        {report.readiness ? <span>{status.label}</span> : report.draft ? <span>草稿</span> : null}
         {report.fallbackPages.length ? <span>{report.fallbackPages.length} 页精简</span> : null}
         {report.pendingPages.length ? <span>{report.pendingPages.length} 页待补全</span> : null}
         <span>{auditLabels[report.audit]}</span>
         {visual ? <span>{visual.status === "checked" ? "WPS 已检查" : visual.status === "unavailable" ? "WPS 未检查" : "WPS 检查中"}</span> : null}
       </summary>
       <div className="presentation-file-report-details">
+        {report.readiness ? <div>
+          文件可用状态 · {status.label}；视觉检查 · {status.dimensions.visual === "checked" ? "已检查" : status.dimensions.visual === "unknown" ? "未校验" : "未完成"}
+        </div> : null}
+        {report.readiness && status.coverage ? <div>
+          正文可见覆盖 · {status.coverage.satisfied}/{status.coverage.required}
+          {status.coverage.unknown ? ` · ${status.coverage.unknown} 项待语义核验` : ""}
+        </div> : null}
+        {report.readiness && status.timeline.usableReadyAt ? <div>首次可用 · {new Date(status.timeline.usableReadyAt).toLocaleString()}</div> : null}
+        {report.readiness && status.timeline.draftReadyAt ? <div>草稿产出 · {new Date(status.timeline.draftReadyAt).toLocaleString()}（不计入成品）</div> : null}
         {report.reason ? <p>{report.reason}</p> : null}
         {rows.map(([label, pages]) => pages.length ? <div key={label}>{label} · {pages.join("、")}</div> : null)}
         {report.unplacedImages ? <div>{report.unplacedImages} 张原图保存在可编辑项目中</div> : null}

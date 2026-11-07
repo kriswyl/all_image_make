@@ -317,7 +317,7 @@ export async function planPresentationWithAi(
         ELEMENT_DESIGN_GUIDE,
         '严格元素例子：{"id":"claim","type":"text","x":0.8,"y":0.5,"w":11.5,"h":0.9,"text":"这是页面主张","style":{"fontSize":28,"bold":true}}。所有text元素的text必须是字符串，style和text同级，绝不能传text:{...}、runs、options或html。图片例子：{"id":"photo","type":"image","x":7,"y":2,"w":5,"h":3,"imageIndex":0,"fit":"contain"}。表格例子：{"id":"table","type":"table","x":0.8,"y":2,"w":11,"h":3,"rows":[["模块","职责"],["账户","权限"]],"header":true,"fontSize":18}。',
         "每页 title 最多70字，subtitle最多140字；旧模板lines最多6条每条70字，元素页lines留空。notes最多5000字。每页必须有可见正文，关键事实和限定条件应在页面上清楚表达，不能仅把原文藏在备注里。每页一个主张加支撑证据；没有依据就不补造证据。允许根据内容密度拆页，不机械限制页数或套用相同版式。",
-        "用户要求精简时可以合并内容，但每个来源 ID 仍须对应页面，不得遗漏；如果页数要求和完整覆盖冲突，优先完整覆盖。",
+        "用户要求精简时应把相近内容合并到同一页，每个来源 ID 仍须被覆盖；页数要求和完整覆盖冲突时，优先在页数内合并，不能靠突破页数来覆盖。",
       ].join("\n") },
       { role: "user", content: `用户要求：${userRequest.trim() || "将导图转成内容清晰、适合讲述的可编辑 PPT"}\n全局主题：${title}${outline ? `\n整套策划：${JSON.stringify({ audience: outline.audience, objective: outline.objective, narrative: outline.narrative, sections: outline.sections.map(({ title, goal }) => ({ title, goal })) })}\n本批章节：${section}\n原始批次编号：${originalIndex + 1}` : ""}\n本页任务：${section}\n本批完整阅读结论：${JSON.stringify(readings[originalIndex] ?? null)}\n可用图片索引（只允许引用这些编号）：${JSON.stringify(options?.images?.map((image, imageIndex) => ({ imageIndex, ...image })) ?? [])}\n统一视觉规范：${JSON.stringify(options?.design ?? { background: "FAFAF8", text: "243443", accent: "286D9C", fontFace: "Microsoft YaHei" })}\n当前批次：${index + 1}/${ordered.length}\n素材（JSON 数据）：\n${JSON.stringify(parts)}` },
     ];

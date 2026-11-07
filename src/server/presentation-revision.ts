@@ -10,6 +10,7 @@ import { placePresentationImages, renderContentSlide, slideContentSchema, validS
 import { reviewPresentationSamples } from "./presentation-workflow.js";
 import { requestWorkflowObject, type StructuredWorkflowCall } from "./structured-workflow.js";
 import { reviewRenderedPresentation } from "./presentation-visual-review.js";
+import { getTheme } from "../shared/presentation-theme.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";
 
 export type PresentationAction = { kind: "page"; page: number } | { kind: "audit" } | { kind: "review" };
@@ -30,6 +31,15 @@ export async function revisePresentation(
   const file = readOriginal();
   const sourceDocument = db.getWorkspaceDocument(conversationId, fileId);
   const lineage = { familyId: sourceDocument?.familyId ?? fileId, parentId: fileId };
+  // A：补做/审校/视觉修复沿用「这份文件当初绑定的契约版本」。
+  // 用 findByFamily 取的是家族当前 revision，改过契约后会把新约束套到旧文件上。
+  const reportSpecRef = version.report.specRef;
+  const boundSpec = reportSpecRef
+    ? db.specs.ownedRevision(conversationId, reportSpecRef.specId, reportSpecRef.specRevision)
+    : null;
+  const specRef = boundSpec
+    ? { expectedSpecId: boundSpec.specId, expectedSpecRevision: boundSpec.revision }
+    : {};
   const project = await readPresentationProject(file.bytes);
   if (!project) throw new Error("PPT 缺少可编辑来源");
   const { plan, images } = project;
@@ -44,10 +54,13 @@ export async function revisePresentation(
     const subset = { ...plan, slides: plan.slides.slice(0, count) };
     const reviewed = await reviewRenderedPresentation(subset, images,
       bytes => renderWithLocalWps(db, bytes, signal), call, progress, {
-        scope: operationId,
+        // C：scope 仅作兼容保留；缓存键由页内容/截图/主题/策略决定，可跨版本复用。
+        scope: operationId, engineVersion: "visual-v2",
         get: key => db.getPresentationBatch(conversationId, key),
         set: (key, value) => db.savePresentationBatch(conversationId, key, value),
-      });
+      },
+      // C：subset 从第 1 页开始截取，显式传原页码，避免将来改成局部子集时被重编号。
+      Array.from({ length: count }, (_, index) => index + 1));
     signal.throwIfAborted();
     readOriginal();
     const visualReview = {
@@ -55,8 +68,21 @@ export async function revisePresentation(
       summary: `${reviewed.summary}${count < plan.slides.length ? `。本次仅检查前 ${count}/${plan.slides.length} 页` : ""}`,
       issues: reviewed.issues,
     };
+    // 只有完整检查才记录「可选视觉检查完成」；它不影响文件可用状态。
+    const visualReport = {
+      ...report, visualReview,
+      // C：§7.4 记录视觉阶段的模型调用页数、缓存命中与 WPS 导出页数。
+      ...(reviewed.metrics ? { metrics: {
+        visual: {
+          pages: reviewed.metrics.pages, modelCalls: reviewed.metrics.modelCalls,
+          cacheHits: reviewed.metrics.cacheHits, modelMs: reviewed.metrics.modelMs,
+        },
+        wps: reviewed.metrics.wps,
+      } } : {}),
+      ...(visualReview.status === "complete" ? { optionalVisualCompletedAt: new Date().toISOString() } : {}),
+    };
     if (!reviewed.complete || JSON.stringify(reviewed.plan.slides) === JSON.stringify(subset.slides)) {
-      db.updatePresentationAudit(fileId, expectedSha256, { ...report, visualReview });
+      db.updatePresentationAudit(fileId, expectedSha256, visualReport);
       return null;
     }
     const revised = { ...plan, slides: [...reviewed.plan.slides, ...plan.slides.slice(count)] };
@@ -65,7 +91,8 @@ export async function revisePresentation(
     const bytes = await packPresentationProject(rendered, revised, images);
     signal.throwIfAborted();
     readOriginal();
-    const saved = saveWorkspaceDocument(db, conversationId, `视觉修复-${file.name.replace(/\.pptx$/i, "")}`, "pptx", bytes, operationId, { ...report, visualReview }, lineage);
+    const saved = saveWorkspaceDocument(db, conversationId, `视觉修复-${file.name.replace(/\.pptx$/i, "")}`, "pptx", bytes, operationId, visualReport, lineage,
+      { ...specRef, plan: revised, baselinePlan: plan, targets: Array.from({ length: count }, (_, index) => index + 1) });
     db.pruneWorkspaceFamily(conversationId, lineage.familyId, 3);
     db.updatePresentationAudit(fileId, expectedSha256, { ...report, visualReview: { ...visualReview, revisedFileId: saved.id } });
     return saved;
@@ -85,7 +112,12 @@ export async function revisePresentation(
     readOriginal();
     const complete = count === candidates.length && !report.pendingPages.length && input.every((item, index) =>
       item.content.length === selected[index]!.content.length && item.source.length === selected[index]!.source.length);
-    db.updatePresentationAudit(fileId, expectedSha256, { ...report, issues: review.issues, audit: complete ? "complete" : "partial" });
+    // C：内容审校的抽样页集合也记进报告，便于核对「只审相关页」而不是整稿重审。
+    const auditPages = input.map(item => item.page);
+    const checkSets = report.checkSets
+      ? { ...report.checkSets, auditPages }
+      : { contentPages: [], auditPages, visualPages: [], widened: false, reason: "内容审校抽样集合" };
+    db.updatePresentationAudit(fileId, expectedSha256, { ...report, issues: review.issues, audit: complete ? "complete" : "partial", checkSets });
     return null;
   }
 
@@ -108,7 +140,8 @@ export async function revisePresentation(
   ], slideContentSchema, value => value.page === number && validSlideContent(value, selectedImages) &&
     (imageIndex === undefined || value.layout === "bullets" || value.layout === "image"));
   if (!page) throw new Error(`第 ${number} 页未能补做，原版本仍可下载`);
-  const { slide, overflow } = renderContentSlide(page, plan.design ?? {}, old.sourceIds, source, undefined, imageIndex);
+  // D2：补做页必须沿用整稿主题，否则单页会和其余页面不同皮肤。
+  const { slide, overflow } = renderContentSlide(page, plan.design ?? {}, old.sourceIds, source, undefined, imageIndex, getTheme(report.theme?.id));
   const updatedPlan = placePresentationImages({ ...plan, slides: plan.slides.map((item, index) => index === number - 1 ? slide : item) }, mapped);
   const rendered = await renderAiPresentation(updatedPlan, images);
   await checkPresentation(rendered, updatedPlan);
@@ -120,7 +153,7 @@ export async function revisePresentation(
     overflowPages: [...report.overflowPages.filter(page => page !== number), ...(overflow ? [number] : [])].sort((a, b) => a - b),
     sourceLimitedPages: [...new Set([...report.sourceLimitedPages, ...(source.length > 6500 ? [number] : [])])].sort((a, b) => a - b),
     audit: "unavailable", issues: report.issues.filter(issue => issue.page !== number), visualReview: undefined,
-  }, lineage);
+  }, lineage, { ...specRef, plan: updatedPlan, baselinePlan: plan, targets: [number] });
   db.pruneWorkspaceFamily(conversationId, lineage.familyId, 3);
   return saved;
 }

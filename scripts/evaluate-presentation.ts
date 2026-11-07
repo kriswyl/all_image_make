@@ -1,4 +1,7 @@
-/** Reproducible synthetic-only evaluation. --real opts into configured provider billing. */
+/** Reproducible synthetic-only evaluation. --real opts into configured provider billing.
+ * --chapters N 控制资料规模；--pages P（默认 N+1）单独指定目标页数。
+ * P < N+1 时验收「多章压缩到少页」：不再要求每章独立成页或标题逐一出现，
+ * 改为逐条核对每章关键事实编号与示例数值是否在页面正文可见，备注不计入。 */
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -24,7 +27,11 @@ const engine=option("--engine","template"),api=option("--api","http://127.0.0.1:
 if (!["template","legacy","both"].includes(engine)) throw new Error("engine 必须是 template/legacy/both");
 const maxCalls=Number(option("--max-calls","20")),maxTokens=Number(option("--max-tokens","80000"));
 const repeats=Number(option("--repeat","1")),chapters=Number(option("--chapters","10"));
-if (![maxCalls,maxTokens,repeats,chapters].every(n=>Number.isSafeInteger(n)&&n>0) || repeats>3 || chapters>18 || maxCalls>80 || maxTokens>200000) throw new Error("验收预算或资料规模超出上限");
+// 目标页数与资料章节数解耦：默认仍是「一章一页 + 封面」的历史基线，
+// 显式 --pages N（N < chapters+1）用于验收「多章压缩到少页」这一真实场景。
+const expectedPages=Number(option("--pages",String(chapters+1)));
+if (![maxCalls,maxTokens,repeats,chapters,expectedPages].every(n=>Number.isSafeInteger(n)&&n>0) || repeats>3 || chapters>18 || expectedPages>chapters+1 || expectedPages<2 || maxCalls>80 || maxTokens>200000) throw new Error("验收预算、资料规模或目标页数超出上限（2 <= pages <= chapters+1）");
+const compressed=expectedPages<chapters+1;
 const output=path.resolve("artifacts","presentation-eval",new Date().toISOString().replace(/[:.]/g,"-"));
 await fs.mkdir(output,{recursive:true});
 const fixtures=Array.from({length:chapters},(_,i)=>({
@@ -33,8 +40,9 @@ const fixtures=Array.from({length:chapters},(_,i)=>({
 }));
 const markdown=["# 虚构运营培训资料","全部数值与岗位均为虚构验收资料，不代表真实经营数据。",...fixtures.flatMap(x=>[`## ${x.title}`,x.text])].join("\n");
 const mind=markdownToMind(markdown,"虚构运营培训");
-const request=`把这份虚构资料整理为 ${chapters+1} 页培训 PPT，封面计入总页数。每个模块独立一页，保留示例数值及限定条件，正文要能直接讲解。`;
-const expectedPages=chapters+1;
+const request=compressed
+  ? `把这份 ${chapters} 章虚构资料压缩整理为严格 ${expectedPages} 页培训 PPT，封面计入总页数。合并相关模块，不得按章节数逐章拆页；每个模块的关键数值（示例订单量）与限定条件必须保留在页面正文，不能只写进备注。`
+  : `把这份虚构资料整理为 ${expectedPages} 页培训 PPT，封面计入总页数。每个模块独立一页，保留示例数值及限定条件，正文要能直接讲解。`;
 let channel:DbChannel|undefined,key="",model=option("--model","deepseek-v4.1-flash-1017");
 if (real) {
   const response=await fetch(`${api}/api/bootstrap`),bootstrap=await response.json();
@@ -55,7 +63,17 @@ for (const selected of engine==="both"?["legacy","template"]:[engine]) for(let r
     if(!real) {
       const instruction=String(messages[0]?.content),input=JSON.parse(String(messages[1]?.content));
       let value:unknown;
-      if(instruction.includes("总策划")) value={title:"虚构运营培训",audience:"培训学员",objective:"了解各模块的操作、指标和限制",pages:input.catalog.map((row:{id:number},i:number)=>({title:fixtures[i]!.title,goal:"核验本模块数据与限制",batchIds:[row.id]}))};
+      if(instruction.includes("总策划")) {
+        const catalog=input.catalog as Array<{id:number}>;
+        // 压缩场景下规划单元数少于章节数：离线固定返回也必须把多个章节并入同一单元，
+        // 否则 validOutline 判无效并触发 planningFallback，测不到页数约束本身。
+        const units=Math.min(catalog.length,Math.max(1,Number(input.planningUnits)||catalog.length));
+        value={title:"虚构运营培训",audience:"培训学员",objective:"了解各模块的操作、指标和限制",
+          pages:Array.from({length:units},(_,unit)=>{
+            const ids=catalog.map(row=>row.id).slice(Math.floor(unit*catalog.length/units),Math.floor((unit+1)*catalog.length/units));
+            return {title:fixtures[ids[0]!-1]?.title??`主题${unit+1}`,goal:"核验本组模块数据与限制",batchIds:ids};
+          })};
+      }
       else if(instruction.includes("审校员")) value={issues:[]};
       else value={pages:input.pages.map((row:{page:number;title:string;source:Array<{text:string}>})=>({page:row.page,title:row.title,layout:"bullets",bullets:row.source.map(x=>x.text.slice(0,155)).filter(x=>x!==row.title).slice(0,4)}))};
       return {content:JSON.stringify(value),truncated:false};
@@ -84,12 +102,21 @@ for (const selected of engine==="both"?["legacy","template"]:[engine]) for(let r
     await fs.writeFile(path.join(output,name),await packPresentationProject(bytes,plan,[]));
     const visible=plan.slides.map(slide=>elementTexts(slide.elements??[]).join("\n")+slide.title+slide.lines.join("\n"));
     const notes=plan.slides.map(slide=>slide.notes).join("\n");
-    const covered=fixtures.filter(f=>notes.includes(f.title)||visible.some(v=>v.includes(f.title))).length;
-    const visibleFacts=fixtures.filter((_,i)=>visible.some(v=>v.includes(`F${String(i+1).padStart(2,"0")}`))).length;
+    // A：备注只算来源留存，不能冒充正文可见覆盖；两者分别记录。
+    const covered=fixtures.filter(f=>visible.some(v=>v.includes(f.title))).length;
+    const notesCovered=fixtures.filter(f=>notes.includes(f.title)).length;
+    const missingFacts=fixtures.map((_,i)=>i+1).filter(n=>!visible.some(v=>v.includes(`F${String(n).padStart(2,"0")}`)));
+    const visibleFacts=chapters-missingFacts.length;
+    // 逐条核对必需数值：章节标题可因合并而不再逐一出现，但每章的关键数字必须在正文可见。
+    const missingNumbers=fixtures.map((_,i)=>i+1).filter(n=>!visible.some(v=>v.includes(`示例订单量为 ${100+(n-1)*13}`)));
+    const visibleNumbers=chapters-missingNumbers.length;
     const issues=plan.slides.flatMap((slide,index)=>layoutIssues(slide.elements??[]).map(detail=>({page:index+1,detail})));
-    const structuralPassed=plan.slides.length===expectedPages&&covered===chapters&&visibleFacts===chapters&&!issues.length&&(!outputPlan||!outputPlan.template.draft);
+    const coveragePassed=compressed
+      ? visibleFacts===chapters&&visibleNumbers===chapters
+      : covered===chapters&&visibleFacts===chapters;
+    const structuralPassed=plan.slides.length===expectedPages&&coveragePassed&&!issues.length&&(!outputPlan||!outputPlan.template.draft);
     const contentPassed=outputPlan ? outputPlan.template.audit!=="unavailable"&&!outputPlan.template.issues.length : true;
-    report={...report,file:name,pages:plan.slides.length,expectedPages,coveredChapters:covered,totalChapters:chapters,visibleFacts,layoutIssues:issues,
+    report={...report,file:name,pages:plan.slides.length,expectedPages,compressed,coveredChapters:covered,notesCovered,totalChapters:chapters,visibleFacts,visibleNumbers,missingFacts,missingNumbers,coveragePassed,layoutIssues:issues,
       templateReport:outputPlan?.template,structuralPassed,contentPassed,passed:structuralPassed&&contentPassed,
       visualStatus:"not-checked",humanReview:"pending"};
   }catch(error){report={...report,passed:false,error:error instanceof Error?error.message:"验收失败"};}
