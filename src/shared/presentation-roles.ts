@@ -7,7 +7,11 @@
  * 版式字面量必须与 presentation-templates 的 slideContentSchema.layout 保持一致，
  * 由 server 侧测试断言两者不漂移。
  */
-export const SLIDE_LAYOUTS = ["bullets", "cards", "process", "comparison", "table", "chart", "image"] as const;
+export const SLIDE_LAYOUTS = [
+  "bullets", "cards", "process", "comparison", "table", "chart", "image",
+  // D2 扩展：指标卡行、时间轴、引文页。都只描述结构，坐标仍由渲染器计算。
+  "kpi", "timeline", "quote",
+] as const;
 export type SlideLayout = typeof SLIDE_LAYOUTS[number];
 
 export const PAGE_ROLES = ["claim", "evidence", "comparison", "process", "case", "action", "section", "appendix"] as const;
@@ -26,13 +30,14 @@ export const ROLE_LABEL: Record<PageRole, string> = {
 
 /** 每种职责的候选版式。第一个是首选，后续是容量/内容不匹配时的降级选项。 */
 const PREFERRED: Record<PageRole, SlideLayout[]> = {
-  claim: ["bullets", "cards"],
-  evidence: ["table", "chart", "bullets"],
+  // 每个职责给出 2–4 个候选，首个是首选，其余按内容形态降级。
+  claim: ["bullets", "quote", "cards"],
+  evidence: ["table", "chart", "kpi", "bullets"],
   comparison: ["comparison", "table"],
-  process: ["process", "cards"],
+  process: ["process", "timeline", "cards"],
   case: ["cards", "bullets"],
-  action: ["bullets", "process"],
-  section: ["bullets"],
+  action: ["bullets", "process", "cards"],
+  section: ["quote", "bullets"],
   appendix: ["table", "bullets"],
 };
 

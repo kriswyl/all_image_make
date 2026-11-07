@@ -11,7 +11,7 @@ export const slideContentSchema = z.object({
   page: z.number().int().positive(),
   title: z.string().trim().min(1).max(70),
   takeaway: z.string().trim().max(140).optional(),
-  layout: z.enum(["bullets", "cards", "process", "comparison", "table", "chart", "image"]),
+  layout: z.enum(["bullets", "cards", "process", "comparison", "table", "chart", "image", "kpi", "timeline", "quote"]),
   bullets: z.array(line).max(6).optional(),
   groups: z.array(z.object({ title: z.string().trim().min(1).max(44), items: z.array(line).min(1).max(3) })).min(2).max(4).optional(),
   table: z.array(z.array(z.string().trim().max(80)).min(2).max(5)).min(2).max(7).optional(),
@@ -19,6 +19,22 @@ export const slideContentSchema = z.object({
     type: z.enum(["bar", "line", "pie"]),
     categories: z.array(z.string().trim().min(1).max(24)).min(2).max(8),
     series: z.array(z.object({ name: z.string().trim().min(1).max(32), values: z.array(z.number().finite()).min(2).max(8) })).min(1).max(3),
+  }).optional(),
+  /** kpi：2–4 个指标卡，数字必须来自原文。 */
+  metrics: z.array(z.object({
+    label: z.string().trim().min(1).max(18),
+    value: z.string().trim().min(1).max(14),
+    note: z.string().trim().max(40).optional(),
+  })).min(2).max(4).optional(),
+  /** timeline：3–6 个有先后顺序的阶段。 */
+  steps: z.array(z.object({
+    title: z.string().trim().min(1).max(24),
+    detail: z.string().trim().max(60).optional(),
+  })).min(3).max(6).optional(),
+  /** quote：一句结论或引文 + 出处。 */
+  quote: z.object({
+    text: z.string().trim().min(2).max(120),
+    source: z.string().trim().max(40).optional(),
   }).optional(),
   imageIndex: z.number().int().min(0).max(199).optional(),
   notes: z.string().trim().max(1500).optional(),
@@ -32,8 +48,11 @@ const singleLine = (value: string) => xmlText(value).replace(/\s+/g, " ");
 const textKey = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[\p{P}\s]/gu, "");
 
 export function validSlideContent(content: SlideContent, images: number[]): boolean {
-  const { layout, bullets, groups, table, chart, imageIndex } = content;
+  const { layout, bullets, groups, table, chart, imageIndex, metrics, steps, quote } = content;
   if (imageIndex !== undefined && !images.includes(imageIndex)) return false;
+  if (layout === "kpi") return !!metrics && metrics.length >= 2;
+  if (layout === "timeline") return !!steps && steps.length >= 3;
+  if (layout === "quote") return !!quote && textKey(quote.text) !== textKey(content.title) && !!textKey(quote.text);
   if (layout === "table") return !!table && table.every(row => row.length === table[0]!.length && row.some(Boolean));
   if (layout === "chart") return !!chart && chart.series.every(series => series.values.length === chart.categories.length) &&
     (chart.type !== "pie" || chart.series.length === 1 && chart.series[0]!.values.every(value => value >= 0) && chart.series[0]!.values.some(value => value > 0));
@@ -111,6 +130,47 @@ export function renderContentSlide(
     const { type, categories, series } = content.chart;
     elements.push({ id: "chart", type: "chart", x: geometry.marginX, y: top, w: width, h: bottom - top, chartType: type,
       categories: categories.map(singleLine), series: series.map(item => ({ ...item, name: singleLine(item.name) })) });
+  } else if (content.layout === "kpi" && content.metrics?.length) {
+    // 指标卡：等分列，大数字在上、标签在下、可选备注。数值宽度按列宽自适应缩字。
+    const metrics = content.metrics.slice(0, 4);
+    const columns = metrics.length, gap = geometry.gap;
+    const w = (width - gap * (columns - 1)) / columns, h = bottom - top;
+    metrics.forEach((metric, index) => {
+      const x = geometry.marginX + index * (w + gap);
+      shape(`kpi-${index}`, { x, y: top, w, h }, panel, geometry.panelShape === "roundRect");
+      add(`kpi-value-${index}`, metric.value, { x: x + 0.18, y: top + 0.38, w: w - 0.36, h: 1.42 },
+        Math.round(typography.title * 1.4), Math.round(typography.title * 0.9), accent, true);
+      add(`kpi-label-${index}`, metric.label, { x: x + 0.18, y: top + 1.86, w: w - 0.36, h: 0.62 },
+        typography.cardTitle, 13, panelInk, true);
+      if (metric.note) add(`kpi-note-${index}`, metric.note, { x: x + 0.18, y: top + 2.52, w: w - 0.36, h: 0.86 },
+        typography.cardItem - 3, 12, panelInk);
+    });
+  } else if (content.layout === "timeline" && content.steps?.length) {
+    // 时间轴：一条水平主轴 + 等距节点，标题在轴上方、说明在轴下方。
+    const steps = content.steps.slice(0, 6);
+    const columns = steps.length, gap = geometry.gap * 0.6;
+    const w = (width - gap * (columns - 1)) / columns;
+    const axisY = top + (bottom - top) * 0.42;
+    shape("timeline-axis", { x: geometry.marginX, y: axisY, w: width, h: 0.035 }, accent);
+    steps.forEach((step, index) => {
+      const x = geometry.marginX + index * (w + gap);
+      const center = x + w / 2;
+      shape(`timeline-node-${index}`, { x: center - 0.11, y: axisY - 0.095, w: 0.22, h: 0.22 }, accent, true);
+      add(`timeline-index-${index}`, String(index + 1).padStart(2, "0"),
+        { x, y: top, w, h: axisY - top - 0.42 }, typography.small + 3, typography.small, accent, true);
+      add(`timeline-title-${index}`, step.title, { x, y: axisY - 0.62, w, h: 0.52 },
+        typography.cardTitle, 13, ink, true);
+      if (step.detail) add(`timeline-detail-${index}`, step.detail,
+        { x, y: axisY + 0.28, w, h: Math.max(0.6, bottom - axisY - 0.32) }, typography.cardItem - 2, 12, ink);
+    });
+  } else if (content.layout === "quote" && content.quote) {
+    // 引文页：左侧竖条 + 大字结论 + 出处，故意留白，不用面板。
+    const blockWidth = Math.min(width, 10.6);
+    shape("quote-bar", { x: geometry.marginX, y: top + 0.2, w: 0.1, h: Math.min(2.4, bottom - top - 0.4) }, accent);
+    add("quote-text", content.quote.text, { x: geometry.marginX + 0.42, y: top + 0.2, w: blockWidth - 0.42, h: Math.min(3.2, bottom - top - 0.9) },
+      Math.round(typography.title * 1.1), typography.takeaway, ink, true);
+    if (content.quote.source) add("quote-source", `—— ${content.quote.source}`,
+      { x: geometry.marginX + 0.42, y: bottom - 0.9, w: blockWidth - 0.42, h: 0.5 }, typography.small + 2, typography.small, ink);
   } else if (["cards", "comparison", "process"].includes(content.layout) && groups.length) {
     const columns = content.layout === "process" ? groups.length : 2;
     const gap = geometry.gap, rows = Math.ceil(groups.length / columns);
