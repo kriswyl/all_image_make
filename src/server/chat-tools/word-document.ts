@@ -47,6 +47,29 @@ function paragraphStyle(paragraph: XmlNode, prefix: string) {
   return match ? `${"#".repeat(Number(match[1]))} ` : "";
 }
 
+/**
+ * 按文字唯一命中一个段落。
+ *
+ * 替换文字、字符样式、段落样式三条入口共用同一套匹配规则：命中 0 次报「未找到」，
+ * 命中多处报「匹配多次」，绝不按顺序取第一个 —— 猜错位置比报错更难收拾。
+ */
+function matchParagraph(body: XmlNode, prefix: string, find: string, label: string) {
+  if (/[\u0000-\u001f]/.test(find)) throw new Error(`${label}仅支持段落内文字，请勿包含换行或控制字符`);
+  const paragraphs: XmlNode[] = [];
+  function collect(node: XmlNode) {
+    const name = tag(node);
+    if (name === `${prefix}p`) paragraphs.push(node);
+    else if (name !== `${prefix}del` && name !== `${prefix}drawing`) children(node).forEach(collect);
+  }
+  collect(body);
+  const matches = paragraphs.filter(paragraph => paragraphText(paragraph, prefix).includes(find));
+  if (!matches.length) throw new Error(`${label}未找到原文，请重新读取文件`);
+  if (matches.length > 1 || paragraphText(matches[0]!, prefix).split(find).length > 2) {
+    throw new Error(`${label}匹配多次，请提供更多上下文以确定位置`);
+  }
+  return matches[0]!;
+}
+
 export async function readDocxText(bytes: Buffer): Promise<string> {
   const { body, prefix } = await readBody(bytes);
   const lines: string[] = [];
@@ -155,14 +178,6 @@ export async function styleDocxText(bytes: Buffer, styles: DocxTextStyle[]) {
   const { zip, nodes, body, prefix } = await readBody(bytes);
   if (Object.keys(zip.files).some(name => name.startsWith("_xmlsignatures/"))) throw new Error("带数字签名的 Word 文件不能直接修改");
 
-  const paragraphs: XmlNode[] = [];
-  function collect(node: XmlNode) {
-    const name = tag(node);
-    if (name === `${prefix}p`) paragraphs.push(node);
-    else if (name !== `${prefix}del` && name !== `${prefix}drawing`) children(node).forEach(collect);
-  }
-  collect(body);
-
   const readText = (node: XmlNode) => children(node).map(child => String(child["#text"] ?? "")).join("");
   const setProperty = (rPr: XmlNode, name: string, value?: Record<string, string>) => {
     const items = children(rPr);
@@ -183,16 +198,9 @@ export async function styleDocxText(bytes: Buffer, styles: DocxTextStyle[]) {
 
   for (const [index, style] of styles.entries()) {
     const label = `第 ${index + 1} 处样式`;
-    if (/[\u0000-\u001f]/.test(style.find)) throw new Error(`${label}仅支持段落内文字，请勿包含换行或控制字符`);
-    const matches = paragraphs.flatMap(paragraph => {
-      const text = paragraphText(paragraph, prefix);
-      const start = text.indexOf(style.find);
-      return start < 0 ? [] : [{ paragraph, repeat: text.indexOf(style.find, start + 1) >= 0 }];
-    });
-    if (!matches.length) throw new Error(`${label}未找到原文，请重新读取文件`);
-    if (matches.length !== 1 || matches[0]!.repeat) throw new Error(`${label}匹配多次，请提供更多上下文以确定位置`);
+    const paragraph = matchParagraph(body, prefix, style.find, label);
 
-    const runs = children(matches[0]!.paragraph).filter(run => tag(run) === `${prefix}r`);
+    const runs = children(paragraph).filter(run => tag(run) === `${prefix}r`);
     const text = runs.map(run => children(run).filter(item => tag(item) === `${prefix}t`).map(readText).join("")).join("");
     const start = text.indexOf(style.find);
     if (start < 0) throw new Error(`${label}跨越表格、字段或其他结构，请缩小范围`);
@@ -222,6 +230,143 @@ export async function styleDocxText(bytes: Buffer, styles: DocxTextStyle[]) {
       touched++;
     }
     if (!touched) throw new Error(`${label}没有落到可样式的文字上`);
+  }
+
+  zip.file(MAIN, builder.build(nodes));
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+
+/** `w:pPr` 子节点的 schema 顺序；乱序时 Word 可能整段忽略，或只认前半截。 */
+const PPR_ORDER = [
+  "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl", "numPr",
+  "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens", "kinsoku", "wordWrap",
+  "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+  "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc",
+  "textDirection", "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr",
+  "sectPr", "pPrChange",
+];
+
+const ALIGN_VALUES = { left: "left", center: "center", right: "right", justify: "both" } as const;
+
+export type DocxParagraphStyle = {
+  find: string;
+  /** 对齐方式 */
+  align?: keyof typeof ALIGN_VALUES;
+  /** 倍数行距（1.5 即 1.5 倍），写入为 w:line = 240 × 倍数 */
+  lineSpacing?: number;
+  /** 段前间距（磅） */
+  spaceBefore?: number;
+  /** 段后间距（磅） */
+  spaceAfter?: number;
+  /** 首行缩进字符数，中文常用 2 */
+  firstLineChars?: number;
+  /** 左缩进（磅） */
+  indentLeft?: number;
+};
+
+/** 段落第一个 run 的字号（磅），用于把「字符数」换算成 twips；取不到时按五号 10.5pt 算。 */
+function paragraphFontSize(paragraph: XmlNode, prefix: string) {
+  for (const run of children(paragraph)) {
+    if (tag(run) !== `${prefix}r`) continue;
+    const rPr = children(run).find(item => tag(item) === `${prefix}rPr`);
+    const size = rPr && children(rPr).find(item => tag(item) === `${prefix}sz`);
+    const value = Number((size?.[":@"] as Record<string, string> | undefined)?.[`@_${prefix}val`]);
+    if (value > 0) return value / 2;
+  }
+  return 10.5;
+}
+
+/**
+ * 往 `pPr` 里写一个属性节点，按 schema 顺序重排。
+ *
+ * 与字符样式不同的是这里**合并属性**而不是整节点替换：`w:spacing` 上可能同时挂着
+ * 行距与段前段后，整节点替换会把用户原有的那几项抹掉。`remove` 用来清掉互斥项，
+ * 例如设首行缩进时必须去掉悬挂缩进，否则 Word 按悬挂算。
+ */
+function setParagraphAttribute(pPr: XmlNode, prefix: string, name: string, attrs: Record<string, string>, remove: string[] = []) {
+  const items = children(pPr);
+  const key = `${prefix}${name}`;
+  let node = items.find(item => tag(item) === key);
+  if (!node) {
+    node = { [key]: [] };
+    items.push(node);
+  }
+  const current = { ...((node[":@"] as Record<string, string> | undefined) ?? {}) };
+  for (const drop of remove) delete current[`@_${prefix}${drop}`];
+  node[":@"] = { ...current, ...attrs };
+  items.sort((left, right) => {
+    const rank = (item: XmlNode) => {
+      const at = PPR_ORDER.indexOf((tag(item) ?? "").slice(prefix.length));
+      return at < 0 ? PPR_ORDER.length : at;
+    };
+    return rank(left) - rank(right);
+  });
+}
+
+/**
+ * 给指定段落加段落级样式：对齐、行距、段前段后、缩进。
+ *
+ * 只改命中段落的 `pPr`：文字、字符样式、其它段落、表格结构与包内部件都不动。
+ * 匹配规则与文字替换一致 —— 唯一命中才改。
+ */
+export async function styleDocxParagraphs(bytes: Buffer, styles: DocxParagraphStyle[]) {
+  const { zip, nodes, body, prefix } = await readBody(bytes);
+  if (Object.keys(zip.files).some(name => name.startsWith("_xmlsignatures/"))) throw new Error("带数字签名的 Word 文件不能直接修改");
+
+  for (const [index, style] of styles.entries()) {
+    const label = `第 ${index + 1} 处段落样式`;
+    const given = [style.align, style.lineSpacing, style.spaceBefore, style.spaceAfter, style.firstLineChars, style.indentLeft];
+    if (given.every(value => value === undefined)) throw new Error(`${label}没有给出任何段落属性`);
+    if (style.lineSpacing !== undefined && !(style.lineSpacing >= 0.5 && style.lineSpacing <= 5)) {
+      throw new Error(`${label}行距倍数须在 0.5–5 之间`);
+    }
+    for (const value of [style.spaceBefore, style.spaceAfter, style.indentLeft]) {
+      if (value !== undefined && !(value >= 0 && value <= 500)) throw new Error(`${label}段间距与缩进须在 0–500 磅之间`);
+    }
+    if (style.firstLineChars !== undefined && !(style.firstLineChars >= 0 && style.firstLineChars <= 20)) {
+      throw new Error(`${label}首行缩进字符数须在 0–20 之间`);
+    }
+
+    const paragraph = matchParagraph(body, prefix, style.find, label);
+    const items = children(paragraph);
+    let pPr = items.find(node => tag(node) === `${prefix}pPr`);
+    if (pPr) {
+      // pPr 必须是段落的第一个子节点，否则整段属性会被忽略。
+      if (items[0] !== pPr) {
+        items.splice(items.indexOf(pPr), 1);
+        items.unshift(pPr);
+      }
+    } else {
+      pPr = { [`${prefix}pPr`]: [] };
+      items.unshift(pPr);
+    }
+
+    if (style.align) setParagraphAttribute(pPr, prefix, "jc", { [`@_${prefix}val`]: ALIGN_VALUES[style.align] });
+    if (style.lineSpacing !== undefined) {
+      setParagraphAttribute(pPr, prefix, "spacing", {
+        [`@_${prefix}line`]: String(Math.round(style.lineSpacing * 240)),
+        [`@_${prefix}lineRule`]: "auto",
+      });
+    }
+    if (style.spaceBefore !== undefined || style.spaceAfter !== undefined) {
+      const attrs: Record<string, string> = {};
+      if (style.spaceBefore !== undefined) attrs[`@_${prefix}before`] = String(Math.round(style.spaceBefore * 20));
+      if (style.spaceAfter !== undefined) attrs[`@_${prefix}after`] = String(Math.round(style.spaceAfter * 20));
+      setParagraphAttribute(pPr, prefix, "spacing", attrs);
+    }
+    if (style.firstLineChars !== undefined || style.indentLeft !== undefined) {
+      const attrs: Record<string, string> = {};
+      const remove: string[] = [];
+      if (style.firstLineChars !== undefined) {
+        attrs[`@_${prefix}firstLineChars`] = String(Math.round(style.firstLineChars * 100));
+        // Word 自己也是两个都写：firstLineChars 给支持字符单位的阅读器，
+        // firstLine 给只认 twips 的阅读器，两者不能互相矛盾。
+        attrs[`@_${prefix}firstLine`] = String(Math.round(style.firstLineChars * paragraphFontSize(paragraph, prefix) * 20));
+        remove.push("hanging", "hangingChars");
+      }
+      if (style.indentLeft !== undefined) attrs[`@_${prefix}left`] = String(Math.round(style.indentLeft * 20));
+      setParagraphAttribute(pPr, prefix, "ind", attrs, remove);
+    }
   }
 
   zip.file(MAIN, builder.build(nodes));
