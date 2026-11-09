@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 import { z } from "zod";
 import { openOfficeArchive, readOfficePart } from "./office-archive.js";
+import { editXlsxPreserving } from "./xlsx-surgical.js";
 
 const MAX_NEW_CELLS = 50_000;
 const MAX_READ_CELLS = 500;
@@ -51,9 +52,12 @@ function writeValue(value: z.infer<typeof spreadsheetValueSchema>): ExcelJS.Cell
   return { formula };
 }
 
+/** ExcelJS 的模型里没有这些部件，整本往返一次就会丢；有它们时改走外科式写入。 */
+const COMPLEX_PARTS = /^(?:_xmlsignatures\/|customXml\/|xl\/(?:charts(?:heets)?|drawings|pivot[^/]*|slicers?[^/]*|externalLinks|embeddings|queryTables|activeX|model)\/|xl\/connections\.xml$)/i;
+
 async function loadWorkbook(bytes: Buffer, editing = false) {
   const zip = await openOfficeArchive(bytes, "xl/workbook.xml", "Excel");
-  if (editing && Object.keys(zip.files).some(name => /^(?:_xmlsignatures\/|customXml\/|xl\/(?:charts(?:heets)?|drawings|pivot[^/]*|slicers?[^/]*|externalLinks|embeddings|queryTables|activeX|model)\/|xl\/connections\.xml$)/i.test(name))) {
+  if (editing && Object.keys(zip.files).some(name => COMPLEX_PARTS.test(name))) {
     throw new Error("此工作簿包含图表、数据透视表、外部连接或其他复杂组件。可以读取数据，当前无法在保留这些组件的情况下修改工作簿");
   }
   let mergedCells = 0;
@@ -282,4 +286,18 @@ export async function matchAndEditXlsx(bytes: Buffer, options: MatchRows, listBy
   }
   if (marker) workbook.calcProperties.fullCalcOnLoad = true;
   return { report, bytes: Buffer.from(await workbook.xlsx.writeBuffer()) };
+}
+
+/**
+ * 改单元格的统一入口：普通工作簿走 ExcelJS，含图表等复杂部件时走外科式写入。
+ *
+ * 不一律用外科式写：ExcelJS 那条路径已经覆盖了样式、公式校验、合并与边界检查，
+ * 也经过了更多真实文件的检验。只有它做不到的情况（会丢部件）才切过去。
+ */
+export async function editXlsxCells(bytes: Buffer, cells: Array<z.infer<typeof cellEditSchema>>) {
+  const zip = await openOfficeArchive(bytes, "xl/workbook.xml", "Excel");
+  const complex = Object.keys(zip.files).some(name => COMPLEX_PARTS.test(name));
+  if (!complex) return { bytes: await editXlsx(bytes, cells), surgical: false as const, report: undefined };
+  const result = await editXlsxPreserving(bytes, cells);
+  return { bytes: result.bytes, surgical: true as const, report: result.report };
 }

@@ -10,7 +10,7 @@ import type { BrainToolSpec } from "../brain.js";
 import { checkPresentation, paginatePresentation } from "../presentation-check.js";
 import { markdownToDocx, markdownToMind } from "./markdown.js";
 import { editDocxTableStructure, editDocxText, readDocxText, styleDocxParagraphs, styleDocxText } from "./word-document.js";
-import { cellEditSchema, createXlsx, editXlsx, matchAndEditXlsx, matchRowsSchema, readXlsx, sheetSchema } from "./spreadsheet-document.js";
+import { cellEditSchema, createXlsx, editXlsxCells, matchAndEditXlsx, matchRowsSchema, readXlsx, sheetSchema } from "./spreadsheet-document.js";
 import { readPdfPage } from "./pdf-document.js";
 import { designSchema, resolveElements, ELEMENT_DESIGN_GUIDE, type PresentationDesign } from "../presentation-elements.js";
 import { readPresentationProject, packPresentationProject, readPresentationStyle } from "../presentation-project.js";
@@ -538,8 +538,17 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           if (matchRows.marker) summary += `已写入「${matchRows.marker.header ?? "标记"}」列。`;
         } else {
           if (!cells || edits) throw new Error("Excel 请提供 cells 单元格修改列表或 matchRows 批量匹配参数");
-          bytes = await editXlsx(file.bytes, cells);
-          summary = `已完成 ${cells.length} 个单元格修改。请用 Excel 或 WPS 打开并重新计算公式。`;
+          const result = await editXlsxCells(file.bytes, cells);
+          bytes = result.bytes;
+          if (result.surgical) {
+            const charts = result.report.charts.length
+              ? `，并刷新了 ${result.report.charts.length} 个图表的缓存（${result.report.charts.join("、")}）`
+              : "";
+            const warnings = result.report.warnings.length ? ` 注意：${result.report.warnings.slice(0, 2).join("；")}` : "";
+            summary = `已完成 ${cells.length} 个单元格修改，工作簿里的图表等部件原样保留${charts}。${warnings}`;
+          } else {
+            summary = `已完成 ${cells.length} 个单元格修改。请用 Excel 或 WPS 打开并重新计算公式。`;
+          }
         }
         const base = file.name.replace(/^(?:\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z-(?:\d+-)?)+/, "").replace(/(?:-修改版)*\.(docx|xlsx)$/i, "");
         const saved = saveWorkspaceDocument(db, conversationId, `${base}-修改版`, office, bytes, operationId, undefined, lineage ?? { familyId: `attachment:${resolvedFileId}` });

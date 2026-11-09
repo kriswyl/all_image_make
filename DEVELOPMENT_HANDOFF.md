@@ -42,7 +42,7 @@
 - **PPT 生成**：契约（页数/必需内容/风格，`presentation-spec-store.ts`）→ 分批阅读与规划 → 10 种版式渲染（`presentation-templates.ts`）→ 容量诊断（`shared/presentation-capacity.ts`）→ 校验门禁（`presentation-check.ts` / `presentation-contract-check.ts`）→ 候选发布（`document-publish.ts`）。
 - **PPT 修改有两条通道**：`doc_edit.pages[].content` 只给版式与文字、坐标由渲染器算；`doc_edit.objects[]` 走对象级原位补丁（`presentation-object-map.ts` 定位 + `presentation-object-patch.ts` 写回），支持文字、字号颜色位置、换图、图表数据（同时同步内嵌工作簿）、表格单元格与增删行列。补丁后逐部件比哈希，只允许预计算的部件变化。
 - **不能破的约定**：改一页不换整稿主题；渲染器页不被整页元素覆盖；容量降级必须留证；对象定位同名或缺失即拒绝；`box`/`lines` 页不假装 plan 仍有效。
-- Word 支持正文段落内文本替换、字符样式（加粗/斜体/下划线/颜色/字号）与段落样式（对齐/行距/段前后/缩进/首行缩进），表格支持按特征文字定位后改单元格文字或增删行列（含合并单元格的表格拒绝），不支持页眉页脚与合并单元格；Excel 支持单元格读写与批量标色/标记；PDF 只读。Word 样式有真实渲染验收：`npm run eval:word`（源文件与补丁文件各导出一次 PDF，比对颜色、字体、文本坐标与表格位移）。详见 README 与 `docs/architecture.md` 第 9 节。
+- Word 支持正文段落内文本替换、字符样式（加粗/斜体/下划线/颜色/字号）与段落样式（对齐/行距/段前后/缩进/首行缩进），表格支持按特征文字定位后改单元格文字或增删行列（含合并单元格的表格拒绝），不支持页眉页脚与合并单元格；Excel 支持单元格读写与批量标色/标记，含图表的工作簿改单元格时走外科式 XML 写入（`xlsx-surgical.ts`）并同步图表缓存，部件不丢；PDF 只读。Excel 那条链路有真实验收：`npm run eval:xlsx`（COM 建图 → 改数 → 再打开读图表系列值）。Word 样式有真实渲染验收：`npm run eval:word`（源文件与补丁文件各导出一次 PDF，比对颜色、字体、文本坐标与表格位移）。详见 README 与 `docs/architecture.md` 第 9 节。
 
 ### 音乐生成
 
