@@ -261,8 +261,8 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     if (budget) throw new Error(budget);
   }
   if (channel.adapterType === "seedance-video" && input.seedanceVideoMedia?.length) {
-    // 内联音频是用户显式勾选的实验用法（上游是否接受尚待实测），
-    // 请求体预算由 TaskRunner 的 15 MB 内联上限兜底，这里不重复拦。
+    // 内联音频是已实测可用的用法（词元流墟 sd-2.0-mini r2v 通过），
+    // 请求体预算由 TaskRunner 的 15 MB 内联上限兜底。
     const problem = validateSeedanceMedia(input.seedanceVideoMedia, input.model, { allowInlineAudio: true });
     if (problem) throw new Error(problem);
   }

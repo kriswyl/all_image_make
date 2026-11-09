@@ -228,6 +228,12 @@ export function VideoGenerateView(props: {
   const isWan = adapterType === "wan-video";
   const isSeedance = adapterType === "seedance-video";
   const isKling = adapterType === "kling-video";
+  /**
+   * Seedance 本地音频默认不经过图床：2026-11-09 实测该中转接受
+   * `audio_url` 的 base64 data URI（r2v 模式，音频需 ≥1.8 秒）。
+   * 渠道没配上传地址时直接走内联，避免「明明能传却用不了」。
+   */
+  const seedanceInlineAudio = seedanceAudioInline || !channel?.uploadEndpoint;
   // 可灵的能力按模型分：turbo 只有文生/首帧/首尾帧，omni 才有多图，运动控制只有 kling-3.0
   const isKlingOmni = isKling && /omni/i.test(props.selectedModel);
   const klingModeOrder = isKling ? klingModesForModel(props.selectedModel) : [];
@@ -285,7 +291,9 @@ export function VideoGenerateView(props: {
       if (file.size > 15 * 1024 * 1024) throw new Error("音频不能超过 15 MB");
       const duration = await mediaDuration(file, "audio");
       if (duration > 15 || duration <= 0) throw new Error("音频时长需在 15 秒以内");
-      if (target === "seedance" && !seedanceAudioInline) {
+      // 上游 r2v 实测要求音频 ≥1.8 秒，低于这个值会直接 400。
+      if (target === "seedance" && duration < 1.8) throw new Error("参考音频需至少 1.8 秒");
+      if (target === "seedance" && !seedanceInlineAudio) {
         if (!channel?.uploadEndpoint) throw new Error("该渠道未配置上传服务：可填写公网音频地址，或勾选「内联 base64」试试");
         if (epoch === uploadEpoch.current) { setSeedanceAudioUrls(""); setLocalAudio({ file, duration }); }
         return;
@@ -420,8 +428,8 @@ export function VideoGenerateView(props: {
     const slots = spec.imageSlots;
     const localVideoReady = localVideo?.target === "seedance";
     // 本地音频分两条路：勾选内联走 base64（实验），否则交给服务端图床上传，这里不出 media 项。
-    const inlineAudio = seedanceAudioInline ? audioUpload : null;
-    const uploadedAudio = !seedanceAudioInline ? localAudio : null;
+    const inlineAudio = seedanceInlineAudio ? audioUpload : null;
+    const uploadedAudio = !seedanceInlineAudio ? localAudio : null;
     if (!slots.length && !seedanceVideoUrls.trim() && !seedanceAudioUrls.trim() && !localVideoReady && !inlineAudio && !uploadedAudio) return [];
     if (!spec.imageRepeatable && slots.length && referenceImages.length < slots.length) {
       return `${spec.label}需要 ${slots.length} 张图片`;
@@ -440,7 +448,7 @@ export function VideoGenerateView(props: {
     for (const url of urls(seedanceVideoUrls)) media.push({ type: "video_url", url, role: "reference_video" });
     for (const url of urls(seedanceAudioUrls)) media.push({ type: "audio_url", url, role: "reference_audio" });
     if (inlineAudio) media.push({ type: "audio_url", url: inlineAudio.dataUri, role: "reference_audio" });
-    const problem = validateSeedanceMedia(media, props.selectedModel, { allowInlineAudio: seedanceAudioInline });
+    const problem = validateSeedanceMedia(media, props.selectedModel, { allowInlineAudio: seedanceInlineAudio });
     if (problem) return problem;
     return media;
   }
@@ -513,11 +521,11 @@ export function VideoGenerateView(props: {
       const sourceFile = (isWan && localVideo?.target === "wan" && urlModeSpec?.urlSlots.some(slot => slot.type === "reference_video"))
         || (isKling && localVideo?.target === "kling" && klingCap?.needsReferenceVideo) ? localVideo?.file : undefined;
       const seedanceVideo = isSeedance && localVideo?.target === "seedance" ? localVideo.file : null;
-      const seedanceAudio = isSeedance && !seedanceAudioInline ? localAudio?.file ?? null : null;
+      const seedanceAudio = isSeedance && !seedanceInlineAudio ? localAudio?.file ?? null : null;
       const localNote = [
         sourceFile || seedanceVideo ? "参考视频将上传至渠道并生成公网链接" : "",
         seedanceAudio ? "参考音频将上传至渠道并生成公网链接" : "",
-        isSeedance && seedanceAudioInline && audioUpload ? "参考音频以内联 base64 提交（实验）" : "",
+        isSeedance && seedanceInlineAudio && audioUpload ? "参考音频以内联 base64 提交" : "",
       ].filter(Boolean).join(" · ");
       const detail = `时长：${caps.durations.fixed ?? duration} 秒 · 分辨率：${resolution}${localNote ? ` · ${localNote}` : ""}`;
       if (!confirmGeneration({ kind: "视频生成", model: props.selectedModel, channel: channel.name, detail })) return;
@@ -723,16 +731,16 @@ export function VideoGenerateView(props: {
                     {!channel?.uploadEndpoint ? <p className="mode-hint">该渠道未配置上传服务，本地视频不可用；请填写公网地址。</p> : null}
                   </label>
                   <label className="field-block">
-                    <span>参考音频 <small>本地文件提交时上传，或每行一个公网 URL，最多 {seedanceCap.maxAudios} 段</small></span>
+                    <span>参考音频 <small>本地文件或公网 URL，最多 {seedanceCap.maxAudios} 段；时长需 1.8–15 秒</small></span>
                     <div className="media-input-group">
                       <textarea className="json-input" spellCheck={false} value={seedanceAudioUrls}
                         onChange={(event) => {
                           setSeedanceAudioUrls(event.target.value);
-                          if (event.target.value.trim()) { setLocalAudio(null); if (!seedanceAudioInline) setAudioUpload(null); }
+                          if (event.target.value.trim()) { setLocalAudio(null); if (!seedanceInlineAudio) setAudioUpload(null); }
                         }}
                         placeholder={"https://…/bgm.mp3\nhttps://…/voice.wav"} />
                       <label className={`media-upload-button ${readingVideo ? "is-loading" : ""}`}>
-                        <Music size={14} />{localAudio || (seedanceAudioInline && audioUpload) ? "更换音频" : "选择音频"}
+                        <Music size={14} />{localAudio || (seedanceInlineAudio && audioUpload) ? "更换音频" : "选择音频"}
                         <input type="file" accept="audio/mpeg,audio/mp4,audio/aac,audio/wav,.mp3,.m4a,.aac,.wav" disabled={readingVideo || submitting} onChange={(event) => {
                           const file = event.currentTarget.files?.[0];
                           event.currentTarget.value = "";
@@ -747,7 +755,7 @@ export function VideoGenerateView(props: {
                         <button type="button" aria-label="移除已选择音频" disabled={submitting} onClick={() => setLocalAudio(null)}><X size={14} /></button>
                       </div>
                     ) : null}
-                    {seedanceAudioInline && audioUpload ? (
+                    {seedanceInlineAudio && audioUpload ? (
                       <div className="media-file-chip">
                         <Music size={15} />
                         <span><strong title={audioUpload.name}>{audioUpload.name}</strong><small>{audioUpload.duration.toFixed(1)} 秒 · 内联 base64</small></span>
@@ -755,12 +763,14 @@ export function VideoGenerateView(props: {
                       </div>
                     ) : null}
                     <label className="inline-check">
-                      <input type="checkbox" checked={seedanceAudioInline} disabled={submitting}
+                      <input type="checkbox" checked={seedanceInlineAudio} disabled={submitting || !channel?.uploadEndpoint}
                         onChange={(event) => { setSeedanceAudioInline(event.target.checked); setLocalAudio(null); setAudioUpload(null); }} />
-                      <span>音频改用内联 base64（实验，待确认上游是否接受）</span>
+                      <span>{channel?.uploadEndpoint
+                        ? "音频内联 base64 提交（不走上传服务）"
+                        : "未配置上传服务，音频自动使用内联 base64"}</span>
                     </label>
                   </label>
-                  <p className="mode-hint">本地视频 / 音频提交时上传到渠道的上传服务换取公网链接；不勾内联时音频也走这条链路。提示词里可用「视频1」「音频1」指代。</p>
+                  <p className="mode-hint">本地视频提交时上传到渠道的上传服务换取公网链接；音频默认也走上传，取消勾选可改回上传（需渠道配置上传地址）。提示词里可用「视频1」「音频1」指代。</p>
                 </div>
               ) : null}
 

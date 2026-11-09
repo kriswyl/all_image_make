@@ -20,10 +20,11 @@
 - **窄窗口布局**：修复部分用户进入软件看到「两栏塌陷 + 大片空白 + 需要滚动」的问题。根因是 Tauri 窗口尺寸、WebView CSS 视口、侧栏宽度三者没有换算层，系统缩放或拖宽侧栏会误命中视口断点，加上 `min-height:580px` 把控制区撑空。现在按主区实际宽度（容器查询）决定两栏，去掉写死高度，侧栏拖拽上限与主区最小宽度联动；侧栏宽度计算抽成可单测的 `src/client/layout.ts`。
 - **GIF / SVG 输出与帧参数**：格式枚举收敛到 `shared/image-formats.ts`（png / jpeg / webp / gif / svg）；GIF 不再按模型名硬拦、也不再强制必须有底图，`/v1/images/generations` 可直接出 GIF；新增 `frame_count`（默认 9）与 `frame_duration_ms`（默认 200）控件与请求字段。按实测加 sprite sheet 护栏：1024×1024 + 9 帧会拼成 3072×3072 超像素预算，提交前明确提示改用 ≤768×768 或减少帧数。SVG 补齐字节识别、`.svg` 扩展名、下载名与缩略图接口兜底（直接返回原 SVG 让 `<img>` 渲染）。
 - **标注引导层（markup）已取消**：上一版按需求加过一版，产品决定不做，这一版把类型、zod、TaskRunner 校验、适配器字段与 UI 入口全部移除，只保留局部重绘蒙版（mask）能力；高级 JSON 里写同名 key 仍按普通字段透传，不再有专门的互斥与诊断处理。
-- **Seedance 参考素材改为本地上传**：参考视频不再只能填公网 URL——与万相/可灵共用同一条图床上传链路（`uploadReferenceMedia`）：本地文件提交时先上传到渠道的 `uploadEndpoint` 换公网地址，再进 `content` 数组；参考音频同样支持本地文件上传，且重试会重新上传（图床链接可能过期）。新增 `POST /api/generations/reference-media` 一次提交视频 + 音频，`/api/generations/reference-video` 保持兼容。音频另加一个「内联 base64」实验开关：上游是否接受 base64 尚待实测，未勾选时仍按公网地址校验。
+- **Seedance 参考素材改为本地上传 + 音频内联**：参考视频不再只能填公网 URL——与万相/可灵共用同一条图床上传链路（`uploadReferenceMedia`）：本地文件提交时先上传到渠道的 `uploadEndpoint` 换公网地址，再进 `content` 数组；参考音频同样支持本地文件，且重试会重新上传（图床链接可能过期）。新增 `POST /api/generations/reference-media` 一次提交视频 + 音频，`/api/generations/reference-video` 保持兼容。音频在渠道没配上传地址时自动改用内联 base64，配了上传地址也可手动切换。
+- **音频 base64 已用真实渠道验证**（词元流墟 `sd-2.0-mini`，r2v / 480p / 4s）：`audio_url` 接受 `data:audio/wav;base64,…`，任务正常 `queued`。同时确认三条上游约束：音频不能是唯一参考素材（需另一张图或一段视频）、参考图最小 300px、r2v 音频时长 ≥1.8 秒（已加进前端选择校验）。
 - Seedance 仍按模型版本区分上限（2.0：9 图 / 3 视频 / 3 音频；2.5：30 / 10 / 10，合计 ≤50），2.5 才锁首帧自适应比例；修掉 8 / 10 / 20 三处上限冲突：图片页仍 8 张，视频页独立 30 张，multer 与 zod 同步放宽。
-- 新增 `tests/seedance-reference-media.test.ts` 4 项（上传换 URL、重试重传、非参考模式拒绝、音频签名校验），`tests/media-requirements.test.ts` 13 项；更新 `tests/adapters.test.ts` 的 GIF 旧断言。全量 **116 文件 / 873 项通过**，TypeScript 双配置检查通过。
-- 待联调 / 边界：词元流墟中转是否接受 Seedance 的 `video_url` / `audio_url`（以及 `audio_url` 用 base64）尚未实测；SVG 缩略图直接回原文件，不做位图栅格化；`requiredAssets` 的生产写入链路仍未启用（上一轮已注明）。
+- 新增 `tests/seedance-reference-media.test.ts` 4 项（上传换 URL、重试重传、非参考模式拒绝、音频签名校验），`tests/media-requirements.test.ts` 13 项；更新 `tests/adapters.test.ts` 的 GIF 旧断言。全量 **116 文件 / 873 项通过**，TypeScript 双配置检查与 `vite build` 通过。
+- 待联调 / 边界：`video_url`（公网地址）与 `reference_video` role 仍未实测，本地视频上传要等渠道补 `uploadEndpoint`；SVG 缩略图直接回原文件，不做位图栅格化；`requiredAssets` 的生产写入链路仍未启用（上一轮已注明）。
 
 ## 未发布改动 — 入口与状态一致性收尾（版本仍为 v2.3.5，未打包、未打 tag）
 
