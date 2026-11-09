@@ -1,6 +1,6 @@
 # 无限画布（独立自由画布 + 浮动 Agent）开发文档
 
-- 状态：设计稿 v2，开发前评审
+- 状态：**已落地**（独立画布、画布助手、素材库、分镜与剪映草稿导出）。本文保留为设计记录，当前结构见 [`docs/architecture.md`](docs/architecture.md)。
 - 日期：2026-10-26
 - 范围：独立无限画布工作区、自由节点画布、配置节点生成、浮动 Agent
 - 关联：`AGENT_PLAN.md`、`EXPANSION_PLAN.md`、`DEVELOPMENT_HANDOFF.md`

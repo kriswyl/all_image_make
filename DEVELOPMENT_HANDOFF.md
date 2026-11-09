@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-这是一个 Windows 桌面图片 / 视频生成客户端（当前源码版本 `2.3.5`）。前端提供渠道、模型和生成参数配置，后端通过中转站 API 调用不同模型。用户使用的是中转站 API Key，不需要官方模型账号登录。
+这是一个 Windows 桌面 AI 客户端（当前源码版本 `2.3.5`）：在同一个对话里聊天、处理文档与 PPT、生成图片 / 视频 / 音乐 / 配音，另有无限画布与分镜。前端提供渠道、模型和参数配置，后端通过中转站 API 调用不同模型。用户使用自己的中转站 API Key，不需要官方账号登录。代码结构见 `docs/architecture.md`。
 
 ## 当前架构
 
@@ -35,6 +35,14 @@
 - 品牌为 **ChatCanvas**，中文名「语布」，slogan「马中赤兔，创中语布」。界面、窗口标题、安装包、快捷方式和系统提示词里都用这个名字。`productName` 从 2.2.1 起改为 `ChatCanvas`；数据目录由 identifier（`com.imagerelay.studio`）决定，不受影响。2.2.0 及更早的 `ezcanvas` 安装会与新版本并存一次，安装新版后手动卸载旧的即可。
 - 图标母版在 `design/chatcanvas-icon-1024.png`，用 `npx tauri icon` 生成 `src-tauri/icons/*`；界面里的裸 mark 是 `src/client/public/brand-mark.png`（由 `src/client/BrandMark.tsx` 使用），站点图标是 `src/client/public/app-icon.png`。
 - **自绘标题栏的窗口动作必须显式授权**：`decorations: false` 后，拖拽、最小化、最大化、关闭分别走 `core:window:allow-start-dragging` / `allow-minimize` / `allow-toggle-maximize` / `allow-close`。`core:default` **不包含**这四个权限，漏掉时前端拿到的是静默失败的 Promise，表现为“拖不动、按钮没反应”（v2.2.1 修过一次）。
+
+### 文档与 PPT
+
+- 支持的格式与能力边界见 README 的「文档与 PPT」表；实现集中在 `src/server/chat-tools/` 与 `src/server/presentation-*.ts`。
+- **PPT 生成**：契约（页数/必需内容/风格，`presentation-spec-store.ts`）→ 分批阅读与规划 → 10 种版式渲染（`presentation-templates.ts`）→ 容量诊断（`shared/presentation-capacity.ts`）→ 校验门禁（`presentation-check.ts` / `presentation-contract-check.ts`）→ 候选发布（`document-publish.ts`）。
+- **PPT 修改有两条通道**：`doc_edit.pages[].content` 只给版式与文字、坐标由渲染器算；`doc_edit.objects[]` 走对象级原位补丁（`presentation-object-map.ts` 定位 + `presentation-object-patch.ts` 写回），支持文字、字号颜色位置、换图、图表数据、表格单元格。补丁后逐部件比哈希，只允许预计算的部件变化。
+- **不能破的约定**：改一页不换整稿主题；渲染器页不被整页元素覆盖；容量降级必须留证；对象定位同名或缺失即拒绝；`box`/`lines` 页不假装 plan 仍有效。
+- Word 只支持正文段落内文本替换；Excel 支持单元格读写与批量标色/标记；PDF 只读。详见 README 与 `docs/architecture.md` 第 9 节。
 
 ### 音乐生成
 
@@ -88,6 +96,11 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/task-ui.tsx`：图片 / 视频 / 音乐共用的状态徽标、格式化与表单持久化。
 - `src/shared/kinds.ts`：渠道 / 任务品类的唯一真相（图片 / 视频 / 音乐 / 对话）。
 - `src/server/async-providers.ts`：异步厂商（视频 / 音乐）的轮询、状态与结果提取。
+- `src/server/presentation-*.ts`：PPT 全链路（spec 存储、工作流、执行、渲染、容量、检查、项目打包、发布、修改、对象映射与补丁、视觉审阅）。
+- `src/server/chat-tools/`：原生工具实现，`documents.ts` 是文档与 PPT 的工具入口，其余按格式/媒体拆分。
+- `src/shared/presentation-*.ts`：契约、报告、主题、版式职责、状态投影、容量诊断（前后端共用）。
+- `docs/architecture.md`：项目框架总览（进程、目录、请求链路、数据模型、不变量、扩展点）。
+- `docs/document-reliability-development.md`：PPT 可靠性与增量改造的决策与实现记录（A–D2、M1/M2）。
 - `src/server/agent-plan.ts` / `agent-confirm.ts` / `agent-batch.ts` / `agent-vision.ts` / `agent-task-events.ts` / `agent-brain.ts` / `agent-prompt.ts`：从 `agent.ts` 拆出的职责模块。
 - `src/client/useFileDrop.ts`：参考图上传区的拖放交互（图片页与视频页共用）。
 - `src/client/api.ts`：前端 API 客户端和桌面 API 地址切换。
@@ -183,5 +196,5 @@ Tauri 版本默认使用：
 ## 给下一次 Codex 对话的提示词
 
 ```text
-继续开发 ChatCanvas（语布）。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 DEVELOPMENT_HANDOFF.md、README.md、VIDEO_HANDOFF.md、PACKAGING.md 和 src-tauri 配置，再修改代码。不要把中转站 API Key 或更新签名私钥写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录、视频轮询与重启恢复、Tauri sidecar 能力，以及 Windows 自动更新链路（updater tag 上的 latest.json）。
+继续开发 ChatCanvas（语布）。项目是 React/Vite + Express/TypeScript + Tauri 2，Windows release 通过 Node.js sidecar 启动本地 API。请先阅读 docs/architecture.md、DEVELOPMENT_HANDOFF.md、README.md、VIDEO_HANDOFF.md、PACKAGING.md 和 src-tauri 配置，再修改代码。涉及 PPT 时再读 docs/document-reliability-development.md，那里记录了不能破的不变量。不要把中转站 API Key 或更新签名私钥写进代码或提交到 Git。当前重点是保持已有多渠道、官方参数透传、历史记录、视频轮询与重启恢复、Tauri sidecar 能力，以及 Windows 自动更新链路（updater tag 上的 latest.json）。
 ```

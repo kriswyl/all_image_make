@@ -2,7 +2,7 @@
 
 > 版本：v1 · 2026-10-21
 > 范围：接入 Kling 视频、Suno 音乐；同时把「加一个新模型要改十几处」的结构问题收敛掉。
-> 状态：Suno 已落地；Kling 按用户要求延后。
+> 状态：Suno 与 Kling 均已落地（`suno-music`、`kling-video` 已接入）。本文保留为当时的结构优化记录，新增渠道的现状见 README 与 `docs/architecture.md`。
 
 ## 实施进度（2026-10-21）
 
