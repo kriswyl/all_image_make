@@ -2,8 +2,8 @@
 
 日期：2026-11-06  
 基线：ChatCanvas v2.3.4 当前代码；以下内容随 v2.3.5 发布（未打包）。  
-状态：设计决策已确定；**A 已完成（真实 6/6）、B 已完成（含完整 6 轮复验）、C 已完成（ChangeScope + 局部检查 + 真实视觉验收）、D1 已完成（整稿职责与布局计划）、D2 已完成（主题令牌 / 版式扩展到 10 种 / 收窄 doc_edit 入参 / 容量诊断），M1 与 M2 第一刀已完成（对象映射 + 原位补丁），见第 13–26 节**。本文是开发规范与实现状态记录，不是发布记录。  
-本轮执行范围：A → B → C → D1/D2 → M1/M2 第一刀，均已落地；发布记录见 CHANGELOG，本文只记录规范与实现状态。
+状态：设计决策已确定；**A 已完成（真实 6/6）、B 已完成（含完整 6 轮复验）、C 已完成（ChangeScope + 局部检查 + 真实视觉验收）、D1 已完成（整稿职责与布局计划）、D2 已完成（主题令牌 / 版式扩展到 10 种 / 收窄 doc_edit 入参 / 容量诊断）、M1/M2 已完成（对象映射 + 原位补丁：文字/样式/换图/图表与内嵌工作簿/表格与增删行列）、Word 与 Excel 的保留式修改已完成，见第 13–27 节**。本文是开发规范与实现状态记录，不是发布记录。  
+执行范围：A → B → C → D1/D2 → M1/M2 → Word / Excel 保留式修改，均已落地；发布记录见 CHANGELOG，本文只记录规范与实现状态。
 
 ## 1. 目标、范围与事实基线
 
@@ -24,14 +24,14 @@
 | `src/server/presentation-elements.ts`                    | `objectName: element.id`；连线分段命名 | 补齐复合对象命名、导出后映射校验、局部补丁             |
 | `src/server/presentation-project.ts`                     | PPT 内嵌 plan/images、内容指纹         | 映射版本、修改后 plan/OOXML 同步；保留外部修改拒绝机制 |
 | `src/server/chat-tools/word-document.ts`                 | 正文 run 替换、保留其他包部件               | 按需增加可定位的段落、样式、表格操作                |
-| `src/server/chat-tools/spreadsheet-document.ts`          | ExcelJS 数据/格式操作、复杂工作簿编辑拒绝       | 精确声明支持范围；后续增加原包限定操作               |
+| `src/server/chat-tools/spreadsheet-document.ts`          | ExcelJS 数据/格式操作；复杂工作簿整本拒绝       | 已加 `xlsx-surgical.ts`：复杂工作簿改走外科式写入，见第 27 节 |
 
 事实限定：
 
 - 当前消息明确要求 10 页时，已进行的离线验证得到 10 页，包括规划失败回退。缺口是跨轮要求继承和修改入口一致性，不能宣称已复现默认路径必然输出 30 页。
 - 页数缺失时仍可能使用资料批次数推导默认值；一旦契约中已有页数，不允许再次进入该默认分支。
 - `TemplateReport` 是结果报告，不是用户任务契约。
-- ExcelJS 修改后整本序列化，不等于原包单元格级补丁；Word 正文 XML 也会重新序列化。不能承诺整个 ZIP 字节不变。
+- ExcelJS 修改后整本序列化，不等于原包单元格级补丁；Word 正文 XML 也会重新序列化。**普通工作簿**不承诺整个 ZIP 字节不变；含图表等复杂部件的工作簿已改走外科式写入，非目标部件才逐字节保持（第 27 节）。
 - PPT 单页补做仍调用整稿 `renderAiPresentation`；现有缓存不等于原包增量写入。
 - `objectName` 已进入 `cNvPr.name`，不是从零建立元素映射。一个逻辑元素可能对应多个形状；数字 shapeId 仅在所属页面内使用。
 - 三类检查已经存在。本期统一它们的输入、约束和交付口径，不重新开发三套检查器。
@@ -502,7 +502,7 @@ Excel→CSV 是后续 E 的候选小增量，不是已实现能力；必须另�
 - ~~原 `scripts/evaluate-presentation.ts` 仍用 `chapters+1` 期望值~~ → 已用 `--pages` 解耦，压缩场景另查正文可见事实与数值；与独立 fixture 保持职责分离（参数化质量评测 vs 固定契约评测），不做强行串联。
 - **溢出内容藏进备注**：压缩场景红灯已复现（见 13.2），渲染器溢出策略的修改属于 D2，A 阶段不动 `presentation-templates.ts`。
 - **质量状态**：文件卡只展示可用状态、可见覆盖与首次可用时间，未展示完整四段时间线；后台视觉检查（B）才会在更多路径写 `optionalVisualCompletedAt`。
-- **后续阶段**：B 已完成，见第 14 节；C 第一刀已完成，见第 15 节；C 的性能指标/缓存剩余部分、D（设计系统）、M（原包修改）、E/F 未开工。
+- **后续阶段**：B 已完成，见第 14 节；C 第一刀已完成，见第 15 节。当时的待办是「C 的性能指标/缓存剩余、D（设计系统）、M（原包修改）、E/F」；其中 M 后续已落地，见第 26、27 节，D 与 E/F 仍未开工。
 - **真实验收口径**：真实渠道 6 轮已按用户授权通过（见 13.2），会话与 PPTX 保留在桌面端；脚本通过本机 API 驱动同一后端，不是人手在窗口里逐轮点击。WPS 加载项在线（端口 58890）但本轮未做像素级视觉检查，故只写「6/6 通过 + 已登记未验证项」，不写「完整验收通过」。
 
 按第 11 节要求：未跑真实渠道不写验收结论；CHANGELOG 在实际功能完成前不记录；本轮不打包、不发布、不提交 Release。
@@ -543,7 +543,7 @@ Excel→CSV 是后续 E 的候选小增量，不是已实现能力；必须另�
 - **before_publish 的用户入口**：策略已在 `ContractCheckContext` 与 `publishDocument` 打通并有测试，但 `doc_convert / doc_edit` 尚未从用户自然语言里解析「检查完成再交付」，当前所有真实调用仍走默认 `background`。
 - **视觉检查结果来源**：`visualReview` 目前由调用方显式传入，未与 `presentation_versions.visual_state` / WPS 后台队列打通（属 C）。
 - **容量与清理**：TTL 清扫已接启动钩子，但「任务已终止」的判定目前依赖 `lease` 与家族活跃引用，未与 `workflow-store` 的终态逐一对账。
-- **后续阶段**：C 第一刀已落地（第 15 节），C 剩余的性能指标、跨版本缓存与真实性能验收、D、M、E/F 未开工。B/C 均未改 `CHANGELOG`、未提交、未打包、未发布。
+- **后续阶段**：C 第一刀已落地（第 15 节）。当时的待办是「C 剩余的性能指标、跨版本缓存与真实性能验收、D、M、E/F」；其中 M 后续已落地（第 26、27 节），D 与 E/F 仍未开工。B/C 阶段均未改 `CHANGELOG`、未提交、未打包、未发布。
 
 ## 15. C 阶段第一刀实现状态（2026-11-07）
 
@@ -1118,7 +1118,7 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 - 压缩确实会丢字。只要丢字就进 `truncatedPages`，页面不会被当成内容完整；但「必需内容是否还在」仍由契约门禁按**可见文字**核对，不靠备注。
 - 指标卡 / 时间轴 / 引文按定长字段渲染，未做容量诊断 —— 它们本来就是短字段，超长时应由模型改写。
 
-## 26. M1 / M2 第一刀：对象映射与原位补丁（2026-11-09）
+## 26. M1 / M2：对象映射与原位补丁（2026-11-09）
 
 ### 26.1 为什么先做这一刀
 
@@ -1134,9 +1134,9 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 | 拒绝条件 | 同名多份、子对象缺失、页部件缺失都进 `issues`；`resolveObjectBinding` 直接抛错，不按相似度猜 |
 | 指纹 | 映射绑定 `fingerprint`（只算 `ppt/` 部件）；文件被外部改过就拒绝复用旧映射 |
 
-### 26.3 补丁（M2 第一刀）
+### 26.3 补丁（M2）
 
-`src/server/presentation-object-patch.ts`，只处理本应用生成的文本框与普通形状：
+`src/server/presentation-object-patch.ts`，处理本应用生成文件里的文本框、普通形状、图片、图表与表格：
 
 - 支持文字内容、字号、文字颜色、填充色、位置与尺寸，以及**换图**、**改图表数据**、**改表格单元格**；
 - 换图会新增一个媒体部件、在该页 `.rels` 追加一条 image 关系、把 `<a:blip r:embed>` 指向新 rId；`Content_Types` 只在缺声明时**补一条** Default，已有声明绝不修改；
@@ -1153,7 +1153,7 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 
 ### 26.4 入口
 
-`doc_edit` 新增 `objects:[{slide, elementId, fontSize?, color?, rect?:{x,y,w,h}}]`，必须单独使用 —— 与 `pages`、`appendSlides`、`order`、`design`、`imageAssetIds` 混用会被拒绝。走这条路时不重新渲染整稿，只改目标页部件。
+`doc_edit` 新增 `objects:[{slide, elementId, text?, fontSize?, color?, rect?:{x,y,w,h}, imageAssetId?, chart?, table?}]`，必须单独使用 —— 与 `pages`、`appendSlides`、`order`、`design`、`imageAssetIds` 混用会被拒绝。走这条路时不重新渲染整稿，只改目标页部件。`text` / `fontSize` / `color` / `rect` 用于文本框，`imageAssetId` 换图，`chart` 改显示数据（同时同步内嵌工作簿），`table` 改单元格或增删行列；一条补丁只能做一类事，混写直接拒绝。
 
 ### 26.5 验证
 
@@ -1162,7 +1162,7 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 - 部件差异：3 页补 6 处（含换图、改图表、改表格）→ 只有 3 个页面部件、`slide1.xml.rels`、`ppt/charts/chart1.xml`、内嵌工作簿与新 `ppt/media/patch-*.png` 变化，其余 27 个部件逐字节一致；
 - WPS 回归：`make-object-patch-fixture` 生成补丁后的文件，`eval:wps --file` 打开并导出 3 页；导出图里标题变红、色块变宽变绿、第 3 页正文换成两段且字号沿用、第 1 页配图由红变蓝且无破损占位、第 2 页柱状图数据由 3/5 变为 9/12 且坐标轴自动重算、第 3 页表格单元格改为「推广 / 12 个」且表头底色与边框完好；无重叠或越界。
 
-全量回归 **110 个测试文件、813 项**通过；`tsc` 与 `npm run build` 通过。
+本节落地时的全量回归为 110 个测试文件 / 813 项；加上后续 Word 与 Excel 增量，当前是 **113 个测试文件 / 845 项**全部通过；`tsc` 与 `npm run build` 通过。
 
 ### 26.6 边界
 
@@ -1171,4 +1171,48 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 - 表格可增删行列，但不支持合并单元格、改列宽或拆分单元格；一次补丁只能做一种操作；
 - 文字只能整段替换，同一段内部分加粗/变色不在这一刀范围内；
 - 补丁后的溢出只是警告：文件仍会生成，页面也不会被标成草稿。要彻底避免「字被框切掉」，还需要一次真实的 WPS 视觉复核，这属于视觉检查链路的职责，不在这里假装已完成；
-- 依赖关系迁移、整页重做、`[Content_Types].xml` 与 `.rels` 的允许变化仍在 M2 后续，不因为「有 shapeId」就承诺所有外部 PPT 都能安全改。
+- 允许变化的部件已按操作预先计算（样式/文字只有目标页；换图额外允许该页 `.rels`、新媒体、必要时 `[Content_Types].xml`），列表之外的变化直接抛错；仍未做的是整页依赖闭包（整页替换、母版/版式关系迁移），不因为「有 shapeId」就承诺所有外部 PPT 都能安全改。
+
+## 27. Word 与 Excel 的保留式修改（2026-11-09）
+
+### 27.1 为什么单列一节
+
+PPT 走的是「保留源方案 + 重渲染」，Word 与 Excel 走的是「就地改包内部件」，两条路的约束不一样。这里记录后者的做法与边界，避免以后照着 PPT 的思路去改这两个格式。
+
+Excel 原先有一个硬拦截：只要工作簿里有 `xl/charts/`、`xl/pivot*`、`xl/drawings/` 就拒绝修改。原因是它用 ExcelJS 把整个工作簿读进内存再整体重写，这些部件不在 ExcelJS 的模型里，往返一次就没了。真实报表几乎都带图表，所以这条拦截实际挡住的是最常见的一类文件。
+
+### 27.2 Word：字符样式、段落样式、表格
+
+| 能力 | 入口 | 落点 |
+|---|---|---|
+| 字符样式 | `styles:[{find,bold?,italic?,underline?,color?,fontSize?}]` | 命中文字所在 run 的 `rPr` |
+| 段落样式 | `paragraphs:[{find,align?,lineSpacing?,spaceBefore?,spaceAfter?,firstLineChars?,indentLeft?}]` | 命中段落的 `pPr` |
+| 表格 | `tables:[{find,cells?,insertRows?,deleteRows?,insertCols?,deleteCols?}]` | 目标表的 `w:tbl` |
+
+- `rPr` / `pPr` 的子节点按 OOXML schema 顺序重排，乱序时 Word 可能整段忽略；`pPr` 还必须是段落的第一个子节点。
+- 关闭加粗写 `<w:b w:val="0"/>` 而不是删节点 —— 删了会回退到段落/主题继承，结果不可预期。
+- `w:spacing` / `w:ind` 按**属性合并**，不整节点替换：先设行距再设段前后时，整节点替换会把行距抹掉。
+- 首行缩进同时写 `firstLineChars` 与 `firstLine`（按该段字号换算，取不到时按 10.5pt），并清掉互斥的 `hanging`。
+- 表格增删行列会同时改 `w:tblGrid` 与单元格 `w:tcW`，并按原总宽度重新分配；含 `gridSpan` / `vMerge` 的表直接拒绝。
+- 文字一改，按原文定位的样式就对不上，所以 `edits` 与 `styles` / `paragraphs` 不能同批提交；字符样式与段落样式改的是不同层级，可以同批。
+
+### 27.3 Excel：只写目标单元格与样式
+
+`src/server/chat-tools/xlsx-surgical.ts`：
+
+- 只改 `xl/worksheets/sheetN.xml` 的目标 `<c>`；字符串走共享字符串池（没有池时用 `t="inlineStr"`，不为此新增包部件）。
+- 扩 `dimension`、公式清缓存值并打 `fullCalcOnLoad="1"`（否则打开是空白）、合并区域只允许写左上角。
+- 批量标色要动 `styles.xml`：新增一个复制原 font 并加了 `<color>` 的 font，再新增一个只改 `fontId` 的 `xf`，最后把单元格的 `s` 指过去。**不能改已有 font** —— 共用它的单元格会一起变色。
+- 按部件分流：普通工作簿仍走 ExcelJS（那条路覆盖样式、公式校验、合并检查，经过更多真实文件检验），含图表/透视表/drawing 的才切外科式；`doc_edit` 摘要会说明走了哪条路。
+- 改完顺着图表 `<c:f>` 的矩形区域刷新 `numCache` / `strCache` 的 `<c:pt>`，只替换 `<c:v>`（保住 `ptExt`）；三维引用与命名区域跳过并记警告 —— 猜错区域会把别的数据画进图里。
+
+### 27.4 验证
+
+- `tests/word-style.test.ts` 5 项、`tests/word-paragraph.test.ts` 8 项、`tests/word-table.test.ts` 9 项、`tests/xlsx-chart.test.ts` 15 项（X01–X08 单元格与图表缓存，Y01–Y07 批量标色与标记列）。
+- `npm run eval:word`：同一份源文件导出两次 PDF（原样 / 打补丁）后比对。颜色序列 `#000000 → #b23b2e → #000000`（只出现一次）、加粗段换了字体资源、居中偏移 199.43 → 0.01（页宽 595.3）、2 倍行距把后一段推低 14.28、多一行把表后段落推低 13.2。
+- `npm run eval:xlsx`：COM 生成带柱状图的工作簿 → 改 B2:B4 → 再交 Excel 打开，单元格 40/55/30、图表系列值 40/55/30、包内缓存 40/55/30；第二阶段在同一份文件上批量标色，命中行字体色 255、未命中行 0、图表仍画 40/55/30、标记列 D1「标记」且 D2/D4 为 1。
+
+### 27.5 边界
+
+- Word 不支持页眉页脚、合并单元格、列宽调整；样式作用整个 run，同一段内的局部富文本不支持。
+- Excel 不支持改图表类型或增删系列、不支持编辑数据透视表；批量标色遇到富文本 ID（共享字符串里带 run）时不生效，会计入 `richTextSkipped`，不假装染上了。
