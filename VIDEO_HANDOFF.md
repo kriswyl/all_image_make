@@ -9,7 +9,7 @@
 | 项目 | 状态 |
 |---|---|
 | TypeScript | `npx tsc --noEmit` 零错误 |
-| 单元测试 | `npm test` → 260 passed（20 个文件） |
+| 单元测试 | `npm test` → 119 文件 / 904 项全通过（含视频专项 31 项） |
 | 开发服务 | 前端 `127.0.0.1:5173`，API `127.0.0.1:17891` |
 | 真实 API 联调 | Seedance **已跑通**（见下）；万相 / Grok 仍只测到 mock 上游 |
 
@@ -51,7 +51,7 @@
 - **不要完全相信文档的「尾帧暂未开放」**：2026-10-22 实测 `kling-3.0` 与 `kling-3.0-turbo` 的 `/image-to-video` 都接受 `first_frame + last_frame`，3 秒 720p 任务成功；抽最后一帧与输入尾帧一致。所以非 Omni 也开放首尾帧
 - 参考图实测仍只属于 Omni：普通 `/image-to-video` 只传 `refer_image` 时返回 400 `content item of type 'first_frame' is required`
 - Omni 的参考图走 `refer_image`
-- 运动控制参考视频支持手动填写公网 http(s) 地址，或通过渠道配置的图床上传本地 MP4/MOV；上传结果可通过公网访问。
+- 运动控制参考视频通过渠道配置的图床上传本地 MP4/MOV（页面不再提供粘贴公网地址的输入）；上传结果可通过公网访问。
 - Omni 文档里的 `element` / `voice` / `feature_video` / `base_video` 需要可灵素材库或额外视频输入，工作台暂未开放；参考图走 `refer_image`
 - `kling-3.0-turbo` 走同样的原生路径；默认打开音频，避免只配置了 `audio` 计费档时被拒
 - **Key 必须属于 `kling专属` 分组**。模型列表里能看到 Kling 不代表当前 Key 能调用；不在该分组时会报 `get_channel_failed ... 可用渠道不存在`
@@ -111,7 +111,7 @@ media 里出现 `file` 或 `link` 时，`prompt_extend` 被强制改成 `true`�
 
 Grok 没有模式概念，只按「有没有参考图」区分文案。
 
-每套模式声明的 `imageSlots` 决定上传几张图、每张标什么 role；`urlSlots` 决定要填几个公网地址（万相的视频/音频/文档只收 URL，不支持上传）。切换模式会清空已传图片。
+每套模式声明的 `imageSlots` 决定上传几张图、每张标什么 role；`acceptsReferenceVideo` / `needsReferenceVideo` / `acceptsReferenceAudio` 决定素材槽，素材一律本地文件上传（页面没有粘贴地址的入口）。切模式不销毁素材，按 `adapter:mode` 分桶各存一份。
 
 ### 关键约束（已实现，别改坏）
 
@@ -155,7 +155,7 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 ### 本地视频和音频素材
 
-- 万相参考视频和可灵运动控制支持本地 MP4/MOV 经渠道图床上传，也可手动输入 URL；图床链接是公开的。渠道上传地址和附加请求头可在渠道设置中配置。
+- 万相参考视频和可灵运动控制支持本地 MP4/MOV 经渠道图床上传（页面只保留这条路径）；图床链接是公开的。渠道上传地址和附加请求头可在渠道设置中配置。
 - 万相参考音频支持本地 MP3/M4A/AAC/WAV，最多 15 秒、15 MB，转成 data URI 后计入 15 MiB 字符总预算；上传音频优先于手动地址。
 
    注意只有 `data:` 开头的内联 base64 才算进这个预算，公网 / `oss://` 地址不占请求体。
@@ -236,13 +236,15 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 | Seedance 2.5 | 30 | 10 | 10 | 50 |
 
 - 上限来自 `src/shared/seedance-capabilities.ts`，`seedanceVersion()` 按模型 ID 判版本，`validateSeedanceMedia()` 在前端 `buildSeedanceMedia()` 与服务端 `buildGenerationRequest()` 各跑一次。
-- UI 在「参考生视频」模式下提供参考视频 / 音频两个槽位：**本地文件**可直接选（视频提交时上传图床；音频默认内联 base64，渠道配了上传地址时可切回上传），也可继续填 http(s) 公网 URL（每行一个）。视频不接受 base64。
+- UI 在「参考生视频」模式下提供参考视频 / 音频两个槽位：**只接受本地文件**（视频提交时上传图床；音频默认内联 base64，渠道配了上传地址时可切回上传），粘贴公网 URL 的输入框已删除。视频不接受 base64。
 - 本地视频的上传实现在 `src/server/reference-video.ts` 的 `uploadReferenceMedia()`：任务执行时才上传，换回公网地址后写进 `content`。视频 / 音频会先落到 `inputs/` 下，重试时重新上传（图床链接可能过期）。接口是 `POST /api/generations/reference-media`（`video` / `audio` 两个 multipart 字段）。
 - `adapters.ts` 的 seedance `content` 数组现在组装 `image_url` / `video_url` / `audio_url` 三种 part 及对应 role；以前只处理 `image_url`，视频音频被静默丢弃。
 - 修掉三处上限打架：视频页 UI 写 10、共用 `useReferenceImages` 按 8 拦、zod 又是 20。现在图片页仍 8 张、视频页单独一份状态（30 张）、multer 与 zod 都是 30 / 50。
 - 对话与画布侧仍只把画布图片映射成 `image_url`（那里没有视频 / 音频素材槽），多模态入口在视频生成页。
 
-**待联调**：词元流墟中转是否接受 `video_url` 与 `reference_video` role 仍未实测（音频已测，见下）；该渠道预设也仍未配置 `uploadEndpoint`，本地视频上传要等渠道补上上传地址。
+**渠道已配上图床（2026-11-09）**：`词元流墟-seedance视频` 预设补上了与万相、可灵同一座图床（`https://imageproxy.zhongzhuan.chat/api/upload` + `New-Api-User: 1`），参考生视频模式的「参考视频」槽位从「暂不支持上传」变成可点。`db-schema.ts` 有幂等回填：启动时把 tiantoken 站上 `upload_endpoint` 为空的 seedance 渠道自动补上，老渠道不用删除重建。
+
+**待联调**：词元流墟中转是否接受 `video_url` 与 `reference_video` role 仍未实测（音频已测，见下）；本地视频上传链路（选文件 → 任务执行时传图床 → `video_url` 进请求体）代码与测试就绪，等一次真实提交验证。
 
 ### 音频 base64 实测（2026-11-09，词元流墟 / sd-2.0-mini / 480p / 4s）
 
@@ -259,6 +261,16 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 - 因此视频页在渠道没有 `uploadEndpoint` 时，本地音频会自动走内联 base64；有上传地址时仍默认上传，可手动切到内联。
 - 音频下限写进了前端选择时的校验（`selectAudio`，≥1.8 秒），避免提交后才被上游拒绝。
 - 尚未验证：`video_url` 用公网地址与 `reference_video` role 是否被接受；本地视频上传（需 `uploadEndpoint`）。
+
+## 视频工作台改版（2026-11-09）
+
+- **界面**：左侧导航与顶部模型/渠道保留；中央一体化创作框（素材槽 → 提示词 → 底部参数胶囊 → 发送），参数与模式都是挂在 body 上的浮层，右侧不再有固定参数面板；下方是「本次结果」大舞台 + 「最近」缩略记录。
+- **模式**：只渲染渠道/模型真正支持的模式（万相 7 / Seedance 4 / 可灵按模型）；Seedance 没有编辑、延长时间线语义，所以不出现这些入口。
+- **草稿**：`adapter:mode` 为键，提示词/参数/URL 进 localStorage，文件在内存分桶；切模式/切模型/切渠道都不清空，刷新页面图片需重选。
+- **重校验**：换模型后当前模式不成立会自动回退并提示；时长/分辨率/比例按新能力收敛，改动原因显示在创作框下方。
+- **快照**：提交即落 `input_json`，`GET /api/generations/:id` 带回脱敏的 `inputParameters`；结果区展示「本次参数」，可复用提示词/数值/URL，图片会提示重选。重试仍重放落库快照。
+- **服务端守卫**：`tasks.create` 前校验模式是否属于该模型、素材是否齐/超、分辨率与时长是否在档；万相「视频编辑」不再发送 `duration`。
+- **仍未接后端**：`format`（MP4/MOV）与 `n`（一次多条）——面板里可见但锁定，说明写在提示里，不做能点却无效的控件。
 
 ## 可以问用户的开放问题
 
@@ -294,7 +306,13 @@ src/shared/provider-presets.ts  渠道预设（9 个），改动要和 adapters 
 src/server/adapters.ts          各渠道请求体构造、视频链接提取
 src/server/tasks.ts             异步任务轮询、视频下载落盘、内联素材体积预算
 src/server/app.ts               zod 校验（新参数记得加进 generationSchema）
-src/client/VideoGenerateView.tsx 视频工作台、模式选择器
+src/shared/video-modes.ts       模式矩阵：哪家渠道有哪些模式、素材槽、参数档位（前后端共用）
+src/shared/video-draft.ts       草稿结构、默认值、参数收敛、快照复用
+src/shared/video-snapshot.ts    任务参数快照的脱敏与摘要
+src/server/video-mode-guard.ts  提交前的模式/素材/参数复核
+src/client/video/               创作框、参数浮层、结果面板、素材数组构造
+src/client/hooks/useMediaBuckets.ts  按「渠道:模式」分桶的图片/视频/音频
+src/client/VideoGenerateView.tsx 视频页编排：渠道/模型 → 模式 → 草稿 → 提交
 src/client/App.tsx              图片/视频渠道与任务的状态分离
 src/client/useFileDrop.ts       参考图上传区的拖放交互（图片页/视频页共用）
 ```

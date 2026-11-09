@@ -67,6 +67,9 @@
 
 - 四种视频渠道（通义万相 `wan-video`、Grok `grok-video`、豆包 Seedance `seedance-video`、可灵 `kling-video`），协议细节见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)。
 - 异步任务提交 → 持久化上游 task id → 轮询 → 下载落盘。**服务重启后，已拿到上游 task id 的视频任务会接着轮询**，不再一律判失败。
+- 视频页是一体化创作框：素材槽 + 提示词 + 底部参数胶囊，参数从胶囊弹出浮层，右侧没有固定参数面板；下方是「本次结果」大舞台 + 最近缩略记录。
+- 模式只在渠道/模型真正支持时出现（万相界面 6 种、Seedance 4 种、可灵按模型；只靠链接的「参考文件生视频」仅留接口），服务端 `video-mode-guard.ts` 用同一张表复核；草稿按 `adapter:mode` 分键，切模式/切模型不丢素材；提交即落参数快照，结果区可复用提示词与数值（素材需重新上传）。
+- 素材只走本地上传：创作框里没有粘贴公网地址的输入框；创作框右上角的 @ 弹出「全部/视频/图片/音频」素材列表，选中把 `@图片1` 插进提示词。
 - 视频任务的诊断记录采用「首尾完整 + 中间精简」：提交请求和最后一次轮询保留完整响应，中间的轮询只存一行状态摘要。
 
 ### 历史与素材目录
@@ -100,7 +103,10 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/views/HistoryView.tsx`：历史列表、预览和清空确认。
 - `src/client/dialogs/`：设置与诊断弹窗。
 - `src/client/hooks/useReferenceImages.ts`、`hooks/usePolling.ts`：参考图/蒙版与任务轮询。
-- `src/client/VideoGenerateView.tsx`：视频工作台和模式选择器。
+- `src/client/VideoGenerateView.tsx`：视频页编排（渠道/模型 → 模式 → 草稿 → 提交）。
+- `src/client/video/`：一体化创作框 `VideoComposer`、参数浮层 `VideoParamsPanel`、结果面板 `VideoResultPanel`、媒体构造 `media-builders.ts`。
+- `src/shared/video-modes.ts` / `video-draft.ts` / `video-snapshot.ts`：模式矩阵、草稿与参数收敛、任务参数快照（前后端共用）。
+- `src/server/video-mode-guard.ts`：提交前的模式/素材/参数复核。
 - `src/client/MusicGenerateView.tsx`：音乐工作台、全部模式、源歌曲选择、播放器与歌词。
 - `src/client/chat/ModelPanel.tsx`、`chat/ConversationSidebar.tsx`、`chat/AssetLightbox.tsx`：对话页拆出的组件。
 - `src/client/task-ui.tsx`：图片 / 视频 / 音乐共用的状态徽标、格式化与表单持久化。

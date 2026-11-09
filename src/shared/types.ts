@@ -1,3 +1,4 @@
+import type { TaskInputSnapshot } from "./video-snapshot.js";
 // 参数核对结果（需求.md 问题 1）的类型住在 agent-types 里，因为 Agent 卡片先用到它。
 // 这里只要类型、不要运行时的东西，所以用 `import type`——编译后整行消失，不会绕成一个环。
 import type { ParamNote } from "./agent-types.js";
@@ -404,6 +405,11 @@ export interface Task {
   /** 上游任务的附加元数据；Midjourney 用它带回按钮（U1-U4 / V1-V4 / 重绘） */
   remoteMeta?: { midjourney?: MidjourneyMeta } | null;
   assets: Asset[];
+  /**
+   * 提交时的参数快照（脱敏）。来自任务落库的 `input_json`，之后改表单不会影响它；
+   * 结果区据此展示「本次参数」并支持复用。
+   */
+  inputParameters?: TaskInputSnapshot | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

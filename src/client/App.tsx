@@ -29,10 +29,11 @@ import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { LoadingScreen, StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "./task-ui";
-import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_VIDEO_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
+import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
 import { useInpaintMask, useReferenceImages } from "./hooks/useReferenceImages";
+import { useMediaBuckets } from "./hooks/useMediaBuckets";
 import { useImageTaskEvents, usePolling } from "./hooks/usePolling";
 import { ClearHistoryDialog, HistoryView } from "./views/HistoryView";
 import { SettingsDialog } from "./dialogs/SettingsDialog";
@@ -340,7 +341,8 @@ export function App() {
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
   const references = useReferenceImages(showToast);
   /** 视频页单独一份参考图状态：Seedance 2.5 的上限远高于图片页 */
-  const videoReferences = useReferenceImages(showToast, MAX_VIDEO_REFERENCE_IMAGES);
+  // 视频页按「渠道:模式」分桶存素材：切模式不再清空已上传的图片/视频
+  const videoMedia = useMediaBuckets(showToast);
   /**
    * 局部重绘只对 openai-images（gpt / gpt-c）且恰好一张参考图生效。
    * 底图一变（删除、替换、加第二张、换渠道），`maskSourceUrl` 就变，旧蒙版自动作废。
@@ -876,7 +878,7 @@ export function App() {
             selectedModel={videoModel}
             activeTask={activeVideoTask}
             tasks={videoTasks}
-            references={videoReferences}
+            media={videoMedia}
             onChannelChange={selectVideoChannel}
             onModelChange={setVideoModel}
             onAddChannel={() => setWizardOpen(true)}

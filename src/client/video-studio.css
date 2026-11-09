@@ -1,0 +1,567 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   视频生成工作台（一体化创作框）
+
+   布局：左侧导航与顶部模型/渠道沿用外壳，中央一栏 —— 标题、创作框、
+   本次结果、最近记录。不再有右侧固定参数面板：参数从创作框底部的胶囊
+   弹出浮层，浮层挂在 body 上（portal），编辑器始终留在 DOM 里。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.vstudio-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.vstudio-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 28px 40px;
+}
+
+.vstudio-inner {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+.vstudio-hero {
+  margin: 26px auto 22px;
+  text-align: center;
+  font-size: 22px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: .01em;
+}
+
+/* ── 创作框 ─────────────────────────────────────────────────────────────── */
+
+.vstudio-composer {
+  position: relative;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  padding: 14px 16px 12px;
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+
+.vstudio-composer:focus-within {
+  border-color: var(--line-hover);
+  box-shadow: var(--shadow-card);
+}
+
+.vstudio-composer.is-drop-target {
+  border-color: var(--accent);
+  background: var(--surface-soft);
+}
+
+.vstudio-composer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.vstudio-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+/* 引用素材：截图里右上角那个 @ */
+.vstudio-tool {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.vstudio-tool:hover,
+.vstudio-tool[aria-expanded="true"] {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--ink);
+}
+
+.vstudio-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vstudio-slot {
+  position: relative;
+  width: 84px;
+  height: 64px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  overflow: hidden;
+  padding: 0;
+}
+
+.vstudio-slot:hover { border-color: var(--line-hover); color: var(--ink-soft); }
+.vstudio-slot input[type="file"] { display: none; }
+.vstudio-slot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.vstudio-slot.is-filled { border-style: solid; border-color: var(--line); }
+.vstudio-slot-role {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  z-index: 1;
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, .62);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.6;
+}
+.vstudio-slot-remove {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .58);
+  color: #fff;
+  cursor: pointer;
+}
+
+.vstudio-slot.is-locked {
+  border-style: dotted;
+  color: var(--muted-soft);
+  cursor: not-allowed;
+}
+.vstudio-slot.is-locked:hover { border-color: var(--line-strong); color: var(--muted-soft); }
+
+.vstudio-clear {
+  align-self: center;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.vstudio-clear:hover { color: var(--ink-soft); }
+
+.vstudio-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.vstudio-file-chip strong { display: block; font-weight: 500; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vstudio-file-chip small { color: var(--muted); font-size: 11px; }
+.vstudio-file-chip button { border: 0; background: none; color: var(--muted); cursor: pointer; display: grid; place-items: center; }
+
+.vstudio-input {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  max-height: 320px;
+  margin-top: 10px;
+  padding: 10px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: none;
+  transition: min-height var(--dur-3) var(--ease-out);
+}
+.vstudio-input:focus { outline: none; }
+.vstudio-input::placeholder { color: var(--muted-soft); }
+.vstudio-composer.is-expanded .vstudio-input { min-height: 260px; }
+
+.vstudio-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.vstudio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.vstudio-chip:hover { border-color: var(--line-hover); background: var(--surface-soft); }
+.vstudio-chip.is-static { cursor: default; color: var(--muted); }
+.vstudio-chip.is-static:hover { border-color: var(--line); background: var(--surface); }
+.vstudio-chip.is-mode { padding-left: 8px; }
+.vstudio-chip svg { color: var(--muted); }
+
+.vstudio-spacer { flex: 1 1 auto; }
+
+.vstudio-send {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-1) var(--ease-out);
+}
+.vstudio-send:disabled { background: var(--surface-hover); color: var(--muted); cursor: not-allowed; }
+.vstudio-send:not(:disabled):hover { transform: translateY(-1px); }
+
+.vstudio-key-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--coral-line);
+  border-radius: var(--radius-pill);
+  background: var(--coral-soft);
+  color: var(--coral-ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ── 浮层（模式菜单 / 参数面板）──────────────────────────────────────────── */
+
+.vstudio-panel {
+  position: fixed;
+  z-index: 60;
+  width: 330px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.vstudio-panel-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.vstudio-field { margin-bottom: 14px; }
+.vstudio-field:last-child { margin-bottom: 0; }
+.vstudio-field > label,
+.vstudio-field > .vstudio-field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vstudio-segment {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+.vstudio-segment.is-wrap { grid-auto-flow: row; grid-template-columns: repeat(auto-fit, minmax(56px, 1fr)); }
+.vstudio-segment button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-control) - 3px);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.vstudio-segment button:hover:not(:disabled) { background: var(--surface-hover); }
+.vstudio-segment button.is-active {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-panel);
+}
+.vstudio-segment button:disabled { color: var(--muted-soft); cursor: not-allowed; text-decoration: line-through; }
+
+.vstudio-ratio-glyph {
+  display: block;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  opacity: .75;
+}
+
+.vstudio-duration-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.vstudio-duration-input input {
+  width: 72px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.vstudio-mention-panel {
+  width: 268px;
+  padding: 10px;
+}
+.vstudio-mention-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.vstudio-mention-tabs button {
+  flex: 1 1 auto;
+  padding: 6px 4px 7px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.vstudio-mention-tabs button:hover { color: var(--ink-soft); }
+.vstudio-mention-tabs button.is-active {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: 500;
+}
+.vstudio-mention-list { display: grid; gap: 2px; }
+.vstudio-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.vstudio-mention-item:hover { background: var(--surface-soft); }
+.vstudio-mention-thumb {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+.vstudio-mention-thumb img,
+.vstudio-mention-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vstudio-mention-label { flex: 1 1 auto; color: var(--ink); }
+.vstudio-mention-kind { color: var(--muted); font-size: 11px; }
+
+.vstudio-mode-list { display: grid; gap: 4px; }
+.vstudio-mode-item {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.vstudio-mode-item:hover { background: var(--surface-soft); }
+.vstudio-mode-item.is-active { border-color: var(--line-strong); background: var(--surface-soft); }
+.vstudio-mode-item strong { font-size: 13px; font-weight: 500; color: var(--ink); }
+.vstudio-mode-item span { font-size: 11px; color: var(--muted); line-height: 1.6; }
+
+.vstudio-advanced {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.vstudio-advanced summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+.vstudio-advanced summary::-webkit-details-marker { display: none; }
+.vstudio-advanced[open] summary { margin-bottom: 10px; }
+.vstudio-advanced .vstudio-field > input[type="text"],
+.vstudio-advanced .vstudio-field > input[type="number"],
+.vstudio-advanced input[type="text"],
+.vstudio-advanced input[type="number"] {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 12px;
+}
+.vstudio-advanced select {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 12px;
+}
+.vstudio-advanced textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  resize: vertical;
+}
+.vstudio-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.vstudio-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+/* ── 结果区 ─────────────────────────────────────────────────────────────── */
+
+.vstudio-result-block { margin-top: 26px; }
+
+.vstudio-result-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.vstudio-result-head h2 { margin: 0; font-size: 13px; font-weight: 500; color: var(--ink); }
+.vstudio-result-head span { font-size: 12px; color: var(--muted); }
+
+.vstudio-result .result-panel { border-radius: var(--radius-panel); }
+.vstudio-result .result-stage { min-height: 380px; }
+
+.vstudio-snapshot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+.vstudio-snapshot .vstudio-snapshot-item {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface-soft);
+}
+.vstudio-snapshot button {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11px;
+  cursor: pointer;
+}
+.vstudio-snapshot button:hover { background: var(--surface-soft); }
+
+/* ── 最近记录 ───────────────────────────────────────────────────────────── */
+
+.vstudio-recent {
+  margin-top: 22px;
+  padding-bottom: 8px;
+}
+.vstudio-recent h2 { margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--ink); }
+
+@media (max-width: 860px) {
+  .vstudio-scroll { padding: 4px 16px 32px; }
+  .vstudio-hero { font-size: 19px; margin: 18px auto 16px; }
+  .vstudio-panel { width: min(330px, calc(100vw - 24px)); }
+}
+
+@media (max-width: 620px) {
+  .vstudio-slots { gap: 6px; }
+  .vstudio-slot { width: 72px; height: 56px; }
+  .vstudio-footer { gap: 5px; }
+  .vstudio-chip { padding: 4px 8px; font-size: 11px; }
+}

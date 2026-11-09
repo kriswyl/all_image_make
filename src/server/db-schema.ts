@@ -419,6 +419,12 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       db.exec("ALTER TABLE channels ADD COLUMN upload_headers_json TEXT NOT NULL DEFAULT '{}'");
       db.exec(`UPDATE channels SET upload_headers_json = '{"New-Api-User":"1"}' WHERE upload_endpoint = 'https://imageproxy.zhongzhuan.chat/api/upload'`);
     }
+    // Seedance 参考视频/音频改走图床上传（与万相、可灵同一座）。
+    // 预设补了 uploadEndpoint，历史渠道也要跟上，否则界面上仍是「暂不支持上传」。
+    // 幂等：每次启动都跑，只填空的，不动用户自己改过的值。
+    db.exec(`UPDATE channels SET upload_endpoint = 'https://imageproxy.zhongzhuan.chat/api/upload',
+      upload_headers_json = '{"New-Api-User":"1"}'
+      WHERE rtrim(base_url, '/') = 'https://api.tiantoken.com' AND adapter_type = 'seedance-video' AND upload_endpoint = ''`);
     if (!channelColumns.some((col) => col.name === "unified_agent_default")) {
       db.exec("ALTER TABLE channels ADD COLUMN unified_agent_default INTEGER NOT NULL DEFAULT 0");
     }

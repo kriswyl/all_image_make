@@ -304,7 +304,8 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       parameters: compact({
         resolution: input.resolution,
         ratio: input.ratio,
-        duration: input.duration,
+        // 视频编辑不认时长：带上会被上游当参数错误
+        duration: input.wanVideoMode === "video-edit" ? undefined : input.duration,
         audio: input.audio,
         prompt_extend: forcePromptExtend ? true : input.promptExtend,
         seed: input.seed,

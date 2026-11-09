@@ -140,6 +140,16 @@ describe("buildChannelDrafts", () => {
     ]);
   });
 
+  it("gives seedance the same image host as wan / kling so reference video can upload", () => {
+    const seedance = findProviderPreset("tiantoken-seedance")!;
+    expect(seedance.uploadEndpoint).toBe("https://imageproxy.zhongzhuan.chat/api/upload");
+    expect(seedance.uploadHeaders).toEqual({ "New-Api-User": "1" });
+
+    const [draft] = buildChannelDrafts(seedance, [selectionFor(seedance, "seedance-video")]);
+    expect(draft.input.uploadEndpoint).toBe("https://imageproxy.zhongzhuan.chat/api/upload");
+    expect(draft.input.uploadHeaders).toEqual({ "New-Api-User": "1" });
+  });
+
   it("no longer exposes a Midjourney unit", () => {
     for (const preset of PROVIDER_PRESETS) {
       expect(preset.units.some((unit) => unit.id === "mj")).toBe(false);

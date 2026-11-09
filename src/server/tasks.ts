@@ -27,6 +27,7 @@ import { detectImageMime, writeThumbnail } from "./vision.js";
 import type { KeyStore } from "./key-store.js";
 import { AppError } from "./app-error.js";
 import { uploadReferenceMedia, validateReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
+import { assertVideoModeRequest } from "./video-mode-guard.js";
 
 export { AppError } from "./app-error.js";
 
@@ -268,6 +269,11 @@ export class TaskRunner {
         throw new AppError("REFERENCE_AUDIO_CONFLICT", "本地参考音频和音频链接只能选择一种", 400);
       }
     }
+    // 模式与素材的服务端复核：界面只渲染渠道支持的模式，但接口不能只信界面
+    assertVideoModeRequest(channel, input, {
+      referenceVideoUpload: Boolean(referenceVideoUpload),
+      referenceAudioUpload: Boolean(referenceAudioUpload),
+    });
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
     const videoPath = referenceVideoUpload ? path.join(this.db.inputsDir, `${id}-reference.${referenceVideoUpload.mimetype === "video/quicktime" ? "mov" : "mp4"}`) : undefined;
     const audioPath = referenceAudioUpload ? path.join(this.db.inputsDir, `${id}-reference-audio.${audioExtension(referenceAudioUpload.mimetype)}`) : undefined;

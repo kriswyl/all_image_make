@@ -31,7 +31,8 @@ src/
   client/            界面
     App.tsx          外壳、侧栏、页面切换
     chat/            对话页：消息流、工具卡、文档卡片、PPT 报告面板
-    views/           生图 / 视频 / 音乐 / 语音 / 历史 / 设置
+    views/           生图 / 历史 / 设置
+    video/           视频工作台：一体化创作框、参数浮层、结果面板、媒体构造
     board/           无限画布与分镜
     channels/        渠道列表、编辑、添加向导
     dialogs/         设置与诊断
@@ -44,6 +45,7 @@ src/
     db-board.ts      画布仓储
     adapters.ts      渠道协议适配
     tasks.ts         任务执行、异步轮询、重启恢复
+    video-mode-guard.ts  模式 / 素材 / 参数的服务端复核（与前端同一张表）
     async-providers.ts  异步厂商描述表（视频/音乐共用）
     key-store.ts     渠道密钥本地持久化
     agent*.ts        对话循环、规划、确认、上下文、批量
@@ -51,9 +53,11 @@ src/
     presentation-*.ts  PPT 全套管线（见第 5 节），含图表内嵌工作簿同步
     chat-tools/word|spreadsheet|pdf-document.ts  各格式读写
   shared/            前后端共享：类型、schema、契约、主题、报告、状态投影
+                     视频相关：video-modes.ts（模式矩阵）、video-draft.ts（草稿与参数收敛）、
+                     video-snapshot.ts（任务参数快照的脱敏与复用）、video-capabilities.ts
 src-tauri/            Rust 壳、sidecar、图标、打包配置
 scripts/             开发、打包、评测脚本
-tests/               vitest 用例（109 文件 / 800 项）
+tests/               vitest 用例（119 文件 / 904 项）
 docs/                设计与交接文档
 ```
 
@@ -165,12 +169,13 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 9. **规划标签不是完成证据**。`role: "case"`、案例编号、模型自报通过都不能替代正文 + 来源的可核验结果。
 10. **显式绑定不能静默降级**。文件绑定的契约失效时拒绝发布，绝不退回「无契约」。
 11. **文件产出 ≠ 任务完成**。草稿可下载，但工具结果与 UI 必须标明任务未完成及原因。
+12. **生成方式不能只做界面切换**。模式只在渠道/模型真正支持时出现，必需素材与参数由服务端按同一张表复核；上游没有的语义（Seedance 的编辑/延长）不画假按钮。
 
 ## 7. 测试与评测
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 116 文件 / 873 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 119 文件 / 904 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
@@ -193,10 +198,27 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 | 新增可补丁对象 | `presentation-object-map.ts` 的命名规则 + `presentation-object-patch.ts` 的写回 + 允许部件 |
 | 新增渠道 | 适配器 + `shared/provider-presets.ts`（向导预设），不在代码里放密钥 |
 | 新增异步厂商 | `async-providers.ts` 描述表，复用 `TaskRunner.pollAsyncTask()` |
+| 新增视频模式 | `shared/video-modes.ts` 的模式表 + 适配器分支 + `server/video-mode-guard.ts` 的素材/参数规则 |
 | 新增文档格式 | `chat-tools/` 下独立模块 + `registry.ts` 注册 + `doc_read/doc_edit` 分支 |
 | 新增工具 | `chat-tools/` 实现 + `registry.ts` 声明 + 预算与去重策略 |
 
-## 9. 已知边界
+## 9. 视频工作台（模式 / 素材 / 快照）
+
+视频页是一条独立链路，与图片页共用渠道、任务与播放器，但模式与素材规则单独成型。
+
+| 关注点 | 落点 | 规则 |
+|---|---|---|
+| 模式矩阵 | `shared/video-modes.ts` | 万相 7 种、Seedance 4 种、可灵按模型（omni 才有参考图，运动控制只有 kling-3.0）；只渲染支持的模式，`resolutionOptionsFor` 按模式给档位 |
+| 草稿 | `shared/video-draft.ts` + `client/hooks/useMediaBuckets.ts` | 草稿按 `adapter:mode` 分键：提示词/参数进 localStorage，图片/视频/音频在内存分桶；切模式只是换键，谁都不清空 |
+| 素材入口 | 只在创作框里上传本地文件 | 页面没有任何「粘贴公网地址」的输入框；需要参考视频的模式只在渠道配了 `uploadEndpoint` 时出现，否则不画入口 |
+| @ 引用 | `client/video/VideoMentionPanel.tsx` | 创作框右上角的 @ 弹出「全部/视频/图片/音频」素材列表，选中把 `@图片1` 这类记号插到光标处；记号顺序与提交时素材数组一致 |
+| 参数收敛 | `reconcileVideoDraft()` | 换渠道/模型/模式后夹时长、换分辨率档、锁比例（2.5 首尾帧自适应），并回传改动原因给界面提示 |
+| 参数入口 | `client/video/VideoParamsPanel.tsx` | 从创作框底部胶囊弹出（portal）；「格式 MP4/MOV」「生成数量 1–4」可见但锁定——上游没有 format 与 n 字段，不做无效控件 |
+| 服务端守卫 | `server/video-mode-guard.ts` | `tasks.create` 前校验模式是否属于该模型、素材是否齐/超、分辨率与时长是否在档；`MODE_UNSUPPORTED` / `MODE_MEDIA_REQUIRED` / `MODE_MEDIA_LIMIT` / `MODE_PARAM_UNSUPPORTED` |
+| 参数快照 | `shared/video-snapshot.ts` + `tasks.input_json` | 提交即落库，`taskView` 输出脱敏快照（内联素材只留字节数）；结果区展示「本次参数」，可复用提示词与数值，素材一律提示重新上传；`retry` 重放 `input_json`，不读当前表单 |
+| 适配器 | `adapters.ts` | 万相 video-edit 不发 `duration`；可灵运动控制端点与参数按模式表；Seedance 的 content 按 role 组装 |
+
+## 10. 已知边界
 
 **共用的是「可扩展的共同底座」**：文件管理、候选发布与版本管理对各格式一致；任务契约（PresentationSpec）、可信检查结果与质量报告（TemplateReport）仍主要围绕 PPT。Word / Excel 复用候选发布与版本管理，不宣称具备 PPT 同等完整的契约核验能力。
 

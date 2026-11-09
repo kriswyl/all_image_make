@@ -8,6 +8,7 @@ import { isAudioAsset, isImageAsset } from "../shared/types.js";
 import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, taskKindFor } from "../shared/kinds.js";
 // 参数核对（需求.md 问题 1）：纯函数、无 IO、不碰 db，所以放在这里不构成环
 import { auditParameters } from "./diagnose.js";
+import { summarizeTaskInput } from "../shared/video-snapshot.js";
 import { initializeSchema } from "./db-schema.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { ExecutionStore } from "./execution-store.js";
@@ -2791,6 +2792,9 @@ export class AppDatabase {
     return {
       id: task.id, origin: task.origin, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
       status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
+      // 脱敏参数快照：界面展示「本次参数」与「复用参数」都用它，原始 input 里的
+      // base64 图片不会跟着列表一起回传。
+      inputParameters: summarizeTaskInput(parseJson<Record<string, unknown>>(task.inputJson, {})),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
       ...(task.remoteMeta ? { remoteMeta: parseJson<NonNullable<Task["remoteMeta"]>>(task.remoteMeta, {}) } : {}),

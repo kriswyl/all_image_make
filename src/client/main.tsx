@@ -15,6 +15,8 @@ import "./styles.css";
 import "./select-menu.css";
 // 素材库抽屉：和分镜工作台一样独立成文件，避免 styles.css 继续膨胀
 import "./asset-library.css";
+// 视频生成工作台：一体化创作框、参数浮层与结果区
+import "./video-studio.css";
 // 无限画布（独立自由画布）：节点、连线、浮动 Agent 的样式
 import "./board/board.css";
 import "./board/board-material.css";

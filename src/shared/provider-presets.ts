@@ -193,12 +193,16 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     id: "tiantoken-seedance",
     label: "词元流墟-seedance视频",
     baseUrl: "https://api.tiantoken.com",
+    // Seedance 的参考视频 / 参考音频与万相、可灵走同一座图床：
+    // 本地文件提交时先传这里换公网地址，再进 Seedance 的 video_url / audio_url。
+    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    uploadHeaders: { "New-Api-User": "1" },
     logo: "/logo-tiantoken.svg",
     units: [
       {
         id: "seedance-video",
         label: "seedance 视频",
-        description: "豆包 Seedance，文生/首帧/首尾帧/参考图",
+        description: "豆包 Seedance，文生/首帧/首尾帧/参考图，参考模式支持视频与音频素材",
         adapterType: "seedance-video",
         authType: "bearer",
         channelName: "{provider}",
