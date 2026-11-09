@@ -145,24 +145,62 @@ it("E09：引号内原话照收，即使外层句子带「保留」等指令词"
   expect(spec.requiredContent.map(item => item.description)).toEqual(["所有数值均为虚构"]);
 });
 
-it("E04：职责计划里的案例页数满足要求时判可用，不足时明确失败", async () => {
+/** 三个案例：正文里有实质内容，页上带来源关联，才能作为「内容保留」证据。 */
+function planWithCases(): AiPresentation {
+  const deck = makePlan();
+  ["A", "B", "C"].forEach((label, index) => {
+    deck.slides[index] = {
+      ...deck.slides[index]!,
+      lines: [`案例 ${label}：某客户通过方案把交付周期从 30 天压缩到 12 天，复购率提升 18%。`],
+    };
+  });
+  return deck;
+}
+
+it("E04：案例必须有正文 + 来源证据才判可用；只有职责标签或编号都不算", async () => {
   const db = await makeDb();
   const create = (value: number) => db.specs.create({
     conversationId: "c1",
     structure: [{ kind: "case_count", value, evidence: { sourceMessageId: "m1", text: "必须保留三个案例" } }],
   });
   const enough = checkPresentationContract(db.specs, {
-    conversationId: "c1", spec: create(3), plan: makePlan(), bytes: bytes(), report: makeReport(3),
+    conversationId: "c1", spec: create(3), plan: planWithCases(), bytes: bytes(), report: makeReport(3),
   });
   expect(enough.validation?.ok).toBe(true);
   expect(enough.validation?.failures).toEqual([]);
   expect(enough.validation?.visibleCoverage.satisfied).toBe(1);
 
-  const short = checkPresentationContract(db.specs, {
-    conversationId: "c1", spec: create(3), plan: makePlan(), bytes: bytes(), report: makeReport(2),
+  // 三个 case 角色标签，正文里没有任何案例内容：不能通过。
+  const rolesOnly = checkPresentationContract(db.specs, {
+    conversationId: "c1", spec: create(3), plan: makePlan(), bytes: bytes(), report: makeReport(3),
   });
-  expect(short.validation?.ok).toBe(false);
-  expect(short.validation?.failures.some(item => item.code === "STRUCTURE_CASE_COUNT")).toBe(true);
+  expect(rolesOnly.validation?.ok).toBe(false);
+  expect(rolesOnly.validation?.failures.map(item => item.code)).toContain("STRUCTURE_CASE_UNVERIFIED");
+
+  // 只有「案例 A/B/C」编号、没有实质正文和来源：同样不能通过。
+  const labelsOnly = makePlan();
+  ["A", "B", "C"].forEach((label, index) => {
+    labelsOnly.slides[index] = { ...labelsOnly.slides[index]!, title: `案例 ${label}`, lines: [], sourceIds: [] };
+  });
+  const bare = checkPresentationContract(db.specs, {
+    conversationId: "c1", spec: create(3), plan: labelsOnly, bytes: bytes(), report: makeReport(3),
+  });
+  expect(bare.validation?.ok).toBe(false);
+
+  const short = checkPresentationContract(db.specs, {
+    conversationId: "c1", spec: create(3), plan: planWithCases(), bytes: bytes(), report: makeReport(2),
+  });
+  // 正文证据只有 2 个，职责计划标 2 页也不能补足第 3 个。
+  const partial = checkPresentationContract(db.specs, {
+    conversationId: "c1", spec: create(3), plan: (() => {
+      const deck = planWithCases();
+      deck.slides[2] = { ...deck.slides[2]!, lines: ["普通正文"] };
+      return deck;
+    })(), bytes: bytes(), report: makeReport(3),
+  });
+  expect(partial.validation?.ok).toBe(false);
+  expect(partial.validation?.failures.some(item => item.code === "STRUCTURE_CASE_COUNT")).toBe(true);
+  expect(short.validation?.ok).toBe(true); // 证据以正文为准，不因职责计划页数少而误判
 });
 
 it("E05：缺少任何证据时明确未通过，未验证不能当成满足", async () => {

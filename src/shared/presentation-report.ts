@@ -18,6 +18,13 @@ export const presentationReportSchema = z.object({
     satisfied: z.number().int().nonnegative(),
     unknown: z.number().int().nonnegative(),
   }).optional(),
+  // A 收口：内容审校对语义必需内容逐项给出的可信结论（尚未绑定候选哈希，绑定在门禁里完成）。
+  requirementVerifications: z.array(z.object({
+    requiredId: z.string().min(1),
+    status: z.enum(["satisfied", "missing"]),
+    evidence: z.string().max(500),
+    sourceRef: z.string().max(300).optional(),
+  })).optional(),
   // C：本次任务的内容生成 / 内容审校 / 视觉检查页面集合，全部是原始页码。
   checkSets: z.object({
     contentPages: z.array(z.number().int().positive()),

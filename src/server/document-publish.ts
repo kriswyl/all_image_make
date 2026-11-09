@@ -5,7 +5,7 @@ import type { AppDatabase } from "./db.js";
 import { safeName, workspaceDir } from "./workspace-paths.js";
 import {
   CANDIDATE_TTL_MS,
-  type CandidateMeta, type PublishInput, type PublishResult,
+  type CandidateMeta, type PendingPublish, type PublishInput, type PublishResult,
 } from "../shared/document-publish.js";
 
 /**
@@ -17,9 +17,10 @@ import {
 
 /** 安全 / 归属 / 原文件保护类失败，不允许用显式 draft 分支绕过。 */
 const BLOCKING_FAILURES = new Set(["SPEC_OWNERSHIP", "SPEC_REVISION", "SCOPE_VIOLATION", "REQUIRED_ASSET", "UNPLACED_IMAGES"]);
+const pendingOwner = (candidateId: string) => `pending-publish:${candidateId}`;
 
 export class PublishPending extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly candidateId: string, readonly operationId: string) {
     super(message);
     this.name = "PublishPending";
   }
@@ -70,6 +71,8 @@ export function createCandidateDocument(db: AppDatabase, input: CandidateInput):
     }
     fs.rmSync(existingFull, { force: true });
     db.deleteCandidateDocument(existing.id);
+    db.deletePendingVisualPublish(existing.id);
+    db.specs.releaseFamilyRef(pendingOwner(existing.id));
   }
   const dir = workspaceDir(db, input.conversationId);
   const safe = safeName(input.name, input.ext);
@@ -113,7 +116,7 @@ export function createCandidateDocument(db: AppDatabase, input: CandidateInput):
 }
 
 /** 读取候选磁盘字节，同时做与 readWorkspaceFile 相同的路径安全校验。 */
-function readCandidateBytes(db: AppDatabase, conversationId: string, candidate: { name: string; baseDir: string }): Buffer {
+export function readCandidateBytes(db: AppDatabase, conversationId: string, candidate: { name: string; baseDir: string }): Buffer {
   const root = path.resolve(candidate.baseDir || db.documentsDir);
   const dir = path.resolve(root, conversationId);
   const full = path.join(dir, candidate.name);
@@ -179,7 +182,10 @@ export function publishDocument(db: AppDatabase, input: PublishInput): PublishRe
   if (input.visualPolicy === "before_publish") {
     const review = input.visualReview;
     if (review?.status !== "complete" || review.blocking?.length) {
-      throw new PublishPending("视觉检查尚未完成，候选等待检查；可交付明确标注未检查的草稿");
+      throw new PublishPending(
+        "视觉检查尚未完成，候选等待检查；后台检查完成后自动发布同一候选",
+        input.candidateId, input.operationId,
+      );
     }
   }
   input.signal?.throwIfAborted();
@@ -196,10 +202,156 @@ export function publishDocument(db: AppDatabase, input: PublishInput): PublishRe
       validationId: input.validationId, disposition: input.disposition,
     },
   });
+  // 正常发布或携带完成状态的重放一旦成功，等待登记必须一并清掉。
+  db.deletePendingVisualPublish(input.candidateId);
+  db.specs.releaseFamilyRef(pendingOwner(input.candidateId));
   return {
     fileId: published.fileId, familyId: published.familyId, version: published.version,
     sha256, disposition: input.disposition, report: input.report ?? null,
   };
+}
+
+function emptyReport(): import("../shared/presentation-report.js").TemplateReport {
+  return {
+    draft: true, resume: false, fallbackPages: [], pendingPages: [], overflowPages: [],
+    sourceLimitedPages: [], notesLimitedPages: [], unplacedImages: 0,
+    planningFallback: false, audit: "unavailable", issues: [],
+  };
+}
+
+/**
+ * before_publish 阻塞后登记可续行的等待状态：
+ * - 复用 presentation_family_refs(kind='visual_check')，TTL 清理不会把它当作孤儿；
+ * - 发布意图另存一张表，重启后仍能按 operationId 找回；
+ * - 把候选排进已有的 WPS 检查队列，检查完成即发布同一候选。
+ */
+export function markPendingPublish(db: AppDatabase, input: PublishInput, reason: string): void {
+  const candidate = db.getCandidateById(input.conversationId, input.candidateId);
+  if (!candidate?.meta) throw new Error("等待视觉检查的候选不存在，无法登记续行状态");
+  const payload: PendingPublish = {
+    operationId: input.operationId,
+    candidateSha256: input.expectedCandidateSha256,
+    ...(input.specId ? { specId: input.specId } : {}),
+    ...(input.specRevision !== undefined ? { specRevision: input.specRevision } : {}),
+    ...(input.baseline ? { baseline: input.baseline } : {}),
+    validationId: input.validationId,
+    disposition: input.disposition,
+    ...(input.report ? { report: input.report } : {}),
+    ...(input.lineage ? { lineage: input.lineage } : {}),
+    visualPolicy: input.visualPolicy ?? "before_publish",
+    ...(input.expectedOwner ? { expectedOwner: input.expectedOwner } : {}),
+    createdAt: nowIso(), reason,
+  };
+  db.saveCandidateMeta(input.conversationId, candidate.id, {
+    ...candidate.meta,
+    pendingPublish: payload,
+    visualCheck: { status: "waiting", updatedAt: nowIso(), summary: reason },
+  });
+  db.specs.registerFamilyRef({
+    familyId: candidate.id, conversationId: input.conversationId,
+    owner: pendingOwner(candidate.id), kind: "visual_check",
+  });
+  db.savePendingVisualPublish({
+    candidateId: candidate.id, conversationId: input.conversationId,
+    operationId: input.operationId, payload,
+  });
+  db.queueCandidateVisualCheck(candidate.id, payload.candidateSha256, payload.report ?? emptyReport());
+}
+
+export type VisualCheckCompletion = {
+  conversationId: string;
+  candidateId: string;
+  status: "complete" | "unavailable";
+  source: "visual-review" | "wps-render";
+  summary?: string;
+  blocking?: string[];
+};
+
+/**
+ * 检查完成 → 发布同一候选。重复回调最多发布一次：
+ * 先看发布日志，再靠 publishDocument 的正式发布幂等与候选 state 变更兜底。
+ */
+export function completePendingVisualCheck(db: AppDatabase, input: VisualCheckCompletion): PublishResult | null {
+  const pending = db.listPendingVisualPublishes()
+    .find(item => item.candidateId === input.candidateId && item.conversationId === input.conversationId);
+  if (!pending) return null;
+  const owner = pendingOwner(pending.candidateId);
+  const finish = () => {
+    db.deletePendingVisualPublish(pending.candidateId);
+    db.specs.releaseFamilyRef(owner);
+  };
+  const log = db.getPublishLog(input.conversationId, pending.operationId);
+  if (log?.publishedId) {
+    const file = db.getWorkspaceDocument(input.conversationId, log.publishedId);
+    finish();
+    return file ? {
+      fileId: file.id, familyId: file.familyId, version: file.version,
+      sha256: log.candidateSha256, disposition: log.disposition,
+      report: db.getPresentationVersion(input.conversationId, file.id)?.report ?? pending.payload.report ?? null,
+    } : null;
+  }
+  const candidate = db.getCandidateById(input.conversationId, pending.candidateId);
+  if (!candidate?.meta) { finish(); return null; }
+  const bytes = readCandidateBytes(db, input.conversationId, candidate);
+  if (sha256Of(bytes) !== pending.payload.candidateSha256) { finish(); return null; }
+  const passed = input.status === "complete" && !input.blocking?.length;
+  db.saveCandidateMeta(input.conversationId, candidate.id, {
+    ...candidate.meta,
+    visualCheck: {
+      status: passed ? "complete" : "unavailable", source: input.source,
+      ...(input.summary ? { summary: input.summary } : {}),
+      blocking: input.blocking ?? [], updatedAt: nowIso(),
+    },
+  });
+  if (!passed) return null;
+  const p = pending.payload;
+  const result = publishDocument(db, {
+    conversationId: input.conversationId,
+    operationId: p.operationId,
+    candidateId: candidate.id,
+    expectedCandidateSha256: p.candidateSha256,
+    ...(p.specId ? { specId: p.specId } : {}),
+    ...(p.specRevision !== undefined ? { specRevision: p.specRevision } : {}),
+    ...(p.baseline ? { baseline: p.baseline } : {}),
+    validationId: p.validationId,
+    disposition: p.disposition,
+    ...(p.report ? { report: p.report } : {}),
+    ...(p.lineage ? { lineage: p.lineage } : {}),
+    visualPolicy: p.visualPolicy,
+    visualReview: { status: "complete", blocking: [] },
+    ...(p.expectedOwner ? { expectedOwner: p.expectedOwner } : {}),
+  });
+  finish();
+  return result;
+}
+
+/** 重启恢复：已发布的清登记；字节未变的重新排进检查队列。 */
+export function reconcilePendingVisualChecks(db: AppDatabase): { resumed: string[]; cleared: string[] } {
+  const result = { resumed: [] as string[], cleared: [] as string[] };
+  for (const pending of db.listPendingVisualPublishes()) {
+    const owner = pendingOwner(pending.candidateId);
+    const clear = () => {
+      const candidate = db.getCandidateById(pending.conversationId, pending.candidateId);
+      if (candidate?.meta?.pendingPublish) {
+        const { pendingPublish, ...meta } = candidate.meta;
+        void pendingPublish;
+        db.saveCandidateMeta(pending.conversationId, candidate.id, meta);
+      }
+      db.deletePendingVisualPublish(pending.candidateId);
+      db.specs.releaseFamilyRef(owner);
+      result.cleared.push(pending.candidateId);
+    };
+    const log = db.getPublishLog(pending.conversationId, pending.operationId);
+    if (log?.publishedId) { clear(); continue; }
+    const candidate = db.getCandidateById(pending.conversationId, pending.candidateId);
+    if (!candidate?.meta) { clear(); continue; }
+    try {
+      if (sha256Of(readCandidateBytes(db, pending.conversationId, candidate)) !== pending.payload.candidateSha256) { clear(); continue; }
+    } catch { clear(); continue; }
+    db.queueCandidateVisualCheck(candidate.id, pending.payload.candidateSha256, pending.payload.report ?? emptyReport());
+    result.resumed.push(candidate.id);
+  }
+  return result;
 }
 
 export type ReconcileResult = { removedOrphans: string[]; staleLogs: string[] };
@@ -215,6 +367,8 @@ export function reconcileCandidates(db: AppDatabase): ReconcileResult {
     const full = path.join(path.resolve(root, candidate.conversationId), candidate.name);
     if (!fs.existsSync(full)) {
       if (db.deleteCandidateDocument(candidate.id)) result.removedOrphans.push(candidate.id);
+      db.deletePendingVisualPublish(candidate.id);
+      db.specs.releaseFamilyRef(pendingOwner(candidate.id));
       continue;
     }
     // 发布已完成但登记残留（例如旧版本中断在 COMMIT 前后）时，不重复增加版本，只清掉候选标记。
@@ -232,7 +386,8 @@ export function cleanupExpiredCandidates(db: AppDatabase, at = Date.now()): stri
   for (const candidate of db.listCandidateDocuments()) {
     const meta = candidate.meta;
     if (!meta) continue;
-    if (meta.lease) continue;
+    // 等待视觉检查的候选是活跃工作流状态，不能被 TTL 当成过期产物清掉。
+    if (meta.pendingPublish || meta.lease) continue;
     if (Date.parse(meta.expiresAt) > at) continue;
     if (db.specs?.hasActiveFamilyRef(candidate.id)) continue;
     const root = path.resolve(candidate.baseDir || db.documentsDir);

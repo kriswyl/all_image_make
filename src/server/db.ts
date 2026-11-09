@@ -12,7 +12,7 @@ import { initializeSchema } from "./db-schema.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { ExecutionStore } from "./execution-store.js";
 import { PresentationSpecStore } from "./presentation-spec-store.js";
-import { CANDIDATE_OPERATION_PREFIX, type CandidateMeta } from "../shared/document-publish.js";
+import { CANDIDATE_OPERATION_PREFIX, type CandidateMeta, type PendingPublish } from "../shared/document-publish.js";
 import { BoardRepository } from "./db-board.js";
 import type {
   AgentPlan, ChatDocumentRef, ChatToolScope, ChatVideoFrames, ConfirmPreview, ChatMessage, Conversation, ConversationKind, ConversationPatch,
@@ -1234,6 +1234,37 @@ export class AppDatabase {
   }
   deleteCandidateDocument(candidateId: string) {
     return Number(this.db.prepare("DELETE FROM workspace_documents WHERE id = ? AND state = 'candidate'").run(candidateId).changes) > 0;
+  }
+  /** 只更新候选登记里的元数据，不改文件字节；用于记录「等待视觉检查」。 */
+  saveCandidateMeta(conversationId: string, candidateId: string, meta: CandidateMeta) {
+    return Number(this.db.prepare("UPDATE workspace_documents SET candidate_meta = ? WHERE id = ? AND conversation_id = ? AND state = 'candidate'")
+      .run(JSON.stringify(meta), candidateId, conversationId).changes) > 0;
+  }
+
+  /** 让候选进入已有的 WPS 检查队列；检查完成后由发布层发布同一候选。 */
+  queueCandidateVisualCheck(fileId: string, sha256: string, report: TemplateReport) {
+    const visual: PresentationVisualCheck = { status: "queued", summary: "候选等待本机 WPS 渲染检查" };
+    this.db.prepare(`INSERT OR IGNORE INTO presentation_versions (file_id, sha256, report, visual, visual_state)
+      VALUES (?, ?, ?, ?, 'queued')`).run(fileId, sha256, JSON.stringify(report), JSON.stringify(visual));
+    // 中断在 running / 已检查过但仍在等待发布时，重新排队，保证重启后能继续。
+    this.db.prepare(`UPDATE presentation_versions SET sha256 = ?, report = ?, visual = ?, visual_state = 'queued', lease = NULL
+      WHERE file_id = ? AND visual_state != 'queued'`).run(sha256, JSON.stringify(report), JSON.stringify(visual), fileId);
+  }
+
+  savePendingVisualPublish(input: { candidateId: string; conversationId: string; operationId: string; payload: PendingPublish }) {
+    this.db.prepare(`INSERT OR REPLACE INTO pending_visual_publishes
+      (candidate_id, conversation_id, operation_id, payload, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(input.candidateId, input.conversationId, input.operationId, JSON.stringify(input.payload), now());
+  }
+  listPendingVisualPublishes(): Array<{ candidateId: string; conversationId: string; operationId: string; payload: PendingPublish }> {
+    const rows = this.db.prepare("SELECT candidate_id, conversation_id, operation_id, payload FROM pending_visual_publishes").all() as DbRow[];
+    return rows.map(row => ({
+      candidateId: String(row.candidate_id), conversationId: String(row.conversation_id),
+      operationId: String(row.operation_id), payload: parseJson<PendingPublish>(row.payload, {} as PendingPublish),
+    }));
+  }
+  deletePendingVisualPublish(candidateId: string) {
+    return Number(this.db.prepare("DELETE FROM pending_visual_publishes WHERE candidate_id = ?").run(candidateId).changes) > 0;
   }
   getPublishLog(conversationId: string, operationId: string) {
     const row = this.db.prepare("SELECT * FROM document_publish_log WHERE conversation_id = ? AND operation_id = ?").get(conversationId, operationId) as DbRow | undefined;

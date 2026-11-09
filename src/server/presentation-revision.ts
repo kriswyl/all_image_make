@@ -4,12 +4,14 @@ import { AppError } from "./tasks.js";
 import { readWorkspaceFile, saveWorkspaceDocument } from "./chat-tools/documents.js";
 import { renderAiPresentation } from "./mind-document.js";
 import { checkPresentation } from "./presentation-check.js";
+import { checkPresentationContract, type RequirementVerdict } from "./presentation-contract-check.js";
 import { elementTexts } from "./presentation-elements.js";
 import { packPresentationProject, readPresentationProject } from "./presentation-project.js";
 import { placePresentationImages, renderContentSlide, slideContentSchema, validSlideContent } from "./presentation-templates.js";
 import { reviewPresentationSamples } from "./presentation-workflow.js";
 import { requestWorkflowObject, type StructuredWorkflowCall } from "./structured-workflow.js";
 import { reviewRenderedPresentation } from "./presentation-visual-review.js";
+import { boundSpecRefFromReport } from "./presentation-contract-resolution.js";
 import { getTheme } from "../shared/presentation-theme.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";
 
@@ -32,14 +34,10 @@ export async function revisePresentation(
   const sourceDocument = db.getWorkspaceDocument(conversationId, fileId);
   const lineage = { familyId: sourceDocument?.familyId ?? fileId, parentId: fileId };
   // A：补做/审校/视觉修复沿用「这份文件当初绑定的契约版本」。
-  // 用 findByFamily 取的是家族当前 revision，改过契约后会把新约束套到旧文件上。
-  const reportSpecRef = version.report.specRef;
-  const boundSpec = reportSpecRef
-    ? db.specs.ownedRevision(conversationId, reportSpecRef.specId, reportSpecRef.specRevision)
-    : null;
-  const specRef = boundSpec
-    ? { expectedSpecId: boundSpec.specId, expectedSpecRevision: boundSpec.revision }
-    : {};
+  // 绑定失效（不存在 / 越权 / revision 丢失）必须在这里拒绝，不能悄悄退回 active 或无契约。
+  // 用 findByFamily 取家族当前 revision 会把新任务的约束套到旧文件上，同样不采用。
+  const binding = boundSpecRefFromReport(db, conversationId, version.report);
+  const specRef = binding ? { specRef: binding } : {};
   const project = await readPresentationProject(file.bytes);
   if (!project) throw new Error("PPT 缺少可编辑来源");
   const { plan, images } = project;
@@ -92,7 +90,13 @@ export async function revisePresentation(
     signal.throwIfAborted();
     readOriginal();
     const saved = saveWorkspaceDocument(db, conversationId, `视觉修复-${file.name.replace(/\.pptx$/i, "")}`, "pptx", bytes, operationId, visualReport, lineage,
-      { ...specRef, plan: revised, baselinePlan: plan, targets: Array.from({ length: count }, (_, index) => index + 1) });
+      {
+        ...specRef, plan: revised, baselinePlan: plan,
+        targets: Array.from({ length: count }, (_, index) => index + 1),
+        // 视觉修复本身就是一次完整检查；把真实结论传给发布层，避免重复等待。
+        ...(visualReview.status === "complete" && !visualReview.issues.length
+          ? { visualReview: { status: "complete" as const, blocking: [] } } : {}),
+      });
     db.pruneWorkspaceFamily(conversationId, lineage.familyId, 3);
     db.updatePresentationAudit(fileId, expectedSha256, { ...report, visualReview: { ...visualReview, revisedFileId: saved.id } });
     return saved;
@@ -106,7 +110,11 @@ export async function revisePresentation(
     const limit = Math.floor(14_000 / count);
     const selected = Array.from({ length: count }, (_, index) => candidates[Math.floor(index * candidates.length / count)]!);
     const input = selected.map(item => ({ page: item.page, content: item.content.slice(0, Math.floor(limit * 0.45)), source: item.source.slice(0, Math.floor(limit * 0.55)) }));
-    const review = await reviewPresentationSamples(call, input);
+    // 内容审校同时是「语义必需内容」的可信核验方：结论绑定当前文件哈希 + 契约 revision + 要求 ID。
+    const auditSpec = binding ? db.specs.ownedRevision(conversationId, binding.specId, binding.specRevision) : null;
+    const required = auditSpec?.requiredContent.filter(item => item.verification === "semantic")
+      .map(item => ({ id: item.id, description: item.description }));
+    const review = await reviewPresentationSamples(call, input, required?.length ? required : undefined);
     signal.throwIfAborted();
     if (!review) throw new Error("审校未返回有效报告，可稍后重试");
     readOriginal();
@@ -117,7 +125,24 @@ export async function revisePresentation(
     const checkSets = report.checkSets
       ? { ...report.checkSets, auditPages }
       : { contentPages: [], auditPages, visualPages: [], widened: false, reason: "内容审校抽样集合" };
-    db.updatePresentationAudit(fileId, expectedSha256, { ...report, issues: review.issues, audit: complete ? "complete" : "partial", checkSets });
+    let qualityPatch: Partial<typeof report> = {};
+    const verdicts: RequirementVerdict[] = (review.verdicts ?? []).map(verdict => ({
+      requiredId: verdict.id, status: verdict.status, evidence: verdict.evidence,
+      ...(verdict.sourceRef ? { sourceRef: verdict.sourceRef } : {}), verifiedBy: "content-audit" as const,
+    }));
+    if (auditSpec && verdicts.length) {
+      // 重新跑一次门禁，让已核验的结论真正从 unknown 变成 satisfied；文件字节不变才能复用。
+      const rechecked = checkPresentationContract(db.specs, {
+        conversationId, spec: auditSpec, plan, bytes: file.bytes, report,
+        requirementVerifications: verdicts,
+      });
+      if (rechecked.validation) qualityPatch = {
+        contractValidation: rechecked.validation.validationId,
+        readiness: rechecked.validation.readiness,
+        visibleCoverage: rechecked.validation.visibleCoverage,
+      };
+    }
+    db.updatePresentationAudit(fileId, expectedSha256, { ...report, ...qualityPatch, issues: review.issues, audit: complete ? "complete" : "partial", checkSets });
     return null;
   }
 

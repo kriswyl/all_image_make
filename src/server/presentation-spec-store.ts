@@ -19,6 +19,21 @@ export type ContractValidation = {
   createdAt: string;
 };
 
+/** 语义必需内容的核验结论；unverified 不是通过，只是明确记下「还缺什么证据」。 */
+export type RequirementVerification = {
+  id: string;
+  specId: string;
+  specRevision: number;
+  requiredId: string;
+  fileSha256: string;
+  status: "satisfied" | "missing" | "unverified";
+  /** verbatim / case-evidence / content-audit / manual / none */
+  method: string;
+  evidence: string;
+  sourceRef: string;
+  createdAt: string;
+};
+
 export type FamilyRef = {
   familyId: string;
   conversationId: string;
@@ -192,6 +207,33 @@ export class PresentationSpecStore {
     this.db.prepare("INSERT INTO presentation_validations (validation_id, spec_id, spec_revision, file_sha256, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(saved.validationId, saved.specId, saved.specRevision, saved.fileSha256, JSON.stringify(saved), saved.createdAt);
     return saved;
+  }
+
+  /**
+   * 语义必需内容的核验结论。绑定候选哈希 + Spec revision + 要求 ID，
+   * 因此文件字节一变旧结论就查不到；可信的 AI 审校/人工核验可据此解除 unknown。
+   */
+  saveRequirementVerification(record: Omit<RequirementVerification, "id" | "createdAt">): RequirementVerification {
+    const saved: RequirementVerification = { ...record, id: randomUUID(), createdAt: now() };
+    this.db.prepare(`INSERT INTO presentation_requirement_verifications
+      (id, spec_id, spec_revision, required_id, file_sha256, status, method, evidence, source_ref, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(saved.id, saved.specId, saved.specRevision, saved.requiredId, saved.fileSha256,
+        saved.status, saved.method, saved.evidence, saved.sourceRef, saved.createdAt);
+    return saved;
+  }
+
+  listRequirementVerifications(specId: string, specRevision: number, fileSha256: string): RequirementVerification[] {
+    const rows = this.db.prepare(`SELECT id, spec_id, spec_revision, required_id, file_sha256,
+      status, method, evidence, source_ref, created_at FROM presentation_requirement_verifications
+      WHERE spec_id = ? AND spec_revision = ? AND file_sha256 = ? ORDER BY rowid`).all(specId, specRevision, fileSha256) as DbRow[];
+    return rows.map(row => ({
+      id: String(row.id), specId: String(row.spec_id), specRevision: Number(row.spec_revision),
+      requiredId: String(row.required_id), fileSha256: String(row.file_sha256),
+      status: String(row.status) as RequirementVerification["status"],
+      method: String(row.method), evidence: String(row.evidence),
+      sourceRef: String(row.source_ref ?? ""), createdAt: String(row.created_at),
+    }));
   }
 
   getValidation(validationId: string): ContractValidation | null {

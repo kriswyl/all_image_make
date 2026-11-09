@@ -2,8 +2,10 @@
 
 日期：2026-11-06  
 基线：ChatCanvas v2.3.4 当前代码；以下内容随 v2.3.5 发布（未打包）。  
-状态：设计决策已确定；**A 已完成（真实 6/6）、B 已完成（含完整 6 轮复验）、C 已完成（ChangeScope + 局部检查 + 真实视觉验收）、D1 已完成（整稿职责与布局计划）、D2 已完成（主题令牌 / 版式扩展到 10 种 / 收窄 doc_edit 入参 / 容量诊断）、M1/M2 已完成（对象映射 + 原位补丁：文字/样式/换图/图表与内嵌工作簿/表格与增删行列）、Word 与 Excel 的保留式修改已完成，见第 13–27 节**。本文是开发规范与实现状态记录，不是发布记录。  
-执行范围：A → B → C → D1/D2 → M1/M2 → Word / Excel 保留式修改，均已落地；发布记录见 CHANGELOG，本文只记录规范与实现状态。
+状态：设计决策已确定；**A 已完成（真实 6/6）、B 已完成（含完整 6 轮复验）、C 已完成（ChangeScope + 局部检查 + 真实视觉验收）、D1 已完成（整稿职责与布局计划）、D2 已完成（主题令牌 / 版式扩展到 10 种 / 收窄 doc_edit 入参 / 容量诊断）、M1/M2 已完成（对象映射 + 原位补丁：文字/样式/换图/图表与内嵌工作簿/表格与增删行列）、Word 与 Excel 的保留式修改已完成，见第 13–27 节；入口与状态一致性收尾已完成，见第 28 节**。本文是开发规范与实现状态记录，不是发布记录。  
+执行范围：A → B → C → D1/D2 → M1/M2 → Word / Excel 保留式修改 → 入口与状态一致性收尾，均已落地；发布记录见 CHANGELOG，本文只记录规范与实现状态。
+
+**范围口径**：目前共用的是文件管理、候选发布与版本管理底座，可称为「可扩展的共同底座」；任务契约（PresentationSpec）、可信检查结果与质量报告（TemplateReport）仍主要围绕 PPT。Word / Excel 复用候选发布与版本管理，不宣称具备与 PPT 同等完整的契约核验能力。
 
 ## 1. 目标、范围与事实基线
 
@@ -1162,7 +1164,7 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 - 部件差异：3 页补 6 处（含换图、改图表、改表格）→ 只有 3 个页面部件、`slide1.xml.rels`、`ppt/charts/chart1.xml`、内嵌工作簿与新 `ppt/media/patch-*.png` 变化，其余 27 个部件逐字节一致；
 - WPS 回归：`make-object-patch-fixture` 生成补丁后的文件，`eval:wps --file` 打开并导出 3 页；导出图里标题变红、色块变宽变绿、第 3 页正文换成两段且字号沿用、第 1 页配图由红变蓝且无破损占位、第 2 页柱状图数据由 3/5 变为 9/12 且坐标轴自动重算、第 3 页表格单元格改为「推广 / 12 个」且表头底色与边框完好；无重叠或越界。
 
-本节落地时的全量回归为 110 个测试文件 / 813 项；加上后续 Word 与 Excel 增量，当前是 **113 个测试文件 / 845 项**全部通过；`tsc` 与 `npm run build` 通过。
+本节落地时的全量回归为 110 个测试文件 / 813 项；加上后续 Word / Excel 增量与入口一致性收尾，当前是 **114 个测试文件 / 856 项**全部通过；`tsc` 与 `npm run build` 通过。
 
 ### 26.6 边界
 
@@ -1216,3 +1218,45 @@ Excel 原先有一个硬拦截：只要工作簿里有 `xl/charts/`、`xl/pivot*
 
 - Word 不支持页眉页脚、合并单元格、列宽调整；样式作用整个 run，同一段内的局部富文本不支持。
 - Excel 不支持改图表类型或增删系列、不支持编辑数据透视表；批量标色遇到富文本 ID（共享字符串里带 run）时不生效，会计入 `richTextSkipped`，不假装染上了。
+
+## 28. 入口与状态一致性收尾（2026-11-09）
+
+外部复核 `00e27be` 后确认：架构方向无需重做，缺的是入口之间没接通。本节记录修正后的施工范围与验收边界，**保留现有发布机制**（同 operationId + 同字节 + 携带完成状态，本来就能发布同一候选），只补入口传递、持久化状态与续行。复核中被撤回或修正的三点：幂等重放不会覆盖已保存报告（`presentation_versions.file_id` 是主键、`INSERT OR IGNORE`）；视觉检查底层能发布同一候选；`requiredAssets` 目前没有生产写入方，指定素材属于「尚未启用完整生产链路的潜在缺口」，不是用户已普遍遇到的故障。
+
+### 28.1 契约绑定（唯一解析入口）
+
+`src/server/presentation-contract-resolution.ts` 的 `resolveContractSpec()` 是所有 PPT 保存路径的必经入口：
+
+- `specRef` 与旧的 `expectedSpecId/expectedSpecRevision` 都视为**显式绑定**，统一按 `ownedRevision(conversationId, specId, revision)` 解析；
+- 绑定不存在、属于别的会话、或 revision 已失效 → 抛 `SPEC_BINDING_INVALID`（409），**不降级为无契约、不改用会话 active**；
+- 只有真正没有绑定的旧文件才走 `findActive` 兼容路径；连 active 都没有时才是无契约文档；
+- 补做 / 视觉修复经 `boundSpecRefFromReport()` 读取文件卡里的 `specRef`，不再向保存函数只传 `expectedSpec*`。
+
+验收边界：显式绑定三种失效都拒绝且不产生文件；无绑定旧文件仍产生可信检查结果；同一会话另开任务（active 换绑）后补做旧文件仍按文件绑定的旧契约校验。
+
+### 28.2 状态回传（以最终保存报告为准）
+
+`finalDocumentResult()` / `documentStatusOf()` 统一产出三态：`fileProduced`（文件已产出）、`downloadableDraft`（草稿可下载）、`taskCompleted`（任务已完成）。模板生成、整页编辑、对象修改、补做（UI 动作）与 legacy `doc_convert` 都回传 `saved.report`，并在摘要里区分「草稿可下载，任务未完成」与「任务已完成」。幂等重放分支不改：已保存报告由 `INSERT OR IGNORE` 保护。
+
+### 28.3 证据核验（规划标签不是完成证据）
+
+- `assetBindings` 从生成入口一路传到检查器，覆盖封面素材、图片身份与字节哈希；哈希不一致报 `REQUIRED_ASSET_IDENTITY`。
+- `collectCaseEvidence()` 只把「页面可见正文含案例且有实质内容 + 该页能关联来源（sourceIds 或来源原文备注）」计为证据。`role: "case"` 与「案例 A/B/C」编号都只是线索，不能单独满足结构要求；证据不足时区分 `STRUCTURE_CASE_UNVERIFIED`（无证据）与 `STRUCTURE_CASE_COUNT`（证据不够）。
+- 语义必需内容不再一律 `unknown`：`presentation_requirement_verifications` 把结论绑定到**候选哈希 + Spec revision + 要求 ID**，文件字节改变即失效。保留一句原话可按「逐字 + 来源」确定性核验；案例结论必须有正文 + 来源证据，或由内容审校（`reviewPresentationSamples` 的 `verdicts`）给出带证据片段的可信结论。逐字出现**不是**所有语义要求的通用通过条件。
+- 内容审校的逐项结论随 `TemplateReport.requirementVerifications` 传到门禁；`carryDeckReport` 会丢弃旧结论，避免把上一份文件的核验继承到新字节上。
+
+### 28.4 视觉等待与续行
+
+- 正常调用把视觉阶段的真实结论（complete / partial / unavailable + blocking）传给发布层：`VisualReviewOutcome` → `publishVisualEvidence()`；看图未启用时不再伪造「已检查」。
+- `before_publish` 阻塞时 `PublishPending` 带 `candidateId/operationId`；`markPendingPublish()` 把发布意图写进候选 meta 与 `pending_visual_publishes`，复用 `presentation_family_refs(kind='visual_check')` 保护候选不被 TTL 清理，并把候选排进**已有的 WPS 检查队列**。
+- 工具层返回 `paused` 而不是 failed；重启时 `PresentationCheckQueue.recover()` → `reconcilePendingVisualChecks()` 重新排队；检查完成后 `completePendingVisualCheck()` 用保存的意图发布**同一候选**；发布日志与候选 state 保证重复回调最多发布一次。
+- 不重写发布机制：同 operationId + 同字节 + 检查完成状态的重放本来就能发布同一候选，补的是生产入口与持久化状态。
+
+### 28.5 跨入口回归
+
+`tests/presentation-cross-entry.test.ts`（H01–H10）：
+
+- H01–H03 契约绑定失效与兼容路径；H04 状态回传；H05–H07 素材 / 语义 / 案例证据；H08–H09 视觉等待、TTL 保护、重启恢复、重复回调幂等、一次通过；
+- H10 串起「生成 → 整页修改 → 切换任务（另一份 active 契约）→ 补做旧文件指定页 → 检查 → 发布同一候选」，断言全程按文件绑定的契约，而不是会话当前 active。
+
+全量回归：**114 文件 / 856 项通过**；`tsc --noEmit` 与 `tsc -p tsconfig.server.json --noEmit` 均通过。版本仍为 v2.3.5，**未打包、未打 tag**。

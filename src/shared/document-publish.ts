@@ -12,6 +12,31 @@ import type { TemplateReport } from "./presentation-report.js";
 
 export type VisualPolicy = "background" | "before_publish";
 
+/** before_publish 下候选等待检查时保存的发布意图：检查完成后用它发布同一份候选。 */
+export type PendingPublish = {
+  operationId: string;
+  candidateSha256: string;
+  specId?: string;
+  specRevision?: number;
+  baseline?: { fileId: string; sha256: string };
+  validationId: string | null;
+  disposition: "ready" | "draft";
+  report?: TemplateReport;
+  lineage?: { familyId?: string; parentId?: string };
+  visualPolicy: VisualPolicy;
+  expectedOwner?: string;
+  createdAt: string;
+  reason: string;
+};
+
+export type CandidateVisualCheck = {
+  status: "waiting" | "complete" | "unavailable";
+  source?: "visual-review" | "wps-render";
+  summary?: string;
+  blocking?: string[];
+  updatedAt: string;
+};
+
 export type CandidateMeta = {
   operationId: string;
   owner: string;
@@ -20,6 +45,9 @@ export type CandidateMeta = {
   specRevision?: number;
   baseline?: { fileId: string; sha256: string };
   lease?: string;
+  /** 有这份意图的候选是「等待检查」，不是普通过期候选。 */
+  pendingPublish?: PendingPublish;
+  visualCheck?: CandidateVisualCheck;
   updatedAt: string;
   expiresAt: string;
 };

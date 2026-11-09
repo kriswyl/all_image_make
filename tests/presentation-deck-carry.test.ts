@@ -97,20 +97,45 @@ const spec = (): PresentationSpec => ({
 /** 让门禁把真实校验结果写回来，而不是用固定桩掩盖结论。 */
 const store = {
   saveValidation: (input: Record<string, unknown>) => ({ validationId: "v1", ...input }),
+  listRequirementVerifications: () => [],
+  saveRequirementVerification: () => ({}),
 } as unknown as PresentationSpecStore;
 
-it("F06：没有职责计划时，正文里的三个案例标签即可满足结构要求", () => {
-  const plan = planOf(["总览", "案例 A：门店改造", "案例 B：渠道试点", "案例 C：供应链"]);
-  const checked = checkPresentationContract(store, { conversationId: "c1", spec: spec(), plan, bytes: Buffer.from("x") });
+/** 案例页必须有实质正文（不只是编号）且带来源关联，才能算「内容保留」证据。 */
+function caseDeck(titles: string[]): AiPresentation {
+  const deck = planOf(["总览", ...titles]);
+  titles.forEach((title, index) => {
+    deck.slides[index + 1] = {
+      ...deck.slides[index + 1]!,
+      lines: [`${title}：某客户通过该方案把交付周期从 30 天压缩到 12 天，复购率提升 18%。`],
+      sourceIds: [`source-case-${index + 1}`],
+    };
+  });
+  return deck;
+}
+
+it("F06：没有职责计划时，三个案例的正文 + 来源证据即可满足结构要求", () => {
+  const checked = checkPresentationContract(store, {
+    conversationId: "c1", spec: spec(), plan: caseDeck(["案例 A：门店改造", "案例 B：渠道试点", "案例 C：供应链"]), bytes: Buffer.from("x"),
+  });
   expect(checked.validation?.failures).toEqual([]);
   expect(checked.validation?.visibleCoverage).toEqual({ required: 1, satisfied: 1, unknown: 0 });
 });
 
-it("F07：正文只有两个案例时明确失败，不谎报满足", () => {
-  const plan = planOf(["总览", "案例 A：门店改造", "案例 B：渠道试点", "其他内容"]);
-  const checked = checkPresentationContract(store, { conversationId: "c1", spec: spec(), plan, bytes: Buffer.from("x") });
+it("F07：只有两个案例有证据时明确失败，不谎报满足", () => {
+  const checked = checkPresentationContract(store, {
+    conversationId: "c1", spec: spec(), plan: caseDeck(["案例 A：门店改造", "案例 B：渠道试点", "其他内容"]), bytes: Buffer.from("x"),
+  });
   expect(checked.validation?.failures.map(item => item.code)).toContain("STRUCTURE_CASE_COUNT");
   expect(checked.validation?.visibleCoverage).toEqual({ required: 1, satisfied: 0, unknown: 0 });
+});
+
+it("F09：只有案例编号、没有实质正文或来源，不算内容保留", () => {
+  const plan = planOf(["总览", "案例 A", "案例 B", "案例 C"]);
+  plan.slides.slice(1).forEach(slide => { slide.lines = []; slide.sourceIds = []; });
+  const checked = checkPresentationContract(store, { conversationId: "c1", spec: spec(), plan, bytes: Buffer.from("x") });
+  expect(checked.validation?.ok).toBe(false);
+  expect(checked.validation?.failures.map(item => item.code)).toContain("STRUCTURE_CASE_UNVERIFIED");
 });
 
 it("F08：修改版不能把版式退化成 content，应继承或从元素反推", () => {

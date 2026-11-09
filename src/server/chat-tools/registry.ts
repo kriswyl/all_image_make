@@ -43,6 +43,8 @@ export interface ChatToolResult {
   uiData?: Record<string, unknown>;
   imageContext?: BrainContentPart[];
   execution?: { state: ExecutionState; operationId: string; version: number; reasonCode?: string };
+  /** 候选等待后台检查：不是失败，运行时据此记为 paused 并触发检查队列。 */
+  pendingVisualCheck?: { candidateId: string; operationId: string };
 }
 
 /** A tool owns its public schema and execution policy; the runtime knows no domain-specific names. */

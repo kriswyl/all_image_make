@@ -104,7 +104,7 @@ it("指定图片必须按素材身份真正落位，图片数量不能冒充", a
   const db = await makeDb();
   const spec = await makeSpec(db, "c1", true);
   const assetId = spec.requiredAssets[0]!.assetId;
-  const bindings = [{ assetId, imageIndex: 0 }];
+  const bindings = [{ assetId, imageIndex: 0, sha256: "fixture-image-hash" }];
 
   const placed = checkPresentationContract(db.specs, {
     conversationId: "c1", spec, plan: deckWithImage(true), bytes: Buffer.from("placed"), assetBindings: bindings,
@@ -121,10 +121,17 @@ it("指定图片必须按素材身份真正落位，图片数量不能冒充", a
   // 页面上有图，但那不是用户指定的那张：不能算满足。
   const wrongAsset = checkPresentationContract(db.specs, {
     conversationId: "c1", spec, plan: deckWithImage(true), bytes: Buffer.from("wrong-asset"),
-    assetBindings: [{ assetId: "asset-other", imageIndex: 0 }],
+    assetBindings: [{ assetId: "asset-other", imageIndex: 0, sha256: "fixture-image-hash" }],
   });
   expect(wrongAsset.validation?.ok).toBe(false);
-  expect(wrongAsset.validation?.failures.some(item => item.code === "REQUIRED_ASSET")).toBe(true);
+  expect(wrongAsset.validation?.failures.some(item => item.code.startsWith("REQUIRED_ASSET"))).toBe(true);
+
+  // 素材 ID 对上了但图片内容哈希不同，也不能冒充原图。
+  const wrongHash = checkPresentationContract(db.specs, {
+    conversationId: "c1", spec, plan: deckWithImage(true), bytes: Buffer.from("wrong-hash"),
+    assetBindings: [{ assetId, imageIndex: 0, sha256: "another-image" }],
+  });
+  expect(wrongHash.validation?.failures.some(item => item.code === "REQUIRED_ASSET_IDENTITY")).toBe(true);
 
   // 完全没有绑定记录时不猜，也不放行。
   const unbound = checkPresentationContract(db.specs, {

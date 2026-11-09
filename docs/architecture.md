@@ -138,7 +138,19 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 - `overflowPages` / `capacity.{truncatedPages,reflowedPages}`：内容去了备注 / 被截断 / 放宽行高；
 - `freeformPages`：还有几页走整页元素（目标为 0）；
 - `deckPlan.{roleDistribution,repeatedRuns}`：职责分布与连续同版式提示；
-- `theme` / `specRef` / `checkSets`：皮肤、契约版本、实际检查了哪几页。
+- `theme` / `specRef` / `checkSets`：皮肤、契约版本、实际检查了哪几页；
+- `documentStatus`（工具结果）：文件已产出 / 草稿可下载 / 任务已完成三态，一律以保存后的最终报告为准。
+
+### 5.4 入口一致性（2026-11-09 收尾）
+
+| 环节 | 唯一入口 | 约束 |
+|---|---|---|
+| 契约解析 | `presentation-contract-resolution.ts` 的 `resolveContractSpec()` | 显式绑定失效必须拒绝；仅真无绑定的旧文件走 active 兼容路径 |
+| 证据核验 | `presentation-contract-check.ts` | 素材含身份与哈希；案例需正文 + 来源；语义结论绑定哈希 / revision / 要求 ID |
+| 视觉等待 | `document-publish.ts` 的 `markPendingPublish()` / `completePendingVisualCheck()` | 复用 `visual_check` 家族引用 + WPS 检查队列；等待记 paused、重启可续、只发布一次 |
+| 状态回传 | `chat-tools/documents.ts` 的 `finalDocumentResult()` | 生成 / 整页编辑 / 对象修改 / 补做 / legacy 统一以 `saved.report` 为准 |
+
+跨入口链路（生成 → 修改 → 切换任务 → 补做 → 检查 → 发布）由 `tests/presentation-cross-entry.test.ts` H01–H10 钉住。
 
 ## 6. 不能破的不变量
 
@@ -148,14 +160,17 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 4. **映射必须唯一命中**。同名多份、子对象缺失、文件被外部改过，一律拒绝，不按相似度猜。
 5. **plan 必须同步**。无法同步的页（`box` / `lines`）不允许声称旧 plan 仍有效。
 6. **契约 revision 不可变**。改要求只能追加 revision，文件版本不允许事后换绑。
-7. **候选默认不可见**。只有发布能把它变成成品。
+7. **候选默认不可见**。只有发布能把它变成成品；等待视觉检查的候选受 `visual_check` 引用保护，不被 TTL 清掉。
 8. **未检查 ≠ 已通过**。视觉或契约没跑完时，界面显示「未校验 / 未完成」，不冒充通过。
+9. **规划标签不是完成证据**。`role: "case"`、案例编号、模型自报通过都不能替代正文 + 来源的可核验结果。
+10. **显式绑定不能静默降级**。文件绑定的契约失效时拒绝发布，绝不退回「无契约」。
+11. **文件产出 ≠ 任务完成**。草稿可下载，但工具结果与 UI 必须标明任务未完成及原因。
 
 ## 7. 测试与评测
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 113 文件 / 845 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 114 文件 / 856 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
@@ -182,6 +197,8 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 | 新增工具 | `chat-tools/` 实现 + `registry.ts` 声明 + 预算与去重策略 |
 
 ## 9. 已知边界
+
+**共用的是「可扩展的共同底座」**：文件管理、候选发布与版本管理对各格式一致；任务契约（PresentationSpec）、可信检查结果与质量报告（TemplateReport）仍主要围绕 PPT。Word / Excel 复用候选发布与版本管理，不宣称具备 PPT 同等完整的契约核验能力。
 
 - **Word** 支持正文段落内文本替换、字符样式（加粗 / 斜体 / 下划线 / 颜色 / 字号，落到包含该文字的 run）与段落样式（对齐 / 行距 / 段前后 / 缩进 / 首行缩进，落到命中段落的 `pPr`），以及表格（按特征文字定位，改单元格文字或增删行列；增删列时总宽度守恒，含合并单元格/嵌套表的表格拒绝）；不支持页眉页脚、合并单元格与图片。
 - **Excel** 支持单元格读写、批量标色与标记；含图表/透视表/绘图的工作簿改走外科式 XML 写入（`xlsx-surgical.ts`），只动目标单元格与样式、并同步图表缓存，其余部件逐字节保留。不支持改图表类型/增删系列、编辑数据透视表。

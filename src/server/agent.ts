@@ -43,6 +43,7 @@ import { totalize } from "../shared/presentation-spec.js";
 import { specCacheKey } from "./presentation-spec-store.js";
 import { readProviderOutputCap, type StructuredWorkflowCall } from "./structured-workflow.js";
 import { PresentationCheckQueue } from "./presentation-check-queue.js";
+import { PublishPending } from "./document-publish.js";
 import { presentationPageOperation, revisePresentation, type PresentationAction } from "./presentation-revision.js";
 import { describeMindImages } from "./mind-image-vision.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";
@@ -259,6 +260,13 @@ export class AgentService {
       }
       return { fileId: saved?.id ?? fileId };
     } catch (error) {
+      if (error instanceof PublishPending) {
+        if (pending && this.activeTurns.get(conversationId) === controller) this.publishPresentationAction(conversationId, pending, {
+          ok: true, summary: `候选已产出并等待视觉检查；检查完成后会自动发布同一候选。`,
+        });
+        this.presentationChecks.kick();
+        return { fileId, pendingVisualCheck: true };
+      }
       if (pending && this.activeTurns.get(conversationId) === controller) this.publishPresentationAction(conversationId, pending, {
         ok: false, summary: controller.signal.aborted ? "补做已停止" : error instanceof Error ? error.message : "补做失败",
       });
@@ -640,6 +648,8 @@ export class AgentService {
           after: (event, result) => {
             const workflow = result.uiData?.workflow as { runId?: string } | undefined;
             this.db.executions.finish(event.operationId, result.execution?.state ?? (result.paused ? "paused" : result.ok ? "completed" : "failed"), { workflowId: workflow?.runId });
+            // 候选等待视觉检查：立刻拉起检查队列，检查完成会发布同一候选。
+            if (result.pendingVisualCheck) this.presentationChecks.kick();
           },
         });
         for (const spec of CHAT_DOCUMENT_TOOLS) {
@@ -784,6 +794,10 @@ export class AgentService {
                     ...(spec?.structure?.some(item => item.kind === "case_count")
                       ? { requiredCaseCount: spec.structure.find(item => item.kind === "case_count")!.value }
                       : {}),
+                    // 语义必需内容交给内容审校逐项核验，结论随报告传到发布门禁。
+                    ...(spec?.requiredContent?.length
+                      ? { requiredContent: spec.requiredContent.map(item => ({ id: item.id, description: item.description })) }
+                      : {}),
                     // D2：主题只决定皮肤，坐标仍由确定性渲染器计算。
                     // 优先级：本次调用的 style 参数 > 契约里记录的风格原文。
                     ...(resolveThemeId(style) ?? resolveThemeId(spec?.styleRequest?.text)
@@ -807,14 +821,23 @@ export class AgentService {
                   });
                 }, runId, async (plan, images, pageNumbers) => {
                   controller.signal.throwIfAborted();
-                  if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查" };
-                  if (isVisionBlocked(this.db, turnConversation)) return { plan, summary: "当前模型不接受图片，未进行实际页面视觉检查" };
+                  if (!turnConversation.visionEnabled) return { plan, summary: "会话未启用看图，未进行实际页面视觉检查", status: "unavailable" as const };
+                  if (isVisionBlocked(this.db, turnConversation)) return { plan, summary: "当前模型不接受图片，未进行实际页面视觉检查", status: "unavailable" as const };
                   // C：doc_edit 与 doc_convert 共用视觉缓存；键按「页内容+截图+主题+策略」复用，
                   // 不再因文件哈希变化而整体失效。doc_edit 传入 ChangeScope 推导的原页码集合。
                   const visualCache = { ...cache, scope, engineVersion: "visual-v2", modelFingerprint: scope };
                   const result = await reviewRenderedPresentation(plan, images, bytes => renderWithLocalWps(this.db, bytes, controller.signal), modelRequest, report, visualCache, pageNumbers);
                   controller.signal.throwIfAborted();
-                  return result;
+                  // 发布层只认真实检查结论：complete 且无阻塞问题才能标成「已检查」。
+                  return {
+                    plan: result.plan, summary: result.summary, metrics: result.metrics,
+                    status: result.complete && !result.issues.length ? "complete" as const : "partial" as const,
+                    blocking: result.issues.map(issue => `第 ${issue.page} 页：${issue.detail}`),
+                    checkedPages: result.checkedPages,
+                  };
+                }, {
+                  // A 收口：legacy 生成入口也显式绑定本次执行的契约版本。
+                  ...(spec ? { specRef: { specId: spec.specId, specRevision: spec.revision } } : {}),
                 });
                 controller.signal.throwIfAborted();
                 if (workflowStarted) {

@@ -693,6 +693,22 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS presentation_family_refs_family_idx ON presentation_family_refs(family_id);
+      -- 语义必需内容的核验结果：绑定「候选哈希 + Spec revision + 要求 ID」，
+      -- 文件一变旧结论自动失效；外部可信核验可据此解除 unknown。
+      CREATE TABLE IF NOT EXISTS presentation_requirement_verifications (
+        id TEXT PRIMARY KEY,
+        spec_id TEXT NOT NULL,
+        spec_revision INTEGER NOT NULL,
+        required_id TEXT NOT NULL,
+        file_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL,
+        method TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        source_ref TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS presentation_requirement_verifications_idx
+        ON presentation_requirement_verifications(spec_id, spec_revision, file_sha256, required_id);
     `);
 
     // 文档可靠性改造 B：候选状态与发布日志。
@@ -715,5 +731,13 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         UNIQUE (conversation_id, operation_id)
       );
       CREATE INDEX IF NOT EXISTS workspace_documents_state_idx ON workspace_documents(conversation_id, state);
+      -- before_publish 的等待状态：候选发布意图持久化在这里，重启后据 operationId 续行。
+      CREATE TABLE IF NOT EXISTS pending_visual_publishes (
+        candidate_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
 }

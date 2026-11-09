@@ -89,8 +89,11 @@ export function carryDeckReport(input: {
   const keep = (pageNumbers: number[] | undefined) =>
     (pageNumbers ?? []).filter(page => page >= 1 && page <= total && !touched.has(page));
 
+  // 语义核验结论绑定的是上一份文件的字节，内容一变就失效；不能继承到新版本。
+  const { requirementVerifications: staleVerdicts, ...inherited } = parentReport;
+  void staleVerdicts;
   return {
-    ...parentReport,
+    ...inherited,
     // 整稿内容变了，原内容审校结论不再代表当前文件。
     audit: "unavailable",
     issues: [],

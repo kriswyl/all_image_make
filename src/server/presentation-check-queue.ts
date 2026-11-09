@@ -5,8 +5,20 @@ import { readWorkspaceFile } from "./chat-tools/documents.js";
 import type { AppDatabase } from "./db.js";
 import { readPresentationProject } from "./presentation-project.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";
+import { completePendingVisualCheck, readCandidateBytes, reconcilePendingVisualChecks } from "./document-publish.js";
 
 const PAGE_LIMIT = 20;
+
+/** 正式文件与「等待发布的候选」都从磁盘读自己的字节，候选不允许被当成不存在。 */
+function readCheckBytes(db: AppDatabase, conversationId: string, fileId: string): Buffer {
+  try {
+    return readWorkspaceFile(db, conversationId, fileId).bytes;
+  } catch (error) {
+    const candidate = db.getCandidateById(conversationId, fileId);
+    if (!candidate) throw error;
+    return readCandidateBytes(db, conversationId, candidate);
+  }
+}
 
 /** One local WPS job at a time. The lease prevents an interrupted job from updating a newer check. */
 export class PresentationCheckQueue {
@@ -18,6 +30,8 @@ export class PresentationCheckQueue {
 
   recover() {
     this.db.recoverPresentationChecks();
+    // 等待视觉发布的候选在重启后重新排队；已发布的清掉登记。
+    reconcilePendingVisualChecks(this.db);
     this.kick();
   }
 
@@ -42,20 +56,20 @@ export class PresentationCheckQueue {
       if (!job) return;
       const signal = AbortSignal.any([this.stop.signal, AbortSignal.timeout(45_000)]);
       let result: PresentationVisualCheck;
+      const issues: NonNullable<PresentationVisualCheck["issues"]> = [];
       try {
-        const file = readWorkspaceFile(this.db, job.conversationId, job.fileId);
-        const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
-        if (hash(file.bytes) !== job.sha256) throw new Error("已交付文件在外部发生变化");
-        const project = await readPresentationProject(file.bytes);
+        const bytes = readCheckBytes(this.db, job.conversationId, job.fileId);
+        const hash = (value: Buffer) => createHash("sha256").update(value).digest("hex");
+        if (hash(bytes) !== job.sha256) throw new Error("已交付文件在外部发生变化");
+        const project = await readPresentationProject(bytes);
         if (!project) throw new Error("无法读取此版本的页面");
         const total = project.plan.slides.length;
         signal.throwIfAborted();
-        const pages = await renderWithLocalWps(this.db, file.bytes, signal, PAGE_LIMIT);
+        const pages = await renderWithLocalWps(this.db, bytes, signal, PAGE_LIMIT);
         signal.throwIfAborted();
         if (pages.length !== Math.min(total, PAGE_LIMIT)) throw new Error("WPS 返回的页数不完整");
-        const issues: NonNullable<PresentationVisualCheck["issues"]> = [];
-        for (const [index, bytes] of pages.entries()) {
-          const image = await Jimp.read(bytes);
+        for (const [index, pageBytes] of pages.entries()) {
+          const image = await Jimp.read(pageBytes);
           image.resize({ w: 64, h: 36 });
           const pixels = image.bitmap.data;
           if (pixels.every((channel, i) => channel === pixels[i % 4])) {
@@ -63,14 +77,31 @@ export class PresentationCheckQueue {
           }
           signal.throwIfAborted();
         }
-        if (hash(readWorkspaceFile(this.db, job.conversationId, job.fileId).bytes) !== job.sha256) throw new Error("检查期间文件发生变化");
+        if (hash(readCheckBytes(this.db, job.conversationId, job.fileId)) !== job.sha256) throw new Error("检查期间文件发生变化");
         result = { status: "checked", summary: `WPS 已核验 ${pages.length}/${total} 页的渲染完整性`, issues };
       } catch (error) {
         if (this.stop.signal.aborted) return;
         const reason = signal.aborted ? "WPS 检查超时" : error instanceof Error ? error.message.slice(0, 120) : "本机 WPS 暂不可用";
         result = { status: "unavailable", summary: `未检查 · ${reason}` };
       }
-      if (!this.stop.signal.aborted) this.db.finishPresentationCheck(job.fileId, lease, result);
+      if (!this.stop.signal.aborted) {
+        this.db.finishPresentationCheck(job.fileId, lease, result);
+        // 渲染检查完成即尝试发布等待中的同一候选；重复回调由发布日志与候选 state 保证只发一次。
+        const pending = this.db.listPendingVisualPublishes()
+          .find(item => item.candidateId === job.fileId && item.conversationId === job.conversationId);
+        if (pending) {
+          try {
+            completePendingVisualCheck(this.db, {
+              conversationId: job.conversationId, candidateId: job.fileId,
+              status: result.status === "checked" && !issues.length ? "complete" : "unavailable",
+              source: "wps-render", summary: result.summary,
+              blocking: issues.map(issue => `第 ${issue.page} 页：${issue.detail}`),
+            });
+          } catch (error) {
+            if (!this.stop.signal.aborted) console.warn("等待中的候选发布失败", error);
+          }
+        }
+      }
     }
   }
 }
