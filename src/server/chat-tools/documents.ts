@@ -504,6 +504,13 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
             parentPlan: project.plan,
             touched: [],
           });
+          // 补丁成功但文字可能放不下：写进报告让用户和后续视觉检查都看得见。
+          for (const warning of patched.report.warnings) {
+            const detail = `第 ${warning.slide} 页 ${warning.elementId} ${warning.detail}`.slice(0, 180);
+            if (carried && !carried.issues.some(issue => issue.page === warning.slide && issue.detail === detail)) {
+              carried.issues.push({ page: warning.slide, detail });
+            }
+          }
           const saved = saveWorkspaceDocument(db, conversationId, `${baseName}-修改版`, "pptx", patched.bytes, operationId, carried, lineage,
             { plan: patched.plan, checkSets: { contentPages: [], auditPages: [], visualPages: [], widened: false, reason: "只改对象样式或位置，未重排页面", effects: [] }, ...(carried?.specRef ? { specRef: carried.specRef } : {}) });
           db.pruneWorkspaceFamily(conversationId, parentDocument?.familyId ?? saved.familyId, 3);
@@ -511,7 +518,7 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           const ops = patched.report.applied.flatMap(item => item.operations).length;
           return {
             ok: true,
-            summary: `已原位修改 ${patched.report.applied.length} 个对象（${ops} 项属性），只改第 ${[...new Set(patched.report.applied.map(item => item.slide))].join("、")} 页，其余页面和部件保持原样；新版本 ${saved.name}，原文件保留。`,
+            summary: `已原位修改 ${patched.report.applied.length} 个对象（${ops} 项属性），只改第 ${[...new Set(patched.report.applied.map(item => item.slide))].join("、")} 页，其余页面和部件保持原样；新版本 ${saved.name}，原文件保留。${patched.report.warnings.length ? ` 注意：第 ${[...new Set(patched.report.warnings.map(item => item.slide))].join("、")} 页文字可能超出文本框，建议改短、拆页或调大文本框。` : ""}`,
             data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize, sha256 },
           };
         }

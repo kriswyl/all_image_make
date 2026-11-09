@@ -15,6 +15,7 @@ import type { AiPresentation } from "./mind-document.js";
 import type { PresentationElement } from "./presentation-elements.js";
 import { buildObjectMap, resolveObjectBinding } from "./presentation-object-map.js";
 import { packPresentationProject } from "./presentation-project.js";
+import { fitChars, measureHeight } from "../shared/presentation-capacity.js";
 
 export type ObjectPatch = {
   slide: number;
@@ -32,6 +33,11 @@ export type ObjectPatch = {
 export type PatchReport = {
   applied: Array<{ slide: number; elementId: string; operations: string[] }>;
   rejected: Array<{ slide: number; elementId: string; reason: string }>;
+  /**
+   * 补丁成功但结果有风险。目前只有一种：文字改长了，按当前字号放不进文本框。
+   * 这类页不会被标成内容缺失，但必须让调用方看见 —— 用户打开时可能被截断。
+   */
+  warnings: Array<{ slide: number; elementId: string; detail: string }>;
   /** 与补丁前相比真正变了的部件；只应有目标页 */
   changedParts: string[];
   unchangedParts: number;
@@ -170,7 +176,7 @@ export async function patchPresentationObjects(
   const zip = await JSZip.loadAsync(bytes);
   const before = await partHashes(zip);
   const nextPlan = structuredClone(plan);
-  const report: PatchReport = { applied: [], rejected: [], changedParts: [], unchangedParts: 0 };
+  const report: PatchReport = { applied: [], rejected: [], warnings: [], changedParts: [], unchangedParts: 0 };
   const touchedParts = new Set<string>();
 
   for (const patch of patches) {
@@ -225,6 +231,20 @@ export async function patchPresentationObjects(
     zip.file(binding.slidePart, xml.replace(block, nextBlock));
     touchedParts.add(binding.slidePart);
     slide.elements = slide.elements.map(item => item.id === patch.elementId ? syncPlanElement(item, patch) : item);
+    // 补丁成功不等于排版成立：文字变长后按当前字号可能放不进原文本框。
+    // 这里只诊断，不擅自缩字号 —— 缩字号是用户的决定，不是补丁的副作用。
+    if (patch.text !== undefined && element.type === "text") {
+      const fontSize = patch.fontSize ?? element.style?.fontSize ?? 18;
+      const rect = patch.rect ?? { x: element.x, y: element.y, w: element.w, h: element.h };
+      const needed = measureHeight(patch.text, fontSize, { w: rect.w, h: rect.h });
+      if (needed > rect.h + 0.06) {
+        const keep = fitChars(patch.text, fontSize, { w: rect.w, h: rect.h });
+        report.warnings.push({
+          slide: patch.slide, elementId: patch.elementId,
+          detail: `文字放不下：${fontSize}pt 下约需 ${needed.toFixed(2)} 英寸，文本框只有 ${rect.h.toFixed(2)} 英寸；当前约能放下 ${keep}/${Array.from(patch.text).length} 字，建议改短、拆页或调大文本框`,
+        });
+      }
+    }
     report.applied.push({ slide: patch.slide, elementId: patch.elementId, operations });
   }
 

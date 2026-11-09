@@ -240,3 +240,53 @@ it("P12：doc_edit 改文字同样走原位补丁，读回的源方案文字已�
   const element = project.plan.slides[0]!.elements!.find(item => item.id === "t-body")!;
   expect(element.type === "text" && element.text).toBe("改写后的正文\n第二段");
 });
+
+it("P13：文字改长后放不进文本框要给出警告，但不擅自缩字号", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const long = "这是一段被刻意写得很长的正文，用来验证补丁之后的容量诊断是否生效。".repeat(12);
+  const result = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-body", text: long }]);
+  expect(result.report.applied).toHaveLength(1);
+  expect(result.report.warnings).toHaveLength(1);
+  const warning = result.report.warnings[0]!;
+  expect(warning.elementId).toBe("t-body");
+  expect(warning.detail).toContain("文字放不下");
+  expect(warning.detail).toContain("建议改短");
+  // 明确没有替用户缩字号：字号仍是原来的 18pt
+  expect(await slideXml(result.bytes)).toContain('sz="1800"');
+  // plan 里保留用户给的原文，不做静默截断
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "t-body")!;
+  expect(element.type === "text" && element.text).toBe(long);
+});
+
+it("P14：正常长度或不改文字时不产生警告", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const short = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-body", text: "一句正常的正文" }]);
+  expect(short.report.warnings).toEqual([]);
+  const style = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-body", fontSize: 20 }]);
+  expect(style.report.warnings).toEqual([]);
+});
+
+it("P15：doc_edit 把溢出写进摘要与报告问题列表", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "object-patch-warn-"));
+  const db = new AppDatabase(dir);
+  databases.push(db);
+  const conversationId = db.createConversation({
+    title: "溢出警告", brainChannelId: "mock-channel", brainModel: "mock",
+    videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false,
+  }).id;
+  const bytes = await packPresentationProject(await renderAiPresentation(plan), plan, []);
+  const source = saveWorkspaceDocument(db, conversationId, "溢出源文件", "pptx", bytes, "op-source", {
+    draft: false, resume: false, fallbackPages: [], pendingPages: [], overflowPages: [],
+    sourceLimitedPages: [], notesLimitedPages: [], unplacedImages: 0, planningFallback: false,
+    audit: "unavailable", issues: [],
+  });
+  const long = "把正文写得很长很长，长到按当前字号一定放不进这个文本框。".repeat(15);
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId: source.id, expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+    objects: [{ slide: 1, elementId: "t-body", text: long }],
+  }), undefined, "op-warn");
+  expect(result.ok).toBe(true);
+  expect(result.summary).toContain("文字可能超出文本框");
+  const report = db.getPresentationVersion(conversationId, String(result.data!.fileId))!.report;
+  expect(report.issues.some(issue => issue.page === 1 && issue.detail.includes("文字放不下"))).toBe(true);
+});
