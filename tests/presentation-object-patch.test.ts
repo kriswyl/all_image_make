@@ -613,3 +613,112 @@ it("R07：内嵌工作簿结构损坏时如实警告，不假装同步成功", a
   expect(result.report.applied).toHaveLength(1);
   expect(result.report.warnings[0]!.detail).toContain("内嵌数据表同步失败");
 });
+
+const tableXml = async (bytes: Buffer) => {
+  const xml = await slideXml(bytes);
+  return xml.match(/<a:tbl>[\s\S]*?<\/a:tbl>/)![0];
+};
+const rowHeights = (tbl: string) => [...tbl.matchAll(/<a:tr\b[^>]*\bh="(\d+)"/g)].map(match => Number(match[1]));
+const cellsPerRow = (tbl: string) => [...tbl.matchAll(/<a:tr\b[^>]*>[\s\S]*?<\/a:tr>/g)].map(row => (row[0].match(/<a:tc>/g) ?? []).length);
+const colWidths = (tbl: string) => [...tbl.matchAll(/<a:gridCol\b[^>]*\bw="(\d+)"/g)].map(match => Number(match[1]));
+
+it("T01：末尾增行保持总高度与样式，plan 同步出一行空白", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const before = await tableXml(bytes);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { insertRows: { at: 4, count: 1 } } }]);
+  expect(result.report.rejected).toEqual([]);
+  expect(result.report.applied[0]!.operations).toEqual(["insertRows"]);
+  const after = await tableXml(result.bytes);
+  expect(rowHeights(after)).toHaveLength(4);
+  // 总高度不变：表格不会撑出文本框
+  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+  expect(sum(rowHeights(after))).toBe(sum(rowHeights(before)));
+  // 新行是空文本，但保留了单元格结构与边框
+  const lastRow = [...after.matchAll(/<a:tr\b[^>]*>[\s\S]*?<\/a:tr>/g)].at(-1)![0];
+  expect(lastRow.match(/<a:t><\/a:t>/g)).toHaveLength(2);
+  expect(lastRow).toContain("<a:tcPr");
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows).toEqual([["阶段", "结果"], ["选点", "3 个"], ["试点", "1 个"], ["", ""]]);
+  expect(result.report.changedParts).toEqual(["ppt/slides/slide1.xml"]);
+  // 表格必须仍在 graphicFrame 里，否则 PowerPoint/WPS 会整块不渲染
+  expect(await slideXml(result.bytes)).toContain("<p:graphicFrame");
+});
+
+it("T02：删除中间行同步删掉 plan 行，总高度仍不变", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const before = await tableXml(bytes);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { deleteRows: { at: 2, count: 1 } } }]);
+  const after = await tableXml(result.bytes);
+  expect(rowHeights(after)).toHaveLength(2);
+  expect(rowHeights(after).reduce((a, b) => a + b, 0)).toBe(rowHeights(before).reduce((a, b) => a + b, 0));
+  expect(after).not.toContain("<a:t>选点</a:t>");
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows).toEqual([["阶段", "结果"], ["试点", "1 个"]]);
+});
+
+it("T03：增列给每行补一个空单元格，列宽总和不变", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const before = await tableXml(bytes);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { insertCols: { at: 2, count: 1 } } }]);
+  const after = await tableXml(result.bytes);
+  expect(colWidths(after)).toHaveLength(3);
+  expect(colWidths(after).reduce((a, b) => a + b, 0)).toBe(colWidths(before).reduce((a, b) => a + b, 0));
+  expect(cellsPerRow(after)).toEqual([3, 3, 3]);
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows[0]).toEqual(["阶段", "", "结果"]);
+});
+
+it("T04：删列同步收窄每行与网格", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { deleteCols: { at: 2, count: 1 } } }]);
+  const after = await tableXml(result.bytes);
+  expect(colWidths(after)).toHaveLength(1);
+  expect(cellsPerRow(after)).toEqual([1, 1, 1]);
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows).toEqual([["阶段"], ["选点"], ["试点"]]);
+});
+
+it("T05：越界、混用、合并单元格都拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const outOfRange = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { insertRows: { at: 6, count: 1 } } }]);
+  expect(outOfRange.report.rejected[0]!.reason).toContain("行位置超出范围");
+
+  const deleteTooMany = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { deleteRows: { at: 1, count: 3 } } }]);
+  expect(deleteTooMany.report.rejected[0]!.reason).toContain("至少保留一行");
+
+  const mixed = await patchPresentationObjects(bytes, tablePlan, [{
+    slide: 1, elementId: "tb-1",
+    table: { cells: [{ row: 2, col: 1, text: "x" }], insertRows: { at: 2, count: 1 } },
+  }]);
+  expect(mixed.report.rejected[0]!.reason).toContain("一次只能做一件事");
+
+  // 人为加一个合并属性，结构补丁必须拒绝
+  const merged = await (async () => {
+    const zip = await JSZip.loadAsync(bytes);
+    const xml = await zip.file("ppt/slides/slide1.xml")!.async("string");
+    zip.file("ppt/slides/slide1.xml", xml.replace("<a:tc>", '<a:tc gridSpan="2">'));
+    return zip.generateAsync({ type: "nodebuffer" });
+  })();
+  const rejected = await patchPresentationObjects(merged, tablePlan, [{ slide: 1, elementId: "tb-1", table: { insertRows: { at: 2, count: 1 } } }]);
+  expect(rejected.report.rejected[0]!.reason).toContain("合并单元格");
+});
+
+it("T06：doc_edit 增行端到端", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "table-structure-"));
+  const db = new AppDatabase(dir);
+  databases.push(db);
+  const conversationId = db.createConversation({
+    title: "表格结构", brainChannelId: "mock-channel", brainModel: "mock",
+    videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false,
+  }).id;
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const source = saveWorkspaceDocument(db, conversationId, "表格源文件", "pptx", bytes, "op-source");
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId: source.id, expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+    objects: [{ slide: 1, elementId: "tb-1", table: { insertRows: { at: 4, count: 1 } } }],
+  }), undefined, "op-table-structure");
+  expect(result.ok).toBe(true);
+  const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
+  const element = project.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows).toHaveLength(4);
+});

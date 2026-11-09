@@ -48,6 +48,7 @@ const patched = await patchPresentationObjects(bytes, plan, [
   { slide: 1, elementId: "img-1", image: { data: blue } },
   { slide: 2, elementId: "ch-1", chart: { series: [{ values: [9, 12] }] } },
   { slide: 3, elementId: "tb-1", table: { cells: [{ row: 2, col: 2, text: "12 个" }, { row: 3, col: 1, text: "推广" }] } },
+  { slide: 3, elementId: "tb-1", table: { insertRows: { at: 4, count: 1 } } },
 ], images);
 if (patched.report.rejected.length) throw new Error(`补丁被拒：${JSON.stringify(patched.report.rejected)}`);
 

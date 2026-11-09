@@ -17,6 +17,7 @@ import { buildObjectMap, resolveObjectBinding } from "./presentation-object-map.
 import { packPresentationProject } from "./presentation-project.js";
 import { fitChars, measureHeight } from "../shared/presentation-capacity.js";
 import { syncChartWorkbook, type WorkbookSync } from "./presentation-chart-workbook.js";
+import { deleteColumns, deleteRows, insertColumns, insertRows } from "./presentation-table-structure.js";
 
 export type ObjectPatch = {
   slide: number;
@@ -42,8 +43,17 @@ export type ObjectPatch = {
     categories?: string[];
     series?: Array<{ name?: string; values: number[] }>;
   };
-  /** 改表格单元格文字：行列从 1 开始，只换文字，单元格样式与边框不动 */
-  table?: { cells: Array<{ row: number; col: number; text: string }> };
+  /**
+   * 表格补丁：行列从 1 开始。一次只能做一件事 —— 改文字、增行、删行、增列、删列。
+   * 结构变化会按总高度/总宽度均分，表格外框保持不动。
+   */
+  table?: {
+    cells?: Array<{ row: number; col: number; text: string }>;
+    insertRows?: { at: number; count: number };
+    deleteRows?: { at: number; count: number };
+    insertCols?: { at: number; count: number };
+    deleteCols?: { at: number; count: number };
+  };
 };
 
 export type PatchReport = {
@@ -236,10 +246,24 @@ function syncPlanElement(element: PresentationElement, patch: ObjectPatch): Pres
     return { ...element, ...(patch.rect ?? {}), ...(patch.color !== undefined ? { fill: patch.color.toUpperCase() } : {}) };
   }
   if (element.type === "table" && patch.table) {
-    const rows = element.rows.map((row, rowIndex) => row.map((text, colIndex) => {
-      const next = patch.table!.cells.find(cell => cell.row === rowIndex + 1 && cell.col === colIndex + 1);
-      return next ? next.text : text;
-    }));
+    let rows = element.rows.map(row => [...row]);
+    if (patch.table.cells) {
+      rows = rows.map((row, rowIndex) => row.map((text, colIndex) => {
+        const next = patch.table!.cells!.find(cell => cell.row === rowIndex + 1 && cell.col === colIndex + 1);
+        return next ? next.text : text;
+      }));
+    } else if (patch.table.insertRows) {
+      const { at, count } = patch.table.insertRows;
+      rows.splice(at - 1, 0, ...Array.from({ length: count }, () => Array.from({ length: rows[0]!.length }, () => "")));
+    } else if (patch.table.deleteRows) {
+      rows.splice(patch.table.deleteRows.at - 1, patch.table.deleteRows.count);
+    } else if (patch.table.insertCols) {
+      const { at, count } = patch.table.insertCols;
+      rows = rows.map(row => { const next = [...row]; next.splice(at - 1, 0, ...Array.from({ length: count }, () => "")); return next; });
+    } else if (patch.table.deleteCols) {
+      const { at, count } = patch.table.deleteCols;
+      rows = rows.map(row => { const next = [...row]; next.splice(at - 1, count); return next; });
+    }
     return { ...element, ...(patch.rect ?? {}), rows };
   }
   if (element.type === "chart") {
@@ -382,10 +406,29 @@ export async function patchPresentationObjects(
     if (patch.table !== undefined) {
       if (element.type !== "table") { reject("只有表格对象能改单元格"); continue; }
       const rows = element.rows.length, cols = element.rows[0]?.length ?? 0;
-      const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
-      if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
-      if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
-      if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+      const structure = [patch.table.insertRows, patch.table.deleteRows, patch.table.insertCols, patch.table.deleteCols].filter(Boolean);
+      if ((patch.table.cells ? 1 : 0) + structure.length !== 1) { reject("一次只能做一件事：改单元格，或者增减行列"); continue; }
+      if (patch.table.cells) {
+        const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
+        if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
+        if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
+        if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+      }
+      const operation = structure[0];
+      if (operation) {
+        const { at, count } = operation;
+        if (!Number.isInteger(at) || !Number.isInteger(count) || count < 1 || count > 10) { reject("增删行列的 at / count 必须是整数，count 在 1–10 之间"); continue; }
+        const isRow = operation === patch.table.insertRows || operation === patch.table.deleteRows;
+        const limit = isRow ? rows : cols;
+        const inserting = operation === patch.table.insertRows || operation === patch.table.insertCols;
+        if (!inserting && limit - count < 1) { reject(`删完后至少保留一${isRow ? "行" : "列"}`); continue; }
+        const maxAt = inserting ? limit + 1 : limit - count + 1;
+        if (at < 1 || at > maxAt) { reject(`${isRow ? "行" : "列"}位置超出范围：当前 ${limit} ${isRow ? "行" : "列"}，at 应在 1–${maxAt}`); continue; }
+        const nextRows = inserting ? (isRow ? rows + count : rows) : (isRow ? rows - count : rows);
+        const nextCols = inserting ? (isRow ? cols : cols + count) : (isRow ? cols : cols - count);
+        if (nextRows < 1 || nextRows > 30) { reject(`改完后会是 ${nextRows} 行，超出 1–30 行的限制`); continue; }
+        if (nextCols < 1 || nextCols > 20) { reject(`改完后会是 ${nextCols} 列，超出 1–20 列的限制`); continue; }
+      }
     }
     if (patch.chart !== undefined) {
       if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
@@ -424,10 +467,29 @@ export async function patchPresentationObjects(
     if (patch.table !== undefined) {
       if (element.type !== "table") { reject("只有表格对象能改单元格"); continue; }
       const rows = element.rows.length, cols = element.rows[0]?.length ?? 0;
-      const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
-      if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
-      if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
-      if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+      const structure = [patch.table.insertRows, patch.table.deleteRows, patch.table.insertCols, patch.table.deleteCols].filter(Boolean);
+      if ((patch.table.cells ? 1 : 0) + structure.length !== 1) { reject("一次只能做一件事：改单元格，或者增减行列"); continue; }
+      if (patch.table.cells) {
+        const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
+        if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
+        if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
+        if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+      }
+      const operation = structure[0];
+      if (operation) {
+        const { at, count } = operation;
+        if (!Number.isInteger(at) || !Number.isInteger(count) || count < 1 || count > 10) { reject("增删行列的 at / count 必须是整数，count 在 1–10 之间"); continue; }
+        const isRow = operation === patch.table.insertRows || operation === patch.table.deleteRows;
+        const limit = isRow ? rows : cols;
+        const inserting = operation === patch.table.insertRows || operation === patch.table.insertCols;
+        if (!inserting && limit - count < 1) { reject(`删完后至少保留一${isRow ? "行" : "列"}`); continue; }
+        const maxAt = inserting ? limit + 1 : limit - count + 1;
+        if (at < 1 || at > maxAt) { reject(`${isRow ? "行" : "列"}位置超出范围：当前 ${limit} ${isRow ? "行" : "列"}，at 应在 1–${maxAt}`); continue; }
+        const nextRows = inserting ? (isRow ? rows + count : rows) : (isRow ? rows - count : rows);
+        const nextCols = inserting ? (isRow ? cols : cols + count) : (isRow ? cols : cols - count);
+        if (nextRows < 1 || nextRows > 30) { reject(`改完后会是 ${nextRows} 行，超出 1–30 行的限制`); continue; }
+        if (nextCols < 1 || nextCols > 20) { reject(`改完后会是 ${nextCols} 列，超出 1–20 列的限制`); continue; }
+      }
     }
     if (patch.chart !== undefined) {
       if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
@@ -470,7 +532,7 @@ export async function patchPresentationObjects(
         }
       } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
     }
-    if (patch.table !== undefined && element.type === "table") {
+    if (patch.table?.cells && element.type === "table") {
       let changedCells = 0;
       for (const cell of patch.table.cells) {
         const result = patchTableCell(nextBlock, cell.row, cell.col, cell.text);
@@ -492,6 +554,22 @@ export async function patchPresentationObjects(
           });
         }
       }
+    }
+    if (patch.table && !patch.table.cells && element.type === "table") {
+      const op = patch.table.insertRows ? { kind: "insertRows" as const, value: patch.table.insertRows }
+        : patch.table.deleteRows ? { kind: "deleteRows" as const, value: patch.table.deleteRows }
+          : patch.table.insertCols ? { kind: "insertCols" as const, value: patch.table.insertCols }
+            : patch.table.deleteCols ? { kind: "deleteCols" as const, value: patch.table.deleteCols } : undefined;
+      if (!op) { reject("表格补丁没有给出任何操作"); continue; }
+      try {
+        const result = op.kind === "insertRows" ? insertRows(nextBlock, op.value.at, op.value.count)
+          : op.kind === "deleteRows" ? deleteRows(nextBlock, op.value.at, op.value.count)
+            : op.kind === "insertCols" ? insertColumns(nextBlock, op.value.at, op.value.count)
+              : deleteColumns(nextBlock, op.value.at, op.value.count);
+        if (!result.changed) { reject("表格结构没有变化，或结构不符合预期"); continue; }
+        nextBlock = result.block;
+        operations.push(op.kind);
+      } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
     }
     if (patch.text !== undefined) {
       const result = patchTextContent(nextBlock, patch.text);
