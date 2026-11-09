@@ -2,9 +2,28 @@ import { createHash } from "node:crypto";
 import type { AiPresentation } from "./mind-document.js";
 import type { TemplateReport } from "../shared/presentation-report.js";
 import {
-  findRepeatedRuns, inferRole, layoutFitsRole, preferredLayouts, summarizeRoles,
+  SLIDE_LAYOUTS, findRepeatedRuns, inferRole, layoutFitsRole, preferredLayouts, summarizeRoles,
   type PageRole, type SlideLayout,
 } from "../shared/presentation-roles.js";
+
+/** 真正的版式名；`cover/content/section` 是 AiPresentation 层，不能当版式继承。 */
+const CONTENT_LAYOUTS = new Set<string>(SLIDE_LAYOUTS);
+
+/** 从渲染器的元素 id 反推版式；用于「这一页被改过、没有可继承的版式」。 */
+export function inferLayoutFromElements(slide: AiPresentation["slides"][number]): SlideLayout {
+  const ids = new Set((slide.elements ?? []).map(element => element.id));
+  const has = (prefix: string) => [...ids].some(id => id.startsWith(prefix));
+  if (has("kpi-")) return "kpi";
+  if (ids.has("timeline-axis")) return "timeline";
+  if (ids.has("quote-bar")) return "quote";
+  if (ids.has("table")) return "table";
+  if (ids.has("chart")) return "chart";
+  if (ids.has("comparison-divider")) return "comparison";
+  if (has("panel-")) return "cards";
+  if (has("marker-")) return "bullets";
+  if (ids.has("picture")) return "image";
+  return "bullets";
+}
 
 /**
  * 修改入口（doc_edit / 单页补做 / 视觉修复）没有重新生成整稿，
@@ -39,7 +58,8 @@ export function carryDeckReport(input: {
     previous.set(signature(slide), {
       role: entry.role as PageRole,
       ...(entry.seriesId ? { seriesId: entry.seriesId } : {}),
-      layout: entry.layout as SlideLayout,
+      // 历史报告可能被旧版本写成了 content；只继承真正的版式名，其余交给反推。
+      ...(CONTENT_LAYOUTS.has(entry.layout) ? { layout: entry.layout as SlideLayout } : {}),
     });
   });
 
@@ -50,7 +70,9 @@ export function carryDeckReport(input: {
     const matched = previous.get(signature(slide));
     // 未改动的页沿用原职责；改过的页按新标题重新推断，避免把「改成对比结构」仍记成案例。
     const role = matched?.role ?? inferRole(slide.title, "", { index, contentCount });
-    const layout = (slide.layout ?? "bullets") as SlideLayout;
+    // 注意：`slide.layout` 是 AiPresentation 层的 cover/content，不是版式名。
+    // 版式只能从原报告继承，或按渲染器元素 id 反推，否则 deckPlan 会退化成「全是 content」。
+    const layout = matched?.layout ?? inferLayoutFromElements(slide);
     return {
       page, role, layout, fitsRole: layoutFitsRole(role, layout),
       ...(matched?.seriesId ? { seriesId: matched.seriesId } : {}),

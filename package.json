@@ -25,6 +25,7 @@
     "eval:contract": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/evaluate-presentation-contract.js",
     "eval:diversity": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/measure-presentation-diversity.js",
     "eval:contract:real": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/evaluate-presentation-contract-real.js",
+    "eval:declarative": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-declarative-edit-real.js",
     "eval:local-visual": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-presentation-local-visual.js",
     "eval:wps": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-local-wps.js",
     "eval:visual": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/evaluate-presentation-visual.js",

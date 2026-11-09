@@ -112,3 +112,29 @@ it("F07：正文只有两个案例时明确失败，不谎报满足", () => {
   expect(checked.validation?.failures.map(item => item.code)).toContain("STRUCTURE_CASE_COUNT");
   expect(checked.validation?.visibleCoverage).toEqual({ required: 1, satisfied: 0, unknown: 0 });
 });
+
+it("F08：修改版不能把版式退化成 content，应继承或从元素反推", () => {
+  const parent = planOf(["总览", "指标页", "流程页", "对比页"]);
+  const child = structuredClone(parent);
+  // 第 2 页被改成指标卡（渲染器元素），第 4 页内容未动
+  child.slides[1] = {
+    layout: "content", title: "指标页", subtitle: "", notes: "", sourceIds: ["s-2"], lines: [],
+    elements: [
+      { type: "shape", id: "kpi-0", shape: "roundRect", x: 0.8, y: 2, w: 3, h: 4, fill: "EEEEEE" },
+      { type: "text", id: "kpi-value-0", x: 1, y: 2.4, w: 2.6, h: 1.4, text: "92%", style: { fontSize: 44 } },
+    ],
+  };
+  const carried = carryDeckReport({
+    plan: child, parentPlan: parent, touched: [2],
+    parentReport: reportOf([
+      { page: 1, role: "claim", layout: "bullets" },
+      { page: 2, role: "evidence", layout: "table" },
+      { page: 3, role: "process", layout: "timeline" },
+      { page: 4, role: "comparison", layout: "comparison" },
+    ]),
+  });
+  const layouts = carried!.deckPlan!.pages.map(page => `${page.page}:${page.layout}`);
+  // 未改页沿用原版式；被改页从 kpi-* 元素反推为 kpi，而不是 content
+  expect(layouts).toEqual(["1:bullets", "2:kpi", "3:timeline", "4:comparison"]);
+  expect(layouts.some(item => item.endsWith(":content"))).toBe(false);
+});

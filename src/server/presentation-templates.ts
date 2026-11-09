@@ -3,6 +3,7 @@ import type { AiPresentation } from "./mind-document.js";
 import { PAGE_HEIGHT, layoutIssues, resolveElements, validateElements, type PresentationDesign, type PresentationElement } from "./presentation-elements.js";
 import { presentationInk, presentationPanel } from "./presentation-palette.js";
 import { DEFAULT_THEME_ID, getTheme, type ThemeTokens } from "../shared/presentation-theme.js";
+import { compressText, fitChars, measureHeight, type CapacityDiagnosis } from "../shared/presentation-capacity.js";
 
 const DEFAULT_THEME = getTheme(DEFAULT_THEME_ID);
 
@@ -72,9 +73,11 @@ export function validSlideContent(content: SlideContent, images: number[]): bool
 export function renderContentSlide(
   content: SlideContent, design: PresentationDesign, sourceIds: string[], sourceNotes: string,
   status?: "精简页" | "待补全", imageIndex?: number, theme: ThemeTokens = DEFAULT_THEME,
-): { slide: Slide; overflow: boolean } {
+): { slide: Slide; overflow: boolean; capacity: CapacityDiagnosis } {
   const elements: PresentationElement[] = [];
   const moved: string[] = [];
+  // 容量诊断随渲染一起产出：哪一页被压缩、被截断、放宽了行高，都必须能核对。
+  const capacity: CapacityDiagnosis = { ok: true, issues: [], truncated: [], reflowed: [] };
   const paper = design.background ?? theme.colors.background;
   // 面板/墨色仍由对比度推导兜底：主题可以给建议色，但不能把文字压到看不清。
   const panel = design.background ? presentationPanel(paper) : theme.colors.panel ?? presentationPanel(paper);
@@ -85,18 +88,32 @@ export function renderContentSlide(
   const add = (id: string, value: string | undefined, rect: Rect, size: number, min: number, color = ink, bold = false) => {
     if (!value) return;
     const item: Text = { type: "text", id, ...rect, text: xmlText(value), style: { fontSize: size, color, bold, margin: 0, valign: "middle", fontFace } };
+    // 第一层：缩字号，但有下限；到下限就停，不许无声突破。
     while (layoutIssues([item]).length && item.style!.fontSize! > min) item.style!.fontSize! -= 1;
     if (layoutIssues([item]).length) {
-      moved.push(value);
-      const chars = Array.from(item.text);
-      let low = 0, high = chars.length;
-      while (low < high) {
-        const middle = Math.ceil((low + high) / 2);
-        item.text = chars.slice(0, middle).join("").trimEnd() + "…";
-        if (layoutIssues([item]).length) high = middle - 1;
-        else low = middle;
+      // 第二层：按语义边界压缩（分句处断开），而不是从字中间硬切。
+      const fontSize = item.style!.fontSize!;
+      const budget = fitChars(item.text, fontSize, rect);
+      const compressed = compressText(item.text, budget);
+      item.text = compressed.text;
+      // 压缩本身可能因为字宽估算与真实排版差一点，仍放不下就继续退字。
+      let chars = Array.from(item.text);
+      while (layoutIssues([item]).length && chars.length > 1) {
+        chars = chars.slice(0, -1);
+        item.text = `${chars.join("").trimEnd()}…`;
       }
-      item.text = chars.slice(0, low).join("").trimEnd() + "…";
+      if (compressed.cut) {
+        // 只要真的丢字，就必须留证据：这一页不能被当成「内容完整」。
+        capacity.truncated.push(id);
+        capacity.issues.push({
+          slot: id, kind: fontSize <= min ? "font_floor" : "too_long",
+          overBy: Math.round((measureHeight(value, fontSize, rect) - rect.h - 0.06) * 100) / 100,
+          keepChars: Array.from(item.text).length,
+          remedy: Array.from(item.text).length >= Array.from(value).length * 0.5 ? "compress" : "split_page",
+          detail: `${fontSize}pt 下最多保留 ${Array.from(item.text).length}/${Array.from(value).length} 字，原文已存入演讲备注`,
+        });
+        moved.push(value);
+      }
     }
     elements.push(item);
   };
@@ -122,8 +139,15 @@ export function renderContentSlide(
     const rows = content.table.map(row => row.map(cell => {
       const flat = singleLine(cell);
       if (Array.from(flat).length <= cellCapacity) return flat;
+      // 表格单元格同样按分句压缩，并记录截断，避免「看起来放得下」。
+      const compressed = compressText(flat, cellCapacity);
+      capacity.truncated.push("table");
+      capacity.issues.push({
+        slot: "table", kind: "too_long", overBy: 0, keepChars: cellCapacity, remedy: "compress",
+        detail: `单元格超过 ${cellCapacity} 字，已压缩并保留原文到备注`,
+      });
       moved.push(flat);
-      return Array.from(flat).slice(0, cellCapacity - 1).join("") + "…";
+      return compressed.text;
     }));
     elements.push({ id: "table", type: "table", x: geometry.marginX, y: top, w: width, h: bottom - top, rows, header: true, fontSize: typography.small });
   } else if (content.layout === "chart" && content.chart) {
@@ -186,14 +210,29 @@ export function renderContentSlide(
       group.items.forEach((value, row) => add(`item-${index}-${row}`, value,
         { x: x + 0.22, y: y + 0.78 + row * rowH, w: w - 0.44, h: rowH - 0.035 }, typography.cardItem, 13, panelInk));
     });
+    // 两栏对比与两栏卡片版式名不同，但不能长得一模一样：
+    // 加一条中缝，几何签名随之区分，避免「换名不换布局」。
+    if (content.layout === "comparison" && columns === 2 && rows === 1) {
+      const center = geometry.marginX + w + gap / 2;
+      shape("comparison-divider", { x: center - 0.01, y: top + 0.1, w: 0.02, h: h - 0.2 }, accent);
+    }
   } else {
     if (media !== undefined) picture(media);
-    const rowH = Math.min(geometry.rowCap, (bottom - top) / Math.max(1, body.length));
+    const columnWidth = media === undefined ? geometry.bulletWidth : geometry.bulletWidthWithMedia;
+    const rows = Math.max(1, body.length);
+    const available = bottom - top;
+    // 行高上限（rowCap）是为了密度好看，不是容量真理：条目少、纵向还有余量时，
+    // 按内容真实需要分配行高，比压字号或截字更保内容（约束内重排）。
+    const fair = Math.min(geometry.rowCap, available / rows);
+    const needed = body.reduce((max, value) => Math.max(max, measureHeight(value, typography.bodyMin, { w: columnWidth, h: available })), 0);
+    const rowH = Math.min(available / rows, Math.max(fair, needed + 0.045));
+    if (rowH > fair + 0.0001) {
+      capacity.reflowed.push({ slot: "bullets", mode: "row_height", detail: `行高由 ${fair.toFixed(2)} 放宽到 ${rowH.toFixed(2)} 英寸以容纳正文` });
+    }
     body.forEach((value, index) => {
       const y = top + index * rowH;
       shape(`marker-${index}`, { x: geometry.markerX, y: y + rowH / 2 - geometry.markerHeight / 2, w: geometry.markerWidth, h: geometry.markerHeight }, accent);
-      add(`item-${index}`, value, { x: geometry.bulletX, y, w: media === undefined ? geometry.bulletWidth : geometry.bulletWidthWithMedia, h: rowH - 0.045 },
-        typography.body, typography.bodyMin);
+      add(`item-${index}`, value, { x: geometry.bulletX, y, w: columnWidth, h: rowH - 0.045 }, typography.body, typography.bodyMin);
     });
   }
   if (body.length && !elements.some(item => item.id === "item-0")) moved.push(...body);
@@ -201,8 +240,9 @@ export function renderContentSlide(
   if (moved.length) add("overflow-note", "补充内容见演讲备注", { x: 3.3, y: 6.96, w: 5.2, h: 0.29 }, typography.small, typography.small);
   add("page-number", String(content.page).padStart(2, "0"), { x: 12.1, y: 6.96, w: 0.46, h: 0.29 }, typography.small, 12, ink, true);
   validateElements(elements);
+  capacity.ok = capacity.truncated.length === 0;
   const notes = xmlText([content.notes, moved.length ? `页面补充\n${moved.join("\n")}` : "", sourceNotes].filter(Boolean).join("\n\n"));
-  return { slide: { title: xmlText(content.title), subtitle: xmlText(content.takeaway ?? ""), layout: "content", background: paper, lines: [], sourceIds, notes, elements }, overflow: moved.length > 0 };
+  return { slide: { title: xmlText(content.title), subtitle: xmlText(content.takeaway ?? ""), layout: "content", background: paper, lines: [], sourceIds, notes, elements }, overflow: moved.length > 0, capacity };
 }
 
 export function renderTemplateCover(title: string, subtitle: string, design: PresentationDesign, imageIndex?: number, theme: ThemeTokens = DEFAULT_THEME): Slide {

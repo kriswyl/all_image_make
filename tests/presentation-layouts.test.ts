@@ -106,3 +106,15 @@ it("L08：每个职责都能给出候选版式，且首选仍在候选内", () =
   expect(preferredLayouts("process")).toContain("timeline");
   expect(preferredLayouts("section")).toContain("quote");
 });
+
+it("L09：两栏对比与两栏卡片不能长得一样（几何签名必须可区分）", () => {
+  const groups = [{ title: "自建", items: ["投入高", "周期长"] }, { title: "外包", items: ["上线快", "依赖服务商"] }];
+  const comparison = render({ page: 2, title: "两种方案", layout: "comparison", groups });
+  const cards = render({ page: 2, title: "两种方案", layout: "cards", groups });
+  expect((comparison.elements ?? []).map(element => element.id)).toContain("comparison-divider");
+  expect((cards.elements ?? []).map(element => element.id)).not.toContain("comparison-divider");
+  // 元素几何集合不同，才不会被判成「换名不换布局」
+  const boxes = (slide: { elements?: PresentationElement[] }) =>
+    (slide.elements ?? []).map(element => "w" in element ? `${Number(element.x).toFixed(2)},${Number(element.w).toFixed(2)}` : element.id).sort().join("|");
+  expect(boxes(comparison)).not.toBe(boxes(cards));
+});

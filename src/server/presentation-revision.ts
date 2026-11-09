@@ -141,7 +141,7 @@ export async function revisePresentation(
     (imageIndex === undefined || value.layout === "bullets" || value.layout === "image"));
   if (!page) throw new Error(`第 ${number} 页未能补做，原版本仍可下载`);
   // D2：补做页必须沿用整稿主题，否则单页会和其余页面不同皮肤。
-  const { slide, overflow } = renderContentSlide(page, plan.design ?? {}, old.sourceIds, source, undefined, imageIndex, getTheme(report.theme?.id));
+  const { slide, overflow, capacity } = renderContentSlide(page, plan.design ?? {}, old.sourceIds, source, undefined, imageIndex, getTheme(report.theme?.id));
   const updatedPlan = placePresentationImages({ ...plan, slides: plan.slides.map((item, index) => index === number - 1 ? slide : item) }, mapped);
   const rendered = await renderAiPresentation(updatedPlan, images);
   await checkPresentation(rendered, updatedPlan);
@@ -152,6 +152,16 @@ export async function revisePresentation(
     ...report, fallbackPages: report.fallbackPages.filter(page => page !== number),
     overflowPages: [...report.overflowPages.filter(page => page !== number), ...(overflow ? [number] : [])].sort((a, b) => a - b),
     sourceLimitedPages: [...new Set([...report.sourceLimitedPages, ...(source.length > 6500 ? [number] : [])])].sort((a, b) => a - b),
+    // D2：补做同样要报容量 —— 换排是保住了内容，截断则是真的丢字。
+    capacity: {
+      truncatedPages: [...new Set([...(report.capacity?.truncatedPages ?? []).filter(page => page !== number), ...(capacity.truncated.length ? [number] : [])])].sort((a, b) => a - b),
+      reflowedPages: [...new Set([...(report.capacity?.reflowedPages ?? []).filter(page => page !== number), ...(capacity.reflowed.length ? [number] : [])])].sort((a, b) => a - b),
+      issues: [
+        ...(report.capacity?.issues ?? []).filter(issue => issue.page !== number),
+        ...capacity.issues.slice(0, 2).map(issue => ({ page: number, detail: `${issue.slot}：${issue.detail}`.slice(0, 180) }))
+          .filter((issue, index, all) => all.findIndex(item => item.detail === issue.detail) === index),
+      ],
+    },
     audit: "unavailable", issues: report.issues.filter(issue => issue.page !== number), visualReview: undefined,
   }, lineage, { ...specRef, plan: updatedPlan, baselinePlan: plan, targets: [number] });
   db.pruneWorkspaceFamily(conversationId, lineage.familyId, 3);

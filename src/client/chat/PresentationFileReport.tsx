@@ -49,7 +49,10 @@ export function PresentationFileReport({ conversationId, fileId, initial, canUse
   const rows: Array<[string, number[]]> = [
     ["精简页", report.fallbackPages], ["待补全页", report.pendingPages], ["部分文字移至备注", report.overflowPages],
     ["模型仅读取部分原文", report.sourceLimitedPages], ["原文备注达到长度上限", report.notesLimitedPages],
+    ["内容超出容量已截断", report.capacity?.truncatedPages ?? []],
   ];
+  // D3：连续同版式只作提示，不阻断交付；系列页（如同一案例的分期）本来就会同构。
+  const runs = (report.deckPlan?.repeatedRuns ?? []).filter(run => run.pages.length >= 3);
   return (
     <details className="presentation-file-report">
       <summary>
@@ -72,6 +75,8 @@ export function PresentationFileReport({ conversationId, fileId, initial, canUse
         {report.readiness && status.timeline.draftReadyAt ? <div>草稿产出 · {new Date(status.timeline.draftReadyAt).toLocaleString()}（不计入成品）</div> : null}
         {report.reason ? <p>{report.reason}</p> : null}
         {rows.map(([label, pages]) => pages.length ? <div key={label}>{label} · {pages.join("、")}</div> : null)}
+        {report.capacity?.reflowedPages.length ? <div>按内容放宽行高 · 第 {report.capacity.reflowedPages.join("、")} 页</div> : null}
+        {runs.map((run, index) => <div key={`run-${index}`}>第 {run.pages.join("、")} 页连续使用同一版式（{run.layout}），可考虑换一种表达</div>)}
         {report.unplacedImages ? <div>{report.unplacedImages} 张原图保存在可编辑项目中</div> : null}
         {report.planningFallback ? <div>全局策划使用了来源章节编排</div> : null}
         {report.issues.map(({ page, detail }, index) => <div key={index}>第 {page} 页 · {detail}</div>)}

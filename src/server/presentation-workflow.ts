@@ -411,6 +411,21 @@ export async function runTemplatePresentation(mind: MindDocument, call: Structur
     const provenance = sourceNotes(task.sources);
     const rendered = renderContentSlide(page, design, task.sources.map(source => source.id), provenance.notes, status, extra, theme);
     if (rendered.overflow) report.overflowPages.push(task.page);
+    // D2：容量诊断。截断与换排必须分开记 —— 换排保住了内容，截断没有。
+    if (rendered.capacity.truncated.length) {
+      report.capacity ??= { truncatedPages: [], reflowedPages: [], issues: [] };
+      report.capacity.truncatedPages.push(task.page);
+      for (const issue of rendered.capacity.issues.slice(0, 2)) {
+        const detail = `${issue.slot}：${issue.detail}`.slice(0, 180);
+        if (!report.capacity.issues.some(item => item.page === task.page && item.detail === detail)) {
+          report.capacity.issues.push({ page: task.page, detail });
+        }
+      }
+    }
+    if (rendered.capacity.reflowed.length) {
+      report.capacity ??= { truncatedPages: [], reflowedPages: [], issues: [] };
+      report.capacity.reflowedPages.push(task.page);
+    }
     if (sourceSampled) report.sourceLimitedPages.push(task.page);
     if (provenance.omitted) report.notesLimitedPages.push(task.page);
     for (const element of rendered.slide.elements ?? []) if (element.type === "image") used.add(element.imageIndex);

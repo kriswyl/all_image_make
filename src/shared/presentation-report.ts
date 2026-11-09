@@ -26,6 +26,16 @@ export const presentationReportSchema = z.object({
     widened: z.boolean(),
     reason: z.string(),
   }).optional(),
+  // D2：本次修改里有多少页走了「整页元素」遗留通道（自带坐标、绕过主题）。
+  // 目标是把它压到 0；只要大于 0，就说明还有路径在绕开确定性渲染器。
+  freeformPages: z.number().int().nonnegative().optional(),
+  // D2：容量诊断。「truncated」是有字被截掉（页面内容不完整），
+  // 「reflowed」是靠换排法（两栏）撑住了内容 —— 两者必须分开报，不能都算「放得下」。
+  capacity: z.object({
+    truncatedPages: z.array(page),
+    reflowedPages: z.array(page),
+    issues: z.array(presentationIssueSchema),
+  }).optional(),
   // D2：实际使用的主题令牌。写进报告才能核对「换了风格到底变了什么」。
   theme: z.object({
     id: z.string(),

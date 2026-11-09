@@ -18,13 +18,24 @@ import { isImageAsset } from "../../shared/types.js";
 import { prepareImageBytes, REFERENCE_PROFILE } from "../vision.js";
 import type { TemplatePresentation } from "../presentation-workflow.js";
 import type { TemplateReport, VisualReviewMetrics } from "../../shared/presentation-report.js";
-import { placePresentationImages } from "../presentation-templates.js";
+import { placePresentationImages, renderContentSlide, slideContentSchema, validSlideContent } from "../presentation-templates.js";
 import { checkPresentationContract } from "../presentation-contract-check.js";
 import { carryDeckReport } from "../presentation-deck-carry.js";
+import { getTheme } from "../../shared/presentation-theme.js";
 import { createCandidateDocument, publishDocument } from "../document-publish.js";
 import { deriveChangeScope, resolveCheckSets, type CheckSets } from "../../shared/change-scope.js";
 
 const MAX_FILE = 20 * 1024 * 1024;
+/**
+ * 渲染器生成页的签名：只认我们渲染器才会产出的组合。
+ * 不能只看 `title`/`table` 这类通用 id，模型自定义元素也会用它们。
+ */
+function hasRendererElements(slide: { elements?: Array<{ id: string }> }): boolean {
+  const ids = (slide.elements ?? []).map(element => element.id);
+  const has = (prefix: string) => ids.some(id => id.startsWith(prefix));
+  return ids.includes("accent-rule") || ids.includes("cover-rule") || ids.includes("timeline-axis")
+    || ids.includes("quote-bar") || has("kpi-") || (ids.includes("panel-0") && ids.includes("heading-0"));
+}
 const nodeSchema: z.ZodType<DocumentNode> = z.lazy(() => z.object({ title: z.string().trim().min(1).max(2000), notes: z.string().max(10000).default(""), children: z.array(nodeSchema).max(500).default([]) }));
 const schemas = {
   doc_list: z.object({}),
@@ -32,7 +43,13 @@ const schemas = {
   doc_read: z.object({ fileId: z.string().min(1), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(500).default(100), charOffset: z.number().int().min(0).optional(), charLimit: z.number().int().min(1).max(20000).default(12000), sheetName: z.string().min(1).max(31).optional(), range: z.string().min(1).max(25).optional(), page: z.number().int().min(1).max(1000).optional() }),
   doc_search: z.object({ fileId: z.string().min(1), query: z.string().min(1).max(500), charOffset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(50).default(20) }),
   doc_create: z.object({ kind: z.enum(["md", "txt", "csv", "json", "xmind", "docx", "xlsx"]), name: z.string().trim().min(1).max(120), content: z.string().max(2_000_000).optional(), nodes: nodeSchema.optional(), sheets: z.array(sheetSchema).min(1).max(20).optional() }),
-  doc_edit: z.object({ fileId: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i), edits: z.array(z.object({ find: z.string().min(1).max(20000), replace: z.string().max(100000) })).min(1).max(20).optional(), cells: z.array(cellEditSchema).min(1).max(500).optional(), matchRows: matchRowsSchema.optional(), pages: z.array(z.object({ page: z.number().int().min(1).max(200), slide: aiPresentationSchema.shape.slides.element.omit({ box: true }) }).strict()).min(1).max(30).optional(), appendSlides: z.array(aiPresentationSchema.shape.slides.element.omit({ box: true })).min(1).max(30).optional(), imageAssetIds: z.array(z.uuid()).min(1).max(8).optional(), order: z.array(z.number().int().min(1).max(200)).min(1).max(200).optional(), design: designSchema.optional() }),
+  doc_edit: z.object({ fileId: z.string().min(1), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/i), edits: z.array(z.object({ find: z.string().min(1).max(20000), replace: z.string().max(100000) })).min(1).max(20).optional(), cells: z.array(cellEditSchema).min(1).max(500).optional(), matchRows: matchRowsSchema.optional(), pages: z.array(z.object({
+      page: z.number().int().min(1).max(200),
+      /** 声明式内容（推荐）：只给结构与文字，坐标由渲染器按主题算。 */
+      content: slideContentSchema.optional(),
+      /** 遗留通道：整页元素自带坐标，会绕过主题，仅在必须保留原元素时使用。 */
+      slide: aiPresentationSchema.shape.slides.element.omit({ box: true }).optional(),
+    }).strict()).min(1).max(30).optional(), appendSlides: z.array(aiPresentationSchema.shape.slides.element.omit({ box: true })).min(1).max(30).optional(), imageAssetIds: z.array(z.uuid()).min(1).max(8).optional(), order: z.array(z.number().int().min(1).max(200)).min(1).max(200).optional(), design: designSchema.optional() }),
   doc_convert: z.object({ fileId: z.string().min(1), to: z.literal("pptx"), referenceFileId: z.string().min(1).optional(), coverAssetId: z.uuid().optional(),
     pageImages: z.array(z.object({ page: z.number().int().min(1).max(200), assetId: z.uuid() }).strict()).min(1).max(8).optional(),
     pageCount: z.number().int().min(1).max(200).optional(), pageCountEvidence: z.string().trim().min(1).max(140).optional(), design: designSchema.optional(),
@@ -145,7 +162,7 @@ export const CHAT_DOCUMENT_TOOLS: BrainToolSpec[] = [
   { type: "function", function: { name: "doc_read", description: "读取本会话文件与 SHA-256。Word 读正文；Excel 只填 fileId 列工作表，再填 sheetName、range（例如 A1:H20，最多 500 格）读取地址和值；PDF 填 page（从 1 开始）读取单页文字。PPT 返回本应用可编辑源方案、元素 ID 及图片索引，外部 PPT 返回风格。文字可按行 offset/limit 或按字符 charOffset/charLimit 分页，有 nextOffset、nextCharOffset 或 nextPage 时按需继续，不能把首批当成全文。", parameters: z.toJSONSchema(schemas.doc_read, { io: "input" }) } },
   { type: "function", function: { name: "doc_search", description: "在本会话文本、Word正文或PPT可编辑源方案中搜索精确文字/元素ID，返回位置、上下文和版本号；可按nextCharOffset翻页，再doc_read读取上下文。偏移按UTF-16代码单元计。", parameters: objectSchema({ fileId: { type: "string" }, query: { type: "string", minLength: 1, maxLength: 500 }, charOffset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, ["fileId", "query"]) } },
   { type: "function", function: { name: "doc_create", description: "创建新文件。XMind 传结构化 nodes；Word 传 Markdown 正文 content；Excel 传 sheets:[{name,rows:[[单元格,...],...]}]，单元格可填字符串、数字、布尔、null 或 {formula}，公式由 Excel/WPS 打开后计算；其他类型传文本 content。", parameters: objectSchema({ kind: { type: "string", enum: ["md", "txt", "csv", "json", "xmind", "docx", "xlsx"] }, name: { type: "string" }, content: { type: "string", description: "docx 传 Markdown，会按标题/列表/表格/代码块转成 Word 排版" }, sheets: { type: "array", minItems: 1, maxItems: 20, items: z.toJSONSchema(sheetSchema) }, nodes: { type: "object", description: "仅在 kind=xmind 时使用。根节点必须有 title；notes 可选；children 可递归", properties: { title: { type: "string", minLength: 1, maxLength: 2000 }, notes: { type: "string", maxLength: 10000 }, children: { type: "array", items: { type: "object" }, maxItems: 500 } }, required: ["title"], additionalProperties: false } }, ["kind", "name"]) } },
-  { type: "function", function: { name: "doc_edit", description: `先用 doc_read 获取文件的 SHA-256，或者直接使用上次 doc_edit 返回的同一新文件 ID 和 SHA-256。文本和 Word 用 edits 精确替换，每个 find 须唯一；Word 仅限段落内普通正文，整篇重写用 doc_create。Excel 用 cells:[{sheet,address,value}] 修改指定单元格，null 清空。按 ID 批量处理用 matchRows，提供目标 sheet、column 和 ids（字符串，保留前导零）或 list（同会话 XLSX 的 fileId、sheet、column）；两边默认从第 2 行到末行，可指定 startRow/endRow。标红填 fontColor="FF0000"，默认只改 ID 字体；用户明确要整行时指定 colorColumns:{from,to}。只有用户要求写标记时才传 marker，默认使用「标记」表头和数值 1。直接用文件 ID 引用清单，无需逐格读出或转抄。PDF 只读。ChatCanvas 生成的 PPT 用 pages:[{page:从1开始,slide:完整新页面}] 修改指定页，appendSlides 添加页面，order 调整顺序，design 修改主题。原文件不覆盖。现有图片索引取 doc_read 的 images。要把本会话生成或上传的图片放入页面，填 imageAssetIds（真实素材 ID）；这些图片按列表顺序接在原 images 之后，imageIndex 从原 images 的长度开始。外部 PPT 仅支持风格参考。${ELEMENT_DESIGN_GUIDE}`, parameters: z.toJSONSchema(schemas.doc_edit) as Record<string, unknown> } },
+  { type: "function", function: { name: "doc_edit", description: `先用 doc_read 获取文件的 SHA-256，或者直接使用上次 doc_edit 返回的同一新文件 ID 和 SHA-256。文本和 Word 用 edits 精确替换，每个 find 须唯一；Word 仅限段落内普通正文，整篇重写用 doc_create。Excel 用 cells:[{sheet,address,value}] 修改指定单元格，null 清空。按 ID 批量处理用 matchRows，提供目标 sheet、column 和 ids（字符串，保留前导零）或 list（同会话 XLSX 的 fileId、sheet、column）；两边默认从第 2 行到末行，可指定 startRow/endRow。标红填 fontColor="FF0000"，默认只改 ID 字体；用户明确要整行时指定 colorColumns:{from,to}。只有用户要求写标记时才传 marker，默认使用「标记」表头和数值 1。直接用文件 ID 引用清单，无需逐格读出或转抄。PDF 只读。ChatCanvas 生成的 PPT 用 pages:[{page:从1开始,content:声明式内容}] 修改指定页——content 只填 layout 与该版式需要的字段（bullets 3–6 条；groups 用于 cards/comparison/process；table 等列表格；chart 给真实数字；kpi 给 metrics:[{label,value,note?}] 2–4 个；timeline 给 steps:[{title,detail?}] 3–6 个；quote 给 quote:{text,source?}），**不要填坐标、字号或颜色**，渲染器会按整稿主题排版。只有必须原样保留某个已有页面的自定义元素时才用 slide:完整新页面（这会绕过主题，尽量不用）。appendSlides 添加页面，order 调整顺序，design 修改主题。原文件不覆盖。现有图片索引取 doc_read 的 images。要把本会话生成或上传的图片放入页面，填 imageAssetIds（真实素材 ID）；这些图片按列表顺序接在原 images 之后，imageIndex 从原 images 的长度开始。外部 PPT 仅支持风格参考。${ELEMENT_DESIGN_GUIDE}`, parameters: z.toJSONSchema(schemas.doc_edit) as Record<string, unknown> } },
   { type: "function", function: { name: "presentation_spec_update", description: "记录本次 PPT 任务的明确要求（页数、必需保留的内容、风格），可只保存不生成。用户说「先不定，等下开始」「必须保留三个案例」「换成杂志风」或明确页数时调用。只传业务意图，不填写证据、文件哈希或引擎参数；服务端从当前用户消息回读原文校验。prepareOnly=true 表示只保存要求，不触发生成。", parameters: objectSchema({ intent: { type: "string", enum: ["create", "update", "fork"] }, specId: { type: "string" }, prepareOnly: { type: "boolean" }, pageCountText: { type: "string", maxLength: 200 }, requiredContent: { type: "array", items: { type: "string", maxLength: 500 }, maxItems: 20 }, styleText: { type: "string", maxLength: 500 } }, ["intent"]) } },
   { type: "function", function: { name: "doc_convert", description: "直接使用原上传的XMind、Markdown、文本或CSV策划并生成原生可编辑PPT；to 只能填 pptx。封面图片用 coverAssetId，正文配图用 pageImages:[{page,assetId}]，从第1页开始计数，封面计入。根据用户指定页或内容顺序分配图片，只填写本会话已有或生图成功返回的真实素材 ID。用户本轮明确要求总页数时填写 pageCount 和本轮逐字原话 pageCountEvidence；参考资料和历史任务的页数不算。转换失败后告知用户，禁止自行换源、创建替代骨架或反复调用。referenceFileId 引用本会话PPT的颜色字体；design 指定 background/text/accent（6位十六进制无#）及 fontFace；用户提到整体风格（如「杂志风」「极简」「暖色教学」）时填 style：magazine / mono / warm / blue，只想改单页颜色仍用 design。", parameters: z.toJSONSchema(schemas.doc_convert) } },
 ];
@@ -462,12 +479,21 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
         if (!pages && !appendSlides && !order && !design) throw new Error("请指定要修改的页面或主题");
         const project = await readPresentationProject(file.bytes);
         if (!project) throw new Error("此 PPT 没有 ChatCanvas 可编辑源方案；可以作为风格参考，不能声称已保真修改外部文件");
+        // 修改页必须沿用整稿主题，否则会出现「一页换皮肤」。
+        const carriedThemeId = db.getPresentationVersion(conversationId, resolvedFileId)?.report.theme?.id;
         const images = [...project.images];
         if (imageAssetIds) {
           if (new Set(imageAssetIds).size !== imageAssetIds.length || images.length + imageAssetIds.length > 200) throw new Error("PPT 配图不能重复，图片目录最多容纳 200 张");
-          const used = new Set([...(pages ?? []).map(edit => edit.slide), ...(appendSlides ?? [])].flatMap(slide =>
-            slide.elements ? slide.elements.flatMap(element => element.type === "image" ? [element.imageIndex] : [])
-              : slide.layout === "image" || slide.layout === "illustrated" ? [slide.imageIndex] : []));
+          const used = new Set([
+            ...(pages ?? []).flatMap(edit => edit.content
+              ? [edit.content.imageIndex].filter((index): index is number => index !== undefined)
+              : edit.slide ? [edit.slide].flatMap(slide => slide.elements
+                ? slide.elements.flatMap(element => element.type === "image" ? [element.imageIndex] : [])
+                : slide.layout === "image" || slide.layout === "illustrated" ? [slide.imageIndex!] : []) : []),
+            ...(appendSlides ?? []).flatMap(slide => slide.elements
+              ? slide.elements.flatMap(element => element.type === "image" ? [element.imageIndex] : [])
+              : slide.layout === "image" || slide.layout === "illustrated" ? [slide.imageIndex!] : []),
+          ]);
           if (imageAssetIds.some((_, index) => !used.has(images.length + index))) throw new Error("每张新增配图都需在修改的页面上引用对应 imageIndex");
           for (const id of imageAssetIds) {
             const image = await readPptImage(db, conversationId, id);
@@ -475,12 +501,39 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           }
         }
         let plan = structuredClone(project.plan);
+        const theme = getTheme(carriedThemeId);
+        const imageIndexes = images.map((_, index) => index);
         const touched = new Set<number>();
+        let freeformPages = 0;
+        // D2：容量诊断。截断的页要能点名，否则模型会以为改完了其实丢了字。
+        const trimmedPages: number[] = [], reflowedPages: number[] = [];
+        const capacityIssues: Array<{ page: number; detail: string }> = [];
         for (const edit of pages ?? []) {
           const original = plan.slides[edit.page - 1];
           if (!original || touched.has(edit.page)) throw new Error("修改页码不存在或重复");
+          if (Boolean(edit.content) === Boolean(edit.slide)) throw new Error(`第 ${edit.page} 页必须且只能提供 content 或 slide 之一`);
           touched.add(edit.page);
-          plan.slides[edit.page - 1] = { ...edit.slide, notes: edit.slide.notes || original.notes, sourceIds: edit.slide.sourceIds ?? original.sourceIds };
+          if (edit.content) {
+            // 声明式：只收结构与文字，坐标与样式统一由渲染器按主题计算。
+            if (!validSlideContent(edit.content, imageIndexes)) throw new Error(`第 ${edit.page} 页的 content 与本页版式不匹配，请补齐该版式需要的字段`);
+            const rendered = renderContentSlide(edit.content, plan.design ?? {}, original.sourceIds ?? [], "", undefined, edit.content.imageIndex, theme);
+            plan.slides[edit.page - 1] = { ...rendered.slide, notes: rendered.slide.notes || original.notes, sourceIds: original.sourceIds ?? [] };
+            if (rendered.capacity.truncated.length) {
+              trimmedPages.push(edit.page);
+              for (const issue of rendered.capacity.issues.slice(0, 2)) {
+                capacityIssues.push({ page: edit.page, detail: `${issue.slot}：${issue.detail}`.slice(0, 180) });
+              }
+            }
+            if (rendered.capacity.reflowed.length) reflowedPages.push(edit.page);
+            continue;
+          }
+          // 遗留通道：整页元素自带坐标、绕过主题。
+          // 由渲染器生成的页不允许被改回自由元素，否则「确定性排版」会被逐步侵蚀。
+          if (hasRendererElements(original)) {
+            throw new Error(`第 ${edit.page} 页由渲染器生成，请改用 content 声明版式与文字（不要自称已保留元素）`);
+          }
+          freeformPages++;
+          plan.slides[edit.page - 1] = { ...edit.slide!, notes: edit.slide!.notes || original.notes, sourceIds: edit.slide!.sourceIds ?? original.sourceIds };
         }
         if (appendSlides) plan.slides.push(...appendSlides);
         if (order) {
@@ -531,6 +584,27 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           parentPlan: project.plan,
           touched: [...touched],
         });
+        // 记录遗留通道用量：>0 表示仍有页面绕过渲染器与主题。
+        if (freeformPages) {
+          if (carriedReport) carriedReport.freeformPages = freeformPages;
+          else console.warn(`doc_edit 第 ${[...touched].join("、")} 页使用整页元素且原文件无报告，主题一致性无法核对`);
+        }
+        // D2：把容量结果并进报告。本次重排过的页一律先清空旧结论 ——
+        // 旧记录描述的是上一版页面，留着会变成「第 3 页还在截断」的错误提示。
+        if (touched.size && carriedReport) {
+          const keep = (items: number[]) => items.filter(item => !touched.has(item));
+          carriedReport.capacity = {
+            truncatedPages: [...new Set([...keep(carriedReport.capacity?.truncatedPages ?? []), ...trimmedPages])].sort((a, b) => a - b),
+            reflowedPages: [...new Set([...keep(carriedReport.capacity?.reflowedPages ?? []), ...reflowedPages])].sort((a, b) => a - b),
+            issues: [
+              ...(carriedReport.capacity?.issues ?? []).filter(issue => !touched.has(issue.page)),
+              ...capacityIssues.filter((issue, index) => capacityIssues.findIndex(item => item.page === issue.page && item.detail === issue.detail) === index),
+            ],
+          };
+        }
+        if (!carriedReport && trimmedPages.length) {
+          console.warn(`doc_edit 第 ${trimmedPages.join("、")} 页内容超出容量已压缩，原文件无报告可写`);
+        }
         // 修改入口按「这份文件当初绑定的契约版本」校验，不取家族当前 revision。
         const boundSpecRef = carriedReport?.specRef;
         const saved = saveWorkspaceDocument(db, conversationId, `${base}-修改版`, "pptx", bytes, operationId, carriedReport, lineage,
@@ -542,7 +616,7 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
           });
         db.pruneWorkspaceFamily(conversationId, parentDocument?.familyId ?? saved.familyId, 3);
         const sha256 = createHash("sha256").update(readWorkspaceFile(db, conversationId, saved.id).bytes).digest("hex");
-        return { ok: true, summary: `已生成可继续编辑的新版本 ${saved.name}，共 ${plan.slides.length} 页；原文件保留。${visual.summary}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize, sha256 } };
+        return { ok: true, summary: `已生成可继续编辑的新版本 ${saved.name}，共 ${plan.slides.length} 页；原文件保留。${visual.summary}${trimmedPages.length ? ` 第 ${trimmedPages.join("、")} 页内容超出容量已压缩（原文在备注），建议改写更短或拆页。` : ""}`, data: { fileId: saved.id, fileName: saved.name, byteSize: saved.byteSize, sha256 } };
       }
       if (!/\.(md|markdown|txt|csv|json)$/i.test(file.name)) throw new Error("当前仅支持修改文本类文件及 ChatCanvas 生成的 PPT");
       if (!edits || pages || appendSlides || imageAssetIds || order || design) throw new Error("文本文件请提供 edits 精确替换列表");

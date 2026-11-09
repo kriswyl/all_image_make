@@ -37,7 +37,9 @@ if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
 }
 
 /** 渲染器自产的元素 id；模型自由提交的元素通常是 p2-rule / c1-l 这类。 */
-const RENDERER_IDS = /^(accent-rule|title|takeaway|marker-\d+|item-\d+|panel-\d+|heading-\d+|picture|table|chart|page-status|page-number|overflow-note|cover-rule|cover-title|cover-subtitle)$/;
+const RENDERER_IDS = /^(accent-rule|title|takeaway|marker-\d+|item-\d+|panel-\d+|heading-\d+|picture|table|chart|page-status|page-number|overflow-note|cover-rule|cover-title|cover-subtitle|kpi-\d+|kpi-value-\d+|kpi-label-\d+|kpi-note-\d+|timeline-axis|timeline-node-\d+|timeline-title-\d+|timeline-detail-\d+|timeline-index-\d+|quote-bar|quote-text|quote-source)$/;
+/** 模型整页元素的命名习惯（`p2-rule` / `p3-c1`）；这是遗留通道的指纹。 */
+const MODEL_IDS = /^p\d+-/;
 /** 封面/章节页不参与多样性计算：它们本来就该一致。 */
 const NON_BODY = /^(cover|section)/i;
 
@@ -103,9 +105,10 @@ function parseSlide(xml: string, index: number): SlideShape {
     boxes.push({ x: +off[1]! / 914400, y: +off[2]! / 914400, w: +ext[1]! / 914400, h: +ext[2]! / 914400 });
   }
   const fonts = [...new Set([...xml.matchAll(/sz="(\d+)"/g)].map(match => Math.round(+match[1]! / 100)))].sort((a, b) => b - a);
-  const renderer = names.filter(name => RENDERER_IDS.test(name)).length;
-  const model = names.filter(name => /^(p\d+-|c\d|col\d|box\d|kpi)/i.test(name)).length;
-  const authorship = renderer && model ? "mixed" : model ? "model" : "renderer";
+  // 只看「有渲染器标准 id」还是「有模型整页元素前缀」，不要拿单个前缀猜。
+  const hasRenderer = names.some(name => RENDERER_IDS.test(name));
+  const hasModel = names.some(name => MODEL_IDS.test(name));
+  const authorship = hasRenderer && hasModel ? "mixed" : hasModel ? "model" : "renderer";
   const firstText = xml.match(/<a:t>([\s\S]*?)<\/a:t>/)?.[1] ?? "";
   return {
     index, layout: /<p:graphicFrame>/.test(xml) ? "table/chart" : "text", skeleton: skeletonOf(names),
