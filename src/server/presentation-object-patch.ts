@@ -28,6 +28,11 @@ export type ObjectPatch = {
   color?: string;
   /** 英寸，整体替换位置与尺寸 */
   rect?: { x: number; y: number; w: number; h: number };
+  /**
+   * 换图：给新的图片 data URL。会新增媒体部件、追加该页关系并改 blip 指向；
+   * 只影响目标页部件、它的 rels、媒体部件和 Content_Types。
+   */
+  image?: { data: string };
 };
 
 export type PatchReport = {
@@ -44,7 +49,7 @@ export type PatchReport = {
 };
 
 const EMU = 914400;
-const PATCHABLE = new Set(["text", "shape"]);
+const PATCHABLE = new Set(["text", "shape", "image"]);
 const hex = (value: string) => /^[0-9A-Fa-f]{6}$/.test(value);
 
 /** 解压后逐个部件算哈希：ZIP 时间戳、条目顺序、压缩结果都不参与。 */
@@ -141,12 +146,67 @@ function patchTextContent(block: string, value: string): { block: string; change
   return { block: block.replace(tx[0], updated), changed: true };
 }
 
-/** 找出承载该逻辑对象的唯一 `<p:sp>` 块。 */
-function shapeBlock(xml: string, objectName: string): string | null {
-  for (const match of xml.matchAll(/<p:sp>[\s\S]*?<\/p:sp>/g)) {
-    if (match[0].includes(`name="${objectName}"`)) return match[0];
+type ObjectBlock = { block: string; kind: "sp" | "pic" | "graphicFrame" };
+/** 找出承载该逻辑对象的块。文本框/形状是 `p:sp`，图片是 `p:pic`，表格/图表是 `p:graphicFrame`。 */
+function objectBlock(xml: string, objectName: string): ObjectBlock | null {
+  for (const [kind, tag] of [["pic", "p:pic"], ["sp", "p:sp"], ["graphicFrame", "p:graphicFrame"]] as const) {
+    for (const match of xml.matchAll(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, "g"))) {
+      if (match[0].includes(`name="${objectName}"`)) return { block: match[0], kind };
+    }
   }
   return null;
+}
+
+const DATA_URL = /^(?:data:)?image\/(png|jpeg|jpg);base64,([A-Za-z0-9+/=\r\n]+)$/;
+const MIME_EXT: Record<string, { ext: string; mime: string }> = {
+  png: { ext: "png", mime: "image/png" },
+  jpeg: { ext: "jpeg", mime: "image/jpeg" },
+  jpg: { ext: "jpg", mime: "image/jpg" },
+};
+
+/**
+ * 换图：新增媒体部件 + 该页 rels 追加关系 + blip 指向新 rId + 必要时补 Content_Types。
+ * 返回被影响的部件名，交由调用方核对「允许变化」。
+ */
+async function replaceImage(input: {
+  zip: JSZip; slidePart: string; block: string; data: string; elementId: string;
+}): Promise<{ block: string; parts: string[] }> {
+  const match = DATA_URL.exec(input.data.trim());
+  if (!match) throw new Error("图片必须是 png 或 jpeg 的 base64 data URL");
+  const meta = MIME_EXT[match[1]!.toLowerCase()]!;
+  const bytes = Buffer.from(match[2]!, "base64");
+  if (bytes.length < 8 || bytes.length > 5 * 1024 * 1024) throw new Error("图片为空或超过 5 MB");
+  const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+  const media = `ppt/media/patch-${hash}.${meta.ext}`;
+  input.zip.file(media, bytes);
+
+  const relsPath = input.slidePart.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
+  const relsFile = input.zip.file(relsPath);
+  const existing = relsFile ? await relsFile.async("string") : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`;
+  const lastId = [...existing.matchAll(/Id="rId(\d+)"/g)].reduce((max, item) => Math.max(max, Number(item[1])), 0);
+  const relId = `rId${lastId + 1}`;
+  const relationship = `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/patch-${hash}.${meta.ext}"/>`;
+  const nextRels = existing.includes("</Relationships>")
+    ? existing.replace("</Relationships>", `${relationship}</Relationships>`)
+    : `${existing}${relationship}`;
+  input.zip.file(relsPath, nextRels);
+
+  // 只改 blip 的关系指向，不动图片的裁剪与填充设置。
+  if (!/<a:blip\b[^>]*r:embed="[^"]*"/.test(input.block)) throw new Error("这个图片对象没有可替换的关系引用");
+  const block = input.block.replace(/(<a:blip\b[^>]*r:embed=")[^"]*(")/, `$1${relId}$2`);
+
+  const parts = [relsPath, media];
+  // Content_Types 只允许「补声明」，不允许改已有声明。
+  const ct = input.zip.file("[Content_Types].xml");
+  if (ct) {
+    const xml = await ct.async("string");
+    const declared = new RegExp(`<Default\\b[^>]*Extension="${meta.ext}"`, "i").test(xml);
+    if (!declared) {
+      input.zip.file("[Content_Types].xml", xml.replace("</Types>", `<Default Extension="${meta.ext}" ContentType="${meta.mime}"/></Types>`));
+      parts.push("[Content_Types].xml");
+    }
+  }
+  return { block, parts };
 }
 
 function syncPlanElement(element: PresentationElement, patch: ObjectPatch): PresentationElement {
@@ -170,7 +230,7 @@ function syncPlanElement(element: PresentationElement, patch: ObjectPatch): Pres
 export async function patchPresentationObjects(
   bytes: Buffer, plan: AiPresentation, patches: ObjectPatch[],
   images: Array<{ title: string; data: string }> = [],
-): Promise<{ bytes: Buffer; plan: AiPresentation; report: PatchReport }> {
+): Promise<{ bytes: Buffer; plan: AiPresentation; images: Array<{ title: string; data: string }>; report: PatchReport }> {
   if (!patches.length) throw new Error("没有要应用的补丁");
   const map = await buildObjectMap(bytes, plan);
   const zip = await JSZip.loadAsync(bytes);
@@ -178,6 +238,9 @@ export async function patchPresentationObjects(
   const nextPlan = structuredClone(plan);
   const report: PatchReport = { applied: [], rejected: [], warnings: [], changedParts: [], unchangedParts: 0 };
   const touchedParts = new Set<string>();
+  /** 换图会合法地多改几个部件：该页 rels、新媒体、必要时 Content_Types。 */
+  const extraParts = new Set<string>();
+  const nextImages = [...images];
 
   for (const patch of patches) {
     const reject = (reason: string) => report.rejected.push({ slide: patch.slide, elementId: patch.elementId, reason });
@@ -187,7 +250,11 @@ export async function patchPresentationObjects(
     if (!slide.elements) { reject("这一页不是元素页（使用了 box 或 lines），补丁无法同步回可编辑源方案"); continue; }
     const element = slide.elements.find(item => item.id === patch.elementId);
     if (!element) { reject("计划里没有这个元素"); continue; }
-    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框与普通形状`); continue; }
+    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框、普通形状与图片`); continue; }
+    if (patch.image !== undefined) {
+      if (element.type !== "image") { reject("只有图片对象能换图"); continue; }
+      if (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined) { reject("换图不能和文字或样式补丁写在同一条里"); continue; }
+    }
     if (patch.fontSize !== undefined && (element.type !== "text" || !(patch.fontSize > 0 && patch.fontSize <= 200))) { reject("字号补丁只适用于文本框，且须在 1–200pt 之间"); continue; }
     if (patch.text !== undefined && (element.type !== "text" || !patch.text.trim() || patch.text.length > 6000 || patch.text.split(/\r?\n/).length > 30)) { reject("文字补丁只适用于文本框：不能为空，最多 6000 字与 30 段"); continue; }
     if (patch.color !== undefined && !hex(patch.color)) { reject("颜色必须是 6 位十六进制"); continue; }
@@ -201,11 +268,23 @@ export async function patchPresentationObjects(
     const file = zip.file(binding.slidePart);
     if (!file) { reject("页面部件缺失"); continue; }
     const xml = await file.async("string");
-    const block = shapeBlock(xml, binding.objects[0]!.objectName);
-    if (!block) { reject("页面里找不到该对象的形状块"); continue; }
+    const found = objectBlock(xml, binding.objects[0]!.objectName);
+    if (!found) { reject("页面里找不到该对象的形状块"); continue; }
 
-    let nextBlock = block;
+    let nextBlock = found.block;
     const operations: string[] = [];
+    if (patch.image !== undefined) {
+      if (found.kind !== "pic") { reject("这个对象不是图片块，无法换图"); continue; }
+      try {
+        const replaced = await replaceImage({ zip, slidePart: binding.slidePart, block: nextBlock, data: patch.image.data, elementId: patch.elementId });
+        nextBlock = replaced.block;
+        for (const part of replaced.parts) extraParts.add(part);
+        operations.push("image");
+        // 新图接在项目图片末尾，plan 的 imageIndex 指向它。
+        nextImages.push({ title: `原位换图 ${patch.elementId}`.slice(0, 200), data: patch.image.data });
+        (element as { imageIndex: number }).imageIndex = nextImages.length - 1;
+      } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
+    }
     if (patch.text !== undefined) {
       const result = patchTextContent(nextBlock, patch.text);
       if (!result.changed) { reject("这段文字没有变化，或该元素没有可替换的文字"); continue; }
@@ -228,7 +307,7 @@ export async function patchPresentationObjects(
     }
     if (!operations.length) { reject("补丁没有给出任何可执行的修改"); continue; }
 
-    zip.file(binding.slidePart, xml.replace(block, nextBlock));
+    zip.file(binding.slidePart, xml.replace(found.block, nextBlock));
     touchedParts.add(binding.slidePart);
     slide.elements = slide.elements.map(item => item.id === patch.elementId ? syncPlanElement(item, patch) : item);
     // 补丁成功不等于排版成立：文字变长后按当前字号可能放不进原文本框。
@@ -249,7 +328,7 @@ export async function patchPresentationObjects(
   }
 
   if (!report.applied.length) {
-    return { bytes, plan, report };
+    return { bytes, plan, images, report };
   }
 
   // 部件差异：只允许目标页变化，其它部件必须逐字节一致。
@@ -259,11 +338,11 @@ export async function patchPresentationObjects(
   }
   for (const name of after.keys()) if (!before.has(name)) report.changedParts.push(name);
   report.unchangedParts = [...before.keys()].filter(name => !report.changedParts.includes(name)).length;
-  const illegal = report.changedParts.filter(name => !touchedParts.has(name));
+  const illegal = report.changedParts.filter(name => !touchedParts.has(name) && !extraParts.has(name));
   if (illegal.length) throw new Error(`补丁越界：${illegal.join("、")} 不应发生变化`);
 
   const packed = await packPresentationProject(
-    await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }), nextPlan, images,
+    await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }), nextPlan, nextImages,
   );
-  return { bytes: packed, plan: nextPlan, report };
+  return { bytes: packed, plan: nextPlan, images: nextImages, report };
 }

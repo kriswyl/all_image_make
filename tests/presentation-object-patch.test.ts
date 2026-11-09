@@ -290,3 +290,78 @@ it("P15：doc_edit 把溢出写进摘要与报告问题列表", async () => {
   const report = db.getPresentationVersion(conversationId, String(result.data!.fileId))!.report;
   expect(report.issues.some(issue => issue.page === 1 && issue.detail.includes("文字放不下"))).toBe(true);
 });
+
+/** 1×1 PNG，足够作为真实媒体部件走通换图链路。 */
+const PNG = "image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const JPEG = `image/jpeg;base64,${Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 0xff, 0xd9]).toString("base64")}`;
+
+const imagePlan: AiPresentation = {
+  title: "换图", theme: "blue",
+  slides: [{
+    layout: "content", title: "配图页", subtitle: "", lines: [], notes: "", sourceIds: [],
+    elements: [
+      { type: "text", id: "t-1", x: 0.8, y: 0.7, w: 5, h: 0.9, text: "配图页", style: { fontSize: 28 } },
+      { type: "image", id: "img-1", imageIndex: 0, x: 6.4, y: 1.6, w: 5, h: 3.4, fit: "cover" },
+    ],
+  }],
+};
+
+const xmlOfPart = async (bytes: Buffer, name: string) => (await JSZip.loadAsync(bytes)).file(name)!.async("string");
+
+it("Q01：换图新增媒体与关系、改 blip 指向，plan 的 imageIndex 指向新图", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(imagePlan, [{ title: "原图", data: PNG }]), imagePlan, [{ title: "原图", data: PNG }]);
+  const result = await patchPresentationObjects(bytes, imagePlan, [{ slide: 1, elementId: "img-1", image: { data: PNG } }], [{ title: "原图", data: PNG }]);
+  expect(result.report.rejected).toEqual([]);
+  expect(result.report.applied[0]!.operations).toEqual(["image"]);
+  expect(result.report.changedParts).toContain("ppt/slides/slide1.xml");
+  expect(result.report.changedParts).toContain("ppt/slides/_rels/slide1.xml.rels");
+  expect(result.report.changedParts.some(name => name.startsWith("ppt/media/patch-"))).toBe(true);
+  // png 已经声明过，Content_Types 不该被动
+  expect(result.report.changedParts).not.toContain("[Content_Types].xml");
+
+  const block = (await xmlOfPart(result.bytes, "ppt/slides/slide1.xml")).match(/<p:pic>[\s\S]*?<\/p:pic>/)![0];
+  const relId = /r:embed="(rId\d+)"/.exec(block)![1]!;
+  const rels = await xmlOfPart(result.bytes, "ppt/slides/_rels/slide1.xml.rels");
+  expect(rels).toContain(`Id="${relId}"`);
+  expect(rels).toMatch(new RegExp(`Id="${relId}"[^>]*Target="\\.\\./media/patch-[0-9a-f]{12}\\.png"`));
+  // 新图接在项目图片末尾
+  const image = result.plan.slides[0]!.elements!.find(item => item.id === "img-1")!;
+  expect(image.type === "image" && image.imageIndex).toBe(1);
+  expect(result.images).toHaveLength(2);
+});
+
+it("Q02：换成本文件未声明过的格式时补 Content_Types，且不改已有声明", async () => {
+  const packed = await packPresentationProject(await renderAiPresentation(imagePlan, [{ title: "原图", data: PNG }]), imagePlan, [{ title: "原图", data: PNG }]);
+  // 故意去掉 jpeg 声明，模拟只有 png 的文件
+  const stripped = await (async () => {
+    const zip = await JSZip.loadAsync(packed);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    zip.file("[Content_Types].xml", ct.replace(/<Default Extension="jpe?g"[^>]*\/>/g, ""));
+    return zip.generateAsync({ type: "nodebuffer" });
+  })();
+  const result = await patchPresentationObjects(stripped, imagePlan, [{ slide: 1, elementId: "img-1", image: { data: JPEG } }], [{ title: "原图", data: PNG }]);
+  expect(result.report.rejected).toEqual([]);
+  expect(result.report.changedParts).toContain("[Content_Types].xml");
+  const ct = await xmlOfPart(result.bytes, "[Content_Types].xml");
+  expect(ct).toMatch(/<Default Extension="jpeg" ContentType="image\/jpeg"\/>/);
+  // 原有的 png 声明没被删改
+  expect(ct).toMatch(/<Default Extension="png" ContentType="image\/png"\/>/);
+});
+
+it("Q03：非图片对象换图、非法图片数据都明确拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(imagePlan, [{ title: "原图", data: PNG }]), imagePlan, [{ title: "原图", data: PNG }]);
+  const wrongType = await patchPresentationObjects(bytes, imagePlan, [{ slide: 1, elementId: "t-1", image: { data: PNG } }], []);
+  expect(wrongType.report.rejected[0]!.reason).toContain("只有图片对象能换图");
+  const badData = await patchPresentationObjects(bytes, imagePlan, [{ slide: 1, elementId: "img-1", image: { data: "not-an-image" } }], []);
+  expect(badData.report.rejected[0]!.reason).toContain("data URL");
+});
+
+it("Q04：doc_edit 换图用会话素材 ID，素材不存在时明确报错", async () => {
+  const { db, conversationId, fileId, sha256 } = await source();
+  const missing = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId, expectedSha256: sha256,
+    objects: [{ slide: 1, elementId: "t-title", imageAssetId: "00000000-0000-4000-8000-000000000000" }],
+  }), undefined, "op-image-missing");
+  expect(missing.ok).toBe(false);
+  expect(missing.summary).toContain("素材必须是本会话内的图片");
+});

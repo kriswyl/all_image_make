@@ -6,6 +6,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Jimp } from "jimp";
 import { renderAiPresentation, type AiPresentation } from "../src/server/mind-document.js";
 import { packPresentationProject } from "../src/server/presentation-project.js";
 import { patchPresentationObjects } from "../src/server/presentation-object-patch.js";
@@ -18,18 +19,28 @@ const plan: AiPresentation = {
       { type: "text" as const, id: "t-title", x: 0.8, y: 0.7, w: 9, h: 0.9, text: `虚构验收第 ${index + 1} 页`, style: { fontSize: 30, color: "243443" } },
       { type: "shape" as const, id: "s-bar", shape: "roundRect" as const, x: 0.8, y: 1.75, w: 2.4, h: 0.16, fill: "286D9C" },
       { type: "icon" as const, id: "ic-1", icon: "target" as const, x: 0.8, y: 2.3, w: 0.6, h: 0.6 },
-      { type: "text" as const, id: "t-body", x: 1.8, y: 2.3, w: 10.4, h: 2.6, text: "仅用于验证本机排版与导出，不包含任何用户资料。", style: { fontSize: 18 } },
+      { type: "text" as const, id: "t-body", x: 1.8, y: 2.3, w: 5.4, h: 2.6, text: "仅用于验证本机排版与导出，不包含任何用户资料。", style: { fontSize: 18 } },
+      // 图片页：第 1 页用来验证「换图」后 WPS 打开与导出
+      ...(index === 0 ? [{ type: "image" as const, id: "img-1", imageIndex: 0, x: 7.6, y: 2.0, w: 4.6, h: 3.2, fit: "cover" as const }] : []),
     ],
   })),
 };
 
-const bytes = await packPresentationProject(await renderAiPresentation(plan), plan, []);
+/** 两张纯色虚构图：换图前后颜色不同，导出图能直接看出来。 */
+const solid = async (color: number) => {
+  const image = new Jimp({ width: 320, height: 220, color });
+  return `image/png;base64,${(await image.getBuffer("image/png")).toString("base64")}`;
+};
+const red = await solid(0xd02020ff), blue = await solid(0x2f6fbfFF);
+const images = [{ title: "虚构红图", data: red }];
+const bytes = await packPresentationProject(await renderAiPresentation(plan, images), plan, images);
 const patched = await patchPresentationObjects(bytes, plan, [
   { slide: 1, elementId: "t-title", fontSize: 26, color: "B23B2E", rect: { x: 1, y: 0.8, w: 9.4, h: 1 } },
   { slide: 2, elementId: "s-bar", color: "2A716B", rect: { x: 1, y: 1.8, w: 3, h: 0.24 } },
   // 文字也要一起验：只改 <a:t>，字号颜色沿用
   { slide: 3, elementId: "t-body", text: "原位补丁改了这句话\n第二段也一起改" },
-]);
+  { slide: 1, elementId: "img-1", image: { data: blue } },
+], images);
 if (patched.report.rejected.length) throw new Error(`补丁被拒：${JSON.stringify(patched.report.rejected)}`);
 
 const dir = path.resolve("artifacts", "presentation-eval");
