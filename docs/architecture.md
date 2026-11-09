@@ -155,7 +155,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 109 文件 / 800 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 110 文件 / 813 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
@@ -179,7 +179,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 ## 9. 已知边界
 
-- **Word** 只支持正文段落内文本替换，不支持样式、表格结构、图片。
+- **Word** 支持正文段落内文本替换与字符样式（加粗 / 斜体 / 下划线 / 颜色 / 字号，落到包含该文字的 run）；不支持段落样式、表格结构与图片。
 - **Excel** 支持单元格读写、批量标色与标记；复杂工作簿（图表、透视表）拒绝编辑。
 - **PDF** 只读，扫描件需要先 OCR。
 - **PPT** 支持本应用生成文件的整页改与对象级补丁；外部 PPT 仅作风格参考。图表数据会同步内嵌工作簿，但同步失败会明确提示；表格可增删行列，但不支持合并单元格与列宽调整；图标、连线不支持原位补丁。

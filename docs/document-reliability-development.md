@@ -1162,7 +1162,7 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 - 部件差异：3 页补 6 处（含换图、改图表、改表格）→ 只有 3 个页面部件、`slide1.xml.rels`、`ppt/charts/chart1.xml`、内嵌工作簿与新 `ppt/media/patch-*.png` 变化，其余 27 个部件逐字节一致；
 - WPS 回归：`make-object-patch-fixture` 生成补丁后的文件，`eval:wps --file` 打开并导出 3 页；导出图里标题变红、色块变宽变绿、第 3 页正文换成两段且字号沿用、第 1 页配图由红变蓝且无破损占位、第 2 页柱状图数据由 3/5 变为 9/12 且坐标轴自动重算、第 3 页表格单元格改为「推广 / 12 个」且表头底色与边框完好；无重叠或越界。
 
-全量回归 **109 个测试文件、808 项**通过；`tsc` 与 `npm run build` 通过。
+全量回归 **110 个测试文件、813 项**通过；`tsc` 与 `npm run build` 通过。
 
 ### 26.6 边界
 
