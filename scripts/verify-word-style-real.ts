@@ -12,8 +12,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { AlignmentType, Document, Packer, Paragraph, TextRun } from "docx";
-import { styleDocxParagraphs, styleDocxText } from "../src/server/chat-tools/word-document.js";
+import { AlignmentType, Document, Packer, Paragraph, Table, TableCell, TableRow, TextRun } from "docx";
+import { editDocxTableStructure, styleDocxParagraphs, styleDocxText } from "../src/server/chat-tools/word-document.js";
 
 const COLOR = "B23B2E";
 const PLAIN = "这是普通文字";
@@ -23,6 +23,9 @@ const BASELINE = "左对齐基线这一行保持不动";
 const CENTERED = "待居中段落";
 const SPACED = "行距段落要加倍";
 const AFTER = "行距之后的段落";
+const AFTER_TABLE = "表格之后的行";
+const CELL_OLD = "3 个";
+const CELL_NEW = "9 个";
 
 const output = path.resolve("artifacts", "word-style-real", new Date().toISOString().replace(/[:.]/g, "-"));
 await fs.mkdir(output, { recursive: true });
@@ -89,15 +92,30 @@ try {
         new Paragraph({ children: [new TextRun(CENTERED)] }),
         new Paragraph({ children: [new TextRun(SPACED)] }),
         new Paragraph({ children: [new TextRun(AFTER)] }),
+        new Table({ rows: [
+          new TableRow({ children: [
+            new TableCell({ children: [new Paragraph("阶段")] }),
+            new TableCell({ children: [new Paragraph("结果")] }),
+          ] }),
+          new TableRow({ children: [
+            new TableCell({ children: [new Paragraph("选点")] }),
+            new TableCell({ children: [new Paragraph(CELL_OLD)] }),
+          ] }),
+        ] }),
+        new Paragraph({ children: [new TextRun(AFTER_TABLE)] }),
       ],
     }],
   }));
   await fs.writeFile(path.join(output, "source.docx"), source);
 
   // 2. 用项目的补丁改样式 —— 验的是我们的代码，不是 docx 库。
-  const styled = await styleDocxParagraphs(
-    await styleDocxText(source, [{ find: ACCENT, bold: true, color: COLOR }]),
-    [{ find: CENTERED, align: "center" }, { find: SPACED, lineSpacing: 2 }],
+  const styled = await editDocxTableStructure(
+    await styleDocxParagraphs(
+      await styleDocxText(source, [{ find: ACCENT, bold: true, color: COLOR }]),
+      [{ find: CENTERED, align: "center" }, { find: SPACED, lineSpacing: 2 }],
+    ),
+    // 两条：先改一个单元格的文字，再在末尾加一行 —— 表格结构与内容都要真的落到渲染里
+    [{ find: "选点", cells: [{ row: 2, col: 2, text: CELL_NEW }] }, { find: "阶段", insertRows: { at: 3, count: 1 } }],
   );
   const docx = path.join(output, "styled.docx");
   await fs.writeFile(docx, styled);
@@ -165,12 +183,17 @@ try {
   const centerOffset = centered ? Math.abs((centered.left + centered.right) / 2 - after.width / 2) : Infinity;
   const centerOffsetBefore = centeredBefore ? Math.abs((centeredBefore.left + centeredBefore.right) / 2 - before.width / 2) : 0;
   const spacingDelta = (spacedBeforeLine?.baseline ?? 0) - (spacedAfterLine?.baseline ?? 0);
+  // 表格多了一行 → 表后的那段被推下去
+  const tableShift = (find(before.lines, AFTER_TABLE)?.baseline ?? 0) - (find(after.lines, AFTER_TABLE)?.baseline ?? 0);
 
   report.text = after.text;
   report.fillColors = after.fills;
   report.fonts = fonts;
   report.centerOffset = { styled: Number(centerOffset.toFixed(2)), source: Number(centerOffsetBefore.toFixed(2)), pageWidth: Number(after.width.toFixed(2)) };
   report.spacingDelta = Number(spacingDelta.toFixed(2));
+  // 表后那段同时受「行距加倍」和「多一行」影响，扣掉前者才是表格的真实贡献。
+  report.tableShift = Number(tableShift.toFixed(2));
+  report.tableRowShift = Number((tableShift - spacingDelta).toFixed(2));
   report.baselines = {
     spaced: { styled: spacedAfterLine?.baseline ?? null, source: spacedBeforeLine?.baseline ?? null },
   };
@@ -186,6 +209,10 @@ try {
     centered: centerOffset < after.width * 0.03 && centerOffsetBefore > after.width * 0.1,
     // 行距：后面那段被推下去了（2 倍行距至少多出半个行高）
     lineSpacing: spacingDelta > 6,
+    // 表格单元格：改后的文字真的出现在渲染结果里，且旧值已经不在了
+    tableCell: after.text.includes(CELL_NEW) && !after.text.includes(CELL_OLD),
+    // 表格结构：扣掉行距影响后，仍被推低一个行高左右（约 12–18pt）
+    tableRow: tableShift - spacingDelta > 6,
     pageCount: pages === 1 && sourcePages === 1,
   };
   report.checks = checks;

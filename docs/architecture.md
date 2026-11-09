@@ -155,13 +155,13 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 111 文件 / 821 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 112 文件 / 830 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
 | `npm run eval:diversity` | 量版式分布与几何多样性 |
 | `npm run eval:wps` | 用本机 WPS 打开并导出，验证补丁后文件可读 |
-| `npm run eval:word` | Word 样式（字符 + 段落）的真实渲染验收：源文件与补丁文件各导出一次 PDF，比对文字、颜色、字体与文本坐标 |
+| `npm run eval:word` | Word 样式与表格的真实渲染验收：源文件与补丁文件各导出一次 PDF，比对文字、颜色、字体、文本坐标与表格位移 |
 | `npm run eval:edit` | 原生改图链路（画布/图片） |
 
 跑真实渠道脚本时**不要同时改 `src/server`**：`tsx watch` 会重启后端，等待中的请求直接 `ECONNREFUSED`。
@@ -182,7 +182,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 ## 9. 已知边界
 
-- **Word** 支持正文段落内文本替换、字符样式（加粗 / 斜体 / 下划线 / 颜色 / 字号，落到包含该文字的 run）与段落样式（对齐 / 行距 / 段前后 / 缩进 / 首行缩进，落到命中段落的 `pPr`）；不支持页眉页脚、表格结构与图片。
+- **Word** 支持正文段落内文本替换、字符样式（加粗 / 斜体 / 下划线 / 颜色 / 字号，落到包含该文字的 run）与段落样式（对齐 / 行距 / 段前后 / 缩进 / 首行缩进，落到命中段落的 `pPr`），以及表格（按特征文字定位，改单元格文字或增删行列；增删列时总宽度守恒，含合并单元格/嵌套表的表格拒绝）；不支持页眉页脚、合并单元格与图片。
 - **Excel** 支持单元格读写、批量标色与标记；复杂工作簿（图表、透视表）拒绝编辑。
 - **PDF** 只读，扫描件需要先 OCR。
 - **PPT** 支持本应用生成文件的整页改与对象级补丁；外部 PPT 仅作风格参考。图表数据会同步内嵌工作簿，但同步失败会明确提示；表格可增删行列，但不支持合并单元格与列宽调整；图标、连线不支持原位补丁。

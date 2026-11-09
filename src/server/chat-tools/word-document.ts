@@ -372,3 +372,279 @@ export async function styleDocxParagraphs(bytes: Buffer, styles: DocxParagraphSt
   zip.file(MAIN, builder.build(nodes));
   return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }
+
+const copyNode = (node: XmlNode): XmlNode => JSON.parse(JSON.stringify(node));
+const attrOf = (node: XmlNode, prefix: string, name: string) =>
+  (node[":@"] as Record<string, string> | undefined)?.[`@_${prefix}${name}`];
+
+/** 节点下所有 `w:t` 的文字，按出现顺序拼接。 */
+function allText(node: XmlNode, prefix: string) {
+  const parts: string[] = [];
+  function walk(current: XmlNode) {
+    if (tag(current) === `${prefix}t`) parts.push(children(current).map(child => String(child["#text"] ?? "")).join(""));
+    else children(current).forEach(walk);
+  }
+  walk(node);
+  return parts.join("");
+}
+
+function tableRows(table: XmlNode, prefix: string) {
+  return children(table).filter(node => tag(node) === `${prefix}tr`);
+}
+function rowCells(row: XmlNode, prefix: string) {
+  return children(row).filter(node => tag(node) === `${prefix}tc`);
+}
+/** 单元格按行拼接，行间用换行、格间用竖线 —— 避免匹配串跨格拼出假命中。 */
+function tableText(table: XmlNode, prefix: string) {
+  return tableRows(table, prefix)
+    .map(row => rowCells(row, prefix).map(cell => allText(cell, prefix)).join(" | "))
+    .join("\n");
+}
+
+function hasNestedTable(table: XmlNode, prefix: string) {
+  let found = false;
+  function walk(node: XmlNode) {
+    for (const child of children(node)) {
+      if (found) return;
+      if (tag(child) === `${prefix}tbl`) { found = true; return; }
+      walk(child);
+    }
+  }
+  walk(table);
+  return found;
+}
+
+/** 结构类操作的前提：没有嵌套表、没有合并单元格、没有行级跨列跳过。 */
+function tableStructureIssue(table: XmlNode, prefix: string): string | undefined {
+  if (hasNestedTable(table, prefix)) return "表格里嵌套了另一张表";
+  for (const row of tableRows(table, prefix)) {
+    const trPr = children(row).find(node => tag(node) === `${prefix}trPr`);
+    const skip = trPr && children(trPr).find(node => tag(node) === `${prefix}gridBefore` || tag(node) === `${prefix}gridAfter`);
+    if (skip && Number(attrOf(skip, prefix, "val") ?? 0) > 0) return "表格有行级跨列跳过（gridBefore/gridAfter）";
+    for (const cell of rowCells(row, prefix)) {
+      const tcPr = children(cell).find(node => tag(node) === `${prefix}tcPr`);
+      if (!tcPr) continue;
+      const span = children(tcPr).find(node => tag(node) === `${prefix}gridSpan`);
+      if (span && Number(attrOf(span, prefix, "val") ?? 1) > 1) return "表格含合并单元格（gridSpan）";
+      if (children(tcPr).some(node => tag(node) === `${prefix}vMerge`)) return "表格含合并单元格（vMerge）";
+    }
+  }
+  return undefined;
+}
+
+/** 清空单元格内容但保留 tcPr（边框、底纹、宽度）与段落属性。 */
+function clearCellText(cell: XmlNode, prefix: string) {
+  for (const paragraph of children(cell).filter(node => tag(node) === `${prefix}p`)) {
+    const items = children(paragraph);
+    for (let index = items.length - 1; index >= 0; index--) {
+      if (tag(items[index]!) !== `${prefix}pPr`) items.splice(index, 1);
+    }
+  }
+}
+
+/**
+ * 重写单元格文字。
+ *
+ * 保留单元格首段的 pPr 与首个 run 的 rPr，其余内联内容整体替换：单元格里的多段会被
+ * 合并成「按 \n 拆开的新段落」，这是改文字的必然结果，不假装保留了原有分段格式。
+ */
+function writeCellText(cell: XmlNode, prefix: string, text: string) {
+  const paragraphs = children(cell).filter(node => tag(node) === `${prefix}p`);
+  const source = paragraphs[0];
+  const pPr = source && children(source).find(node => tag(node) === `${prefix}pPr`);
+  const firstRun = source && children(source).find(node => tag(node) === `${prefix}r`);
+  const rPr = firstRun && children(firstRun).find(node => tag(node) === `${prefix}rPr`);
+
+  const rebuilt = text.split("\n").map(line => {
+    const paragraph: XmlNode = { [`${prefix}p`]: [] };
+    const kids = children(paragraph);
+    if (pPr) kids.push(copyNode(pPr));
+    if (line) {
+      const run: XmlNode = { [`${prefix}r`]: [] };
+      if (rPr) children(run).push(copyNode(rPr));
+      children(run).push({
+        [`${prefix}t`]: [{ "#text": line }],
+        // 首尾空格会被 XML 解析器吃掉，必须显式声明保留
+        ...(/^\s|\s$/.test(line) ? { ":@": { "@_xml:space": "preserve" } } : {}),
+      });
+      kids.push(run);
+    }
+    return paragraph;
+  });
+
+  const items = children(cell);
+  const positions = items.map((node, index) => tag(node) === `${prefix}p` ? index : -1).filter(index => index >= 0);
+  if (!positions.length) { items.push(...rebuilt); return; }
+  items.splice(positions[0]!, positions.length, ...rebuilt);
+}
+
+/**
+ * 列数变化后按原总宽度重新分配。
+ *
+ * Word 的列宽是「网格 + 单元格 tcW」两处，只改一处不生效；总宽度保持不变，
+ * 是为了不让表格撑出版心 —— 加一列就把表撑出页面比不加更糟。
+ */
+function resizeColumns(table: XmlNode, prefix: string, widths: number[]) {
+  const grid = children(table).find(node => tag(node) === `${prefix}tblGrid`);
+  if (grid) {
+    children(grid).filter(node => tag(node) === `${prefix}gridCol`).forEach((column, index) => {
+      if (widths[index] === undefined) return;
+      column[":@"] = { ...((column[":@"] as object | undefined) ?? {}), [`@_${prefix}w`]: String(widths[index]) };
+    });
+  }
+  tableRows(table, prefix).forEach(row => {
+    rowCells(row, prefix).forEach((cell, index) => {
+      const width = widths[index];
+      if (width === undefined) return;
+      const tcPr = children(cell).find(node => tag(node) === `${prefix}tcPr`);
+      const tcW = tcPr && children(tcPr).find(node => tag(node) === `${prefix}tcW`);
+      if (!tcW) return;
+      // 百分比或自动宽度的单元格不参与绝对宽度分配
+      if ((attrOf(tcW, prefix, "type") ?? "dxa") !== "dxa") return;
+      tcW[":@"] = { ...((tcW[":@"] as object | undefined) ?? {}), [`@_${prefix}w`]: String(width) };
+    });
+  });
+}
+
+function gridWidths(table: XmlNode, prefix: string) {
+  const grid = children(table).find(node => tag(node) === `${prefix}tblGrid`);
+  const columns = grid ? children(grid).filter(node => tag(node) === `${prefix}gridCol`) : [];
+  return columns.map(column => Number(attrOf(column, prefix, "w") ?? 2000) || 2000);
+}
+
+export type DocxTableEdit = {
+  /** 用来定位表格的特征文字：必须唯一落在一张表里 */
+  find: string;
+  /** 改单元格文字，行列从 1 开始；\n 分段 */
+  cells?: Array<{ row: number; col: number; text: string }>;
+  insertRows?: { at: number; count: number };
+  deleteRows?: { at: number; count: number };
+  insertCols?: { at: number; count: number };
+  deleteCols?: { at: number; count: number };
+};
+
+/**
+ * 改 Word 表格：单元格文字，或增删行列。
+ *
+ * 每条只做一件事；改文字只影响目标单元格，增删行列会克隆相邻行/列（保留边框与底纹）
+ * 并清空内容。总列宽保持不变。含合并单元格或嵌套表的表格直接拒绝 —— 复制一行
+ * 在有合并的表格里得不到语义正确的结果。
+ */
+export async function editDocxTableStructure(bytes: Buffer, edits: DocxTableEdit[]) {
+  const { zip, nodes, body, prefix } = await readBody(bytes);
+  if (Object.keys(zip.files).some(name => name.startsWith("_xmlsignatures/"))) throw new Error("带数字签名的 Word 文件不能直接修改");
+
+  const tables: XmlNode[] = [];
+  function collect(node: XmlNode) {
+    const name = tag(node);
+    if (name === `${prefix}tbl`) tables.push(node);
+    else if (name !== `${prefix}del` && name !== `${prefix}drawing`) children(node).forEach(collect);
+  }
+  collect(body);
+  if (!tables.length) throw new Error("Word 文档里没有表格");
+
+  for (const [index, edit] of edits.entries()) {
+    const label = `第 ${index + 1} 处表格修改`;
+    const operations = [edit.cells, edit.insertRows, edit.deleteRows, edit.insertCols, edit.deleteCols].filter(Boolean);
+    if (operations.length !== 1) throw new Error(`${label}一次只能做一件事：改单元格，或者增删行列`);
+
+    const matched = tables.filter(table => tableText(table, prefix).includes(edit.find));
+    if (!matched.length) throw new Error(`${label}未找到包含「${edit.find}」的表格，请重新读取文件`);
+    if (matched.length > 1) throw new Error(`${label}的定位文字出现在多张表格里，请换一段更独特的文字`);
+    const table = matched[0]!;
+    const problem = tableStructureIssue(table, prefix);
+    if (problem) throw new Error(`${label}无法修改：${problem}`);
+
+    const rows = tableRows(table, prefix);
+    const cols = rowCells(rows[0]!, prefix).length;
+    if (rows.some(row => rowCells(row, prefix).length !== cols)) throw new Error(`${label}无法修改：各行单元格数不一致`);
+
+    if (edit.cells) {
+      if (edit.cells.some(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col)
+        || cell.row < 1 || cell.row > rows.length || cell.col < 1 || cell.col > cols)) {
+        throw new Error(`${label}单元格超出范围（${rows.length} 行 ${cols} 列）`);
+      }
+      if (new Set(edit.cells.map(cell => `${cell.row}-${cell.col}`)).size !== edit.cells.length) {
+        throw new Error(`${label}同一个单元格不能在一次修改里改两次`);
+      }
+      for (const cell of edit.cells) writeCellText(rowCells(rows[cell.row - 1]!, prefix)[cell.col - 1]!, prefix, cell.text);
+      continue;
+    }
+
+    const operation = (edit.insertRows ?? edit.deleteRows ?? edit.insertCols ?? edit.deleteCols)!;
+    const isRow = Boolean(edit.insertRows ?? edit.deleteRows);
+    const inserting = Boolean(edit.insertRows ?? edit.insertCols);
+    const { at, count } = operation;
+    const limit = isRow ? rows.length : cols;
+    if (!Number.isInteger(at) || !Number.isInteger(count) || count < 1 || count > 10) {
+      throw new Error(`${label}增删行列的 at / count 必须是整数，count 在 1–10 之间`);
+    }
+    if (!inserting && limit - count < 1) throw new Error(`${label}删完后至少保留一${isRow ? "行" : "列"}`);
+    const maxAt = inserting ? limit + 1 : limit - count + 1;
+    if (at < 1 || at > maxAt) throw new Error(`${label}${isRow ? "行" : "列"}位置超出范围：当前 ${limit} ${isRow ? "行" : "列"}，at 应在 1–${maxAt}`);
+    const next = inserting ? limit + count : limit - count;
+    if (isRow && (next < 1 || next > 100)) throw new Error(`${label}改完后会是 ${next} 行，超出 1–100 行的限制`);
+    if (!isRow && (next < 1 || next > 20)) throw new Error(`${label}改完后会是 ${next} 列，超出 1–20 列的限制`);
+
+    /** 克隆锚点并插到它前面（追加时插到后面），保持「at 是插入后的位置」。 */
+    const spliceClones = (parent: XmlNode, siblings: XmlNode[], make: () => XmlNode) => {
+      const items = children(parent);
+      const anchor = siblings[Math.min(at, siblings.length) - 1]!;
+      const append = at > siblings.length;
+      const clones = Array.from({ length: count }, make);
+      items.splice(items.indexOf(anchor) + (append ? 1 : 0), 0, ...clones);
+    };
+
+    if (isRow) {
+      if (inserting) {
+        spliceClones(table, rows, () => {
+          const clone = copyNode(rows[Math.min(at, rows.length) - 1]!);
+          rowCells(clone, prefix).forEach(cell => clearCellText(cell, prefix));
+          return clone;
+        });
+      } else {
+        children(table).splice(children(table).indexOf(rows[at - 1]!), count);
+      }
+    } else {
+      const widths = gridWidths(table, prefix);
+      const total = widths.reduce((sum, width) => sum + width, 0) || cols * 2000;
+      /** 网格列必须跟着增删，只改宽度会让网格与单元格对不上。位置要和单元格一致。 */
+      const spliceGrid = (mode: "insert" | "delete", templateIndex: number, amount: number) => {
+        const grid = children(table).find(node => tag(node) === `${prefix}tblGrid`);
+        const columns = grid ? children(grid).filter(node => tag(node) === `${prefix}gridCol`) : [];
+        if (!grid || !columns.length) return;
+        const items = children(grid);
+        if (mode === "delete") {
+          items.splice(items.indexOf(columns[templateIndex]!), amount);
+          return;
+        }
+        const anchor = columns[templateIndex]!;
+        const index = items.indexOf(anchor) + (at > columns.length ? 1 : 0);
+        items.splice(index, 0, ...Array.from({ length: amount }, () => copyNode(anchor)));
+      };
+
+      if (inserting) {
+        const after = cols + count;
+        for (const row of rows) spliceClones(row, rowCells(row, prefix), () => {
+          const clone = copyNode(rowCells(row, prefix)[Math.min(at, cols) - 1]!);
+          clearCellText(clone, prefix);
+          return clone;
+        });
+        spliceGrid("insert", Math.min(at, cols) - 1, count);
+        const scaled = widths.map(width => Math.max(240, Math.round(width * (cols / after))));
+        const fresh = Math.round(total / after);
+        scaled.splice(at - 1, 0, ...Array.from({ length: count }, () => fresh));
+        resizeColumns(table, prefix, scaled);
+      } else {
+        for (const row of rows) children(row).splice(children(row).indexOf(rowCells(row, prefix)[at - 1]!), count);
+        spliceGrid("delete", at - 1, count);
+        const remaining = widths.filter((_width, index) => index < at - 1 || index >= at - 1 + count);
+        const rest = remaining.reduce((sum, width) => sum + width, 0) || total;
+        resizeColumns(table, prefix, remaining.map(width => Math.max(240, Math.round(width * (total / rest)))));
+      }
+    }
+  }
+
+  zip.file(MAIN, builder.build(nodes));
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
