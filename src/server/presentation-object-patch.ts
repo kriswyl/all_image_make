@@ -33,6 +33,14 @@ export type ObjectPatch = {
    * 只影响目标页部件、它的 rels、媒体部件和 Content_Types。
    */
   image?: { data: string };
+  /**
+   * 改图表数据：只更新图表部件里的显示缓存（分类、系列名、数值）。
+   * 内嵌数据表（ppt/embeddings/*.xlsx）不随之更新，会作为警告返回。
+   */
+  chart?: {
+    categories?: string[];
+    series?: Array<{ name?: string; values: number[] }>;
+  };
 };
 
 export type PatchReport = {
@@ -49,7 +57,7 @@ export type PatchReport = {
 };
 
 const EMU = 914400;
-const PATCHABLE = new Set(["text", "shape", "image"]);
+const PATCHABLE = new Set(["text", "shape", "image", "chart"]);
 const hex = (value: string) => /^[0-9A-Fa-f]{6}$/.test(value);
 
 /** 解压后逐个部件算哈希：ZIP 时间戳、条目顺序、压缩结果都不参与。 */
@@ -224,7 +232,86 @@ function syncPlanElement(element: PresentationElement, patch: ObjectPatch): Pres
   if (element.type === "shape") {
     return { ...element, ...(patch.rect ?? {}), ...(patch.color !== undefined ? { fill: patch.color.toUpperCase() } : {}) };
   }
+  if (element.type === "chart") {
+    const categories = patch.chart?.categories ?? element.categories;
+    const series = element.series.map((item, index) => {
+      const next = patch.chart?.series?.[index];
+      return next ? { name: next.name ?? item.name, values: next.values } : item;
+    });
+    return { ...element, ...(patch.rect ?? {}), categories, series };
+  }
   return { ...element, ...(patch.rect ?? {}) } as PresentationElement;
+}
+
+const cachePoints = (values: string[]) =>
+  `<c:ptCount val="${values.length}"/>` + values.map((value, index) => `<c:pt idx="${index}"><c:v>${xmlEscape(String(value))}</c:v></c:pt>`).join("");
+
+/**
+ * 改一组系列的数据缓存。
+ * 只改缓存内容，`c:f` 的公式引用、格式码、系列样式都保留 —— 结构和样式不是本次操作的职责。
+ */
+function patchSeries(seriesXml: string, input: { name?: string; categories?: string[]; values?: number[] }): { xml: string; changed: boolean } {
+  let xml = seriesXml;
+  if (input.name !== undefined) {
+    xml = xml.replace(/(<c:tx>[\s\S]*?<c:strCache>)[\s\S]*?(<\/c:strCache>)/, (_match, head: string, tail: string) => `${head}${cachePoints([input.name!])}${tail}`);
+  }
+  if (input.categories) {
+    const points = input.categories.map((value, index) => `<c:pt idx="${index}"><c:v>${xmlEscape(value)}</c:v></c:pt>`).join("");
+    if (/<c:multiLvlStrCache>/.test(xml)) {
+      xml = xml.replace(/(<c:multiLvlStrCache>)[\s\S]*?(<\/c:multiLvlStrCache>)/, (_match, head: string, tail: string) =>
+        `${head}<c:ptCount val="${input.categories!.length}"/><c:lvl>${points}</c:lvl>${tail}`);
+    } else if (/<c:cat>[\s\S]*?<c:strCache>/.test(xml)) {
+      xml = xml.replace(/(<c:cat>[\s\S]*?<c:strCache>)[\s\S]*?(<\/c:strCache>)/, (_match, head: string, tail: string) =>
+        `${head}${cachePoints(input.categories!)}${tail}`);
+    }
+  }
+  if (input.values) {
+    xml = xml.replace(/(<c:numCache>)([\s\S]*?)(<\/c:numCache>)/, (_match, head: string, body: string, tail: string) => {
+      const format = /<c:formatCode>[^<]*<\/c:formatCode>/.exec(body)?.[0] ?? "<c:formatCode>General</c:formatCode>";
+      return `${head}${format}${cachePoints(input.values!.map(String))}${tail}`;
+    });
+  }
+  return { xml, changed: xml !== seriesXml };
+}
+
+/** 换图表数据：改 ppt/charts/chartN.xml 的缓存，不重画图表，也不动页面布局。 */
+async function replaceChartData(input: {
+  zip: JSZip; slidePart: string; block: string;
+  chart: NonNullable<ObjectPatch["chart"]>;
+  current: { categories: string[]; series: Array<{ name: string; values: number[] }> };
+}): Promise<{ parts: string[]; embeddedWorkbook: boolean; changed: number }> {
+  const relId = /<c:chart\b[^>]*r:id="([^"]+)"/.exec(input.block)?.[1];
+  if (!relId) throw new Error("这个图表对象没有关系引用");
+  const relsPath = input.slidePart.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
+  const relsFile = input.zip.file(relsPath);
+  if (!relsFile) throw new Error("页面关系缺失，无法定位图表部件");
+  const rels = await relsFile.async("string");
+  const rel = new RegExp(`<Relationship\\b[^>]*Id="${relId}"[^>]*>`).exec(rels)?.[0];
+  if (!rel || !/\/chart"/.test(rel)) throw new Error("这个对象不是图表关系");
+  const target = /Target="([^"]+)"/.exec(rel)?.[1];
+  if (!target) throw new Error("图表关系缺少目标部件");
+  // 关系目标可能是绝对的 /ppt/charts/...，也可能是相对的 ../charts/...
+  const chartPart = target.startsWith("/") ? target.slice(1) : `ppt/${target.replace(/^\.\.\//, "")}`;
+  const chartFile = input.zip.file(chartPart);
+  if (!chartFile) throw new Error("图表部件不存在");
+
+  const chartXml = await chartFile.async("string");
+  let next = chartXml, changed = 0;
+  const blocks = [...chartXml.matchAll(/<c:ser>[\s\S]*?<\/c:ser>/g)].map(match => match[0]);
+  blocks.forEach((block, index) => {
+    const patch = input.chart.series?.[index] ? { ...input.chart.series[index]!, ...(input.chart.categories ? { categories: input.chart.categories } : {}) }
+      : input.chart.categories ? { categories: input.chart.categories } : undefined;
+    if (!patch) return;
+    const result = patchSeries(block, patch);
+    if (result.changed) { next = next.replace(block, result.xml); changed++; }
+  });
+  if (!changed) throw new Error("图表数据没有变化");
+  input.zip.file(chartPart, next);
+
+  // 内嵌数据表不会跟着改：PowerPoint 的「编辑数据」仍会显示旧值，必须说清楚。
+  const chartRels = `ppt/charts/_rels/${chartPart.split("/").pop()}.rels`;
+  const embedded = Boolean(input.zip.file(chartRels) && /\/package"/.test(await input.zip.file(chartRels)!.async("string")));
+  return { parts: [chartPart], embeddedWorkbook: embedded, changed };
 }
 
 export async function patchPresentationObjects(
@@ -250,7 +337,23 @@ export async function patchPresentationObjects(
     if (!slide.elements) { reject("这一页不是元素页（使用了 box 或 lines），补丁无法同步回可编辑源方案"); continue; }
     const element = slide.elements.find(item => item.id === patch.elementId);
     if (!element) { reject("计划里没有这个元素"); continue; }
-    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框、普通形状与图片`); continue; }
+    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框、普通形状、图片与图表`); continue; }
+    // 混写要在逐字段校验之前拦住，否则会被「字段只适用于文本框」这类更具体的报错盖过去。
+    if (patch.chart !== undefined && (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined || patch.image !== undefined)) { reject("改图表数据不能和文字、样式或换图写在同一条里"); continue; }
+    if (patch.image !== undefined && (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined)) { reject("换图不能和文字或样式补丁写在同一条里"); continue; }
+
+    if (patch.chart !== undefined) {
+      if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
+      const categories = patch.chart.categories ?? element.categories;
+      if (patch.chart.series && patch.chart.series.length !== element.series.length) {
+        reject(`这个图表有 ${element.series.length} 组数据，补丁给了 ${patch.chart.series.length} 组；不支持增删系列`); continue;
+      }
+      if (patch.chart.categories && patch.chart.categories.length !== element.categories.length) {
+        reject(`这个图表有 ${element.categories.length} 个分类，补丁给了 ${patch.chart.categories.length} 个；不支持增删分类`); continue;
+      }
+      const wrong = (patch.chart.series ?? []).findIndex(item => item.values.length !== categories.length);
+      if (wrong >= 0) { reject(`第 ${wrong + 1} 组数据的个数与分类数（${categories.length}）不一致`); continue; }
+    }
     if (patch.image !== undefined) {
       if (element.type !== "image") { reject("只有图片对象能换图"); continue; }
       if (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined) { reject("换图不能和文字或样式补丁写在同一条里"); continue; }
@@ -273,6 +376,18 @@ export async function patchPresentationObjects(
 
     let nextBlock = found.block;
     const operations: string[] = [];
+    if (patch.chart !== undefined) {
+      if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
+      const categories = patch.chart.categories ?? element.categories;
+      if (patch.chart.series && patch.chart.series.length !== element.series.length) {
+        reject(`这个图表有 ${element.series.length} 组数据，补丁给了 ${patch.chart.series.length} 组；不支持增删系列`); continue;
+      }
+      if (patch.chart.categories && patch.chart.categories.length !== element.categories.length) {
+        reject(`这个图表有 ${element.categories.length} 个分类，补丁给了 ${patch.chart.categories.length} 个；不支持增删分类`); continue;
+      }
+      const wrong = (patch.chart.series ?? []).findIndex(item => item.values.length !== categories.length);
+      if (wrong >= 0) { reject(`第 ${wrong + 1} 组数据的个数与分类数（${categories.length}）不一致`); continue; }
+    }
     if (patch.image !== undefined) {
       if (found.kind !== "pic") { reject("这个对象不是图片块，无法换图"); continue; }
       try {
@@ -283,6 +398,22 @@ export async function patchPresentationObjects(
         // 新图接在项目图片末尾，plan 的 imageIndex 指向它。
         nextImages.push({ title: `原位换图 ${patch.elementId}`.slice(0, 200), data: patch.image.data });
         (element as { imageIndex: number }).imageIndex = nextImages.length - 1;
+      } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
+    }
+    if (patch.chart !== undefined && element.type === "chart") {
+      try {
+        const replaced = await replaceChartData({
+          zip, slidePart: binding.slidePart, block: nextBlock, chart: patch.chart,
+          current: { categories: element.categories, series: element.series },
+        });
+        for (const part of replaced.parts) extraParts.add(part);
+        operations.push("chart");
+        if (replaced.embeddedWorkbook) {
+          report.warnings.push({
+            slide: patch.slide, elementId: patch.elementId,
+            detail: "图表只更新了显示数据，内嵌数据表仍是旧值：在 PowerPoint 里点「编辑数据」看到的还是改前的数字",
+          });
+        }
       } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
     }
     if (patch.text !== undefined) {
@@ -307,8 +438,11 @@ export async function patchPresentationObjects(
     }
     if (!operations.length) { reject("补丁没有给出任何可执行的修改"); continue; }
 
-    zip.file(binding.slidePart, xml.replace(found.block, nextBlock));
-    touchedParts.add(binding.slidePart);
+    // 图表补丁只改图表部件，页面块本身没变，就不要把页面重写一遍。
+    if (nextBlock !== found.block) {
+      zip.file(binding.slidePart, xml.replace(found.block, nextBlock));
+      touchedParts.add(binding.slidePart);
+    }
     slide.elements = slide.elements.map(item => item.id === patch.elementId ? syncPlanElement(item, patch) : item);
     // 补丁成功不等于排版成立：文字变长后按当前字号可能放不进原文本框。
     // 这里只诊断，不擅自缩字号 —— 缩字号是用户的决定，不是补丁的副作用。

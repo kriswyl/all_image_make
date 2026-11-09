@@ -9,7 +9,9 @@ import { renderAiPresentation, type AiPresentation } from "../src/server/mind-do
 import { patchPresentationObjects } from "../src/server/presentation-object-patch";
 import { packPresentationProject, readPresentationProject } from "../src/server/presentation-project";
 import { AppDatabase } from "../src/server/db";
-import { executeChatDocumentTool, saveWorkspaceDocument } from "../src/server/chat-tools/documents";
+import { executeChatDocumentTool, readWorkspaceFile, saveWorkspaceDocument } from "../src/server/chat-tools/documents";
+/** 读回工作区文件字节：图表断言要直接看部件内容。 */
+const readWorkspaceFileBytes = (db: AppDatabase, conversationId: string, fileId: string) => readWorkspaceFile(db, conversationId, fileId).bytes;
 
 /** M2：限定原位补丁。断言同时看 OOXML、plan 同步和部件差异。 */
 
@@ -286,7 +288,7 @@ it("P15：doc_edit 把溢出写进摘要与报告问题列表", async () => {
     objects: [{ slide: 1, elementId: "t-body", text: long }],
   }), undefined, "op-warn");
   expect(result.ok).toBe(true);
-  expect(result.summary).toContain("文字可能超出文本框");
+  expect(result.summary).toContain("文字放不下");
   const report = db.getPresentationVersion(conversationId, String(result.data!.fileId))!.report;
   expect(report.issues.some(issue => issue.page === 1 && issue.detail.includes("文字放不下"))).toBe(true);
 });
@@ -306,7 +308,15 @@ const imagePlan: AiPresentation = {
   }],
 };
 
-const xmlOfPart = async (bytes: Buffer, name: string) => (await JSZip.loadAsync(bytes)).file(name)!.async("string");
+/** pptxgenjs 在同一进程里给图表编号自增，不能假设一定叫 chart1.xml。 */
+const chartPartOf = async (bytes: Buffer) => Object.keys((await JSZip.loadAsync(bytes)).files).find(name => /^ppt\/charts\/chart\d+\.xml$/.test(name))!;
+
+const xmlOfPart = async (bytes: Buffer, name: string) => {
+  const zip = await JSZip.loadAsync(bytes);
+  const file = zip.file(name);
+  if (!file) throw new Error(`缺少部件 ${name}；现有：${Object.keys(zip.files).join(",")}`);
+  return file.async("string");
+};
 
 it("Q01：换图新增媒体与关系、改 blip 指向，plan 的 imageIndex 指向新图", async () => {
   const bytes = await packPresentationProject(await renderAiPresentation(imagePlan, [{ title: "原图", data: PNG }]), imagePlan, [{ title: "原图", data: PNG }]);
@@ -364,4 +374,99 @@ it("Q04：doc_edit 换图用会话素材 ID，素材不存在时明确报错", a
   }), undefined, "op-image-missing");
   expect(missing.ok).toBe(false);
   expect(missing.summary).toContain("素材必须是本会话内的图片");
+});
+
+const chartPlan: AiPresentation = {
+  title: "图表", theme: "blue",
+  slides: [{
+    layout: "content", title: "图表页", subtitle: "", lines: [], notes: "", sourceIds: [],
+    elements: [
+      { type: "chart", id: "ch-1", x: 1, y: 1.6, w: 6, h: 3.4, chartType: "bar",
+        categories: ["一季度", "二季度"], series: [{ name: "覆盖", values: [3, 5] }, { name: "转化", values: [1, 2] }] },
+    ],
+  }],
+};
+
+it("R01：改图表数据只动图表部件，页面与样式不变，plan 同步", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const result = await patchPresentationObjects(bytes, chartPlan, [{
+    slide: 1, elementId: "ch-1",
+    chart: { categories: ["上半年", "下半年"], series: [{ name: "覆盖量", values: [7, 9] }, { values: [4, 6] }] },
+  }]);
+  expect(result.report.rejected).toEqual([]);
+  expect(result.report.applied[0]!.operations).toEqual(["chart"]);
+  // 页面块没变：只有图表部件在变化
+  const part = await chartPartOf(result.bytes);
+  expect(result.report.changedParts).toEqual([part]);
+
+  const xml = await xmlOfPart(result.bytes, part);
+  expect(xml).toContain("<c:v>上半年</c:v>");
+  expect(xml).toContain("<c:v>7</c:v>");
+  expect(xml).toContain("<c:v>覆盖量</c:v>");
+  expect(xml).not.toContain("<c:v>3</c:v>");
+  // 公式引用与格式码保留
+  expect(xml).toContain("<c:f>Sheet1!$B$2:$B$3</c:f>");
+  expect(xml).toContain("<c:formatCode>General</c:formatCode>");
+
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "ch-1")!;
+  expect(element.type === "chart" && element.categories).toEqual(["上半年", "下半年"]);
+  expect(element.type === "chart" && element.series).toEqual([
+    { name: "覆盖量", values: [7, 9] }, { name: "转化", values: [4, 6] },
+  ]);
+  // 内嵌数据表不会跟着改，必须明说
+  expect(result.report.warnings[0]!.detail).toContain("内嵌数据表仍是旧值");
+});
+
+it("R02：增删系列、分类数不一致、数值个数不符都拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const fewer = await patchPresentationObjects(bytes, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [1, 2] }] } }]);
+  expect(fewer.report.rejected[0]!.reason).toContain("不支持增删系列");
+
+  const categories = await patchPresentationObjects(bytes, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { categories: ["只有一个"] } }]);
+  expect(categories.report.rejected[0]!.reason).toContain("不支持增删分类");
+
+  const wrongLength = await patchPresentationObjects(bytes, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [1, 2, 3] }, { values: [1, 2] }] } }]);
+  expect(wrongLength.report.rejected[0]!.reason).toContain("个数与分类数");
+});
+
+it("R03：非图表对象改数据、图表与文字混写都拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const wrong = await patchPresentationObjects(bytes, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [2, 3] }] }, text: "混写" }]);
+  expect(wrong.report.rejected[0]!.reason).toContain("不能和文字");
+});
+
+it("R04：只改分类时两组系列的分类缓存都更新，数值保持", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const result = await patchPresentationObjects(bytes, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { categories: ["A 阶段", "B 阶段"] } }]);
+  const xml = await xmlOfPart(result.bytes, await chartPartOf(result.bytes));
+  expect((xml.match(/<c:v>A 阶段<\/c:v>/g) ?? [])).toHaveLength(2);
+  expect(xml).toContain("<c:v>3</c:v>");
+  expect(xml).toContain("<c:v>5</c:v>");
+});
+
+it("R05：doc_edit 改图表数据，报告里带内嵌数据表提示", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "chart-patch-"));
+  const db = new AppDatabase(dir);
+  databases.push(db);
+  const conversationId = db.createConversation({
+    title: "图表补丁", brainChannelId: "mock-channel", brainModel: "mock",
+    videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false,
+  }).id;
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const source = saveWorkspaceDocument(db, conversationId, "图表源文件", "pptx", bytes, "op-source", {
+    draft: false, resume: false, fallbackPages: [], pendingPages: [], overflowPages: [],
+    sourceLimitedPages: [], notesLimitedPages: [], unplacedImages: 0, planningFallback: false,
+    audit: "unavailable", issues: [],
+  });
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId: source.id, expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+    objects: [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [8, 10] }, { values: [5, 7] }] } }],
+  }), undefined, "op-chart");
+  expect(result.ok).toBe(true);
+  expect(result.summary).toContain("内嵌数据表");
+  const report = db.getPresentationVersion(conversationId, String(result.data!.fileId))!.report;
+  expect(report.issues.some(issue => issue.page === 1 && issue.detail.includes("内嵌数据表"))).toBe(true);
+  const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
+  const element = project.plan.slides[0]!.elements!.find(item => item.id === "ch-1")!;
+  expect(element.type === "chart" && element.series[0]!.values).toEqual([8, 10]);
 });

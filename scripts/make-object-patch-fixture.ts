@@ -22,6 +22,9 @@ const plan: AiPresentation = {
       { type: "text" as const, id: "t-body", x: 1.8, y: 2.3, w: 5.4, h: 2.6, text: "仅用于验证本机排版与导出，不包含任何用户资料。", style: { fontSize: 18 } },
       // 图片页：第 1 页用来验证「换图」后 WPS 打开与导出
       ...(index === 0 ? [{ type: "image" as const, id: "img-1", imageIndex: 0, x: 7.6, y: 2.0, w: 4.6, h: 3.2, fit: "cover" as const }] : []),
+      // 第 2 页放图表：验证「只改数据、不重画图表」
+      ...(index === 1 ? [{ type: "chart" as const, id: "ch-1", chartType: "bar" as const, x: 6.4, y: 2.0, w: 5.6, h: 3.4,
+        categories: ["一季度", "二季度"], series: [{ name: "覆盖", values: [3, 5] }] }] : []),
     ],
   })),
 };
@@ -40,6 +43,7 @@ const patched = await patchPresentationObjects(bytes, plan, [
   // 文字也要一起验：只改 <a:t>，字号颜色沿用
   { slide: 3, elementId: "t-body", text: "原位补丁改了这句话\n第二段也一起改" },
   { slide: 1, elementId: "img-1", image: { data: blue } },
+  { slide: 2, elementId: "ch-1", chart: { series: [{ values: [9, 12] }] } },
 ], images);
 if (patched.report.rejected.length) throw new Error(`补丁被拒：${JSON.stringify(patched.report.rejected)}`);
 
