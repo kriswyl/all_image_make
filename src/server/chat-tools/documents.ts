@@ -532,6 +532,7 @@ export async function executeChatDocumentTool(db: AppDatabase, conversationId: s
             if (sample.length) summary += `未找到的 ID${sample.length < unmatched.length ? `（前 ${sample.length} 个）` : ""}：${sample.join("、")}。`;
           }
           if (skippedCells) summary += `有 ${skippedCells} 个非空单元格因公式、合并或非普通 ID 值跳过。`;
+          if (result.report.surgical) summary += "工作簿里的图表等部件原样保留。";
           if (!result.bytes) return { ok: true, summary: `${summary}没有匹配行，未生成修改版。` };
           bytes = result.bytes;
           if (matchRows.fontColor) summary += matchRows.colorColumns ? "已为命中行的指定列设置字体颜色。" : "已为命中的 ID 设置字体颜色。";

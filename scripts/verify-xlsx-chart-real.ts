@@ -17,6 +17,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import JSZip from "jszip";
 import { editXlsxPreserving } from "../src/server/chat-tools/xlsx-surgical.js";
+import { matchAndEditXlsx } from "../src/server/chat-tools/spreadsheet-document.js";
 
 const SHEET = "数据";
 const VALUES = [40, 55, 30];
@@ -25,7 +26,9 @@ await fs.mkdir(output, { recursive: true });
 const report: Record<string, unknown> = { output };
 
 function runPowerShell(script: string, env: Record<string, string>) {
-  const run = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+  // PowerShell 5.1 默认按本地代码页写 stdout，中文会被截断成乱码；先切到 UTF-8。
+  const preamble = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; ";
+  const run = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", preamble + script], {
     env: { ...process.env, ...env }, encoding: "utf8", timeout: 180000,
   });
   return `${run.stdout ?? ""}${run.stderr ?? ""}`.trim();
@@ -44,10 +47,10 @@ try {
     "  $wb=$app.Workbooks.Add()",
     "  $ws=$wb.Worksheets.Item(1)",
     `  $ws.Name='${SHEET}'`,
-    "  $ws.Cells.Item(1,1).Value2='类别'; $ws.Cells.Item(1,2).Value2='数量'",
-    "  $ws.Cells.Item(2,1).Value2='一月'; $ws.Cells.Item(2,2).Value2=12",
-    "  $ws.Cells.Item(3,1).Value2='二月'; $ws.Cells.Item(3,2).Value2=18",
-    "  $ws.Cells.Item(4,1).Value2='三月'; $ws.Cells.Item(4,2).Value2=9",
+    "  $ws.Cells.Item(1,1).Value2='类别'; $ws.Cells.Item(1,2).Value2='数量'; $ws.Cells.Item(1,3).Value2='编号'",
+    "  $ws.Cells.Item(2,1).Value2='一月'; $ws.Cells.Item(2,2).Value2=12; $ws.Cells.Item(2,3).Value2='A-001'",
+    "  $ws.Cells.Item(3,1).Value2='二月'; $ws.Cells.Item(3,2).Value2=18; $ws.Cells.Item(3,3).Value2='A-002'",
+    "  $ws.Cells.Item(4,1).Value2='三月'; $ws.Cells.Item(4,2).Value2=9;  $ws.Cells.Item(4,3).Value2='A-003'",
     "  $co=$ws.ChartObjects().Add(320,20,320,200)",
     "  $co.Chart.ChartType=51",
     `  $co.Chart.SetSourceData($ws.Range('A1:B4'))`,
@@ -112,7 +115,54 @@ try {
     chartReplotted: same(series),
     // 包内缓存也是新值（不重算的预览器也能显示对）
     cacheSynced: same(cached),
+    // 第二阶段（批量标记）的结论，下面再填
+    markColors: false,
+    markChartKept: false,
+    markColumn: false,
   };
+  // 5. 第二阶段：在同一份（带图表的）工作簿上做批量标记，再打开核对字体颜色与图表
+  const marked = await matchAndEditXlsx(patched.bytes, {
+    sheet: SHEET, column: "C", ids: ["A-001", "A-003"], fontColor: "FF0000", marker: {},
+  });
+  if (!marked.bytes) throw new Error("批量标记没有产出新文件");
+  const markedPath = path.join(output, "marked.xlsx");
+  await fs.writeFile(markedPath, marked.bytes);
+  report.markReport = marked.report;
+
+  const probe2 = runPowerShell([
+    "$ErrorActionPreference='Stop'",
+    "$app=New-Object -ComObject Excel.Application",
+    "$app.Visible=$false; $app.DisplayAlerts=0",
+    "try {",
+    "  $wb=$app.Workbooks.Open($env:XL_IN,0,$true)",
+    "  $ws=$wb.Worksheets.Item(1)",
+    "  $col=@($ws.Range('C2').Font.Color,$ws.Range('C3').Font.Color,$ws.Range('C4').Font.Color)",
+    "  $charts=$ws.ChartObjects().Count",
+    "  $vals=@(); if ($charts -gt 0) { $vals=$ws.ChartObjects().Item(1).Chart.SeriesCollection(1).Values }",
+    "  $head=[string]$ws.Range('D1').Value2",
+    "  $mk=@($ws.Range('D2').Value2,$ws.Range('D3').Value2,$ws.Range('D4').Value2)",
+    "  $wb.Close(0)",
+    "  Write-Output ('colors=' + (($col | ForEach-Object { if ($_ -eq $null) { 'null' } else { $_ } }) -join ','))",
+    "  Write-Output ('charts=' + $charts)",
+    "  Write-Output ('series=' + ($vals -join ','))",
+    "  Write-Output ('header=' + $head)",
+    "  Write-Output ('marks=' + (($mk | ForEach-Object { if ($_ -eq $null) { '' } else { $_ } }) -join ','))",
+    "} finally { try { $app.Quit() } catch { } }",
+    "exit 0",
+  ].join("; "), { XL_IN: markedPath });
+
+  const colors = /colors=([^\r\n]*)/.exec(probe2)?.[1]?.split(",") ?? [];
+  const marks = /marks=([^\r\n]*)/.exec(probe2)?.[1]?.split(",") ?? [];
+  const markedCharts = Number(/charts=(\d+)/.exec(probe2)?.[1] ?? 0);
+  const markedSeries = /series=([\d,\-.]*)/.exec(probe2)?.[1]?.split(",").map(Number) ?? [];
+  const header = /header=([^\r\n]*)/.exec(probe2)?.[1] ?? "";
+  report.marked = { colors, charts: markedCharts, series: markedSeries, header, marks };
+
+  // 红色在 Excel 的 BGR 记法里是 255；未命中的那行应保持自动色（0）
+  checks.markColors = colors[0] === "255" && colors[2] === "255" && colors[1] === "0";
+  checks.markChartKept = markedCharts === 1 && same(markedSeries);
+  checks.markColumn = header === "标记" && marks[0] === "1" && marks[1] === "" && marks[2] === "1";
+
   report.checks = checks;
   report.passed = Object.values(checks).every(Boolean);
   console.log(JSON.stringify(report, null, 2));

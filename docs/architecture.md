@@ -155,14 +155,14 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 113 文件 / 838 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 113 文件 / 845 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
 | `npm run eval:diversity` | 量版式分布与几何多样性 |
 | `npm run eval:wps` | 用本机 WPS 打开并导出，验证补丁后文件可读 |
 | `npm run eval:word` | Word 样式与表格的真实渲染验收：源文件与补丁文件各导出一次 PDF，比对文字、颜色、字体、文本坐标与表格位移 |
-| `npm run eval:xlsx` | Excel 图表的真实验收：COM 生成带柱状图的工作簿 → 改数 → 再交 Excel 打开，读单元格值与图表系列值 |
+| `npm run eval:xlsx` | Excel 带图表工作簿的真实验收：COM 建带柱状图的文件 → 改数 + 批量标色 → 再交 Excel 打开，读单元格值、图表系列值与字体颜色 |
 | `npm run eval:edit` | 原生改图链路（画布/图片） |
 
 跑真实渠道脚本时**不要同时改 `src/server`**：`tsx watch` 会重启后端，等待中的请求直接 `ECONNREFUSED`。

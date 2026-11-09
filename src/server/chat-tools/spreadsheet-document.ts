@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs";
 import { z } from "zod";
 import { openOfficeArchive, readOfficePart } from "./office-archive.js";
-import { editXlsxPreserving } from "./xlsx-surgical.js";
+import { editXlsxPreserving, matchAndEditXlsxPreserving } from "./xlsx-surgical.js";
 
 const MAX_NEW_CELLS = 50_000;
 const MAX_READ_CELLS = 500;
@@ -248,6 +248,11 @@ export async function matchAndEditXlsx(bytes: Buffer, options: MatchRows, listBy
   if (options.colorColumns && !options.fontColor) throw new Error("指定标色列范围时也要提供字体颜色");
   const ids = options.list && listBytes ? await readMatchIds(listBytes, options.list) : new Set(options.ids?.filter(id => id.trim()));
   if (!ids.size) throw new Error("指定范围没有可匹配的 ID，请检查清单和起始行");
+  // 含图表/透视表的工作簿用 ExcelJS 整本重写会丢部件，改走 ZIP 补丁。
+  const probe = await openOfficeArchive(bytes, "xl/workbook.xml", "Excel");
+  if (Object.keys(probe.files).some(name => COMPLEX_PARTS.test(name))) {
+    return matchAndEditXlsxPreserving(bytes, options, ids);
+  }
   const workbook = await loadWorkbook(bytes, true);
   const sheet = workbook.getWorksheet(options.sheet);
   if (!sheet) throw new Error(`找不到工作表「${options.sheet}」`);
@@ -266,7 +271,7 @@ export async function matchAndEditXlsx(bytes: Buffer, options: MatchRows, listBy
   }
   const unmatched = [...ids].filter(id => !matched.has(id));
   const report = { scannedRows: Math.max(0, end - start + 1), requestedIds: ids.size, matchedIds: matched.size, matchedRows: rows.length, unmatched, skippedCells };
-  if (!rows.length) return { report };
+  if (!rows.length) return { report: { ...report, surgical: false as const } };
 
   const from = options.colorColumns ? coordinate(`${options.colorColumns.from}1`).column : column;
   const to = options.colorColumns ? coordinate(`${options.colorColumns.to}1`).column : column;
@@ -285,7 +290,7 @@ export async function matchAndEditXlsx(bytes: Buffer, options: MatchRows, listBy
     if (marker) sheet.getCell(row, marker.column).value = marker.value;
   }
   if (marker) workbook.calcProperties.fullCalcOnLoad = true;
-  return { report, bytes: Buffer.from(await workbook.xlsx.writeBuffer()) };
+  return { report: { ...report, surgical: false as const }, bytes: Buffer.from(await workbook.xlsx.writeBuffer()) };
 }
 
 /**

@@ -16,6 +16,15 @@ const SST_PART = "xl/sharedStrings.xml";
 export type CellValue = string | number | boolean | null | { formula: string };
 export type SurgicalEdit = { sheet: string; address: string; value: CellValue };
 
+/** 单元格补丁：给 value 就改值，给 style 就换样式索引，两者可同时给。 */
+type CellPatch = { row: number; column: number; ref: string; value?: CellValue; style?: number };
+
+/** 换掉 `s`（样式索引）属性；传 null 则去掉。 */
+function setStyleAttribute(openAttrs: string, style: string | null) {
+  const cleaned = openAttrs.replace(/\ss="[^"]*"/, "");
+  return style === null ? cleaned : `${cleaned} s="${style}"`;
+}
+
 type Span = { open: string; inner: string; start: number; end: number };
 type Change = { at: number; remove: number; text: string; order: number };
 
@@ -156,9 +165,11 @@ function renderCell(ref: string, style: string | undefined, value: CellValue, in
 }
 
 /** 写一批单元格到某一行，返回新的行内容。 */
-function writeRow(rowInner: string, edits: Array<{ row: number; column: number; ref: string; value: CellValue }>, intern: Intern) {
+function writeRow(rowInner: string, patches: CellPatch[], intern: Intern) {
   const cells = scan(rowInner, "c").map(span => ({
     ref: attribute(span.open, "r") ?? "",
+    open: span.open,
+    inner: span.inner,
     start: span.start,
     end: span.end,
     column: splitAddressOrZero(attribute(span.open, "r") ?? ""),
@@ -167,17 +178,27 @@ function writeRow(rowInner: string, edits: Array<{ row: number; column: number; 
   }));
   const changes: Change[] = [];
   let sharedDelta = 0;
-  for (const edit of edits) {
-    const existing = cells.find(cell => cell.ref === edit.ref);
-    const rendered = renderCell(edit.ref, existing?.style, edit.value, intern);
-    if (rendered.shared) sharedDelta++;
-    if (existing?.shared) sharedDelta--;
-    if (existing) {
-      changes.push({ at: existing.start, remove: existing.end - existing.start, text: rendered.xml, order: edit.column });
+  const place = (patch: CellPatch, text: string) => {
+    const existing = cells.find(cell => cell.ref === patch.ref);
+    if (existing) changes.push({ at: existing.start, remove: existing.end - existing.start, text, order: patch.column });
+    else {
+      const next = cells.filter(cell => cell.column > patch.column).sort((a, b) => a.start - b.start)[0];
+      changes.push({ at: next ? next.start : rowInner.length, remove: 0, text, order: patch.column });
+    }
+  };
+  for (const patch of patches) {
+    const existing = cells.find(cell => cell.ref === patch.ref);
+    if (patch.value !== undefined) {
+      const rendered = renderCell(patch.ref, patch.style === undefined ? existing?.style : String(patch.style), patch.value, intern);
+      if (rendered.shared) sharedDelta++;
+      if (existing?.shared) sharedDelta--;
+      place(patch, rendered.xml);
       continue;
     }
-    const next = cells.filter(cell => cell.column > edit.column).sort((a, b) => a.start - b.start)[0];
-    changes.push({ at: next ? next.start : rowInner.length, remove: 0, text: rendered.xml, order: edit.column });
+    if (patch.style === undefined) continue;
+    // 只换样式：保留原有内容，只重写开标签里的 s —— 公式、富文本、数字格式都不动。
+    const open = setStyleAttribute(existing?.open ?? ` r="${patch.ref}"`, String(patch.style));
+    place(patch, existing?.inner ? `<c${open}>${existing.inner}</c>` : `<c${open}/>`);
   }
   return { inner: applyChanges(rowInner, changes), sharedDelta };
 }
@@ -187,7 +208,7 @@ const splitAddressOrZero = (address: string) => {
   return match ? columnIndex(match[1]!) : 0;
 };
 
-function writeSheet(xml: string, edits: Array<{ row: number; column: number; ref: string; value: CellValue }>, intern: Intern) {
+function writeSheet(xml: string, patches: CellPatch[], intern: Intern) {
   const open = /<sheetData\b[^>]*?(\/?)>/.exec(xml);
   if (!open) throw new Error("工作表缺少 sheetData，无法修改");
   const startInner = open.index + open[0].length;
@@ -197,11 +218,11 @@ function writeSheet(xml: string, edits: Array<{ row: number; column: number; ref
   const inner = selfClosed ? "" : xml.slice(startInner, closeAt);
 
   const rows = scan(inner, "row").map(span => ({ r: Number(attribute(span.open, "r") ?? 0), open: span.open, inner: span.inner, start: span.start, end: span.end }));
-  const pending = new Map<number, typeof edits>();
-  for (const edit of edits) {
-    const list = pending.get(edit.row) ?? [];
-    list.push(edit);
-    pending.set(edit.row, list);
+  const pending = new Map<number, CellPatch[]>();
+  for (const patch of patches) {
+    const list = pending.get(patch.row) ?? [];
+    list.push(patch);
+    pending.set(patch.row, list);
   }
 
   const changes: Change[] = [];
@@ -403,4 +424,299 @@ function rebuildCache(inner: string, points: Map<number, string>) {
   const declared = Number(/<c:ptCount\b[^>]*\bval="(\d+)"/.exec(out)?.[1] ?? 0);
   if (highest > declared) out = out.replace(/<c:ptCount\b[^>]*\/>/, `<c:ptCount val="${highest}"/>`);
   return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * 批量标记（matchRows）
+ *
+ * 与上面的单元格写入共用同一套 XML 原语。区别在于这里要改「字体颜色」，
+ * 而 xlsx 的颜色藏在 styles.xml：单元格的 `s` 只是 cellXfs 的索引，
+ * 真正决定颜色的是 cellXfs[i].fontId → fonts[j] 里的 <color>。
+ * 所以要新增一个 font、再新增一个只改了 fontId 的 xf，最后把单元格指过去 ——
+ * 直接改已有 font 会把所有共用它的单元格一起染色。
+ * ------------------------------------------------------------------ */
+
+type Block = { index: number; text: string; inner: string };
+
+function blockOf(xml: string, tag: string): Block {
+  const match = new RegExp(`<${tag}\\b([^>]*)>([\\s\\S]*?)</${tag}>`).exec(xml);
+  if (!match) throw new Error(`styles.xml 缺少 ${tag}，无法修改字体颜色`);
+  return { index: match.index, text: match[0], inner: match[2]! };
+}
+
+function readStyles(xml: string) {
+  const fontsBlock = blockOf(xml, "fonts");
+  const xfsBlock = blockOf(xml, "cellXfs");
+  return {
+    xml,
+    fontsBlock,
+    xfsBlock,
+    fonts: scan(fontsBlock.inner, "font").map(span => fontsBlock.inner.slice(span.start, span.end)),
+    xfs: scan(xfsBlock.inner, "xf").map(span => xfsBlock.inner.slice(span.start, span.end)),
+  };
+}
+
+type Styles = ReturnType<typeof readStyles>;
+
+/** 只改 count，保留 `<fonts>` 上的其它属性（例如 x14ac:knownFonts）。 */
+function withCount(block: Block, tag: string, count: number, body: string) {
+  const attrs = /^<[a-zA-Z]+\b([^>]*)>/.exec(block.text)?.[1] ?? "";
+  const next = /count="\d*"/.test(attrs) ? attrs.replace(/count="\d*"/, `count="${count}"`) : ` count="${count}"`;
+  return `<${tag}${next}>${body}</${tag}>`;
+}
+
+/** 在 font 里塞一个 rgb 颜色：位置要符合 schema（sz 之后、name 之前）。 */
+function withFontColor(font: string, argb: string) {
+  const color = `<color rgb="${argb}"/>`;
+  if (/<color\b[^>]*\/>/.test(font)) return font.replace(/<color\b[^>]*\/>/, color);
+  if (/^<font\s*\/>$/.test(font)) return `<font>${color}</font>`;
+  const anchor = /<(name|family|charset|scheme)\b/.exec(font);
+  if (anchor) return font.slice(0, anchor.index) + color + font.slice(anchor.index);
+  return font.replace(/<\/font>$/, `${color}</font>`);
+}
+
+const fontIdOf = (xf: string) => Number(/<xf\b[^>]*\bfontId="(\d+)"/.exec(xf)?.[1] ?? 0);
+
+/** 换开标签上的一个属性；自闭合标签要先把 `/` 让开。 */
+function setOpenAttribute(element: string, name: string, value: string) {
+  const end = element.indexOf(">");
+  const selfClosed = element[end - 1] === "/";
+  let head = element.slice(0, selfClosed ? end - 1 : end).replace(/\s+$/, "");
+  const tail = element.slice(end);
+  const pattern = new RegExp(`\\s${name}="[^"]*"`);
+  head = pattern.test(head) ? head.replace(pattern, ` ${name}="${value}"`) : `${head} ${name}="${value}"`;
+  return `${head}${selfClosed ? "/" : ""}${tail}`;
+}
+
+type SheetLayout = { startInner: number; closeAt: number; selfClosed: boolean; inner: string };
+
+/** 定位 sheetData 与其内容；写入和扫描都用这一份，避免两处口径不一致。 */
+function sheetDataOf(xml: string): SheetLayout {
+  const open = /<sheetData\b[^>]*?(\/?)>/.exec(xml);
+  if (!open) throw new Error("工作表缺少 sheetData，无法修改");
+  const startInner = open.index + open[0].length;
+  const selfClosed = open[1] === "/";
+  const closeAt = selfClosed ? startInner : xml.indexOf("</sheetData>", startInner);
+  if (closeAt < 0) throw new Error("工作表 sheetData 结构异常");
+  return { startInner, closeAt, selfClosed, inner: selfClosed ? "" : xml.slice(startInner, closeAt) };
+}
+
+export type MatchSurgicalOptions = {
+  sheet: string;
+  column: string;
+  startRow?: number;
+  endRow?: number;
+  fontColor?: string;
+  colorColumns?: { from: string; to: string };
+  marker?: { column?: string; header?: string; headerRow?: number; value?: string | number | boolean };
+};
+
+type CellInfo = { ref: string; row: number; column: number; t?: string; s?: string; inner: string; open: string };
+
+function cellsOfRow(rowInner: string, rowNumber: number) {
+  return scan(rowInner, "c").map(span => ({
+    ref: attribute(span.open, "r") ?? "",
+    row: rowNumber,
+    column: splitAddressOrZero(attribute(span.open, "r") ?? ""),
+    t: attribute(span.open, "t"),
+    s: attribute(span.open, "s"),
+    inner: span.inner,
+    open: span.open,
+  })) satisfies CellInfo[];
+}
+
+/**
+ * 按 matchRows 的语义改工作簿：命中行改字体颜色、必要时写标记列，其余部件不动。
+ *
+ * 与 ExcelJS 那条一样：ID 只认「普通文本或整数」，公式、合并、错误值都算跳过；
+ * 区别只在于这里是直接改 XML，图表与绘图部件不会被重写。
+ */
+export async function matchAndEditXlsxPreserving(bytes: Buffer, options: MatchSurgicalOptions, ids: Set<string>) {
+  const zip = await openOfficeArchive(bytes, "xl/workbook.xml", "Excel");
+  if (Object.keys(zip.files).some(name => name.startsWith("_xmlsignatures/"))) {
+    throw new Error("工作簿含数字签名，修改会让签名失效，请先在 Excel 里移除");
+  }
+  const parts = await sheetParts(zip);
+  const part = parts.find(item => item.name === options.sheet);
+  if (!part) throw new Error(`找不到工作表「${options.sheet}」`);
+  const file = zip.file(part.part);
+  if (!file) throw new Error(`工作表部件缺失：${part.part}`);
+  const sheetXml = (await readOfficePart(file)).toString("utf8");
+  if (/<sheetProtection\b/.test(sheetXml)) throw new Error(`工作表「${options.sheet}」受保护，请先在 Excel 中解除保护`);
+
+  const sstFile = zip.file(SST_PART);
+  const readPool = sstFile ? sharedPool((await readOfficePart(sstFile)).toString("utf8")) : undefined;
+  const textAt = (index: number) => {
+    const item = readPool?.items[index];
+    if (!item) return undefined;
+    return unescapeXml([...item.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(match => match[1]).join(""));
+  };
+
+  const layout = sheetDataOf(sheetXml);
+  const rows = scan(layout.inner, "row").map(span => ({ r: Number(attribute(span.open, "r") ?? 0), inner: span.inner }));
+  const rowCount = rows.reduce((max, row) => Math.max(max, row.r), 0);
+  const cellsByRow = new Map<number, CellInfo[]>(rows.map(row => [row.r, cellsOfRow(row.inner, row.r)]));
+
+  const merged: Array<{ from: { row: number; column: number }; to: { row: number; column: number } }> = [];
+  for (const match of (/<mergeCells\b[^>]*>([\s\S]*?)<\/mergeCells>/.exec(sheetXml)?.[1] ?? "").matchAll(/<mergeCell\b[^>]*\bref="([^"]*)"/g)) {
+    const [first, last = first] = match[1]!.split(":");
+    merged.push({ from: splitAddress(first!), to: splitAddress(last!) });
+  }
+  const isMerged = (row: number, column: number) =>
+    merged.some(range => row >= range.from.row && row <= range.to.row && column >= range.from.column && column <= range.to.column);
+
+  /** 与 matchId 同一套规则：公式与合并不算 ID，整数按文本比较，其余非字符串算跳过。 */
+  const idOf = (cell: CellInfo | undefined) => {
+    if (!cell || isMerged(cell.row, cell.column)) return undefined;
+    if (/<f\b/.test(cell.inner)) return undefined;
+    if (cell.t === "s" || cell.t === "inlineStr") {
+      const text = cell.t === "s"
+        ? textAt(Number(/<v>([\s\S]*?)<\/v>/.exec(cell.inner)?.[1] ?? ""))
+        : unescapeXml([...cell.inner.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(match => match[1]).join(""));
+      return text?.trim() ? text : undefined;
+    }
+    if (cell.t === "b" || cell.t === "e" || cell.t === "str" || cell.t === "d") return undefined;
+    const value = Number(/<v>([\s\S]*?)<\/v>/.exec(cell.inner)?.[1] ?? "");
+    if (!Number.isFinite(value)) return undefined;
+    return !Number.isInteger(value) || Number.isSafeInteger(value) ? String(value) : undefined;
+  };
+  const hasContent = (cell: CellInfo | undefined) => Boolean(cell && /<v\b|<f\b|<is\b/.test(cell.inner));
+
+  const matchColumn = columnIndex(options.column);
+  const start = options.startRow ?? 2;
+  if (options.endRow !== undefined && options.endRow < start) throw new Error("结束行不能小于起始行");
+  const end = Math.max(start - 1, Math.min(options.endRow ?? rowCount, rowCount));
+
+  const matchedRows: number[] = [];
+  const matched = new Set<string>();
+  let skippedCells = 0;
+  for (let row = start; row <= end; row++) {
+    const cell = cellsByRow.get(row)?.find(item => item.column === matchColumn);
+    const id = idOf(cell);
+    if (id !== undefined && ids.has(id)) { matched.add(id); matchedRows.push(row); }
+    else if (id === undefined && hasContent(cell)) skippedCells++;
+  }
+  const unmatched = [...ids].filter(id => !matched.has(id));
+  const report = {
+    scannedRows: Math.max(0, end - start + 1),
+    requestedIds: ids.size, matchedIds: matched.size, matchedRows: matchedRows.length, unmatched, skippedCells,
+  };
+  if (!matchedRows.length) return { report: { ...report, surgical: true as const } };
+
+  const from = options.colorColumns ? columnIndex(options.colorColumns.from) : matchColumn;
+  const to = options.colorColumns ? columnIndex(options.colorColumns.to) : matchColumn;
+  if (to < from || matchedRows.length * (to - from + 1) > 250_000) throw new Error("标色范围过大或无效，请缩小行列范围");
+
+  // ---- 标记列 ----
+  let markerColumn: number | undefined;
+  let markerHeader = "";
+  let markerValue: CellValue = 1;
+  if (options.marker) {
+    markerHeader = options.marker.header ?? "标记";
+    const headerRow = options.marker.headerRow ?? 1;
+    if (headerRow >= start) throw new Error("标记列的表头行必须位于匹配数据之前");
+    let lastUsedColumn = 0;
+    for (const cells of cellsByRow.values()) for (const cell of cells) lastUsedColumn = Math.max(lastUsedColumn, cell.column);
+    const headerCells = (cellsByRow.get(headerRow) ?? []);
+    const existing = headerCells.filter(cell => textOf(cell, textAt) === markerHeader).map(cell => cell.column);
+    if (!options.marker.column && existing.length > 1) throw new Error("有多列同名标记，请指定要使用的列");
+    markerColumn = options.marker.column ? columnIndex(options.marker.column) : existing[0] ?? lastUsedColumn + 1;
+    if (markerColumn === matchColumn) throw new Error("标记列不能覆盖 ID 列");
+    if (markerColumn > 16384) throw new Error("工作表已无空余列，请指定标记列");
+    const headerCell = headerCells.find(cell => cell.column === markerColumn);
+    if (isMerged(headerRow, markerColumn)) throw new Error(`标记列表头 ${columnName(markerColumn)}${headerRow} 被合并单元格占用，请指定其他列`);
+    const headerText = headerCell ? textOf(headerCell, textAt) : undefined;
+    if (headerText != null && headerText !== markerHeader) {
+      throw new Error(`标记列表头 ${columnName(markerColumn)}${headerRow} 已被占用，请指定其他列`);
+    }
+    if (headerText == null && markerColumn <= lastUsedColumn) {
+      let occupied = false;
+      for (const cells of cellsByRow.values()) if (cells.some(cell => cell.column === markerColumn && hasContent(cell))) occupied = true;
+      if (occupied) throw new Error("指定的标记列含现有数据，请使用空列或已有的同名标记列");
+    }
+    for (const row of matchedRows) {
+      const cell = cellsByRow.get(row)?.find(item => item.column === markerColumn);
+      if (cell && /<f\b/.test(cell.inner)) throw new Error(`标记列的 ${cell.ref} 包含公式，请使用空列`);
+      if (isMerged(row, markerColumn)) throw new Error(`标记列的 ${columnName(markerColumn)}${row} 是合并单元格，请使用空列`);
+    }
+    markerValue = options.marker.value ?? 1;
+  }
+
+  // ---- 样式：为每个「原 xf + 颜色」组合准备一个新 xf ----
+  const stylesFile = zip.file("xl/styles.xml");
+  if (options.fontColor && !stylesFile) throw new Error("工作簿缺少 styles.xml，无法设置字体颜色");
+  const styles = options.fontColor ? readStyles((await readOfficePart(stylesFile!)).toString("utf8")) : undefined;
+  const argb = options.fontColor ? `FF${options.fontColor.replace(/^#/, "").toUpperCase()}` : "";
+  const coloredXf = new Map<number, number>();
+  const xfForColor = (originalStyle: number) => {
+    const cached = coloredXf.get(originalStyle);
+    if (cached !== undefined) return cached;
+    const base = styles!.xfs[originalStyle] ?? styles!.xfs[0] ?? '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>';
+    const baseFont = styles!.fonts[fontIdOf(base)] ?? "<font/>";
+    styles!.fonts.push(withFontColor(baseFont, argb));
+    const next = setOpenAttribute(base, "fontId", String(styles!.fonts.length - 1));
+    styles!.xfs.push(next);
+    const index = styles!.xfs.length - 1;
+    coloredXf.set(originalStyle, index);
+    return index;
+  };
+
+  // ---- 组装补丁 ----
+  const patches: CellPatch[] = [];
+  const sheetPool = sstFile ? sharedPool((await readOfficePart(sstFile)).toString("utf8")) : undefined;
+  const intern = makeIntern(sheetPool);
+  let richTextSkipped = 0;
+  if (options.fontColor) {
+    for (const row of matchedRows) {
+      for (let column = from; column <= to; column++) {
+        const cell = cellsByRow.get(row)?.find(item => item.column === column);
+        // 共享富文本的颜色写在字符串池的 run 里，改样式索引不会生效，如实跳过
+        if (cell?.t === "s" && textAt(Number(/<v>([\s\S]*?)<\/v>/.exec(cell.inner)?.[1] ?? "")) === undefined) richTextSkipped++;
+        patches.push({ row, column, ref: `${columnName(column)}${row}`, style: xfForColor(Number(cell?.s ?? 0) || 0) });
+      }
+    }
+  }
+  if (options.marker && markerColumn !== undefined) {
+    const headerRow = options.marker.headerRow ?? 1;
+    patches.push({ row: headerRow, column: markerColumn, ref: `${columnName(markerColumn)}${headerRow}`, value: markerHeader });
+    for (const row of matchedRows) patches.push({ row, column: markerColumn, ref: `${columnName(markerColumn)}${row}`, value: markerValue });
+  }
+
+  const written = writeSheet(sheetXml, patches, intern);
+  zip.file(part.part, expandDimension(written.xml, patches));
+
+  if (sstFile && sheetPool) {
+    const original = (await readOfficePart(sstFile)).toString("utf8");
+    const count = Number(/<sst\b[^>]*\bcount="(\d+)"/.exec(original)?.[1] ?? 0) + written.sharedDelta;
+    zip.file(SST_PART, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${Math.max(count, 0)}" uniqueCount="${sheetPool.items.length}">${sheetPool.items.join("")}</sst>`);
+  }
+  if (styles) {
+    const body = withCount(styles.fontsBlock, "fonts", styles.fonts.length, styles.fonts.join(""));
+    const xfs = withCount(styles.xfsBlock, "cellXfs", styles.xfs.length, styles.xfs.join(""));
+    // 两块的偏移是相对原文件的，从后往前替换
+    const edits = [
+      { at: styles.xfsBlock.index, length: styles.xfsBlock.text.length, text: xfs },
+      { at: styles.fontsBlock.index, length: styles.fontsBlock.text.length, text: body },
+    ].sort((a, b) => b.at - a.at);
+    let xml = styles.xml;
+    for (const edit of edits) xml = xml.slice(0, edit.at) + edit.text + xml.slice(edit.at + edit.length);
+    zip.file("xl/styles.xml", xml);
+  }
+  if (options.marker) {
+    const workbookFile = zip.file("xl/workbook.xml")!;
+    zip.file("xl/workbook.xml", markFullCalc((await readOfficePart(workbookFile)).toString("utf8")));
+  }
+
+  return {
+    report: { ...report, ...(richTextSkipped ? { richTextSkipped } : {}), surgical: true as const },
+    bytes: await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }),
+  };
+}
+
+/** 读单元格的纯文本（共享字符串 / 内联字符串 / 数字），用于比对标记列的表头。 */
+function textOf(cell: CellInfo, textAt: (index: number) => string | undefined) {
+  if (cell.t === "s") return textAt(Number(/<v>([\s\S]*?)<\/v>/.exec(cell.inner)?.[1] ?? ""));
+  if (cell.t === "inlineStr") return unescapeXml([...cell.inner.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(match => match[1]).join(""));
+  const value = /<v>([\s\S]*?)<\/v>/.exec(cell.inner)?.[1];
+  return value === undefined ? undefined : unescapeXml(value);
 }

@@ -7,8 +7,8 @@ import JSZip from "jszip";
 import { afterEach, expect, it } from "vitest";
 import { AppDatabase } from "../src/server/db";
 import { executeChatDocumentTool, readWorkspaceFile, saveWorkspaceDocument } from "../src/server/chat-tools/documents";
-import { editXlsxCells } from "../src/server/chat-tools/spreadsheet-document";
-import { editXlsxPreserving } from "../src/server/chat-tools/xlsx-surgical";
+import { editXlsxCells, matchAndEditXlsx } from "../src/server/chat-tools/spreadsheet-document";
+import { editXlsxPreserving, matchAndEditXlsxPreserving } from "../src/server/chat-tools/xlsx-surgical";
 
 /** X：含图表的工作簿。改单元格不能把图表冲掉，图表缓存要跟着更新。 */
 
@@ -30,10 +30,10 @@ const REL = (target: string, id: string, type: string) =>
 async function chartedWorkbook() {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("数据");
-  sheet.addRow(["类别", "数量"]);
-  sheet.addRow(["一月", 12]);
-  sheet.addRow(["二月", 18]);
-  sheet.addRow(["三月", 9]);
+  sheet.addRow(["类别", "数量", "编号"]);
+  sheet.addRow(["一月", 12, "A-001"]);
+  sheet.addRow(["二月", 18, "A-002"]);
+  sheet.addRow(["三月", 9, "A-003"]);
   const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer() as unknown as Buffer);
 
   zip.file("xl/charts/chart1.xml", CHART);
@@ -200,4 +200,143 @@ it("X08：doc_edit 端到端，摘要说明图表被保留并刷新", async () =
 
   const updated = readWorkspaceFile(db, conversationId, String(result.data!.fileId)).bytes;
   expect(await partOf(updated, "xl/charts/chart1.xml")).toContain("<c:v>40</c:v>");
+});
+
+/* ------------------------------------------------------------------ *
+ * Y：批量标记（matchRows）走 ZIP 补丁
+ * 颜色藏在 styles.xml（cellXfs → fontId → fonts/color），所以要新增 font 与 xf，
+ * 直接改已有 font 会把所有共用它的单元格一起染色。
+ * ------------------------------------------------------------------ */
+
+const stylesOf = async (bytes: Buffer) => (await partOf(bytes, "xl/styles.xml"))!;
+/** 取某个单元格的 s 索引，再顺着 cellXfs/fonts 找出它的颜色。 */
+async function colorOf(bytes: Buffer, ref: string) {
+  const sheet = (await partOf(bytes, "xl/worksheets/sheet1.xml"))!;
+  const styleIndex = Number(new RegExp(`<c r="${ref}"[^>]*\\bs="(\\d+)"`).exec(sheet)?.[1] ?? 0);
+  const styles = await stylesOf(bytes);
+  const xfs = [...(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/.exec(styles)?.[1] ?? "").matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(match => match[0]);
+  const fontId = Number(/fontId="(\d+)"/.exec(xfs[styleIndex] ?? "")?.[1] ?? 0);
+  const fonts = [...(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/.exec(styles)?.[1] ?? "").matchAll(/<font\b[^>]*?(?:\/>|>[\s\S]*?<\/font>)/g)].map(match => match[0]);
+  return /<color\b[^>]*\brgb="([^"]+)"/.exec(fonts[fontId] ?? "")?.[1] ?? null;
+}
+const styleIndex = async (bytes: Buffer, ref: string) => {
+  const sheet = (await partOf(bytes, "xl/worksheets/sheet1.xml"))!;
+  return Number(new RegExp(`<c r="${ref}"[^>]*\\bs="(\\d+)"`).exec(sheet)?.[1] ?? 0);
+};
+
+it("Y01：带图表的工作簿能批量标色，图表部件原样保留", async () => {
+  const bytes = await chartedWorkbook();
+  const result = await matchAndEditXlsx(bytes, { sheet: "数据", column: "C", ids: ["A-001", "A-003"], fontColor: "FF0000" });
+  expect(result.bytes).toBeTruthy();
+  expect(result.report.surgical).toBe(true);
+  expect(result.report.matchedIds).toBe(2);
+  expect(result.report.matchedRows).toBe(2);
+  expect(result.report.unmatched).toEqual([]);
+
+  // 命中的两行变红，中间那行不动
+  expect(await colorOf(result.bytes!, "C2")).toBe("FFFF0000");
+  expect(await colorOf(result.bytes!, "C4")).toBe("FFFF0000");
+  expect(await styleIndex(result.bytes!, "C3")).toBe(0);
+  // 图表与绘图部件逐字节不变
+  const before = await JSZip.loadAsync(bytes), after = await JSZip.loadAsync(result.bytes!);
+  for (const name of ["xl/charts/chart1.xml", "xl/drawings/drawing1.xml", "xl/theme/theme1.xml", "[Content_Types].xml"]) {
+    const a = await before.file(name)!.async("nodebuffer");
+    const b = await after.file(name)!.async("nodebuffer");
+    expect(createHash("sha256").update(b).digest("hex"), name).toBe(createHash("sha256").update(a).digest("hex"));
+  }
+  // 原有字体没被污染：第 0 号字体仍无 color
+  const styles = await stylesOf(result.bytes!);
+  expect(/<fonts\b[^>]*>\s*<font>/.test(styles)).toBe(true);
+});
+
+it("Y02：标记列加在最后一列之后，表头与值都写进去，图表不动", async () => {
+  const bytes = await chartedWorkbook();
+  const result = await matchAndEditXlsx(bytes, { sheet: "数据", column: "C", ids: ["A-002"], marker: {} });
+  const sheet = (await partOf(result.bytes!, "xl/worksheets/sheet1.xml"))!;
+  // 现有 A–C 三列 → 标记列是 D
+  expect(await partOf(result.bytes!, "xl/sharedStrings.xml")).toContain("标记");
+  expect(sheet).toMatch(/<row r="1"[^>]*>[\s\S]*?<c r="D1" t="s">/);
+  expect(sheet).toMatch(/<row r="3"[^>]*>[\s\S]*?<c r="D3"><v>1<\/v><\/c>/);
+  expect(sheet).not.toContain('<c r="D2"');
+  expect(await partOf(result.bytes!, "xl/charts/chart1.xml")).toBe(await partOf(bytes, "xl/charts/chart1.xml"));
+  // 写入标记列后要让 Excel 重算
+  expect(await partOf(result.bytes!, "xl/workbook.xml")).toContain('fullCalcOnLoad="1"');
+});
+
+it("Y03：标色范围可指定多列，空白单元格也会被补上样式", async () => {
+  const bytes = await chartedWorkbook();
+  const result = await matchAndEditXlsx(bytes, {
+    sheet: "数据", column: "C", ids: ["A-001"], fontColor: "2A716B", colorColumns: { from: "A", to: "C" },
+  });
+  for (const ref of ["A2", "B2", "C2"]) expect(await colorOf(result.bytes!, ref)).toBe("FF2A716B");
+  // 未命中的行整行都不该被染色
+  for (const ref of ["A3", "B3", "C3"]) expect(await styleIndex(result.bytes!, ref)).toBe(0);
+});
+
+it("Y04：报告的扫描行数、未命中清单与跳过计数与整本重写一致", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("表");
+  sheet.addRow(["编号", "值"]);
+  sheet.addRow(["A-001", 1]);
+  sheet.addRow([{ formula: "CONCATENATE(\"A-\",\"002\")", result: "A-002" }, 2]);
+  sheet.addRow(["A-003", 3]);
+  const plain = Buffer.from(await workbook.xlsx.writeBuffer() as unknown as Buffer);
+
+  const options = { sheet: "表", column: "A", ids: ["A-001", "A-002", "A-999"], fontColor: "FF0000" };
+  const viaExcelJs = await matchAndEditXlsx(plain, options);
+  expect(viaExcelJs.report.surgical).toBe(false);
+
+  // 同一份文件加上图表部件，走 ZIP 补丁，报告数字应完全一致
+  const zip = await JSZip.loadAsync(plain);
+  zip.file("xl/charts/chart1.xml", CHART);
+  const charted = await zip.generateAsync({ type: "nodebuffer" });
+  const viaPatch = await matchAndEditXlsx(charted, options);
+  expect(viaPatch.report.surgical).toBe(true);
+  for (const key of ["scannedRows", "requestedIds", "matchedIds", "matchedRows", "skippedCells", "unmatched"] as const) {
+    expect(viaPatch.report[key], key).toEqual(viaExcelJs.report[key]);
+  }
+  // 公式单元格不算 ID：A-002 在两条路径里都应落在未命中清单
+  expect(viaPatch.report.skippedCells).toBe(1);
+  expect(viaPatch.report.unmatched).toEqual(["A-002", "A-999"]);
+});
+
+it("Y05：标记列冲突（覆盖 ID 列、被占用）都拒绝", async () => {
+  const bytes = await chartedWorkbook();
+  await expect(matchAndEditXlsx(bytes, { sheet: "数据", column: "C", ids: ["A-001"], marker: { column: "C" } }))
+    .rejects.toThrow(/标记列不能覆盖 ID 列/);
+  await expect(matchAndEditXlsx(bytes, { sheet: "数据", column: "C", ids: ["A-001"], marker: { column: "A" } }))
+    .rejects.toThrow(/已被占用/);
+});
+
+it("Y06：受保护的工作表拒绝修改", async () => {
+  const zip = await JSZip.loadAsync(await chartedWorkbook());
+  const sheet = (await zip.file("xl/worksheets/sheet1.xml")!.async("string"))
+    .replace("</sheetData>", "</sheetData><sheetProtection sheet=\"1\" objects=\"1\" scenarios=\"1\"/>");
+  zip.file("xl/worksheets/sheet1.xml", sheet);
+  const bytes = await zip.generateAsync({ type: "nodebuffer" });
+  await expect(matchAndEditXlsx(bytes, { sheet: "数据", column: "C", ids: ["A-001"], fontColor: "FF0000" }))
+    .rejects.toThrow(/受保护/);
+});
+
+it("Y07：doc_edit 批量标记端到端，摘要说明部件被保留", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "xlsx-match-"));
+  const db = new AppDatabase(dir);
+  databases.push(db);
+  const conversationId = db.createConversation({
+    title: "Excel 批量", brainChannelId: "mock-channel", brainModel: "mock",
+    videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false,
+  }).id;
+  const bytes = await chartedWorkbook();
+  const saved = saveWorkspaceDocument(db, conversationId, "图表工作簿", "xlsx", bytes, "op-source");
+
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId: saved.id, expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+    matchRows: { sheet: "数据", column: "C", ids: ["A-001", "A-002"], fontColor: "FF0000", marker: {} },
+  }), undefined, "op-xlsx-match");
+  expect(result.ok).toBe(true);
+  expect(result.summary).toContain("图表等部件原样保留");
+
+  const updated = readWorkspaceFile(db, conversationId, String(result.data!.fileId)).bytes;
+  expect(await colorOf(updated, "C2")).toBe("FFFF0000");
+  expect(await partOf(updated, "xl/charts/chart1.xml")).toBe(await partOf(bytes, "xl/charts/chart1.xml"));
 });
