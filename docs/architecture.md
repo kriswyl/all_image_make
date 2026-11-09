@@ -48,7 +48,7 @@ src/
     key-store.ts     渠道密钥本地持久化
     agent*.ts        对话循环、规划、确认、上下文、批量
     chat-tools/      原生工具实现（文档、图片、视频、音频、模板、能力检索）
-    presentation-*.ts  PPT 全套管线（见第 5 节）
+    presentation-*.ts  PPT 全套管线（见第 5 节），含图表内嵌工作簿同步
     chat-tools/word|spreadsheet|pdf-document.ts  各格式读写
   shared/            前后端共享：类型、schema、契约、主题、报告、状态投影
 src-tauri/            Rust 壳、sidecar、图标、打包配置
@@ -126,7 +126,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 | 文本框文字 | `text`（`\n` 分段） | 不改同段内局部富文本 |
 | 字号 / 颜色 / 位置尺寸 | `fontSize` / `color` / `rect` | 只替换已有属性，不插入新节点 |
 | 图片 | `imageAssetId` | 新增媒体 + 该页 rels；不改裁剪/填充方式 |
-| 图表数据 | `chart.categories` / `chart.series` | 显示缓存更新；内嵌 xlsx 不同步，明确警告 |
+| 图表数据 | `chart.categories` / `chart.series` | 显示缓存与内嵌工作簿同步（单元格 / 字符串池 / 表列名）；同步失败才警告 |
 | 表格单元格 | `table.cells[{row,col,text}]` | 只换文字；不增删行列 |
 
 ### 5.3 报告与门禁
@@ -181,7 +181,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 - **Word** 只支持正文段落内文本替换，不支持样式、表格结构、图片。
 - **Excel** 支持单元格读写、批量标色与标记；复杂工作簿（图表、透视表）拒绝编辑。
 - **PDF** 只读，扫描件需要先 OCR。
-- **PPT** 支持本应用生成文件的整页改与对象级补丁；外部 PPT 仅作风格参考。图表内嵌数据表不同步；表格不能增删行列；图标、连线不支持原位补丁。
+- **PPT** 支持本应用生成文件的整页改与对象级补丁；外部 PPT 仅作风格参考。图表数据会同步内嵌工作簿，但同步失败会明确提示；表格不能增删行列；图标、连线不支持原位补丁。
 - **整页依赖闭包**（整页替换、母版/版式关系迁移）未实现，不承诺外部 PPT 原位保真编辑。
 - **视觉检查**依赖本机 WPS 与看图模型；没有渲染器时明确报告未验证。
 - 不引入 Python、LibreOffice、Pandoc 或任意代码执行。

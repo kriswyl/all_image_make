@@ -16,6 +16,7 @@ import type { PresentationElement } from "./presentation-elements.js";
 import { buildObjectMap, resolveObjectBinding } from "./presentation-object-map.js";
 import { packPresentationProject } from "./presentation-project.js";
 import { fitChars, measureHeight } from "../shared/presentation-capacity.js";
+import { syncChartWorkbook, type WorkbookSync } from "./presentation-chart-workbook.js";
 
 export type ObjectPatch = {
   slide: number;
@@ -307,7 +308,7 @@ async function replaceChartData(input: {
   zip: JSZip; slidePart: string; block: string;
   chart: NonNullable<ObjectPatch["chart"]>;
   current: { categories: string[]; series: Array<{ name: string; values: number[] }> };
-}): Promise<{ parts: string[]; embeddedWorkbook: boolean; changed: number }> {
+}): Promise<{ parts: string[]; workbook: WorkbookSync; changed: number }> {
   const relId = /<c:chart\b[^>]*r:id="([^"]+)"/.exec(input.block)?.[1];
   if (!relId) throw new Error("这个图表对象没有关系引用");
   const relsPath = input.slidePart.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
@@ -336,10 +337,17 @@ async function replaceChartData(input: {
   if (!changed) throw new Error("图表数据没有变化");
   input.zip.file(chartPart, next);
 
-  // 内嵌数据表不会跟着改：PowerPoint 的「编辑数据」仍会显示旧值，必须说清楚。
-  const chartRels = `ppt/charts/_rels/${chartPart.split("/").pop()}.rels`;
-  const embedded = Boolean(input.zip.file(chartRels) && /\/package"/.test(await input.zip.file(chartRels)!.async("string")));
-  return { parts: [chartPart], embeddedWorkbook: embedded, changed };
+  // 显示缓存改完，内嵌工作簿也要跟上，否则「编辑数据」看到的还是旧值。
+  const categories = input.chart.categories ?? input.current.categories;
+  const series = input.current.series.map((item, index) => {
+    const next = input.chart.series?.[index];
+    return next ? { name: next.name ?? item.name, values: next.values } : item;
+  });
+  const workbook = await syncChartWorkbook(input.zip, chartPart, { categories, series });
+  return {
+    parts: [chartPart, ...(workbook.status === "synced" && workbook.part ? [workbook.part] : [])],
+    workbook, changed,
+  };
 }
 
 export async function patchPresentationObjects(
@@ -453,10 +461,11 @@ export async function patchPresentationObjects(
         });
         for (const part of replaced.parts) extraParts.add(part);
         operations.push("chart");
-        if (replaced.embeddedWorkbook) {
+        if (replaced.workbook.status === "failed") {
+          // 同步失败才提示；没有内嵌工作簿的图表不需要。
           report.warnings.push({
             slide: patch.slide, elementId: patch.elementId,
-            detail: "图表只更新了显示数据，内嵌数据表仍是旧值：在 PowerPoint 里点「编辑数据」看到的还是改前的数字",
+            detail: `图表显示数据已更新，但内嵌数据表同步失败（${replaced.workbook.reason ?? "结构不匹配"}）：在 PowerPoint 里点「编辑数据」可能仍是旧值`,
           });
         }
       } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }

@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { XMLParser } from "fast-xml-parser";
+import ExcelJS from "exceljs";
 import { renderAiPresentation, type AiPresentation } from "../src/server/mind-document";
 import { patchPresentationObjects } from "../src/server/presentation-object-patch";
 import { packPresentationProject, readPresentationProject } from "../src/server/presentation-project";
@@ -396,7 +397,10 @@ it("R01：改图表数据只动图表部件，页面与样式不变，plan 同�
   expect(result.report.applied[0]!.operations).toEqual(["chart"]);
   // 页面块没变：只有图表部件在变化
   const part = await chartPartOf(result.bytes);
-  expect(result.report.changedParts).toEqual([part]);
+  // 图表部件 + 内嵌工作簿；页面块没有变
+  expect(result.report.changedParts).toContain(part);
+  expect(result.report.changedParts.some(name => name.startsWith("ppt/embeddings/"))).toBe(true);
+  expect(result.report.changedParts).not.toContain("ppt/slides/slide1.xml");
 
   const xml = await xmlOfPart(result.bytes, part);
   expect(xml).toContain("<c:v>上半年</c:v>");
@@ -412,8 +416,8 @@ it("R01：改图表数据只动图表部件，页面与样式不变，plan 同�
   expect(element.type === "chart" && element.series).toEqual([
     { name: "覆盖量", values: [7, 9] }, { name: "转化", values: [4, 6] },
   ]);
-  // 内嵌数据表不会跟着改，必须明说
-  expect(result.report.warnings[0]!.detail).toContain("内嵌数据表仍是旧值");
+  // 内嵌数据表已同步，不再产生「编辑数据是旧值」的警告
+  expect(result.report.warnings).toEqual([]);
 });
 
 it("R02：增删系列、分类数不一致、数值个数不符都拒绝", async () => {
@@ -462,9 +466,9 @@ it("R05：doc_edit 改图表数据，报告里带内嵌数据表提示", async (
     objects: [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [8, 10] }, { values: [5, 7] }] } }],
   }), undefined, "op-chart");
   expect(result.ok).toBe(true);
-  expect(result.summary).toContain("内嵌数据表");
+  expect(result.summary).not.toContain("内嵌数据表");
   const report = db.getPresentationVersion(conversationId, String(result.data!.fileId))!.report;
-  expect(report.issues.some(issue => issue.page === 1 && issue.detail.includes("内嵌数据表"))).toBe(true);
+  expect(report.issues.some(issue => issue.detail.includes("内嵌数据表"))).toBe(false);
   const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
   const element = project.plan.slides[0]!.elements!.find(item => item.id === "ch-1")!;
   expect(element.type === "chart" && element.series[0]!.values).toEqual([8, 10]);
@@ -551,4 +555,61 @@ it("S05：doc_edit 改表格单元格端到端", async () => {
   const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
   const element = project.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
   expect(element.type === "table" && element.rows[1]![1]).toBe("9 个");
+});
+
+/** 读出内嵌工作簿的关键部件，用来核对「编辑数据」看到的内容。 */
+const workbookOf = async (bytes: Buffer) => {
+  const zip = await JSZip.loadAsync(bytes);
+  const part = Object.keys(zip.files).find(name => /^ppt\/embeddings\/.+\.xlsx$/.test(name))!;
+  const inner = await JSZip.loadAsync(await zip.file(part)!.async("nodebuffer"));
+  return {
+    part,
+    sheet: await inner.file("xl/worksheets/sheet1.xml")!.async("string"),
+    shared: await inner.file("xl/sharedStrings.xml")!.async("string"),
+    table: await inner.file("xl/tables/table1.xml")?.async("string"),
+  };
+};
+
+it("R06：改图表数据会同步内嵌工作簿的单元格、字符串池与表列名", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const result = await patchPresentationObjects(bytes, chartPlan, [{
+    slide: 1, elementId: "ch-1",
+    chart: { categories: ["上半年", "下半年"], series: [{ name: "覆盖量", values: [7, 9] }, { values: [4, 6] }] },
+  }]);
+  expect(result.report.warnings).toEqual([]);
+  const book = await workbookOf(result.bytes);
+  // 分类与系列名进了字符串池，单元格按行列指向它们
+  expect(book.shared).toContain("上半年");
+  expect(book.shared).toContain("覆盖量");
+  expect(book.sheet).toContain("<v>7</v>");
+  expect(book.sheet).toContain("<v>9</v>");
+  // 表对象的列名跟着改，否则 Excel 会认为表结构与数据不一致
+  expect(book.table).toContain('name="覆盖量"');
+  // 实际变化的部件包含工作簿
+  expect(result.report.changedParts).toContain(book.part);
+  // 用真实 xlsx 解析器读一遍：文件结构必须仍能被 Excel 系工具打开
+  const zip = await JSZip.loadAsync(result.bytes);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await zip.file(book.part)!.async("nodebuffer") as unknown as ArrayBuffer);
+  const sheet = workbook.worksheets[0]!;
+  expect(sheet.getCell("A2").value).toBe("上半年");
+  expect(sheet.getCell("B2").value).toBe(7);
+  expect(sheet.getCell("C2").value).toBe(4);
+  expect(sheet.getCell("B3").value).toBe(9);
+  expect(sheet.getCell("C3").value).toBe(6);
+});
+
+it("R07：内嵌工作簿结构损坏时如实警告，不假装同步成功", async () => {
+  const packed = await packPresentationProject(await renderAiPresentation(chartPlan), chartPlan, []);
+  const broken = await (async () => {
+    const zip = await JSZip.loadAsync(packed);
+    const part = Object.keys(zip.files).find(name => /^ppt\/embeddings\/.+\.xlsx$/.test(name))!;
+    const inner = await JSZip.loadAsync(await zip.file(part)!.async("nodebuffer"));
+    inner.remove("xl/worksheets/sheet1.xml");
+    zip.file(part, await inner.generateAsync({ type: "nodebuffer" }));
+    return zip.generateAsync({ type: "nodebuffer" });
+  })();
+  const result = await patchPresentationObjects(broken, chartPlan, [{ slide: 1, elementId: "ch-1", chart: { series: [{ values: [8, 10] }, { values: [5, 7] }] } }]);
+  expect(result.report.applied).toHaveLength(1);
+  expect(result.report.warnings[0]!.detail).toContain("内嵌数据表同步失败");
 });
