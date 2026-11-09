@@ -236,12 +236,13 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 | Seedance 2.5 | 30 | 10 | 10 | 50 |
 
 - 上限来自 `src/shared/seedance-capabilities.ts`，`seedanceVersion()` 按模型 ID 判版本，`validateSeedanceMedia()` 在前端 `buildSeedanceMedia()` 与服务端 `buildGenerationRequest()` 各跑一次。
-- UI 在「参考生视频」模式下增加两个多行输入框（每行一个 http(s) 公网 URL）；图片仍走上传。视频 / 音频**不接受 base64 data URI**，否则会撞 15 MB 内联素材预算，校验里会明确拒绝。
+- UI 在「参考生视频」模式下提供参考视频 / 音频两个槽位：**本地文件提交时上传**（与万相/可灵同一条图床链路），也可继续填 http(s) 公网 URL（每行一个）。视频不接受 base64；音频默认也走上传，另有一个「内联 base64」实验开关，是否被上游接受待实测。
+- 本地素材的上传实现在 `src/server/reference-video.ts` 的 `uploadReferenceMedia()`：任务执行时才上传，换回公网地址后写进 `content`。视频 / 音频会先落到 `inputs/` 下，重试时重新上传（图床链接可能过期）。接口是 `POST /api/generations/reference-media`（`video` / `audio` 两个 multipart 字段）。
 - `adapters.ts` 的 seedance `content` 数组现在组装 `image_url` / `video_url` / `audio_url` 三种 part 及对应 role；以前只处理 `image_url`，视频音频被静默丢弃。
 - 修掉三处上限打架：视频页 UI 写 10、共用 `useReferenceImages` 按 8 拦、zod 又是 20。现在图片页仍 8 张、视频页单独一份状态（30 张）、multer 与 zod 都是 30 / 50。
 - 对话与画布侧仍只把画布图片映射成 `image_url`（那里没有视频 / 音频素材槽），多模态入口在视频生成页。
 
-**待联调**：词元流墟中转是否真接受 `video_url` / `audio_url` 与 `reference_video` / `reference_audio` role，代码与文档里都没有实测记录；该渠道预设也仍未配置 `uploadEndpoint`，本地视频 / 音频上传链路暂不可用。
+**待联调**：词元流墟中转是否真接受 `video_url` / `audio_url` 与 `reference_video` / `reference_audio` role，代码与文档里都没有实测记录；该渠道预设也仍未配置 `uploadEndpoint`，本地视频 / 音频上传要等渠道补上上传地址。音频能否用 base64 data URI 同样未验证。
 
 ## 可以问用户的开放问题
 
@@ -253,7 +254,7 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 ```bash
 cd all_image_make
-npm test          # 115 个测试文件 / 870 项
+npm test          # 116 个测试文件 / 873 项
 npx tsc --noEmit  # 类型检查
 npm run dev       # 起服务
 ```

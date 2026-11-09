@@ -106,6 +106,16 @@ const referenceVideoUpload = multer({
   fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime"].includes(file.mimetype)
     ? callback(null, true) : callback(new AppError("REFERENCE_VIDEO_INVALID", "仅支持 MP4 / MOV 视频", 400)),
 });
+/**
+ * 参考素材（视频 + 音频）一次提交：Seedance 的参考生视频两个都可能要。
+ * 音频上限在 `validateReferenceMedia` 里按 15 MB 卡，这里只放到视频的 100 MB。
+ */
+const referenceMediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 2, fields: 1 },
+  fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/m4a"].includes(file.mimetype)
+    ? callback(null, true) : callback(new AppError("REFERENCE_MEDIA_INVALID", "仅支持 MP4 / MOV 视频与 MP3 / M4A / AAC / WAV 音频", 400)),
+});
 
 const channelSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -362,14 +372,6 @@ const generationSchema = z.object({
   outputFormat: imageOutputFormatSchema.optional(),
   frameCount: z.number().int().min(MIN_FRAME_COUNT).max(MAX_FRAME_COUNT).optional(),
   frameDurationMs: z.number().int().min(MIN_FRAME_DURATION_MS).max(MAX_FRAME_DURATION_MS).optional(),
-  /**
-   * markup（标记引导层）：透明 PNG 叠加在第一张输入图上。
-   * 只作用于第一张图、必须同尺寸且含透明像素；与 mask 互斥（在 TaskRunner 里再校验一次）。
-   */
-  markup: z.object({
-    imageUrl: z.string().trim().max(MAX_REFERENCE_BASE64_CHARS).optional(),
-    fileId: z.string().trim().min(1).max(200).optional(),
-  }).refine(item => Boolean(item.imageUrl || item.fileId), { message: "markup 需要 imageUrl 或 fileId" }).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
@@ -1198,6 +1200,28 @@ export function createApp(options: { dataDir?: string } = {}) {
     res.status(202).json(ok(task));
   }));
 
+  /**
+   * 参考素材一次提交：Seedance 参考生视频可能同时要视频与音频。
+   * 上传（图床）在任务执行时做，和万相/可灵同一条链路——本地文件不直接进请求体。
+   */
+  app.post("/api/generations/reference-media", referenceMediaUpload.fields([
+    { name: "video", maxCount: 1 },
+    { name: "audio", maxCount: 1 },
+  ]), asyncHandler(async (req, res) => {
+    const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
+    if (!files.video?.[0] && !files.audio?.[0]) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
+    let body: unknown;
+    try { body = JSON.parse(req.body.payload); }
+    catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
+    const input = generationSchema.parse(body);
+    const task = await runner.create({
+      ...input,
+      referenceVideoUpload: files.video?.[0],
+      referenceAudioUpload: files.audio?.[0],
+    });
+    res.status(202).json(ok(task));
+  }));
+
   app.post("/api/generations", referenceUpload.fields([
     { name: "referenceImages", maxCount: MAX_VIDEO_REFERENCE_IMAGES },
     { name: "mask", maxCount: 1 },
@@ -1997,7 +2021,7 @@ export function createApp(options: { dataDir?: string } = {}) {
         if (/\/api\/conversations\/[^/]+\/(?:documents\/upload|mind-documents)$/.test(req.path)) {
           return res.status(400).json(fail("DOCUMENT_TOO_LARGE", "文档不能超过 10 MB", requestId));
         }
-        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" || req.path === "/api/generations/reference-video" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
+        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" || req.path === "/api/generations/reference-video" || req.path === "/api/generations/reference-media" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
         return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
       }
       if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {

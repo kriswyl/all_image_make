@@ -27,7 +27,6 @@ const referenceImage = {
   fileName: "source.png",
 };
 const maskImage = { ...referenceImage, fileName: "source-mask.png" };
-const markupDataUrl = "data:image/png;base64,iVBORw0KGgo=";
 
 describe("① 窄窗口布局：侧栏不能吃掉主区", () => {
   it("宽窗口允许拖到 420，窄窗口按主区最小宽度收回", () => {
@@ -78,41 +77,28 @@ describe("② SVG 落盘链路", () => {
   });
 });
 
-describe("③ markup 标记引导层", () => {
-  it("edits 的 multipart 带上 markup[image_url]，并在诊断里抹掉图像数据", () => {
+describe("③ 标注引导层已移除", () => {
+  it("显式 markup 不再进入请求，只剩高级 JSON 的原样透传", () => {
+    // 产品决定不做标注层：类型与 UI 都删了，高级 JSON 里写同名 key 仍是普通字段。
     const request = buildGenerationRequest(imageChannel, {
       channelId: imageChannel.id, model: "gpt-image-2.6-sunburst", prompt: "改成红色",
-      referenceImages: [referenceImage], markup: { imageUrl: markupDataUrl },
+      referenceImages: [referenceImage],
+      rawParameters: { markup: { image_url: "https://example.com/m.png" } },
+    }, "secret");
+    expect(request.formData?.get("markup[image_url]")).toBeNull();
+    expect(request.formData?.get("markup")).toBe('{"image_url":"https://example.com/m.png"}');
+  });
+  it("局部重绘蒙版仍然照常发送", () => {
+    const request = buildGenerationRequest(imageChannel, {
+      channelId: imageChannel.id, model: "gpt-image-2.6-sunburst", prompt: "改成红色",
+      referenceImages: [referenceImage], maskImage,
     }, "secret");
     expect(request.url).toBe("https://relay.example.com/v1/images/edits");
-    expect(request.formData?.get("markup[image_url]")).toBe(markupDataUrl);
-    expect(request.formData?.get("mask")).toBeNull();
+    expect(request.formData?.get("mask")).toBeTruthy();
+    // 诊断里只留元信息，不回显 PNG 字节
     const diagnostic = JSON.stringify(request.diagnosticBody ?? {});
-    expect(diagnostic).toContain("IMAGE_DATA");
-    expect(diagnostic).not.toContain(markupDataUrl);
-  });
-  it("file_id 走 markup[file_id]，显式 markup 优先于高级 JSON 同名 key", () => {
-    const request = buildGenerationRequest(imageChannel, {
-      channelId: imageChannel.id, model: "gpt-image-2.6-sunburst", prompt: "改成红色",
-      referenceImages: [referenceImage], markup: { fileId: "file-42" },
-      rawParameters: { markup: "raw-should-be-dropped", temperature: 1 },
-    }, "secret");
-    expect(request.formData?.get("markup[file_id]")).toBe("file-42");
-    expect(request.formData?.get("markup")).toBeNull();
-    expect(request.formData?.get("temperature")).toBe("1");
-  });
-  it("mask 与 markup 同时提交时拒绝，避免两个同名 part", () => {
-    expect(() => buildGenerationRequest(imageChannel, {
-      channelId: imageChannel.id, model: "gpt-image-2.6-sunburst", prompt: "改成红色",
-      referenceImages: [referenceImage], maskImage: maskImage, markup: { imageUrl: markupDataUrl },
-    }, "secret")).toThrow(/不能与/);
-  });
-  it("高级 JSON 里的旧 markup 逃生口仍可用", () => {
-    const request = buildGenerationRequest(imageChannel, {
-      channelId: imageChannel.id, model: "gpt-image-2.6-sunburst", prompt: "改成红色",
-      referenceImages: [referenceImage], rawParameters: { markup: { image_url: "https://example.com/m.png" } },
-    }, "secret");
-    expect(request.formData?.get("markup")).toBe('{"image_url":"https://example.com/m.png"}');
+    expect(diagnostic).toContain("source-mask.png");
+    expect(diagnostic).not.toContain(referenceImage.base64);
   });
 });
 
@@ -157,5 +143,15 @@ describe("④ Seedance 参考多模态与版本上限", () => {
         type: "video_url" as const, url: `https://example.com/v${i}.mp4`, role: "reference_video" as const,
       })),
     }, "secret")).toThrow(/参考视频最多 3 段/);
+  });
+  it("内联 base64 音频（实验）能进 content，前端未勾选时仍按公网地址拦", () => {
+    const media = [{ type: "audio_url" as const, url: "data:audio/mpeg;base64,AAAA", role: "reference_audio" as const }];
+    expect(validateSeedanceMedia(media, "sd-2.5")).toContain("公网 URL");
+    expect(validateSeedanceMedia(media, "sd-2.5", { allowInlineAudio: true })).toBeUndefined();
+    const request = buildGenerationRequest(seedanceChannel, {
+      channelId: seedanceChannel.id, model: "sd-2.5", prompt: "配音参考", seedanceVideoMedia: media,
+    }, "secret");
+    expect((request.body?.content as Array<Record<string, unknown>>)[1])
+      .toMatchObject({ type: "audio_url", audio_url: { url: "data:audio/mpeg;base64,AAAA" } });
   });
 });

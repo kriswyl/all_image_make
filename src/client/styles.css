@@ -1382,6 +1382,11 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 .media-file-chip button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
 .media-file-chip button:hover { background: var(--surface-soft); color: var(--ink); }
 .media-input-note { grid-column: 1 / -1; margin: 0; }
+/* Seedance 参考素材：多行 URL 与上传按钮同排，按钮贴在输入区底部 */
+.media-input-group textarea.json-input { min-height: 66px; resize: vertical; }
+.inline-check { display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.inline-check input { width: 14px; height: 14px; accent-color: var(--accent, var(--ink)); }
+.inline-check span { line-height: 1.4; }
 
 .section-title.compact {
   margin: 0 0 2px;
@@ -3080,9 +3085,6 @@ body:has(.story-review-overlay) > .style-preset-overlay { z-index: 1020; }
   .parameter-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 }
 
-/* markup 标注引导层：与局部重绘同一行风格，URL 输入框占满剩余宽度 */
-.markup-row { flex-wrap: wrap; }
-.markup-url-input { flex: 1 1 100%; min-width: 0; width: 100%; }
 .wide-field > small { display: block; line-height: 1.5; color: var(--muted); }
 /* Seedance 参考视频 / 音频：每行一个 URL 的多行输入框 */
 .media-url-block textarea.json-input { min-height: 64px; resize: vertical; }

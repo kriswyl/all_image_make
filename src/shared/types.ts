@@ -204,19 +204,6 @@ export interface MaskImageInput {
 }
 
 /**
- * GPT Image 2.5/2.6 的标记引导层（/v1/images/edits 的 markup）。
- * 透明 PNG 叠加在第一张输入图上，用来圈选 / 画箭头 / 写短标注；
- * 必须与第一张图同尺寸且包含透明像素，**不能与 mask 同时传**。
- */
-export interface MarkupImageInput {
-  /** HTTPS URL 或 base64 data URL（透明 PNG） */
-  imageUrl?: string;
-  /** 上游已上传文件的 id；与 imageUrl 二选一 */
-  fileId?: string;
-}
-
-
-/**
  * gemini-content 这类站点的 `imageConfig.imageSize` 取值（大小写敏感）。
  *
  * 放在 shared 里是因为三处要用同一份：设置页的校验、`TaskRunner.create()` 补默认值、
@@ -284,8 +271,6 @@ export interface GenerationInput {
   referenceImage?: ReferenceImageInput;
   /** 局部重绘蒙版；必须搭配恰好 1 张参考图，且仅 openai-images 适配器支持 */
   maskImage?: MaskImageInput;
-  /** 标记引导层；与 mask 互斥，只作用于第一张参考图 */
-  markup?: MarkupImageInput;
   /** GIF 帧数（默认 9）与每帧时长毫秒（默认 200） */
   frameCount?: number;
   frameDurationMs?: number;

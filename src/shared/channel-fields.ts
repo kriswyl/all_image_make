@@ -92,11 +92,6 @@ export function modelSupportsSvgOutput(model: string): boolean {
   return modelSupportsGifOutput(model);
 }
 
-/** markup 标记引导层：GPT Image 2.5 / 2.6 的 edits 能力 */
-export function modelSupportsMarkup(model: string): boolean {
-  return /^gpt-image-2(?:\.5|\.6)(?:-[a-z0-9-]+)?$/i.test(model);
-}
-
 /** 画幅在渠道里可能叫 aspectRatio（16:9）也可能叫 ratio（万相/Seedance 的原生写法） */
 const ASPECT_FIELDS: GenerationField[] = ["aspectRatio", "ratio"];
 

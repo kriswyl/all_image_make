@@ -114,9 +114,6 @@ export function GenerateView(props: {
   const [outputFormat, setOutputFormat] = useScopedPersistentState<ImageOutputFormat>(draftScope, "outputFormat", "png");
   const [frameCount, setFrameCount] = useScopedPersistentState(draftScope, "frameCount", DEFAULT_FRAME_COUNT);
   const [frameDurationMs, setFrameDurationMs] = useScopedPersistentState(draftScope, "frameDurationMs", DEFAULT_FRAME_DURATION_MS);
-  const [markupUrl, setMarkupUrl] = useState("");
-  const [markupDataUrl, setMarkupDataUrl] = useState<string | null>(null);
-  const [markupEditorOpen, setMarkupEditorOpen] = useState(false);
   const [moderation, setModeration] = useScopedPersistentState<"auto" | "low">(draftScope, "moderation", "auto");
   const [style, setStyle] = useScopedPersistentState<"auto" | "vivid" | "natural">(draftScope, "style", "auto");
   const [responseFormat, setResponseFormat] = useScopedPersistentState<"auto" | "url" | "b64_json">(draftScope, "responseFormat", "auto");
@@ -145,21 +142,12 @@ export function GenerateView(props: {
     value: format, label: format === "jpeg" ? "JPEG" : format.toUpperCase(),
   }));
   const showAspectRatio = adapterType === "gemini-content" || isMidjourney;
-  /** markup 与 mask 互斥：两边都在 UI 上互相禁用，服务端还会再校验一次 */
-  const markupActive = Boolean(markupDataUrl || markupUrl.trim());
-  const markupAvailable = adapterType === "openai-images" && referenceImages.length >= 1 && !props.inpaint.mask;
-  const firstReferenceUrl = referenceImages[0]?.previewUrl ?? null;
-  useEffect(() => {
-    // 第一张参考图变了，旧的标注层尺寸就不再匹配，必须作废。
-    setMarkupDataUrl(null);
-  }, [firstReferenceUrl]);
-  useEffect(() => { if (!markupAvailable) setMarkupEditorOpen(false); }, [markupAvailable]);
   /**
    * 局部重绘：OpenAI Images 渠道 + 恰好一张底图。
    * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
    * 所以这里不按模型名预先禁用它。
    */
-  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1 && !markupActive;
+  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1;
   useEffect(() => { if (!maskAvailable) setMaskEditorOpen(false); }, [maskAvailable]);
   // 旧版本可能把 mj_edits / 动作模型存成了上次选择；它们已不在下拉里，回落到 mj_imagine
   useEffect(() => {
@@ -190,9 +178,7 @@ export function GenerateView(props: {
       const budget = gifBudgetMessage(requestedSize, frameCount);
       if (budget) return props.onToast("error", budget);
     }
-    if (markupActive && props.inpaint.mask) return props.onToast("error", "markup 标注引导层不能与局部重绘蒙版同时使用，请移除其中一个");
-    let rawParameters: Record<string, unknown>;
-    try {
+    let rawParameters: Record<string, unknown>;    try {
       const parsed = JSON.parse(raw);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
       rawParameters = parsed;
@@ -216,9 +202,6 @@ export function GenerateView(props: {
         outputFormat,
         frameCount: outputFormat === "gif" ? frameCount : undefined,
         frameDurationMs: outputFormat === "gif" ? frameDurationMs : undefined,
-        markup: markupActive && !props.inpaint.mask
-          ? { imageUrl: markupDataUrl ?? markupUrl.trim() }
-          : undefined,
         background: background === "auto" ? undefined : background,
         moderation: isOpenAi && moderation !== "auto" ? moderation : undefined,
         style: isOpenAi && style !== "auto" ? style : undefined,
@@ -232,7 +215,7 @@ export function GenerateView(props: {
         seed: adapterType === "gemini-content" ? optionalNumber(seed) : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, referenceImages.map((item) => item.file), maskAvailable && !markupActive ? props.inpaint.mask?.file : undefined);
+      }, referenceImages.map((item) => item.file), maskAvailable ? props.inpaint.mask?.file : undefined);
       props.onTask(task);
       props.onToast("success", "任务已提交");
     } catch (error) { props.onToast("error", error instanceof Error ? error.message : "提交失败"); }
@@ -349,26 +332,6 @@ export function GenerateView(props: {
                           : "局部重绘只支持 1 张参考图，请先移除多余的参考图"}</span>
                       </div>
                     )}
-                  </div>
-                ) : null}
-                {adapterType === "openai-images" ? (
-                  <div className="inpaint-row markup-row">
-                    <div className="inpaint-copy">
-                      <strong>标注引导层 markup</strong>
-                      <small>透明 PNG 叠加在第一张参考图上圈选 / 画箭头；与蒙版互斥，需上游模型支持</small>
-                    </div>
-                    {markupDataUrl ? <img className="inpaint-mask-thumb" src={markupDataUrl} alt="标注引导层预览" /> : null}
-                    <button type="button" className="secondary-button" disabled={!markupAvailable || submitting || readingImage}
-                      onClick={() => setMarkupEditorOpen(true)}>
-                      <Paintbrush size={15} />{markupDataUrl ? "编辑标注" : "绘制标注"}
-                    </button>
-                    {markupActive ? (
-                      <button type="button" className="icon-button compact" title="移除标注引导层"
-                        onClick={() => { setMarkupDataUrl(null); setMarkupUrl(""); }} disabled={submitting}><X size={15} /></button>
-                    ) : null}
-                    <input className="markup-url-input" value={markupUrl} disabled={Boolean(markupDataUrl) || Boolean(props.inpaint.mask) || submitting}
-                      onChange={(event) => setMarkupUrl(event.target.value)}
-                      placeholder="或填 HTTPS URL / data:image/png;base64,…" aria-label="标注引导层图片 URL" />
                   </div>
                 ) : null}
               </div>
@@ -512,20 +475,6 @@ export function GenerateView(props: {
           onApply={({ file, previewUrl }) => {
             props.inpaint.apply(file, previewUrl);
             setMaskEditorOpen(false);
-          }}
-        />
-      ) : null}
-      {markupEditorOpen && markupAvailable && referenceImages[0] ? (
-        <MaskEditorDialog
-          mode="markup"
-          sourceUrl={referenceImages[0].previewUrl}
-          sourceName={referenceImages[0].file.name}
-          onClose={() => setMarkupEditorOpen(false)}
-          onApply={() => undefined}
-          onApplyMarkup={(dataUrl) => {
-            setMarkupDataUrl(dataUrl);
-            setMarkupUrl("");
-            setMarkupEditorOpen(false);
           }}
         />
       ) : null}

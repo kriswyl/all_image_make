@@ -29,7 +29,11 @@ export function seedanceLimits(model: string): SeedanceLimits {
 }
 
 /** 提交前统一校验，前端与服务端共用同一套说法。 */
-export function validateSeedanceMedia(media: SeedanceMediaInput[], model: string): string | undefined {
+export function validateSeedanceMedia(
+  media: SeedanceMediaInput[],
+  model: string,
+  options: { allowInlineAudio?: boolean } = {},
+): string | undefined {
   const limits = seedanceLimits(model);
   const count = (type: SeedanceMediaInput["type"]) => media.filter(item => item.type === type).length;
   const images = count("image_url"), videos = count("video_url"), audios = count("audio_url");
@@ -37,10 +41,14 @@ export function validateSeedanceMedia(media: SeedanceMediaInput[], model: string
   if (videos > limits.maxVideos) return `参考视频最多 ${limits.maxVideos} 段（当前 ${videos} 段）`;
   if (audios > limits.maxAudios) return `参考音频最多 ${limits.maxAudios} 段（当前 ${audios} 段）`;
   if (media.length > limits.maxTotal) return `素材合计最多 ${limits.maxTotal} 份（当前 ${media.length} 份）`;
-  if (media.some(item => (item.type === "video_url" || item.type === "audio_url") && /^data:/i.test(item.url))) {
-    return "参考视频 / 音频请使用公网 URL，内联 base64 会超过请求预算";
+  // 视频内联一定超预算；音频是否接受 base64 上游未确认，只在显式开启时放行并自行承担被拒风险。
+  if (media.some(item => item.type === "video_url" && /^data:/i.test(item.url))) {
+    return "参考视频请使用公网 URL，内联 base64 会超过请求预算";
   }
-  if (media.some(item => (item.type === "video_url" || item.type === "audio_url") && !/^https?:\/\//i.test(item.url))) {
+  if (!options.allowInlineAudio && media.some(item => item.type === "audio_url" && /^data:/i.test(item.url))) {
+    return "参考音频请使用公网 URL；如需试验内联 base64，请在页面上勾选对应开关";
+  }
+  if (media.some(item => (item.type === "video_url" || item.type === "audio_url") && !/^(https?:\/\/|data:audio\/)/i.test(item.url))) {
     return "参考视频 / 音频地址必须是 http(s):// 开头的公网 URL";
   }
   return undefined;

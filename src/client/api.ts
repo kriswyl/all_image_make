@@ -106,6 +106,17 @@ export const api = {
     form.append("file", file, file.name);
     return request<Task>("/api/generations/reference-video", { method: "POST", body: form });
   },
+  /**
+   * Seedance 参考生视频：视频与音频都走渠道图床上传，本地文件不直接进请求体。
+   * 与万相/可灵用的是同一套上传实现，替换的只是提交接口（两个素材槽）。
+   */
+  generateWithReferenceMedia: (input: GenerationInput, media: { video?: File | null; audio?: File | null }) => {
+    const form = new FormData();
+    form.append("payload", JSON.stringify(input));
+    if (media.video) form.append("video", media.video, media.video.name);
+    if (media.audio) form.append("audio", media.audio, media.audio.name);
+    return request<Task>("/api/generations/reference-media", { method: "POST", body: form });
+  },
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
   workflow: (id: string, runId: string) => request<import("../shared/workflow").WorkflowRun & { steps: import("../shared/workflow").WorkflowStep[] }>(`/api/conversations/${id}/workflows/${runId}`),
   workflowAction: (id: string, runId: string, action: "resume" | "cancel") => request<import("../shared/workflow").WorkflowRun>(`/api/conversations/${id}/workflows/${runId}`, { method:"POST", body:JSON.stringify({ action }) }),
