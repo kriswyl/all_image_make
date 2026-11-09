@@ -445,7 +445,7 @@ export interface BoardGenerateOverrides {
   seed?: number;
   style?: "auto" | "vivid" | "natural";
   background?: "auto" | "opaque" | "transparent";
-  outputFormat?: "png" | "jpeg" | "webp" | "gif";
+  outputFormat?: import("../shared/image-formats.js").ImageOutputFormat;
   moderation?: "auto" | "low";
   count?: number;
   videoMode?: BoardVideoMode;

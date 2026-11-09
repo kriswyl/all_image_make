@@ -115,7 +115,7 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 ### 关键约束（已实现，别改坏）
 
-- Seedance 首帧/首尾帧模式下宽高比锁死 `adaptive`（官方 2.5 要求），选择器禁用
+- Seedance **2.5** 首帧/首尾帧模式下宽高比锁死 `adaptive`（官方 2.5 要求），2.0 不锁；选择器按模型版本判断
 - 万相 `file` 与 `link` 互斥，同时填会被前端拦下
 - 首尾帧模式必须正好 2 张图，数量不对提交前报错
 - 图片素材一律转 base64 data URI 发送
@@ -226,6 +226,23 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 **踩到的一个意外**：拿真人照片当首帧会被方舟风控拦下 —— `PrivacyInformation: the input image 'content[1]' may contain real person`。这不是 bug，是上游策略，用户选图时要知道。
 
+## Seedance 参考多模态（2026-11-09）
+
+按需求补齐「参考图 + 参考视频 + 参考音频」三类素材，并按版本区分上限：
+
+| 版本 | 参考图 | 参考视频 | 参考音频 | 合计 |
+|---|---|---|---|---|
+| Seedance 2.0（含 Fast / Mini） | 9 | 3 | 3 | 15 |
+| Seedance 2.5 | 30 | 10 | 10 | 50 |
+
+- 上限来自 `src/shared/seedance-capabilities.ts`，`seedanceVersion()` 按模型 ID 判版本，`validateSeedanceMedia()` 在前端 `buildSeedanceMedia()` 与服务端 `buildGenerationRequest()` 各跑一次。
+- UI 在「参考生视频」模式下增加两个多行输入框（每行一个 http(s) 公网 URL）；图片仍走上传。视频 / 音频**不接受 base64 data URI**，否则会撞 15 MB 内联素材预算，校验里会明确拒绝。
+- `adapters.ts` 的 seedance `content` 数组现在组装 `image_url` / `video_url` / `audio_url` 三种 part 及对应 role；以前只处理 `image_url`，视频音频被静默丢弃。
+- 修掉三处上限打架：视频页 UI 写 10、共用 `useReferenceImages` 按 8 拦、zod 又是 20。现在图片页仍 8 张、视频页单独一份状态（30 张）、multer 与 zod 都是 30 / 50。
+- 对话与画布侧仍只把画布图片映射成 `image_url`（那里没有视频 / 音频素材槽），多模态入口在视频生成页。
+
+**待联调**：词元流墟中转是否真接受 `video_url` / `audio_url` 与 `reference_video` / `reference_audio` role，代码与文档里都没有实测记录；该渠道预设也仍未配置 `uploadEndpoint`，本地视频 / 音频上传链路暂不可用。
+
 ## 可以问用户的开放问题
 
 1. 万相的 `reference_video` / `reference_audio` 是否也支持 base64？用户说过「图片都支持 base64」，视频音频当时没答。若支持，可以把 `video-edit` / `video-extend` / 参考视频那几个槽从「只填 URL」改成支持上传。注意要同步调大体积上限。
@@ -236,7 +253,7 @@ Grok 没有模式概念，只按「有没有参考图」区分文案。
 
 ```bash
 cd all_image_make
-npm test          # 58 个测试
+npm test          # 115 个测试文件 / 870 项
 npx tsc --noEmit  # 类型检查
 npm run dev       # 起服务
 ```

@@ -13,9 +13,13 @@ import { readPresentationStyle } from "./presentation-project.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
 import { taskKindFor } from "../shared/kinds.js";
+import {
+  imageOutputFormatSchema, MAX_FRAME_COUNT, MAX_FRAME_DURATION_MS,
+  MIN_FRAME_COUNT, MIN_FRAME_DURATION_MS,
+} from "../shared/image-formats.js";
 import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../shared/board.js";
 import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../shared/types.js";
-import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
+import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_VIDEO_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import { AppDatabase, StylePresetError, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
 import { uploadReferenceVideo } from "./reference-video.js";
@@ -28,7 +32,7 @@ import { pickBrainChannel, readAgentDefaults } from "./agent-settings.js";
 import { optimizePromptForWorkbench } from "./prompt-optimizer.js";
 import { callBrain } from "./brain.js";
 import { probeToolProtocol, readToolProtocol, recordToolProtocol } from "./tool-protocol.js";
-import { readThumbBytes, writeThumbnail } from "./vision.js";
+import { assetAbsolutePath, readThumbBytes, writeThumbnail } from "./vision.js";
 import {
   VIDEO_CONFIRM_POLICIES, IMAGE_CONFIRM_POLICIES, assetRef, DEFAULT_CONVERSATION_TITLE,
   type AgentStreamEvent, type ConversationInput, type ConversationPatch, type VideoConfirmPolicy,
@@ -263,7 +267,7 @@ const boardGenerateSchema = z.object({
     seed: z.coerce.number().int().min(0).max(2_147_483_647).optional(),
     style: z.enum(["auto", "vivid", "natural"]).optional(),
     background: z.enum(["auto", "opaque", "transparent"]).optional(),
-    outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
+    outputFormat: imageOutputFormatSchema.optional(),
     moderation: z.enum(["auto", "low"]).optional(),
     count: z.coerce.number().int().min(1).max(8).optional(),
     videoMode: z.enum(BOARD_VIDEO_MODES).optional(),
@@ -340,7 +344,7 @@ const generationSchema = z.object({
     base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
     mimeType: z.enum(referenceImageMimeTypes),
     fileName: z.string().trim().min(1).max(200),
-  })).max(MAX_REFERENCE_IMAGES).optional(),
+  })).max(MAX_VIDEO_REFERENCE_IMAGES).optional(),
   /**
    * 局部重绘蒙版（JSON 入口）。文件上传走 multipart 的 `mask` 字段；
    * 这里留着是为了 zod 不把 JSON 调用方的蒙版静默剥掉。mimeType 只认 PNG。
@@ -355,7 +359,17 @@ const generationSchema = z.object({
   aspectRatio: z.string().max(20).optional(),
   count: z.number().int().min(1).max(8).optional(),
   quality: z.string().max(60).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional(),
+  outputFormat: imageOutputFormatSchema.optional(),
+  frameCount: z.number().int().min(MIN_FRAME_COUNT).max(MAX_FRAME_COUNT).optional(),
+  frameDurationMs: z.number().int().min(MIN_FRAME_DURATION_MS).max(MAX_FRAME_DURATION_MS).optional(),
+  /**
+   * markup（标记引导层）：透明 PNG 叠加在第一张输入图上。
+   * 只作用于第一张图、必须同尺寸且含透明像素；与 mask 互斥（在 TaskRunner 里再校验一次）。
+   */
+  markup: z.object({
+    imageUrl: z.string().trim().max(MAX_REFERENCE_BASE64_CHARS).optional(),
+    fileId: z.string().trim().min(1).max(200).optional(),
+  }).refine(item => Boolean(item.imageUrl || item.fileId), { message: "markup 需要 imageUrl 或 fileId" }).optional(),
   background: z.enum(["auto", "opaque", "transparent"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   style: z.enum(["auto", "vivid", "natural"]).optional(),
@@ -442,7 +456,7 @@ const generationSchema = z.object({
       "reference_video",
       "reference_audio",
     ]).optional(),
-  })).max(20).optional(),
+  })).max(50).optional(),
   timeoutMs: z.number().int().min(10_000).max(1_800_000).optional(),
   rawParameters: z.record(z.string(), z.unknown()).optional(),
 });
@@ -1185,7 +1199,7 @@ export function createApp(options: { dataDir?: string } = {}) {
   }));
 
   app.post("/api/generations", referenceUpload.fields([
-    { name: "referenceImages", maxCount: MAX_REFERENCE_IMAGES },
+    { name: "referenceImages", maxCount: MAX_VIDEO_REFERENCE_IMAGES },
     { name: "mask", maxCount: 1 },
   ]), asyncHandler(async (req, res) => {
       const files = Array.isArray(req.files) || !req.files ? {} : req.files as Record<string, Express.Multer.File[]>;
@@ -1931,6 +1945,16 @@ export function createApp(options: { dataDir?: string } = {}) {
     if (!asset.mimeType.startsWith("image/") && !asset.mimeType.startsWith("audio/")) {
       throw new AppError("ASSET_NOT_IMAGE", "该产物没有缩略图", 404);
     }
+    // SVG 不是位图，Jimp 缩不了；直接返回原文件让 <img> 渲染，别在缩略图接口上 404。
+    if (asset.mimeType === "image/svg+xml") {
+      const absolute = assetAbsolutePath(db, asset);
+      const original = absolute ? await fs.promises.readFile(absolute).catch(() => null) : null;
+      if (!original) throw new AppError("THUMB_UNAVAILABLE", "缩略图不可用", 404);
+      res.setHeader("Content-Type", "image/svg+xml");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.send(original);
+      return;
+    }
     const bytes = await readThumbBytes(db, asset);
     if (!bytes) throw new AppError("THUMB_UNAVAILABLE", "缩略图不可用", 404);
     res.setHeader("Content-Type", "image/jpeg");
@@ -2047,20 +2071,22 @@ function publicChannel(channel: DbChannel, sessionKeys: KeyStore): Channel {
 function assetDownloadName(asset: { fileName: string; mimeType: string }): string {
   const current = asset.fileName.split(".").pop()?.toLowerCase() ?? "";
   const compatible = asset.mimeType.startsWith("image/")
-    ? ["png", "jpg", "jpeg", "webp", "gif"]
+    ? ["png", "jpg", "jpeg", "webp", "gif", "svg"]
     : asset.mimeType.startsWith("video/")
       ? ["mp4", "webm", "mov", "m4v", "mkv"]
       : asset.mimeType.startsWith("audio/")
         ? ["wav", "mp3", "m4a", "aac", "ogg", "flac"]
         : [];
+  const byMime: Record<string, string> = {
+    "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg",
+  };
   const extension = compatible.includes(current)
     ? current
-    : asset.mimeType === "image/jpeg" ? "jpg"
-      : asset.mimeType === "image/webp" ? "webp"
-        : asset.mimeType.includes("mpeg") ? "mp3"
-          : asset.mimeType.includes("wav") ? "wav"
-            : asset.mimeType.startsWith("video/") ? "mp4"
-              : asset.mimeType.startsWith("audio/") ? "m4a" : "png";
+    : byMime[asset.mimeType]
+      ?? (asset.mimeType.includes("mpeg") ? "mp3"
+        : asset.mimeType.includes("wav") ? "wav"
+          : asset.mimeType.startsWith("video/") ? "mp4"
+            : asset.mimeType.startsWith("audio/") ? "m4a" : "png");
   const stem = asset.fileName.replace(/\.[^.]+$/, "") || "asset";
   return `${stem}.${extension}`;
 }

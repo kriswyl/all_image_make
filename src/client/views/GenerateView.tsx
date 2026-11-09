@@ -16,7 +16,12 @@ import { useImagePaste } from "../useImagePaste";
 import { StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState, useScopedPersistentState } from "../task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES } from "../../shared/types";
 import { OPENAI_SIZE_GROUPS } from "../../shared/image-sizes";
-import { modelSupportsGifOutput, modelSupportsNegativePrompt } from "../../shared/channel-fields";
+import { modelSupportsNegativePrompt } from "../../shared/channel-fields";
+import {
+  DEFAULT_FRAME_COUNT, DEFAULT_FRAME_DURATION_MS, gifBudgetMessage, IMAGE_OUTPUT_FORMATS,
+  MAX_FRAME_COUNT, MAX_FRAME_DURATION_MS, MIN_FRAME_COUNT, MIN_FRAME_DURATION_MS,
+  type ImageOutputFormat,
+} from "../../shared/image-formats";
 import { isMidjourneyActionModel, midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
 import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
@@ -83,6 +88,12 @@ function customSize(widthValue: string, heightValue: string) {
   return `${width}x${height}`;
 }
 
+/** 只是给界面预算提示用：与提交时算出的尺寸保持一致，不参与请求 */
+function requestedSizeForDisplay(size: string, widthValue: string, heightValue: string) {
+  if (size === "auto") return undefined;
+  return size === "custom" ? customSize(widthValue, heightValue) : size;
+}
+
 export function GenerateView(props: {
   channels: Channel[]; selectedChannelId: string; selectedModel: string; activeTask: Task | null; tasks: Task[]; references: ReferenceController;
   inpaint: InpaintMaskController;
@@ -100,7 +111,12 @@ export function GenerateView(props: {
   const [mjVersion, setMjVersion] = useScopedPersistentState(draftScope, "mjVersion", "");
   const [quality, setQuality] = useScopedPersistentState(draftScope, "quality", "auto");
   const [background, setBackground] = useScopedPersistentState<"auto" | "opaque" | "transparent">(draftScope, "background", "auto");
-  const [outputFormat, setOutputFormat] = useScopedPersistentState<"png" | "jpeg" | "webp" | "gif">(draftScope, "outputFormat", "png");
+  const [outputFormat, setOutputFormat] = useScopedPersistentState<ImageOutputFormat>(draftScope, "outputFormat", "png");
+  const [frameCount, setFrameCount] = useScopedPersistentState(draftScope, "frameCount", DEFAULT_FRAME_COUNT);
+  const [frameDurationMs, setFrameDurationMs] = useScopedPersistentState(draftScope, "frameDurationMs", DEFAULT_FRAME_DURATION_MS);
+  const [markupUrl, setMarkupUrl] = useState("");
+  const [markupDataUrl, setMarkupDataUrl] = useState<string | null>(null);
+  const [markupEditorOpen, setMarkupEditorOpen] = useState(false);
   const [moderation, setModeration] = useScopedPersistentState<"auto" | "low">(draftScope, "moderation", "auto");
   const [style, setStyle] = useScopedPersistentState<"auto" | "vivid" | "natural">(draftScope, "style", "auto");
   const [responseFormat, setResponseFormat] = useScopedPersistentState<"auto" | "url" | "b64_json">(draftScope, "responseFormat", "auto");
@@ -124,22 +140,26 @@ export function GenerateView(props: {
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const isMidjourney = adapterType === "midjourney";
   const supportsNegativePrompt = modelSupportsNegativePrompt(props.selectedModel);
-  const supportsGif = modelSupportsGifOutput(props.selectedModel);
-  const gifAvailable = supportsGif && referenceImages.length > 0;
-  const outputFormatOptions: SelectOption[] = [
-    { value: "png", label: "PNG" },
-    { value: "jpeg", label: "JPEG" },
-    { value: "webp", label: "WebP" },
-    ...(gifAvailable ? [{ value: "gif", label: "GIF" }] : []),
-  ];
+  // 不再按模型名硬禁用：自定义模型 ID 也能选，能否生成由上游决定。
+  const outputFormatOptions: SelectOption[] = IMAGE_OUTPUT_FORMATS.map(format => ({
+    value: format, label: format === "jpeg" ? "JPEG" : format.toUpperCase(),
+  }));
   const showAspectRatio = adapterType === "gemini-content" || isMidjourney;
-  useEffect(() => { if (outputFormat === "gif" && !gifAvailable) setOutputFormat("png"); }, [outputFormat, gifAvailable]);
+  /** markup 与 mask 互斥：两边都在 UI 上互相禁用，服务端还会再校验一次 */
+  const markupActive = Boolean(markupDataUrl || markupUrl.trim());
+  const markupAvailable = adapterType === "openai-images" && referenceImages.length >= 1 && !props.inpaint.mask;
+  const firstReferenceUrl = referenceImages[0]?.previewUrl ?? null;
+  useEffect(() => {
+    // 第一张参考图变了，旧的标注层尺寸就不再匹配，必须作废。
+    setMarkupDataUrl(null);
+  }, [firstReferenceUrl]);
+  useEffect(() => { if (!markupAvailable) setMarkupEditorOpen(false); }, [markupAvailable]);
   /**
    * 局部重绘：OpenAI Images 渠道 + 恰好一张底图。
    * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
    * 所以这里不按模型名预先禁用它。
    */
-  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1;
+  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1 && !markupActive;
   useEffect(() => { if (!maskAvailable) setMaskEditorOpen(false); }, [maskAvailable]);
   // 旧版本可能把 mj_edits / 动作模型存成了上次选择；它们已不在下拉里，回落到 mj_imagine
   useEffect(() => {
@@ -166,6 +186,11 @@ export function GenerateView(props: {
       requestedSize = customSize(customWidth, customHeight);
       if (!requestedSize) return props.onToast("error", "自定义尺寸须为 16 的倍数，最长边不超过 3840，比例不超过 3:1，总像素为 655360 到 8294400");
     }
+    if (outputFormat === "gif") {
+      const budget = gifBudgetMessage(requestedSize, frameCount);
+      if (budget) return props.onToast("error", budget);
+    }
+    if (markupActive && props.inpaint.mask) return props.onToast("error", "markup 标注引导层不能与局部重绘蒙版同时使用，请移除其中一个");
     let rawParameters: Record<string, unknown>;
     try {
       const parsed = JSON.parse(raw);
@@ -188,7 +213,12 @@ export function GenerateView(props: {
         midjourneyVersion: isMidjourney ? mjVersion || undefined : undefined,
         count,
         quality: quality === "auto" ? undefined : quality,
-        outputFormat: outputFormat === "gif" && !gifAvailable ? undefined : outputFormat,
+        outputFormat,
+        frameCount: outputFormat === "gif" ? frameCount : undefined,
+        frameDurationMs: outputFormat === "gif" ? frameDurationMs : undefined,
+        markup: markupActive && !props.inpaint.mask
+          ? { imageUrl: markupDataUrl ?? markupUrl.trim() }
+          : undefined,
         background: background === "auto" ? undefined : background,
         moderation: isOpenAi && moderation !== "auto" ? moderation : undefined,
         style: isOpenAi && style !== "auto" ? style : undefined,
@@ -202,7 +232,7 @@ export function GenerateView(props: {
         seed: adapterType === "gemini-content" ? optionalNumber(seed) : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, referenceImages.map((item) => item.file), maskAvailable ? props.inpaint.mask?.file : undefined);
+      }, referenceImages.map((item) => item.file), maskAvailable && !markupActive ? props.inpaint.mask?.file : undefined);
       props.onTask(task);
       props.onToast("success", "任务已提交");
     } catch (error) { props.onToast("error", error instanceof Error ? error.message : "提交失败"); }
@@ -321,6 +351,26 @@ export function GenerateView(props: {
                     )}
                   </div>
                 ) : null}
+                {adapterType === "openai-images" ? (
+                  <div className="inpaint-row markup-row">
+                    <div className="inpaint-copy">
+                      <strong>标注引导层 markup</strong>
+                      <small>透明 PNG 叠加在第一张参考图上圈选 / 画箭头；与蒙版互斥，需上游模型支持</small>
+                    </div>
+                    {markupDataUrl ? <img className="inpaint-mask-thumb" src={markupDataUrl} alt="标注引导层预览" /> : null}
+                    <button type="button" className="secondary-button" disabled={!markupAvailable || submitting || readingImage}
+                      onClick={() => setMarkupEditorOpen(true)}>
+                      <Paintbrush size={15} />{markupDataUrl ? "编辑标注" : "绘制标注"}
+                    </button>
+                    {markupActive ? (
+                      <button type="button" className="icon-button compact" title="移除标注引导层"
+                        onClick={() => { setMarkupDataUrl(null); setMarkupUrl(""); }} disabled={submitting}><X size={15} /></button>
+                    ) : null}
+                    <input className="markup-url-input" value={markupUrl} disabled={Boolean(markupDataUrl) || Boolean(props.inpaint.mask) || submitting}
+                      onChange={(event) => setMarkupUrl(event.target.value)}
+                      placeholder="或填 HTTPS URL / data:image/png;base64,…" aria-label="标注引导层图片 URL" />
+                  </div>
+                ) : null}
               </div>
               <div className="section-title parameters-title"><div><SlidersHorizontal size={17} /><h2>基础参数</h2></div></div>
               <div className="parameter-grid">
@@ -339,6 +389,20 @@ export function GenerateView(props: {
                   <label><span>格式</span>
                     <SelectMenu value={outputFormat} options={outputFormatOptions} onChange={(value) => setOutputFormat(value as typeof outputFormat)} ariaLabel="格式" className="param-select" />
                   </label>
+                  {outputFormat === "gif" ? <>
+                    <label><span>帧数</span>
+                      <input type="number" min={MIN_FRAME_COUNT} max={MAX_FRAME_COUNT} step={1} value={frameCount}
+                        onChange={(event) => setFrameCount(Math.max(MIN_FRAME_COUNT, Math.min(MAX_FRAME_COUNT, Number(event.target.value) || DEFAULT_FRAME_COUNT)))} />
+                    </label>
+                    <label><span>每帧时长 <small>ms</small></span>
+                      <input type="number" min={MIN_FRAME_DURATION_MS} max={MAX_FRAME_DURATION_MS} step={10} value={frameDurationMs}
+                        onChange={(event) => setFrameDurationMs(Math.max(MIN_FRAME_DURATION_MS, Math.min(MAX_FRAME_DURATION_MS, Number(event.target.value) || DEFAULT_FRAME_DURATION_MS)))} />
+                    </label>
+                    <div className="wide-field" aria-label="GIF 尺寸提示">
+                      <small>{gifBudgetMessage(requestedSizeForDisplay(size, customWidth, customHeight), frameCount)
+                        ?? `默认 ${DEFAULT_FRAME_COUNT} 帧 × ${DEFAULT_FRAME_DURATION_MS}ms ≈ 1.8 秒循环；1024×1024 + 9 帧会超 sprite sheet 像素预算，建议 768×768 以下。`}</small>
+                    </div>
+                  </> : null}
                   <label><span>响应格式</span>
                     <SelectMenu value={responseFormat} options={responseFormatOptions} onChange={(value) => setResponseFormat(value as typeof responseFormat)} ariaLabel="响应格式" className="param-select" />
                   </label>
@@ -448,6 +512,20 @@ export function GenerateView(props: {
           onApply={({ file, previewUrl }) => {
             props.inpaint.apply(file, previewUrl);
             setMaskEditorOpen(false);
+          }}
+        />
+      ) : null}
+      {markupEditorOpen && markupAvailable && referenceImages[0] ? (
+        <MaskEditorDialog
+          mode="markup"
+          sourceUrl={referenceImages[0].previewUrl}
+          sourceName={referenceImages[0].file.name}
+          onClose={() => setMarkupEditorOpen(false)}
+          onApply={() => undefined}
+          onApplyMarkup={(dataUrl) => {
+            setMarkupDataUrl(dataUrl);
+            setMarkupUrl("");
+            setMarkupEditorOpen(false);
           }}
         />
       ) : null}

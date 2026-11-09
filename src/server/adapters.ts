@@ -1,6 +1,8 @@
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
-import { modelSupportsGifOutput, modelSupportsNegativePrompt, normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
+import { modelSupportsNegativePrompt, normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
+import { frameParameters, gifBudgetMessage } from "../shared/image-formats.js";
+import { validateSeedanceMedia } from "../shared/seedance-capabilities.js";
 import { TTS_DEFAULT_VOICE, splitTtsDialogue } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
@@ -67,6 +69,7 @@ function openAiImageParameters(input: GenerationInput) {
     n: input.count,
     quality: input.quality,
     output_format: input.outputFormat,
+    ...frameParameters(input.outputFormat, input.frameCount, input.frameDurationMs),
     background: input.background,
     moderation: input.moderation,
     style: input.style,
@@ -252,8 +255,14 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
   }
   const references = referenceImages(input);
   if (input.outputFormat === "gif") {
-    if (!modelSupportsGifOutput(input.model)) throw new Error("当前模型不支持 GIF 输出，请选择 gpt-image-2.6-flare / sunburst");
-    if (!references.length) throw new Error("GIF 输出需要在改图/edits 模式提供底图");
+    // 不再按模型名硬拦截：中转站的自定义 gpt-image-2.x ID 也应能发 GIF；
+    // 是否支持由上游决定。这里只挡「一定会失败」的 sprite sheet 尺寸组合，避免白花钱。
+    const budget = gifBudgetMessage(input.size, input.frameCount ?? 9);
+    if (budget) throw new Error(budget);
+  }
+  if (channel.adapterType === "seedance-video" && input.seedanceVideoMedia?.length) {
+    const problem = validateSeedanceMedia(input.seedanceVideoMedia, input.model);
+    if (problem) throw new Error(problem);
   }
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
   if (references.length && channel.adapterType === "openai-images"
@@ -316,20 +325,24 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       ...raw,
     });
   } else if (channel.adapterType === "seedance-video") {
-    const content: Array<{ type: string; text?: string; image_url?: { url: string }; role?: string }> = [];
+    const content: Array<{
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+      video_url?: { url: string };
+      audio_url?: { url: string };
+      role?: string;
+    }> = [];
     if (input.prompt) {
       content.push({ type: "text", text: input.prompt });
     }
-    if (input.seedanceVideoMedia && input.seedanceVideoMedia.length) {
-      input.seedanceVideoMedia.forEach((media) => {
-        if (media.type === "image_url") {
-          content.push({
-            type: "image_url",
-            image_url: { url: media.url },
-            ...(media.role ? { role: media.role } : {}),
-          });
-        }
-      });
+    // 图片 / 参考视频 / 参考音频都要进 content；以前只处理 image_url，
+    // video_url 与 audio_url 被静默丢掉，多模态模式等于没生效。
+    for (const media of input.seedanceVideoMedia ?? []) {
+      const role = media.role ? { role: media.role } : {};
+      if (media.type === "image_url") content.push({ type: "image_url", image_url: { url: media.url }, ...role });
+      else if (media.type === "video_url") content.push({ type: "video_url", video_url: { url: media.url }, ...role });
+      else if (media.type === "audio_url") content.push({ type: "audio_url", audio_url: { url: media.url }, ...role });
     }
     body = compact({
       model: input.model,
@@ -521,9 +534,17 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
      * 以为其余几张也被局部编辑了。
      */
     const mask = input.maskImage && references.length === 1 ? input.maskImage : undefined;
-    const rawFields = mask && Object.hasOwn(raw, "mask")
-      ? Object.fromEntries(Object.entries(raw).filter(([field]) => field !== "mask"))
-      : raw;
+    /**
+     * markup 标记引导层：只作用于第一张输入图；官方约束「不能与 mask 同时传」。
+     * 显式字段优先于高级 JSON 里的同名 key，避免 multipart 里出现两个同名 part。
+     */
+    const markup = input.markup && references.length >= 1 ? input.markup : undefined;
+    if (mask && markup) throw new Error("markup 标记引导层不能与局部重绘蒙版 mask 同时提交，请二选一");
+    const rawFields = Object.fromEntries(Object.entries(raw).filter(([field]) => {
+      if (field === "mask" && mask) return false;
+      if (field === "markup" && (mask || markup)) return false;
+      return true;
+    }));
     const fields = compact({
       model: input.model,
       prompt: mask ? withMaskInstruction(input.prompt) : input.prompt,
@@ -532,7 +553,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     });
     formData = new FormData();
     for (const [field, value] of Object.entries(fields)) {
-      if (field !== "image" && field !== "image[]" && field !== "mask") appendFormValue(formData, field, value);
+      if (field !== "image" && field !== "image[]" && field !== "mask" && field !== "markup") appendFormValue(formData, field, value);
     }
     if (Object.hasOwn(fields, "image") || Object.hasOwn(fields, "image[]")) {
       if (Object.hasOwn(fields, "image")) appendFormValue(formData, "image", fields.image);
@@ -552,9 +573,18 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       // 老用法：rawParameters 里的 mask 当文本字段发出去，行为保持不变
       appendFormValue(formData, "mask", fields.mask);
     }
+    if (markup) {
+      // multipart 没有嵌套对象，按上游惯例用 markup[...] 表单字段；
+      // image_url 可以是 HTTPS URL 或透明 PNG 的 base64 data URL。
+      if (markup.imageUrl) formData.append("markup[image_url]", markup.imageUrl);
+      if (markup.fileId) formData.append("markup[file_id]", markup.fileId);
+    } else if (Object.hasOwn(fields, "markup")) {
+      appendFormValue(formData, "markup", fields.markup);
+    }
     const rawImageField = Object.hasOwn(fields, "image") ? "image" : Object.hasOwn(fields, "image[]") ? "image[]" : undefined;
     const rawImage = rawImageField ? summarizeImageData(fields[rawImageField]) : undefined;
-    const diagnosticFields = Object.fromEntries(Object.entries(fields).filter(([field]) => field !== "image" && field !== "image[]" && field !== "mask"));
+    const diagnosticFields = Object.fromEntries(Object.entries(fields)
+      .filter(([field]) => field !== "image" && field !== "image[]" && field !== "mask" && field !== "markup"));
     diagnosticBody = {
       ...diagnosticFields,
       ...(mask
@@ -562,6 +592,12 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
         : Object.hasOwn(fields, "mask")
           ? { mask: summarizeImageData(fields.mask) }
           : {}),
+      ...(markup
+        ? { markup: {
+          ...(markup.imageUrl ? { image_url: summarizeImageData(markup.imageUrl) } : {}),
+          ...(markup.fileId ? { file_id: markup.fileId } : {}),
+        } }
+        : Object.hasOwn(fields, "markup") ? { markup: summarizeImageData(fields.markup) } : {}),
       ...(rawImageField ? { [rawImageField]: rawImage } : references.length > 1 ? { "image[]": references.map(imageSummary) } : { image: imageSummary(references[0]) }),
     };
   } else if (channel.adapterType === "openai-chat-image") {

@@ -79,9 +79,22 @@ export function modelSupportsNegativePrompt(model: string): boolean {
   return !/^gpt-image-/i.test(model);
 }
 
-/** GIF output is currently declared only by the gpt-image-2.6 templates. */
+/**
+ * GPT Image 2.x 系列支持 GIF / SVG 输出。以前只放行两个 2.6 模板名，
+ * 中转站的自定义模型 ID（gpt-image-2、gpt-image-2.6-xxx）会被误判成不支持。
+ * 这里只做「提示」用的宽松识别，服务端不再据此硬拦截 —— 是否真的支持由上游决定。
+ */
 export function modelSupportsGifOutput(model: string): boolean {
-  return /^gpt-image-2\.6-(?:flare|sunburst)(?:-c)?$/i.test(model);
+  return /^gpt-image-2(?:\.\d+)?(?:-[a-z0-9-]+)?$/i.test(model);
+}
+
+export function modelSupportsSvgOutput(model: string): boolean {
+  return modelSupportsGifOutput(model);
+}
+
+/** markup 标记引导层：GPT Image 2.5 / 2.6 的 edits 能力 */
+export function modelSupportsMarkup(model: string): boolean {
+  return /^gpt-image-2(?:\.5|\.6)(?:-[a-z0-9-]+)?$/i.test(model);
 }
 
 /** 画幅在渠道里可能叫 aspectRatio（16:9）也可能叫 ratio（万相/Seedance 的原生写法） */

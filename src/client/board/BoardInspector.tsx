@@ -16,6 +16,7 @@ import {
 } from "../../shared/video-capabilities";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import { unsupportedLabels } from "../../shared/channel-fields";
+import { IMAGE_OUTPUT_FORMATS, type ImageOutputFormat } from "../../shared/image-formats";
 import { CLAUSE_LABELS, readPromptClauses, replacePromptClause } from "../../shared/prompt-clauses";
 import type { AdapterType } from "../../shared/types";
 import type { Asset } from "../../shared/types";
@@ -780,14 +781,13 @@ export function BoardInspector({
                         <select
                           value={node.outputFormat ?? ""}
                           onChange={(event) => onUpdateNode(node.id, {
-                            outputFormat: event.target.value ? event.target.value as "png" | "jpeg" | "webp" | "gif" : undefined,
+                            outputFormat: event.target.value ? event.target.value as ImageOutputFormat : undefined,
                           } as Partial<BoardNode>)}
                         >
                           <option value="">自动</option>
-                          <option value="png">PNG</option>
-                          <option value="jpeg">JPEG</option>
-                          <option value="webp">WebP</option>
-                          {/^gpt-image-2\.6-(?:flare|sunburst)(?:-c)?$/i.test(node.model ?? "") && node.type === "image" && Boolean(node.assetId) ? <option value="gif">GIF</option> : null}
+                          {IMAGE_OUTPUT_FORMATS.map(format => (
+                            <option key={format} value={format}>{format === "jpeg" ? "JPEG" : format.toUpperCase()}</option>
+                          ))}
                         </select>
                       </label>
                       <label className="board-field">

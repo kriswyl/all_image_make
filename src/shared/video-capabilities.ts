@@ -217,7 +217,9 @@ export const VIDEO_CAPABILITIES: Record<VideoAdapter, VideoCapability> = {
   },
   "seedance-video": {
     label: "豆包 Seedance",
-    maxReferenceImages: 10,
+    // 2.5 上限 30 张参考图（另有 10 视频 / 10 音频，合计 ≤50）；
+    // 2.0 的 9 / 3 / 3 由 seedance-capabilities.ts 在提交前按模型校验。
+    maxReferenceImages: 30,
     durations: { min: 4, max: 30, fixed: null, default: 5 },
     resolutions: ["480p", "720p", "1080p"],
     aspectRatios: ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],

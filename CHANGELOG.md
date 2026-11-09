@@ -13,6 +13,17 @@
 
 ---
 
+## 未发布改动 — 媒体能力四项（版本仍为 v2.3.5，未打包、未打 tag）
+
+来源：`conding需求.md` 的四项（布局 / 输出格式 / 标注层 / Seedance 多模态）。
+
+- **窄窗口布局**：修复部分用户进入软件看到「两栏塌陷 + 大片空白 + 需要滚动」的问题。根因是 Tauri 窗口尺寸、WebView CSS 视口、侧栏宽度三者没有换算层，系统缩放或拖宽侧栏会误命中视口断点，加上 `min-height:580px` 把控制区撑空。现在按主区实际宽度（容器查询）决定两栏，去掉写死高度，侧栏拖拽上限与主区最小宽度联动；侧栏宽度计算抽成可单测的 `src/client/layout.ts`。
+- **GIF / SVG 输出与帧参数**：格式枚举收敛到 `shared/image-formats.ts`（png / jpeg / webp / gif / svg）；GIF 不再按模型名硬拦、也不再强制必须有底图，`/v1/images/generations` 可直接出 GIF；新增 `frame_count`（默认 9）与 `frame_duration_ms`（默认 200）控件与请求字段。按实测加 sprite sheet 护栏：1024×1024 + 9 帧会拼成 3072×3072 超像素预算，提交前明确提示改用 ≤768×768 或减少帧数。SVG 补齐字节识别、`.svg` 扩展名、下载名与缩略图接口兜底（直接返回原 SVG 让 `<img>` 渲染）。
+- **markup 标记引导层**：复用已有的透明 PNG 绘制编辑器，新增「标注引导层」模式，导出透明底彩色标注的 data URL；`/v1/images/edits` 以 `markup[image_url]` / `markup[file_id]` 发出。与 `mask` 在 UI、zod、TaskRunner、适配器四层互斥；要求至少 1 张参考图，只作用于第一张；高级 JSON 的同名逃生口仍保留但显式字段优先。
+- **Seedance 参考多模态**：视频页「参考生视频」新增参考视频 / 参考音频 URL 槽（每行一个），适配器现在组装 `video_url` / `audio_url` 与对应 role，不再静默丢弃。按模型版本区分上限（2.0：9 图 / 3 视频 / 3 音频；2.5：30 / 10 / 10，合计 ≤50），2.5 才锁首帧自适应比例。修掉 8 / 10 / 20 三处上限冲突：图片页仍 8 张，视频页独立 30 张，multer 与 zod 同步放宽。
+- 新增 `tests/media-requirements.test.ts` 14 项；更新 `tests/adapters.test.ts` 的 GIF 旧断言。全量 **115 文件 / 870 项通过**，TypeScript 双配置检查通过。
+- 待联调 / 边界：词元流墟中转是否接受 Seedance 的 `video_url` / `audio_url` 尚未实测，该渠道也没配 `uploadEndpoint`，本地视频音频上传暂不可用；SVG 缩略图直接回原文件，不做位图栅格化；`requiredAssets` 的生产写入链路仍未启用（上一轮已注明）。
+
 ## 未发布改动 — 入口与状态一致性收尾（版本仍为 v2.3.5，未打包、未打 tag）
 
 复核 `00e27be` 后按「保留架构、只做入口与状态收尾」施工，规范与验收边界见 `docs/document-reliability-development.md` §28。

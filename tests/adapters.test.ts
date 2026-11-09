@@ -52,23 +52,42 @@ describe("adapter request building", () => {
     });
   });
 
-  it("按模型过滤负面词，并只在 gpt-image-2.6 的 edits 请求里放行 GIF", () => {
+  it("GIF / SVG 不再按模型名硬拦，帧参数随请求发出并挡住超预算尺寸", () => {
     const gptChannel: DbChannel = { ...channel, models: ["gpt-image-2.6-sunburst"] };
     const gpt = buildGenerationRequest(gptChannel, {
       channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city",
       negativePrompt: "watermark,text", outputFormat: "gif", referenceImages: [referenceImage],
+      frameCount: 9, frameDurationMs: 200,
     }, "secret");
     expect(gpt.url).toBe("https://relay.example.com/v1/images/edits");
     expect(gpt.formData?.get("negative_prompt")).toBeNull();
     expect(gpt.formData?.get("output_format")).toBe("gif");
+    expect(gpt.formData?.get("frame_count")).toBe("9");
+    expect(gpt.formData?.get("frame_duration_ms")).toBe("200");
     expect(gpt.ignoredFields).toContain("负面提示词");
 
-    expect(() => buildGenerationRequest(gptChannel, {
-      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city", outputFormat: "gif",
-    }, "secret")).toThrow("底图");
+    // 文生图也能直接出 GIF：不再强制 edits 模式必须有底图。
+    const pureGif = buildGenerationRequest(gptChannel, {
+      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city", outputFormat: "gif", size: "512x512",
+    }, "secret");
+    expect(pureGif.url).toBe("https://relay.example.com/v1/images/generations");
+    expect(pureGif.body).toMatchObject({ output_format: "gif", frame_count: 9, frame_duration_ms: 200 });
+
+    // 自定义 / 2.5 模型 ID 不再被硬拦，是否支持交给上游。
     expect(() => buildGenerationRequest({ ...channel, models: ["gpt-image-2.5-sunburst"] }, {
-      channelId: channel.id, model: "gpt-image-2.5-sunburst", prompt: "city", outputFormat: "gif", referenceImages: [referenceImage],
-    }, "secret")).toThrow("不支持 GIF");
+      channelId: channel.id, model: "gpt-image-2.5-sunburst", prompt: "city", outputFormat: "gif", size: "512x512",
+    }, "secret")).not.toThrow("不支持 GIF");
+
+    // 1024×1024 + 9 帧会拼成 3072×3072，实测超预算，必须先拦下来。
+    expect(() => buildGenerationRequest(gptChannel, {
+      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city", outputFormat: "gif", size: "1024x1024",
+    }, "secret")).toThrow(/sprite sheet/);
+
+    const svg = buildGenerationRequest(gptChannel, {
+      channelId: gptChannel.id, model: "gpt-image-2.6-sunburst", prompt: "city", outputFormat: "svg",
+    }, "secret");
+    expect(svg.body).toMatchObject({ output_format: "svg" });
+    expect(svg.body).not.toHaveProperty("frame_count");
   });
 
   it("把渠道不认的字段记进诊断，raw 透传的不算", () => {

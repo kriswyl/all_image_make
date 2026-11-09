@@ -14,6 +14,7 @@ import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
  * adapters.ts、security.ts、key-store.ts 一行都不用改。
  */
 import { z } from "zod";
+import { imageOutputFormatSchema } from "../shared/image-formats.js";
 import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../shared/types.js";
 import type { GenerationInput, WanVideoMode, SeedanceVideoMode, KlingMediaType, VideoMediaType } from "../shared/types.js";
 import type {
@@ -66,8 +67,8 @@ export const generateImageSchema = z.object({
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
   count: z.coerce.number().int().min(1).max(8).optional(),
   fromScratch: z.coerce.boolean().optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional()
-    .describe("输出格式。gif 只改变文件封装，是否多帧由模型决定；不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
+  outputFormat: imageOutputFormatSchema.optional()
+    .describe("输出格式。gif/svg 需要上游模型支持；gif 可用 frame_count / frame_duration_ms 控制帧数与每帧时长，是否多帧最终由模型决定，不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
   imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
 });
 
@@ -79,8 +80,8 @@ export const editImageSchema = z.object({
   // 改图照样能定输出尺寸：改完的画面未必沿用原图的形状
   aspectRatio: z.string().trim().max(20).optional(),
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
-  outputFormat: z.enum(["png", "jpeg", "webp", "gif"]).optional()
-    .describe("输出格式。gif 只改变文件封装，是否多帧由模型决定；不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
+  outputFormat: imageOutputFormatSchema.optional()
+    .describe("输出格式。gif/svg 需要上游模型支持；gif 可用 frame_count / frame_duration_ms 控制帧数与每帧时长，是否多帧最终由模型决定，不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
 });
 
 export const viewImagesSchema = z.object({
@@ -473,7 +474,10 @@ export function resolveVideoSelection(
   if (!assets.length) {
     return { error: `${videoModeLabel(mode, adapterType)}需要先用 imageRefs 指定图片（或用 view_images 看清画布后指定）` };
   }
-  const cap = Math.min(MAX_REFERENCE_IMAGES, VIDEO_CAPABILITIES[adapterType as VideoAdapter]?.maxReferenceImages ?? MAX_REFERENCE_IMAGES);
+  // 图片页 8 张的限制不适用于视频：Seedance 2.5 允许 30 张参考图。
+  const cap = adapterType === "seedance-video"
+    ? VIDEO_CAPABILITIES["seedance-video"].maxReferenceImages
+    : Math.min(MAX_REFERENCE_IMAGES, VIDEO_CAPABILITIES[adapterType as VideoAdapter]?.maxReferenceImages ?? MAX_REFERENCE_IMAGES);
   if (assets.length > cap) {
     return { error: `${videoModeLabel(mode, adapterType)}最多用 ${cap} 张图，这次给了 ${assets.length} 张` };
   }

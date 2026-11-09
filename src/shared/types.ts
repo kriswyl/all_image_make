@@ -2,6 +2,7 @@
 // 这里只要类型、不要运行时的东西，所以用 `import type`——编译后整行消失，不会绕成一个环。
 import type { ParamNote } from "./agent-types.js";
 import type { MidjourneyMeta } from "./midjourney.js";
+import type { ImageOutputFormat } from "./image-formats.js";
 import { taskKindOf as taskKindOfFromKinds } from "./kinds.js";
 
 export {
@@ -202,6 +203,18 @@ export interface MaskImageInput {
   fileName: string;
 }
 
+/**
+ * GPT Image 2.5/2.6 的标记引导层（/v1/images/edits 的 markup）。
+ * 透明 PNG 叠加在第一张输入图上，用来圈选 / 画箭头 / 写短标注；
+ * 必须与第一张图同尺寸且包含透明像素，**不能与 mask 同时传**。
+ */
+export interface MarkupImageInput {
+  /** HTTPS URL 或 base64 data URL（透明 PNG） */
+  imageUrl?: string;
+  /** 上游已上传文件的 id；与 imageUrl 二选一 */
+  fileId?: string;
+}
+
 
 /**
  * gemini-content 这类站点的 `imageConfig.imageSize` 取值（大小写敏感）。
@@ -222,6 +235,11 @@ export const DEFAULT_IMAGE_SIZE: ImageSizeValue = "2K";
  * 前端放行、后端拒收，用户只会觉得这功能坏了。所以这里只留一份。
  */
 export const MAX_REFERENCE_IMAGES = 8;
+/**
+ * 视频页参考图上限单列：Seedance 2.5 允许 30 张，图片页仍按 8 张。
+ * 以前两者共用同一个 hook，视频 UI 写 10 张却被 8 张拦住。
+ */
+export const MAX_VIDEO_REFERENCE_IMAGES = 30;
 export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 /**
  * 局部重绘蒙版的上限，来自 OpenAI Images edit 的官方约束：
@@ -266,12 +284,17 @@ export interface GenerationInput {
   referenceImage?: ReferenceImageInput;
   /** 局部重绘蒙版；必须搭配恰好 1 张参考图，且仅 openai-images 适配器支持 */
   maskImage?: MaskImageInput;
+  /** 标记引导层；与 mask 互斥，只作用于第一张参考图 */
+  markup?: MarkupImageInput;
+  /** GIF 帧数（默认 9）与每帧时长毫秒（默认 200） */
+  frameCount?: number;
+  frameDurationMs?: number;
   negativePrompt?: string;
   size?: string;
   aspectRatio?: string;
   count?: number;
   quality?: string;
-  outputFormat?: "png" | "jpeg" | "webp" | "gif";
+  outputFormat?: ImageOutputFormat;
   background?: "auto" | "opaque" | "transparent";
   moderation?: "auto" | "low";
   style?: "auto" | "vivid" | "natural";

@@ -19,6 +19,7 @@ import type {
 import {
   KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type VideoAdapter,
 } from "../shared/video-capabilities";
+import { seedanceLimits, seedanceVersion, validateSeedanceMedia } from "../shared/seedance-capabilities";
 import type { ReferenceController } from "./app-shared";
 import {
   StatusBadge, formatDuration, formatTime, optionalNumber, statusLabels, terminalStatuses,
@@ -198,6 +199,9 @@ export function VideoGenerateView(props: {
   const [klingReferenceVideoUrl, setKlingReferenceVideoUrl] = usePersistentState("klingReferenceVideoUrl", "");
   const [klingCharacterOrientation, setKlingCharacterOrientation] = usePersistentState<KlingCharacterOrientation>("klingOrientation", "video");
   const [klingMultiShot, setKlingMultiShot] = usePersistentState("klingMultiShot", true);
+  /** Seedance 参考视频 / 音频：每行一个公网 URL，按版本上限截断 */
+  const [seedanceVideoUrls, setSeedanceVideoUrls] = usePersistentState("seedanceVideoUrls", "");
+  const [seedanceAudioUrls, setSeedanceAudioUrls] = usePersistentState("seedanceAudioUrls", "");
   const [urlInputs, setUrlInputs] = usePersistentState<Record<VideoMediaType, string>>("urlInputs", {} as Record<VideoMediaType, string>);
   const [submitting, setSubmitting] = useState(false);
   const [readingVideo, setReadingVideo] = useState(false);
@@ -229,9 +233,12 @@ export function VideoGenerateView(props: {
       : isKling ? klingCap
         : null;
   // 万相/Seedance/可灵按当前模式的槽位算上限，Grok 没有模式概念，直接用适配器上限
-  const maxReferenceImages = (isWan || isSeedance || isKling)
-    ? (modeSpec?.imageRepeatable ? caps?.maxReferenceImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
-    : caps?.maxReferenceImages ?? 0;
+  const seedanceCap = isSeedance ? seedanceLimits(props.selectedModel) : null;
+  const maxReferenceImages = isSeedance
+    ? (modeSpec?.imageRepeatable ? seedanceCap?.maxImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
+    : (isWan || isKling)
+      ? (modeSpec?.imageRepeatable ? caps?.maxReferenceImages ?? 0 : modeSpec?.imageSlots.length ?? 0)
+      : caps?.maxReferenceImages ?? 0;
   // 分辨率档位跟着模式走：运动控制没有 4K
   const resolutionOptions = klingCap?.resolutions ?? caps?.resolutions ?? [];
   // 可灵普通图生视频（含首尾帧）不认 aspect_ratio，Omni 才认
@@ -342,8 +349,9 @@ export function VideoGenerateView(props: {
     if (!resolutionOptions.includes(resolution)) setResolution(resolutionOptions[1] ?? resolutionOptions[0]);
   }, [adapterType, klingMode, resolutionOptions.join(",")]);
 
-  // Seedance 首帧/首尾帧只接受自适应比例，界面直接锁定，避免提交后被接口拒绝
-  const ratioLocked = isSeedance && (seedanceMode === "first-frame" || seedanceMode === "first-last-frame");
+  // 2.5 的首帧 / 首尾帧只接受自适应比例；2.0 不做这个限制
+  const ratioLocked = isSeedance && seedanceVersion(props.selectedModel) === "2.5"
+    && (seedanceMode === "first-frame" || seedanceMode === "first-last-frame");
   useEffect(() => {
     if (ratioLocked && ratio !== "adaptive") setRatio("adaptive");
   }, [ratioLocked, ratio]);
@@ -390,15 +398,15 @@ export function VideoGenerateView(props: {
     return media;
   }
 
-  /** Seedance 的 content 数组：图片按模式带上 role，首尾帧必须按序 */
+  /** Seedance 的 content 数组：图片按模式带 role，另加参考视频 / 音频 URL */
   async function buildSeedanceMedia(): Promise<SeedanceMediaInput[] | string> {
     const spec = SEEDANCE_MODE_SPECS[seedanceMode];
     const slots = spec.imageSlots;
-    if (!slots.length) return [];
-    if (!spec.imageRepeatable && referenceImages.length < slots.length) {
+    if (!slots.length && !seedanceVideoUrls.trim() && !seedanceAudioUrls.trim()) return [];
+    if (!spec.imageRepeatable && slots.length && referenceImages.length < slots.length) {
       return `${spec.label}需要 ${slots.length} 张图片`;
     }
-    if (!spec.imageRepeatable && referenceImages.length > slots.length) {
+    if (!spec.imageRepeatable && slots.length && referenceImages.length > slots.length) {
       return `${spec.label}最多 ${slots.length} 张图片`;
     }
 
@@ -408,6 +416,11 @@ export function VideoGenerateView(props: {
       if (!roleType) return `${spec.label}最多 ${slots.length} 张图片`;
       media.push({ type: "image_url", url: await fileToVideoDataUrl(item.file), role: roleType as SeedanceMediaRole });
     }
+    const urls = (text: string) => text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    for (const url of urls(seedanceVideoUrls)) media.push({ type: "video_url", url, role: "reference_video" });
+    for (const url of urls(seedanceAudioUrls)) media.push({ type: "audio_url", url, role: "reference_audio" });
+    const problem = validateSeedanceMedia(media, props.selectedModel);
+    if (problem) return problem;
     return media;
   }
 
@@ -646,6 +659,28 @@ export function VideoGenerateView(props: {
                       );
                     })}
                   </div>
+                </div>
+              ) : null}
+
+              {isSeedance && seedanceMode === "reference" && seedanceCap ? (
+                <div className="media-url-block">
+                  <div className="section-title compact">
+                    <div><LinkIcon size={16} /><h2>参考视频 / 音频</h2></div>
+                    <span>Seedance {seedanceVersion(props.selectedModel)} · 图 {seedanceCap.maxImages} / 视频 {seedanceCap.maxVideos} / 音频 {seedanceCap.maxAudios} · 合计 {seedanceCap.maxTotal}</span>
+                  </div>
+                  <label className="field-block">
+                    <span>参考视频地址 <small>每行一个公网 URL，最多 {seedanceCap.maxVideos} 段</small></span>
+                    <textarea className="json-input" spellCheck={false} value={seedanceVideoUrls}
+                      onChange={(event) => setSeedanceVideoUrls(event.target.value)}
+                      placeholder={"https://…/shot1.mp4\nhttps://…/shot2.mp4"} />
+                  </label>
+                  <label className="field-block">
+                    <span>参考音频地址 <small>每行一个公网 URL，最多 {seedanceCap.maxAudios} 段</small></span>
+                    <textarea className="json-input" spellCheck={false} value={seedanceAudioUrls}
+                      onChange={(event) => setSeedanceAudioUrls(event.target.value)}
+                      placeholder={"https://…/bgm.mp3\nhttps://…/voice.wav"} />
+                  </label>
+                  <p className="mode-hint">视频 / 音频只接受 http(s) 公网地址；本地上传需渠道单独配置上传服务。提示词里可用「视频1」「音频1」指代。</p>
                 </div>
               ) : null}
 

@@ -24,7 +24,14 @@ export function MaskEditorDialog(props: {
   initialMask?: File | null;
   onClose: () => void;
   onApply: (result: MaskEditorResult) => void;
+  /**
+   * markup 模式导出的是「透明底 + 彩色标注」的 PNG data URL，
+   * 而不是 mask 的白底挖空 PNG；两者尺寸都与第一张参考图一致。
+   */
+  mode?: "mask" | "markup";
+  onApplyMarkup?: (dataUrl: string) => void;
 }) {
+  const mode = props.mode ?? "mask";
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const paintCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -194,12 +201,19 @@ export function MaskEditorDialog(props: {
     const paintCtx = paint?.getContext("2d");
     if (!paint || !source || !paintCtx) return;
     if (!hasPaintedPixels(paint, paintCtx)) {
-      setError("请先涂抹要重新生成的区域");
+      setError(mode === "markup" ? "请先画标注（圈选 / 箭头 / 短标注）" : "请先涂抹要重新生成的区域");
       return;
     }
     setError("");
     setExporting(true);
     try {
+      if (mode === "markup") {
+        // 涂抹层本身就是透明底 + 彩色笔画，直接导出即可当标记引导层。
+        const dataUrl = paint.toDataURL("image/png");
+        if (dataUrl.length > MAX_MASK_IMAGE_BYTES * 4 / 3 * 1.4) throw new Error("标注层过大，请减少笔画后重试");
+        props.onApplyMarkup?.(dataUrl);
+        return;
+      }
       const maskCanvas = document.createElement("canvas");
       maskCanvas.width = paint.width;
       maskCanvas.height = paint.height;
@@ -232,9 +246,9 @@ export function MaskEditorDialog(props: {
       role="presentation"
       onMouseDown={(event) => { if (event.target === event.currentTarget && !exporting) props.onClose(); }}
     >
-      <div className="modal mask-editor-modal" role="dialog" aria-modal="true" aria-label="局部重绘蒙版">
+      <div className="modal mask-editor-modal" role="dialog" aria-modal="true" aria-label={mode === "markup" ? "标注引导层" : "局部重绘蒙版"}>
         <div className="modal-header">
-          <div><Paintbrush size={18} /><h2>局部重绘</h2></div>
+          <div><Paintbrush size={18} /><h2>{mode === "markup" ? "标注引导层 markup" : "局部重绘"}</h2></div>
           <button type="button" className="icon-button" title="关闭" onClick={props.onClose}><X size={18} /></button>
         </div>
         <div className="modal-body mask-editor-body">

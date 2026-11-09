@@ -237,6 +237,24 @@ export class TaskRunner {
         throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
       }
     }
+    if (input.markup) {
+      if (channel.adapterType !== "openai-images") {
+        throw new AppError("MARKUP_UNSUPPORTED_ADAPTER", "markup 标记引导层只支持 OpenAI Images 协议的 edits 渠道", 400);
+      }
+      if (!sources.length) {
+        throw new AppError("MARKUP_REQUIRES_REFERENCE_IMAGE", "markup 需要至少 1 张参考图，它只会叠加在第一张图上", 400);
+      }
+      if (maskSource) {
+        throw new AppError("MARKUP_MASK_CONFLICT", "markup 不能与局部重绘蒙版 mask 同时提交，请二选一", 400);
+      }
+      if (Object.hasOwn(input.rawParameters ?? {}, "markup")) {
+        throw new AppError("MARKUP_RAW_CONFLICT", "高级 JSON 里已有 markup，请勿同时填写标注引导层", 400);
+      }
+      const url = input.markup.imageUrl;
+      if (url && !/^https:\/\//i.test(url) && !/^data:image\/(?:png|webp|jpeg);base64,/i.test(url)) {
+        throw new AppError("MARKUP_INVALID_URL", "markup.imageUrl 必须是 HTTPS URL 或图片的 base64 data URL", 400);
+      }
+    }
     if (referenceVideoUpload) {
       validateReferenceVideo(referenceVideoUpload);
       const wanMode = input.wanVideoMode;
@@ -957,6 +975,7 @@ export function extensionForMime(mimeType: string) {
   if (mimeType.includes("jpeg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";
   if (mimeType.includes("gif")) return "gif";
+  if (mimeType.includes("svg")) return "svg";
   return "png";
 }
 
@@ -1015,7 +1034,8 @@ function referenceInputs(input: GenerationInput) {
 /** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */
 function inlineMediaSize(input: GenerationInput) {
   const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? []), ...(input.klingVideoMedia ?? [])];
-  return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
+  const markupUrl = input.markup?.imageUrl?.startsWith("data:") ? input.markup.imageUrl.length : 0;
+  return markupUrl + media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
 }
 
 export function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {

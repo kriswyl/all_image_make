@@ -1422,14 +1422,10 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 .mono-cell, .key-flag-inline { color: var(--accent); }
 
 @media (max-width: 1180px) {
-  .app-shell { padding: 14px 16px 0; }
+  .app-shell { padding: 8px 10px 0; }
   .topbar { gap: 16px; }
-  /* 单列布局下恢复自然滚动，避免面板被压缩 */
-  .generate-page { height: auto; }
-  .generation-grid { grid-template-columns: 1fr; flex: 0 0 auto; }
-  .control-panel { overflow: visible; }
-  .control-scroll { overflow-y: visible; }
-  .control-panel, .result-panel { min-height: 580px; }
+  /* 单列只是「改成上下排」，不再写死高度：580px 的 min-height 会在窄窗口 /
+     高 DPI 下撑出一大片空白，看起来就像界面被压缩、必须滚动才能看到结果。 */
   .submit-row { position: sticky; bottom: 0; }
 }
 
@@ -1601,7 +1597,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
   .generation-grid { gap: 12px; }
   .control-panel, .result-panel { min-height: 0; border-radius: var(--radius-card); }
   .control-panel { padding: 16px; }
-  .result-panel { min-height: 540px; padding: 0 14px 14px; }
+  .result-panel { padding: 0 14px 14px; }
   .parameter-grid { grid-template-columns: 1fr 1fr; }
   .image-preview-backdrop { padding: 16px; }
   .image-preview img { max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); }
@@ -3058,3 +3054,35 @@ body:has(.story-review-overlay) > .style-preset-overlay { z-index: 1020; }
 .tool-protocol-panel > button { justify-self: start; }
 .tool-protocol-panel small { color: var(--muted); }
 .chat-file-link { display: inline-flex; align-items: baseline; gap: 4px; }
+
+/* ── 窄窗口 / 系统缩放：按「主区实际宽度」而不是视口宽度决定两栏 ──────────────
+   Tauri 的窗口尺寸、WebView 的 CSS 视口、侧栏宽度三者之间没有换算层；
+   125%/150% 缩放或把侧栏拖宽后，视口会误命中 1180px 断点，把两栏压成单列。
+   容器查询直接量 .workspace 的可用宽度，且不再用固定 min-height 撑空白。 */
+.workspace { container-type: inline-size; }
+@container (max-width: 860px) {
+  .generate-page { height: auto; }
+  .generation-grid { grid-template-columns: 1fr; flex: 0 0 auto; }
+  .control-panel { overflow: visible; }
+  .control-scroll { overflow-y: visible; }
+  .control-panel, .result-panel { min-height: 0; }
+}
+@container (min-width: 861px) {
+  .generate-page { height: 100%; }
+  .generation-grid { grid-template-columns: minmax(300px, 2fr) minmax(0, 3fr); flex: 1 1 auto; min-height: 0; }
+  .control-panel { overflow: hidden; }
+  .control-scroll { overflow-y: auto; }
+  .control-panel, .result-panel { min-height: 0; }
+}
+/* 主区再窄也不能把控制面板挤到看不见：允许横向滚动，不压缩控件 */
+@media (max-width: 720px) {
+  .page { min-width: 0; }
+  .parameter-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+}
+
+/* markup 标注引导层：与局部重绘同一行风格，URL 输入框占满剩余宽度 */
+.markup-row { flex-wrap: wrap; }
+.markup-url-input { flex: 1 1 100%; min-width: 0; width: 100%; }
+.wide-field > small { display: block; line-height: 1.5; color: var(--muted); }
+/* Seedance 参考视频 / 音频：每行一个 URL 的多行输入框 */
+.media-url-block textarea.json-input { min-height: 64px; resize: vertical; }

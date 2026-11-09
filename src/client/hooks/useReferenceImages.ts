@@ -11,7 +11,10 @@ import {
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, type Asset } from "../../shared/types";
 
 /** 参考图状态提升到 App，切换视图时不被卸载清空，并可从生成结果/历史中追加 */
-export function useReferenceImages(onToast: (kind: Toast["kind"], message: string) => void): ReferenceController {
+export function useReferenceImages(
+  onToast: (kind: Toast["kind"], message: string) => void,
+  maxImages: number = MAX_REFERENCE_IMAGES,
+): ReferenceController {
   const [images, setImages] = useState<ReferenceImageState[]>([]);
   const [reading, setReading] = useState(false);
   const referenceUrls = useRef(new Set<string>());
@@ -23,8 +26,8 @@ export function useReferenceImages(onToast: (kind: Toast["kind"], message: strin
 
   function addFiles(files: File[]): boolean {
     if (!files.length) return false;
-    const remaining = MAX_REFERENCE_IMAGES - images.length;
-    if (files.length > remaining) { onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`); return false; }
+    const remaining = maxImages - images.length;
+    if (files.length > remaining) { onToast("error", `参考图最多上传 ${maxImages} 张`); return false; }
     const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
     if (prepared.some((item) => !item.mimeType)) { onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图"); return false; }
     if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) { onToast("error", "单张参考图不能超过 20 MB"); return false; }

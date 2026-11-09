@@ -57,7 +57,15 @@ export const REFERENCE_PROFILE: EncodeProfile = { maxEdge: 2048, maxBytes: MAX_R
  * 直接用声明的 mimeType 去发给上游，会在「参考图格式与文件内容不匹配」那道校验上炸掉。
  * 所以落盘和当参考图之前都以字节为准。
  */
-export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | "image/gif" | null {
+export type DetectedImageMime = "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/svg+xml";
+
+/** SVG 是文本，没有二进制签名；只看开头几百字节，别把任意 XML 都当图片。 */
+export function isSvgBytes(bytes: Buffer): boolean {
+  const head = bytes.subarray(0, 512).toString("utf8");
+  return /^\s*(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)?(?:<svg[\s>]|<!DOCTYPE\s+svg[\s>])/i.test(head);
+}
+
+export function detectImageMime(bytes: Buffer): DetectedImageMime | null {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
     return "image/png";
   }
@@ -66,6 +74,7 @@ export function detectImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "im
     return "image/webp";
   }
   if (bytes.length >= 6 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a")) return "image/gif";
+  if (isSvgBytes(bytes)) return "image/svg+xml";
   return null;
 }
 /** 视频首帧：必须挤进内容长度限制，1280 对绝大多数视频模型已经够用 */
@@ -141,6 +150,8 @@ async function decode(bytes: Buffer) {
  * 数据目录被整个搬走时缩略图要跟着走。
  */
 export async function writeThumbnail(db: AppDatabase, assetId: string, source: Buffer): Promise<string | null> {
+  // Jimp 不认 SVG；没有缩略图时前端直接显示原文件（<img> 能渲染 SVG），不做假占位图。
+  if (isSvgBytes(source)) return null;
   const image = await decode(source);
   if (!image) return null;
   try {
@@ -277,7 +288,8 @@ export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profil
   if (!original) return null;
   // 以字节为准：老资产可能声明 image/png、实际是 JPEG
   const actualMime = detectImageMime(original);
-  if (actualMime && actualMime !== "image/gif" && original.length <= profile.maxBytes) {
+  // SVG 不是位图，不能当参考图 / 视觉输入；让下面的 Jimp 解码明确失败返回 null。
+  if (actualMime && actualMime !== "image/gif" && actualMime !== "image/svg+xml" && original.length <= profile.maxBytes) {
     return { bytes: original, mimeType: actualMime, fileName: asset.fileName };
   }
 

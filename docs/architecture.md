@@ -170,7 +170,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 114 文件 / 856 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 115 文件 / 870 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |

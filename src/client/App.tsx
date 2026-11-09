@@ -29,7 +29,7 @@ import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { LoadingScreen, StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "./task-ui";
-import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
+import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_VIDEO_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
 import { useInpaintMask, useReferenceImages } from "./hooks/useReferenceImages";
@@ -38,6 +38,7 @@ import { ClearHistoryDialog, HistoryView } from "./views/HistoryView";
 import { SettingsDialog } from "./dialogs/SettingsDialog";
 import { DiagnosticDialog } from "./dialogs/DiagnosticDialog";
 import { setThemeMode, useTheme } from "./theme";
+import { clampSidebarWidth, sidebarWidthLimit } from "./layout";
 
 export type { Toast, View } from "./app-shared";
 
@@ -235,11 +236,24 @@ export function App() {
     return () => unlisten?.();
   }, [customChrome]);
 
+  /** 视口宽度会随系统缩放 / 窗口拖拽变化，用它给侧栏宽度设一个动态上限 */
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const sidebarMaxWidth = sidebarWidthLimit(viewportWidth);
+
   /** 侧栏宽度：拖右边缘调，存 localStorage（下次打开还是这个宽度） */
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
     return stored >= SIDEBAR_MIN_WIDTH && stored <= SIDEBAR_MAX_WIDTH ? stored : SIDEBAR_DEFAULT_WIDTH;
   });
+  // 窗口变小（含 DPI 变化）时把已保存的宽侧栏收回，保证主区不被挤没。
+  useEffect(() => {
+    setSidebarWidth(width => clampSidebarWidth(viewportWidth, width));
+  }, [viewportWidth]);
   useEffect(() => {
     // 存不下也只是下次回到默认宽度，拖拽本身照常
     try { window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)); } catch { /* 忽略 */ }
@@ -251,7 +265,7 @@ export function App() {
     const startX = event.clientX;
     const startWidth = sidebarWidth;
     const onMove = (move: PointerEvent) => {
-      setSidebarWidth(Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + move.clientX - startX)));
+      setSidebarWidth(clampSidebarWidth(window.innerWidth, startWidth + move.clientX - startX));
     };
     const stop = () => {
       window.removeEventListener("pointermove", onMove);
@@ -325,6 +339,8 @@ export function App() {
   const historyUnread = latestTaskActivity > historySeenAt;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
   const references = useReferenceImages(showToast);
+  /** 视频页单独一份参考图状态：Seedance 2.5 的上限远高于图片页 */
+  const videoReferences = useReferenceImages(showToast, MAX_VIDEO_REFERENCE_IMAGES);
   /**
    * 局部重绘只对 openai-images（gpt / gpt-c）且恰好一张参考图生效。
    * 底图一变（删除、替换、加第二张、换渠道），`maskSourceUrl` 就变，旧蒙版自动作废。
@@ -860,7 +876,7 @@ export function App() {
             selectedModel={videoModel}
             activeTask={activeVideoTask}
             tasks={videoTasks}
-            references={references}
+            references={videoReferences}
             onChannelChange={selectVideoChannel}
             onModelChange={setVideoModel}
             onAddChannel={() => setWizardOpen(true)}
