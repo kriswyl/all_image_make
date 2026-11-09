@@ -76,14 +76,13 @@ it("P02：普通形状改填充色与位置，只动 spPr", async () => {
 
 it("P03：复合对象与依赖对象一律拒绝，返回原文件不产生半成品", async () => {
   const bytes = await renderAiPresentation(plan);
+  // 表格已支持原位改单元格，这里只留仍然不支持的复合对象
   const result = await patchPresentationObjects(bytes, plan, [
     { slide: 1, elementId: "ic-1", color: "B23B2E" },
-    { slide: 1, elementId: "tb-1", rect: { x: 1, y: 4, w: 5, h: 2 } },
     { slide: 1, elementId: "cn-1", rect: { x: 1, y: 1, w: 1, h: 1 } },
   ]);
   expect(result.report.applied).toEqual([]);
   expect(result.report.rejected.map(item => item.reason)).toEqual([
-    expect.stringContaining("复合或依赖对象"),
     expect.stringContaining("复合或依赖对象"),
     expect.stringContaining("复合或依赖对象"),
   ]);
@@ -469,4 +468,87 @@ it("R05：doc_edit 改图表数据，报告里带内嵌数据表提示", async (
   const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
   const element = project.plan.slides[0]!.elements!.find(item => item.id === "ch-1")!;
   expect(element.type === "chart" && element.series[0]!.values).toEqual([8, 10]);
+});
+
+const tablePlan: AiPresentation = {
+  title: "表格", theme: "blue",
+  slides: [{
+    layout: "content", title: "表格页", subtitle: "", lines: [], notes: "", sourceIds: [],
+    elements: [
+      { type: "table", id: "tb-1", x: 1, y: 1.6, w: 8, h: 2.4, header: true,
+        rows: [["阶段", "结果"], ["选点", "3 个"], ["试点", "1 个"]] },
+    ],
+  }],
+};
+
+it("S01：改表格单元格只换文字，边框与字号不动，plan 同步", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{
+    slide: 1, elementId: "tb-1",
+    table: { cells: [{ row: 3, col: 1, text: "推广" }, { row: 2, col: 2, text: "5 个" }] },
+  }]);
+  expect(result.report.rejected).toEqual([]);
+  expect(result.report.applied[0]!.operations).toEqual(["table"]);
+  expect(result.report.changedParts).toEqual(["ppt/slides/slide1.xml"]);
+
+  const xml = await slideXml(result.bytes);
+  expect(xml).toContain("<a:t>推广</a:t>");
+  expect(xml).toContain("<a:t>5 个</a:t>");
+  expect(xml).not.toContain("<a:t>试点</a:t>");
+  // 单元格样式仍在：表头加粗、白字、字号 16pt
+  expect(xml).toContain('b="1"');
+  expect(xml).toContain('sz="1600"');
+  // 未涉及的行列不受影响
+  expect(xml).toContain("<a:t>选点</a:t>");
+  expect(xml).toContain("<a:t>结果</a:t>");
+
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows).toEqual([["阶段", "结果"], ["选点", "5 个"], ["推广", "1 个"]]);
+});
+
+it("S02：行列越界、同一格重复改、非法内容都拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const outOfRange = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 4, col: 1, text: "x" }] } }]);
+  expect(outOfRange.report.rejected[0]!.reason).toContain("超出表格范围（3 行 2 列）");
+
+  const duplicated = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 2, col: 1, text: "a" }, { row: 2, col: 1, text: "b" }] } }]);
+  expect(duplicated.report.rejected[0]!.reason).toContain("不能在一次补丁里改两次");
+
+  const newline = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 2, col: 1, text: "两\n行" }] } }]);
+  expect(newline.report.rejected[0]!.reason).toContain("不能含换行");
+});
+
+it("S03：非表格对象改单元格、与其它补丁混写都拒绝", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const wrong = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 1, col: 1, text: "x" }] }, color: "B23B2E" }]);
+  expect(wrong.report.rejected[0]!.reason).toContain("不能和文字");
+});
+
+it("S04：单元格文字改长后放不下要警告，不擅自动字号", async () => {
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const long = "这是很长的一串说明文字，用来验证单元格容量提示是否生效。".repeat(6);
+  const result = await patchPresentationObjects(bytes, tablePlan, [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 1, col: 1, text: long }] } }]);
+  expect(result.report.applied).toHaveLength(1);
+  expect(result.report.warnings[0]!.detail).toContain("第 1 行第 1 列文字可能放不下");
+  expect(await slideXml(result.bytes)).toContain('sz="1600"');
+});
+
+it("S05：doc_edit 改表格单元格端到端", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "table-patch-"));
+  const db = new AppDatabase(dir);
+  databases.push(db);
+  const conversationId = db.createConversation({
+    title: "表格补丁", brainChannelId: "mock-channel", brainModel: "mock",
+    videoConfirmPolicy: "auto_only", visionEnabled: false, verbatimPrompt: false,
+  }).id;
+  const bytes = await packPresentationProject(await renderAiPresentation(tablePlan), tablePlan, []);
+  const source = saveWorkspaceDocument(db, conversationId, "表格源文件", "pptx", bytes, "op-source");
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId: source.id, expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+    objects: [{ slide: 1, elementId: "tb-1", table: { cells: [{ row: 2, col: 2, text: "9 个" }] } }],
+  }), undefined, "op-table");
+  expect(result.ok).toBe(true);
+  const project = (await readPresentationProject(readWorkspaceFileBytes(db, conversationId, String(result.data!.fileId))))!;
+  const element = project.plan.slides[0]!.elements!.find(item => item.id === "tb-1")!;
+  expect(element.type === "table" && element.rows[1]![1]).toBe("9 个");
 });

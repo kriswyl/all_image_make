@@ -41,6 +41,8 @@ export type ObjectPatch = {
     categories?: string[];
     series?: Array<{ name?: string; values: number[] }>;
   };
+  /** 改表格单元格文字：行列从 1 开始，只换文字，单元格样式与边框不动 */
+  table?: { cells: Array<{ row: number; col: number; text: string }> };
 };
 
 export type PatchReport = {
@@ -57,7 +59,7 @@ export type PatchReport = {
 };
 
 const EMU = 914400;
-const PATCHABLE = new Set(["text", "shape", "image", "chart"]);
+const PATCHABLE = new Set(["text", "shape", "image", "chart", "table"]);
 const hex = (value: string) => /^[0-9A-Fa-f]{6}$/.test(value);
 
 /** 解压后逐个部件算哈希：ZIP 时间戳、条目顺序、压缩结果都不参与。 */
@@ -125,8 +127,8 @@ const xmlEscape = (value: string) => value
  * 只动 `<a:t>` 的文字，保留 pPr 与 rPr（字号、颜色、字体、行距全部沿用）；
  * 多段时按原段落数对应，多出来的段落用第一段做模板追加，少了的段落整段移除。
  */
-function patchTextContent(block: string, value: string): { block: string; changed: boolean } {
-  const tx = /(<p:txBody\b[^>]*>)([\s\S]*?)(<\/p:txBody>)/.exec(block);
+function patchTextContent(block: string, value: string, tag = "p:txBody"): { block: string; changed: boolean } {
+  const tx = new RegExp(`(<${tag}\\b[^>]*>)([\\s\\S]*?)(<\\/${tag}>)`).exec(block);
   if (!tx) return { block, changed: false };
   const paragraphs = [...tx[2]!.matchAll(/<a:p\b[\s\S]*?<\/a:p>/g)].map(match => match[0]);
   if (!paragraphs.length) return { block, changed: false };
@@ -232,6 +234,13 @@ function syncPlanElement(element: PresentationElement, patch: ObjectPatch): Pres
   if (element.type === "shape") {
     return { ...element, ...(patch.rect ?? {}), ...(patch.color !== undefined ? { fill: patch.color.toUpperCase() } : {}) };
   }
+  if (element.type === "table" && patch.table) {
+    const rows = element.rows.map((row, rowIndex) => row.map((text, colIndex) => {
+      const next = patch.table!.cells.find(cell => cell.row === rowIndex + 1 && cell.col === colIndex + 1);
+      return next ? next.text : text;
+    }));
+    return { ...element, ...(patch.rect ?? {}), rows };
+  }
   if (element.type === "chart") {
     const categories = patch.chart?.categories ?? element.categories;
     const series = element.series.map((item, index) => {
@@ -272,6 +281,25 @@ function patchSeries(seriesXml: string, input: { name?: string; categories?: str
     });
   }
   return { xml, changed: xml !== seriesXml };
+}
+
+/**
+ * 改表格单元格文字。单元格内是 `a:txBody`，段落与 run 结构跟文本框一致，
+ * 所以复用同一套「只换 <a:t>」的逻辑，边框、底纹、字号都不动。
+ */
+function patchTableCell(block: string, row: number, col: number, text: string): { block: string; changed: boolean } {
+  const table = /<a:tbl\b[^>]*>([\s\S]*?)<\/a:tbl>/.exec(block);
+  if (!table) return { block, changed: false };
+  const rows = [...table[1]!.matchAll(/<a:tr\b[^>]*>[\s\S]*?<\/a:tr>/g)].map(match => match[0]);
+  const rowXml = rows[row - 1];
+  if (!rowXml) return { block, changed: false };
+  const cells = [...rowXml.matchAll(/<a:tc>[\s\S]*?<\/a:tc>/g)].map(match => match[0]);
+  const cell = cells[col - 1];
+  if (!cell) return { block, changed: false };
+  const patched = patchTextContent(cell, text, "a:txBody");
+  if (!patched.changed) return { block, changed: false };
+  const nextTable = table[0].replace(rowXml, rowXml.replace(cell, patched.block));
+  return { block: block.replace(table[0], nextTable), changed: true };
 }
 
 /** 换图表数据：改 ppt/charts/chartN.xml 的缓存，不重画图表，也不动页面布局。 */
@@ -337,11 +365,20 @@ export async function patchPresentationObjects(
     if (!slide.elements) { reject("这一页不是元素页（使用了 box 或 lines），补丁无法同步回可编辑源方案"); continue; }
     const element = slide.elements.find(item => item.id === patch.elementId);
     if (!element) { reject("计划里没有这个元素"); continue; }
-    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框、普通形状、图片与图表`); continue; }
+    if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框、普通形状、图片、图表与表格`); continue; }
     // 混写要在逐字段校验之前拦住，否则会被「字段只适用于文本框」这类更具体的报错盖过去。
     if (patch.chart !== undefined && (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined || patch.image !== undefined)) { reject("改图表数据不能和文字、样式或换图写在同一条里"); continue; }
     if (patch.image !== undefined && (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined)) { reject("换图不能和文字或样式补丁写在同一条里"); continue; }
+    if (patch.table !== undefined && (patch.text !== undefined || patch.fontSize !== undefined || patch.color !== undefined || patch.image !== undefined || patch.chart !== undefined)) { reject("改表格单元格不能和文字、样式、换图或图表数据写在同一条里"); continue; }
 
+    if (patch.table !== undefined) {
+      if (element.type !== "table") { reject("只有表格对象能改单元格"); continue; }
+      const rows = element.rows.length, cols = element.rows[0]?.length ?? 0;
+      const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
+      if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
+      if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
+      if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+    }
     if (patch.chart !== undefined) {
       if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
       const categories = patch.chart.categories ?? element.categories;
@@ -376,6 +413,14 @@ export async function patchPresentationObjects(
 
     let nextBlock = found.block;
     const operations: string[] = [];
+    if (patch.table !== undefined) {
+      if (element.type !== "table") { reject("只有表格对象能改单元格"); continue; }
+      const rows = element.rows.length, cols = element.rows[0]?.length ?? 0;
+      const bad = patch.table.cells.find(cell => !Number.isInteger(cell.row) || !Number.isInteger(cell.col) || cell.row < 1 || cell.row > rows || cell.col < 1 || cell.col > cols);
+      if (bad) { reject(`单元格 ${bad.row}-${bad.col} 超出表格范围（${rows} 行 ${cols} 列）`); continue; }
+      if (new Set(patch.table.cells.map(cell => `${cell.row}-${cell.col}`)).size !== patch.table.cells.length) { reject("同一个单元格不能在一次补丁里改两次"); continue; }
+      if (patch.table.cells.some(cell => cell.text.length > 1000 || /[\r\n]/.test(cell.text))) { reject("单元格文字不能含换行，且不超过 1000 字"); continue; }
+    }
     if (patch.chart !== undefined) {
       if (element.type !== "chart") { reject("只有图表对象能改数据"); continue; }
       const categories = patch.chart.categories ?? element.categories;
@@ -415,6 +460,29 @@ export async function patchPresentationObjects(
           });
         }
       } catch (error) { reject(error instanceof Error ? error.message : String(error)); continue; }
+    }
+    if (patch.table !== undefined && element.type === "table") {
+      let changedCells = 0;
+      for (const cell of patch.table.cells) {
+        const result = patchTableCell(nextBlock, cell.row, cell.col, cell.text);
+        if (!result.changed) continue;
+        nextBlock = result.block; changedCells++;
+      }
+      if (!changedCells) { reject("这些单元格的文字没有变化"); continue; }
+      operations.push("table");
+      // 单元格容量按均分估算：改长了同样要提示，不替用户缩字号。
+      const rowCount = element.rows.length, colCount = element.rows[0]?.length ?? 1;
+      const fontSize = element.fontSize ?? 16;
+      const cellWidth = Math.max(0.3, element.w / colCount - 0.18), cellHeight = element.h / rowCount;
+      for (const cell of patch.table.cells) {
+        if (!cell.text.trim()) continue;
+        if (measureHeight(cell.text, fontSize, { w: cellWidth, h: cellHeight }) > cellHeight + 0.06) {
+          report.warnings.push({
+            slide: patch.slide, elementId: patch.elementId,
+            detail: `第 ${cell.row} 行第 ${cell.col} 列文字可能放不下：${fontSize}pt 下约需 ${measureHeight(cell.text, fontSize, { w: cellWidth, h: cellHeight }).toFixed(2)} 英寸，单元格只有 ${cellHeight.toFixed(2)} 英寸`,
+          });
+        }
+      }
     }
     if (patch.text !== undefined) {
       const result = patchTextContent(nextBlock, patch.text);
