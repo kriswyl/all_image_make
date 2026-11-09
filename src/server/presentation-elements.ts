@@ -190,14 +190,16 @@ export function renderElements(ppt: Presentation, slide: PresentationSlide, elem
       }
       case "chart": slide.addChart(ppt.ChartType[element.chartType], element.series.map((series) => ({ name: series.name, labels: element.categories, values: series.values })), { ...rect, showLegend: element.series.length > 1 || element.chartType === "pie", showValue: true, showTitle: false, chartArea: { fill: { color: paper } }, plotArea: { fill: { color: paper } }, chartColors: [accent, "77A6B6", "D8A657", "778CA3", "7DA87B", "BD8D99", "9A8EB8", "B5B584"], showLabel: element.chartType === "pie", catAxisLabelFontFace: font, catAxisLabelFontSize: 12, catAxisLabelColor: chartInk, valAxisLabelFontFace: font, valAxisLabelFontSize: 12, valAxisLabelColor: chartInk, dataLabelColor: chartInk, legendColor: chartInk, legendFontSize: 12 }); break;
       case "icon": {
+        // 图标是复合对象：每个子形状都要带名字，否则导出后无法定位，
+        // 只能整页重做。命名规则 `${id}-ring|dot|glyph|stroke-i` 由 M1 的映射校验读取。
         const c = element.color ?? accent;
         if (element.icon === "target" || element.icon === "info") {
-          slide.addShape(ppt.ShapeType.ellipse, { ...rect, line: { color: c, width: 2 }, fill: { color: "FFFFFF", transparency: 100 } });
-          if (element.icon === "target") slide.addShape(ppt.ShapeType.ellipse, { x: element.x + element.w * 0.32, y: element.y + element.h * 0.32, w: element.w * 0.36, h: element.h * 0.36, fill: { color: c }, line: { color: c } });
-          else slide.addText("i", { ...rect, fontFace: font, fontSize: Math.max(12, Math.min(element.w, element.h) * 40), bold: true, color: c, align: "center", valign: "middle", margin: 0 });
+          slide.addShape(ppt.ShapeType.ellipse, { ...rect, objectName: `${element.id}-ring`, line: { color: c, width: 2 }, fill: { color: "FFFFFF", transparency: 100 } });
+          if (element.icon === "target") slide.addShape(ppt.ShapeType.ellipse, { x: element.x + element.w * 0.32, y: element.y + element.h * 0.32, w: element.w * 0.36, h: element.h * 0.36, fill: { color: c }, line: { color: c }, objectName: `${element.id}-dot` });
+          else slide.addText("i", { ...rect, fontFace: font, fontSize: Math.max(12, Math.min(element.w, element.h) * 40), bold: true, color: c, align: "center", valign: "middle", margin: 0, objectName: `${element.id}-glyph` });
         } else {
           const points = element.icon === "check" ? [[0.1, 0.5, 0.35, 0.8], [0.35, 0.8, 0.9, 0.15]] : element.icon === "trend" ? [[0.05, 0.85, 0.4, 0.4], [0.4, 0.4, 0.6, 0.6], [0.6, 0.6, 0.95, 0.1]] : [[0.05, 0.5, 0.95, 0.5]];
-          for (const [x1, y1, x2, y2] of points) slide.addShape(ppt.ShapeType.line, { x: element.x + Math.min(x1!, x2!) * element.w, y: element.y + Math.min(y1!, y2!) * element.h, w: Math.abs(x2! - x1!) * element.w, h: Math.abs(y2! - y1!) * element.h, flipV: y2! < y1!, line: { color: c, width: 2.5, ...(element.icon === "arrow" ? { endArrowType: "triangle" as const } : {}) } });
+          points.forEach(([x1, y1, x2, y2], index) => slide.addShape(ppt.ShapeType.line, { x: element.x + Math.min(x1!, x2!) * element.w, y: element.y + Math.min(y1!, y2!) * element.h, w: Math.abs(x2! - x1!) * element.w, h: Math.abs(y2! - y1!) * element.h, flipV: y2! < y1!, line: { color: c, width: 2.5, ...(element.icon === "arrow" ? { endArrowType: "triangle" as const } : {}) }, objectName: `${element.id}-stroke-${index}` }));
         }
         break;
       }
@@ -213,7 +215,7 @@ export function renderElements(ppt: Presentation, slide: PresentationSlide, elem
       if (length <= 0.0001) continue;
       slide.addShape(ppt.ShapeType.line, { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), w: Math.abs(to.x - from.x), h: Math.abs(to.y - from.y), flipH: to.x < from.x, flipV: to.y < from.y, line: { color: element.color ?? accent, width: 1.5, ...(element.arrow && i === points.length - 1 ? { endArrowType: "triangle" as const } : {}) }, objectName: `${element.id}-segment-${i}` });
     }
-    if (element.label) slide.addText(element.label, { x: Math.max(0, Math.min(PAGE_WIDTH - 2, (labelStart.x + labelEnd.x) / 2 - 1)), y: Math.max(0, Math.min(PAGE_HEIGHT - 0.4, (labelStart.y + labelEnd.y) / 2 - 0.4)), w: 2, h: 0.4, fontFace: font, fontSize: 12, color: element.color ?? accent, align: "center", margin: 0 });
+    if (element.label) slide.addText(element.label, { x: Math.max(0, Math.min(PAGE_WIDTH - 2, (labelStart.x + labelEnd.x) / 2 - 1)), y: Math.max(0, Math.min(PAGE_HEIGHT - 0.4, (labelStart.y + labelEnd.y) / 2 - 0.4)), w: 2, h: 0.4, fontFace: font, fontSize: 12, color: element.color ?? accent, align: "center", margin: 0, objectName: `${element.id}-label` });
   }
 }
 

@@ -7,7 +7,8 @@ import { designSchema } from "./presentation-elements.js";
 
 const MANIFEST = "chatcanvas/presentation.json";
 const parser = new XMLParser({ ignoreAttributes: false, parseTagValue: false, processEntities: false });
-async function contentFingerprint(zip: JSZip): Promise<string> {
+/** 只对 ppt/ 部件算指纹：ZIP 时间戳、条目顺序和压缩结果不参与。 */
+export async function contentFingerprint(zip: JSZip): Promise<string> {
   const hash = createHash("sha256");
   for (const name of Object.keys(zip.files).filter((name) => name.startsWith("ppt/") && !zip.files[name]!.dir).sort()) {
     hash.update(name).update("\0").update(await zip.file(name)!.async("nodebuffer")).update("\0");
