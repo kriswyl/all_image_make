@@ -1138,8 +1138,9 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 
 `src/server/presentation-object-patch.ts`，只处理本应用生成的文本框与普通形状：
 
-- 支持字号、文字颜色、填充色、位置与尺寸；
-- 只**替换已有属性**（`rPr/@sz`、`rPr/a:solidFill/a:srgbClr`、`spPr/a:solidFill`、`xfrm/a:off+a:ext`），不插入新节点，避免破坏 schema 顺序；
+- 支持文字内容、字号、文字颜色、填充色、位置与尺寸；
+- 文字只换 `<a:t>` 里的字符，`pPr` 与 `rPr`（字号、颜色、字体、行距）原样沿用；`\n` 按段写入，多出的段落以第一段为模板追加，少了的段落整段移除；特殊字符按 XML 转义，控制字符剔除；
+- 样式只**替换已有属性**（`rPr/@sz`、`rPr/a:solidFill/a:srgbClr`、`spPr/a:solidFill`、`xfrm/a:off+a:ext`），不插入新节点，避免破坏 schema 顺序；
 - 补丁前要求唯一命中；补丁后逐部件比哈希，目标页以外有任何变化立即抛错；
 - plan 同步：改完立刻更新 plan 元素并重新打包（指纹重算）；`box` / `lines` 页没有稳定元素列表，直接拒绝并说明原因，不假装 plan 仍有效。
 
@@ -1150,14 +1151,15 @@ slide3 → accent-rule, timeline-axis, timeline-node-0  ← 时间轴
 ### 26.5 验证
 
 - `tests/presentation-object-map.test.ts` 7 项（O01–O07）：子对象齐全、唯一命中、同名拒绝、缺子对象拒绝、指纹失效、页序按 sldIdLst、命名规则；
-- `tests/presentation-object-patch.test.ts` 7 项（P01–P07）：字号/颜色/位置同步、形状填充、复合对象拒绝、非法参数拒绝、box 页拒绝、`doc_edit` 入口实跑、混用拒绝；
-- 部件差异：3 页补 2 处 → 只有 `slide1.xml`、`slide2.xml` 变化，其余 27 个部件逐字节一致；
-- WPS 回归：`make-object-patch-fixture` 生成补丁后的文件，`eval:wps --file` 打开并导出 3 页；导出图里标题变红、色块变宽变绿，无重叠或越界。
+- `tests/presentation-object-patch.test.ts` 12 项（P01–P12）：字号/颜色/位置同步、形状填充、复合对象拒绝、非法参数拒绝、box 页拒绝、`doc_edit` 入口实跑、混用拒绝、文字替换、多段写入、XML 转义、无变化不假装改过、`doc_edit` 改文字；
+- 部件差异：3 页补 3 处 → 只有 `slide1.xml`、`slide2.xml`、`slide3.xml` 变化，其余 26 个部件逐字节一致；
+- WPS 回归：`make-object-patch-fixture` 生成补丁后的文件，`eval:wps --file` 打开并导出 3 页；导出图里标题变红、色块变宽变绿、第 3 页正文换成两段且字号沿用，无重叠或越界。
 
-全量回归 **109 个测试文件、778 项**通过；`tsc` 与 `npm run build` 通过。
+全量回归 **109 个测试文件、783 项**通过；`tsc` 与 `npm run build` 通过。
 
 ### 26.6 边界
 
 - 表格、图表、图片、图标、连线不支持原位补丁：它们是复合或依赖对象，换一个 shape 不等于改好一个页；
-- 文字内容本身还不能改，当前只改样式与位置；
+- 文字只能整段替换，同一段内部分加粗/变色不在这一刀范围内；
+- 补丁后的文字不做容量复检：改长了可能溢出文本框，需要调用方自行控制长度（渲染器的容量诊断只在重排时生效）；
 - 依赖关系迁移、整页重做、`[Content_Types].xml` 与 `.rels` 的允许变化仍在 M2 后续，不因为「有 shapeId」就承诺所有外部 PPT 都能安全改。

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
+import { XMLParser } from "fast-xml-parser";
 import { renderAiPresentation, type AiPresentation } from "../src/server/mind-document";
 import { patchPresentationObjects } from "../src/server/presentation-object-patch";
 import { packPresentationProject, readPresentationProject } from "../src/server/presentation-project";
@@ -173,4 +174,69 @@ it("P07：objects 不能和整页修改混用；不可补丁的对象如实报�
   }), undefined, "op-composite");
   expect(composite.ok).toBe(false);
   expect(composite.summary).toContain("复合或依赖对象");
+});
+
+it("P08：替换文字内容只改 <a:t>，字号颜色沿用，plan 同步", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const result = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-title", text: "改后的标题" }]);
+  expect(result.report.applied[0]!.operations).toEqual(["text"]);
+  expect(result.report.changedParts).toEqual(["ppt/slides/slide1.xml"]);
+
+  const xml = await slideXml(result.bytes);
+  expect(xml).toContain("<a:t>改后的标题</a:t>");
+  expect(xml).not.toContain("<a:t>标题</a:t>");
+  // 原字号与颜色仍在（沿用 rPr）
+  expect(xml).toContain('sz="3000"');
+  expect(xml).toContain('val="243443"');
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "t-title")!;
+  expect(element.type === "text" && element.text).toBe("改后的标题");
+});
+
+it("P09：多段文字按段写入，段数与换行一致", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const result = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-body", text: "第一行\n第二行" }]);
+  const xml = await slideXml(result.bytes);
+  expect(xml).toContain("<a:t>第一行</a:t>");
+  expect(xml).toContain("<a:t>第二行</a:t>");
+  // 只看被改的那个形状块，别把标题页其它段落算进来
+  const body = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/g)!.find(sp => sp.includes('name="t-body"'))!;
+  const paragraphs = body.match(/<a:p>[\s\S]*?<\/a:p>/g) ?? [];
+  expect(paragraphs.filter(paragraph => /<a:t>[^<]/.test(paragraph))).toHaveLength(2);
+  const element = result.plan.slides[0]!.elements!.find(item => item.id === "t-body")!;
+  expect(element.type === "text" && element.text).toBe("第一行\n第二行");
+});
+
+it("P10：文字里有 XML 特殊字符时正确转义，读回仍是原文", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const value = "A < B & \"C\" > D";
+  const result = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-body", text: value }]);
+  const xml = await slideXml(result.bytes);
+  expect(xml).toContain("&lt;");
+  expect(xml).toContain("&amp;");
+  expect(xml).toContain("&quot;");
+  const parsed = new XMLParser({ ignoreAttributes: false, processEntities: true }).parse(xml) as Record<string, unknown>;
+  expect(JSON.stringify(parsed)).toContain(value.replace(/"/g, "\\\""));
+});
+
+it("P11：形状没有文字，改文字要明确拒绝；文字没变化也不假装改过", async () => {
+  const bytes = await renderAiPresentation(plan);
+  const shape = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "s-bar", text: "不该生效" }]);
+  expect(shape.report.rejected[0]!.reason).toContain("文字补丁只适用于文本框");
+
+  const same = await patchPresentationObjects(bytes, plan, [{ slide: 1, elementId: "t-title", text: "标题" }]);
+  expect(same.report.applied).toEqual([]);
+  expect(same.report.rejected[0]!.reason).toContain("没有变化");
+});
+
+it("P12：doc_edit 改文字同样走原位补丁，读回的源方案文字已更新", async () => {
+  const { db, conversationId, fileId, sha256 } = await source();
+  const result = await executeChatDocumentTool(db, conversationId, "doc_edit", JSON.stringify({
+    fileId, expectedSha256: sha256,
+    objects: [{ slide: 1, elementId: "t-body", text: "改写后的正文\n第二段" }],
+  }), undefined, "op-text");
+  expect(result.ok).toBe(true);
+  const { readWorkspaceFile } = await import("../src/server/chat-tools/documents");
+  const project = (await readPresentationProject(readWorkspaceFile(db, conversationId, String(result.data!.fileId)).bytes))!;
+  const element = project.plan.slides[0]!.elements!.find(item => item.id === "t-body")!;
+  expect(element.type === "text" && element.text).toBe("改写后的正文\n第二段");
 });

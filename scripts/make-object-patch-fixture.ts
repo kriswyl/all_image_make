@@ -27,6 +27,8 @@ const bytes = await packPresentationProject(await renderAiPresentation(plan), pl
 const patched = await patchPresentationObjects(bytes, plan, [
   { slide: 1, elementId: "t-title", fontSize: 26, color: "B23B2E", rect: { x: 1, y: 0.8, w: 9.4, h: 1 } },
   { slide: 2, elementId: "s-bar", color: "2A716B", rect: { x: 1, y: 1.8, w: 3, h: 0.24 } },
+  // 文字也要一起验：只改 <a:t>，字号颜色沿用
+  { slide: 3, elementId: "t-body", text: "原位补丁改了这句话\n第二段也一起改" },
 ]);
 if (patched.report.rejected.length) throw new Error(`补丁被拒：${JSON.stringify(patched.report.rejected)}`);
 

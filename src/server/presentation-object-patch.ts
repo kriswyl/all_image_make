@@ -19,6 +19,8 @@ import { packPresentationProject } from "./presentation-project.js";
 export type ObjectPatch = {
   slide: number;
   elementId: string;
+  /** 替换文本框内容；`\n` 表示换段，沿用第一段与第一个 run 的格式 */
+  text?: string;
   /** 字号（pt） */
   fontSize?: number;
   /** 6 位十六进制，不带 # */
@@ -93,6 +95,46 @@ function patchRect(block: string, rect: { x: number; y: number; w: number; h: nu
   return { block: ext.xml, changed: off.changed && ext.changed };
 }
 
+/** 文字进 XML 必须转义；控制字符按 XML 1.0 的非法范围剔除。 */
+const xmlEscape = (value: string) => value
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/gu, "�")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/**
+ * 替换文本框内容。
+ *
+ * 只动 `<a:t>` 的文字，保留 pPr 与 rPr（字号、颜色、字体、行距全部沿用）；
+ * 多段时按原段落数对应，多出来的段落用第一段做模板追加，少了的段落整段移除。
+ */
+function patchTextContent(block: string, value: string): { block: string; changed: boolean } {
+  const tx = /(<p:txBody\b[^>]*>)([\s\S]*?)(<\/p:txBody>)/.exec(block);
+  if (!tx) return { block, changed: false };
+  const paragraphs = [...tx[2]!.matchAll(/<a:p\b[\s\S]*?<\/a:p>/g)].map(match => match[0]);
+  if (!paragraphs.length) return { block, changed: false };
+  const lines = value.split(/\r?\n/);
+
+  /** 把一段的第一处文字换成 line，其余 run 清空；没有 run 的段落原样保留（不新建结构）。 */
+  const fill = (paragraph: string, line: string): string => {
+    let first = true;
+    return paragraph.replace(/<a:br\s*\/>/g, "").replace(/<a:t>[\s\S]*?<\/a:t>/g, () => {
+      const text = first ? xmlEscape(line) : "";
+      first = false;
+      return `<a:t>${text}</a:t>`;
+    });
+  };
+
+  let index = 0;
+  const inner = tx[2]!.replace(/<a:p\b[\s\S]*?<\/a:p>/g, paragraph => {
+    if (index >= lines.length) { index++; return ""; }
+    return fill(paragraph, lines[index++]!);
+  });
+  const extra = lines.slice(paragraphs.length).map(line => fill(paragraphs[0]!, line)).join("");
+  const updated = `${tx[1]}${inner}${extra}${tx[3]}`;
+  // 和原 txBody 比，不是和整块比：只比较文字部分是否真的变了。
+  if (updated === tx[0]) return { block, changed: false };
+  return { block: block.replace(tx[0], updated), changed: true };
+}
+
 /** 找出承载该逻辑对象的唯一 `<p:sp>` 块。 */
 function shapeBlock(xml: string, objectName: string): string | null {
   for (const match of xml.matchAll(/<p:sp>[\s\S]*?<\/p:sp>/g)) {
@@ -103,7 +145,7 @@ function shapeBlock(xml: string, objectName: string): string | null {
 
 function syncPlanElement(element: PresentationElement, patch: ObjectPatch): PresentationElement {
   if (element.type === "text") {
-    const next = { ...element, ...(patch.rect ?? {}) };
+    const next = { ...element, ...(patch.rect ?? {}), ...(patch.text !== undefined ? { text: patch.text } : {}) };
     if (patch.fontSize !== undefined || patch.color !== undefined) {
       next.style = {
         ...element.style,
@@ -141,6 +183,7 @@ export async function patchPresentationObjects(
     if (!element) { reject("计划里没有这个元素"); continue; }
     if (!PATCHABLE.has(element.type)) { reject(`${element.type} 是复合或依赖对象，原位补丁只支持文本框与普通形状`); continue; }
     if (patch.fontSize !== undefined && (element.type !== "text" || !(patch.fontSize > 0 && patch.fontSize <= 200))) { reject("字号补丁只适用于文本框，且须在 1–200pt 之间"); continue; }
+    if (patch.text !== undefined && (element.type !== "text" || !patch.text.trim() || patch.text.length > 6000 || patch.text.split(/\r?\n/).length > 30)) { reject("文字补丁只适用于文本框：不能为空，最多 6000 字与 30 段"); continue; }
     if (patch.color !== undefined && !hex(patch.color)) { reject("颜色必须是 6 位十六进制"); continue; }
     if (patch.rect && !["x", "y", "w", "h"].every(key => Number.isFinite((patch.rect as Record<string, number>)[key])) || patch.rect && (patch.rect.w <= 0 || patch.rect.h <= 0)) { reject("位置补丁必须给出有限的 x/y/w/h 英寸值"); continue; }
 
@@ -157,6 +200,11 @@ export async function patchPresentationObjects(
 
     let nextBlock = block;
     const operations: string[] = [];
+    if (patch.text !== undefined) {
+      const result = patchTextContent(nextBlock, patch.text);
+      if (!result.changed) { reject("这段文字没有变化，或该元素没有可替换的文字"); continue; }
+      nextBlock = result.block; operations.push("text");
+    }
     if (patch.fontSize !== undefined) {
       const result = patchFontSize(nextBlock, patch.fontSize);
       if (!result.changed) { reject("该文本框没有可改的字号属性"); continue; }
