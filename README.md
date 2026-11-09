@@ -4,7 +4,7 @@
 >
 > 本项目源码公开，但**未采用任何开源许可证**（All rights reserved）。你可以阅读、学习；如需二次开发、修改或分发，**请注明原作者 ChatCanvas / kriswyl，并附上本仓库链接**。未经授权不得用于商业售卖。
 
-当前源码版本为 `2.3.4`。Windows x64 安装包和 macOS Apple Silicon DMG 可从发布页下载。 [GitHub Releases](https://github.com/kriswyl/all_image_make/releases) · [Gitee 镜像](https://gitee.com/cqgsdx_0/chatcanvas-releases/releases)
+当前源码版本为 `2.3.5`。Windows x64 安装包和 macOS Apple Silicon DMG 可从发布页下载。 [GitHub Releases](https://github.com/kriswyl/all_image_make/releases) · [Gitee 镜像](https://gitee.com/cqgsdx_0/chatcanvas-releases/releases)
 
 ChatCanvas 是一个集成 **AI 助手、文档处理和无限画布** 的本地桌面客户端。使用自己配置的对话和生成渠道，在同一会话里制作 PPT、编辑表格，或生成图片、视频、音乐和配音。任务记录和生成文件保存在本机。
 
@@ -191,7 +191,7 @@ npm run tauri:build:exe
 npm run tauri:package:portable
 ```
 
-输出文件名按 `package.json` 中的版本生成，例如 `artifacts/chatcanvas-v2.3.4-portable-win-x64.zip`。
+输出文件名按 `package.json` 中的版本生成，例如 `artifacts/chatcanvas-v2.3.5-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成产物默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。生成产物（图片和视频）的目录可以在历史页改成任意位置，改完只影响之后生成的文件。
 
