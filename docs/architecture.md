@@ -161,9 +161,12 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
 | `npm run eval:diversity` | 量版式分布与几何多样性 |
 | `npm run eval:wps` | 用本机 WPS 打开并导出，验证补丁后文件可读 |
+| `npm run eval:word` | Word 字符样式的真实渲染验收：WPS 导出 PDF，读回文字、颜色、字体 |
 | `npm run eval:edit` | 原生改图链路（画布/图片） |
 
 跑真实渠道脚本时**不要同时改 `src/server`**：`tsx watch` 会重启后端，等待中的请求直接 `ECONNREFUSED`。
+
+`eval:word` 依赖本机 WPS 注册的 `Word.Application` COM：脚本生成虚构 docx、用项目代码加样式、导出 PDF，再用 pdfjs 校验文字、颜色与字体三项。它只支持 Windows，且不影响单元测试（单元测试不碰 COM）。
 
 ## 8. 扩展点
 

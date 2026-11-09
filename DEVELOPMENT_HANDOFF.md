@@ -42,7 +42,7 @@
 - **PPT 生成**：契约（页数/必需内容/风格，`presentation-spec-store.ts`）→ 分批阅读与规划 → 10 种版式渲染（`presentation-templates.ts`）→ 容量诊断（`shared/presentation-capacity.ts`）→ 校验门禁（`presentation-check.ts` / `presentation-contract-check.ts`）→ 候选发布（`document-publish.ts`）。
 - **PPT 修改有两条通道**：`doc_edit.pages[].content` 只给版式与文字、坐标由渲染器算；`doc_edit.objects[]` 走对象级原位补丁（`presentation-object-map.ts` 定位 + `presentation-object-patch.ts` 写回），支持文字、字号颜色位置、换图、图表数据（同时同步内嵌工作簿）、表格单元格与增删行列。补丁后逐部件比哈希，只允许预计算的部件变化。
 - **不能破的约定**：改一页不换整稿主题；渲染器页不被整页元素覆盖；容量降级必须留证；对象定位同名或缺失即拒绝；`box`/`lines` 页不假装 plan 仍有效。
-- Word 支持正文段落内文本替换与字符样式（加粗/斜体/下划线/颜色/字号），不支持段落样式与表格结构；Excel 支持单元格读写与批量标色/标记；PDF 只读。详见 README 与 `docs/architecture.md` 第 9 节。
+- Word 支持正文段落内文本替换与字符样式（加粗/斜体/下划线/颜色/字号），不支持段落样式与表格结构；Excel 支持单元格读写与批量标色/标记；PDF 只读。Word 样式有真实渲染验收：`npm run eval:word`（WPS 导出 PDF 后读回颜色与字体）。详见 README 与 `docs/architecture.md` 第 9 节。
 
 ### 音乐生成
 

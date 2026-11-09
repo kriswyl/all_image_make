@@ -28,6 +28,7 @@
     "eval:declarative": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-declarative-edit-real.js",
     "eval:local-visual": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-presentation-local-visual.js",
     "eval:wps": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-local-wps.js",
+    "eval:word": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/verify-word-style-real.js",
     "eval:visual": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/evaluate-presentation-visual.js",
     "eval:edit": "tsc -p tsconfig.eval.json && node artifacts/eval-runtime/scripts/evaluate-native-edit.js"
   },
