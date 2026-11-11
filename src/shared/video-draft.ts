@@ -1,7 +1,7 @@
 import type { KlingCharacterOrientation } from "./types.js";
 import { seedanceVersion } from "./seedance-capabilities.js";
 import { VIDEO_CAPABILITIES, type VideoAdapter } from "./video-capabilities.js";
-import { resolutionOptionsFor, videoModeSpec, type VideoModeSpec } from "./video-modes.js";
+import { resolutionOptionsFor, studioModeSpec, type VideoModeSpec } from "./video-modes.js";
 import type { TaskInputSnapshot } from "./video-snapshot.js";
 
 /**
@@ -84,7 +84,7 @@ export function reconcileVideoDraft(
   options: { adapter: string | undefined; model: string; mode: string | undefined },
 ): ReconcileResult {
   const { adapter, model, mode } = options;
-  const spec = videoModeSpec(adapter, model, mode);
+  const spec = studioModeSpec(adapter, model, mode);
   const caps = adapter && adapter in VIDEO_CAPABILITIES ? VIDEO_CAPABILITIES[adapter as VideoAdapter] : null;
   const notices: ReconcileNotice[] = [];
   if (!caps) return { draft, notices };
@@ -116,7 +116,7 @@ export function reconcileVideoDraft(
   // 宽高比：字段名与档位都跟渠道走
   if (caps.ratioField === "ratio") {
     const locked = adapter === "seedance-video" && seedanceVersion(model) === "2.5"
-      && (mode === "first-frame" || mode === "first-last-frame");
+      && (mode === "frames" || mode === "first-frame" || mode === "first-last-frame");
     if (locked && next.ratio !== "adaptive") {
       next.ratio = "adaptive";
       notices.push({ key: "ratio", message: "2.5 的首帧 / 首尾帧只接受自适应比例" });
@@ -137,7 +137,7 @@ export function reconcileVideoDraft(
 
 /** 模式切换后：把参数按新模式再收敛一次，素材槽由调用方按桶保留 */
 export function videoModeOfDraft(adapter: string | undefined, model: string, mode: string | undefined): VideoModeSpec | null {
-  return videoModeSpec(adapter, model, mode);
+  return studioModeSpec(adapter, model, mode);
 }
 
 /**

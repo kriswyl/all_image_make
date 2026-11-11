@@ -416,9 +416,12 @@ export function App() {
       .finally(() => setLoading(false));
   }, []);
 
-  // 图片与视频任务各自轮询，切换视图也不会中断
+  // 图片与视频任务各自轮询，切换视图也不会中断。
+  // 视频页是卡片网格，列表里可能同时有好几条在跑；轮询最新一条未完成的，
+  // 而不是只盯「当前选中」——刷新页面后没选中任何一条时也能继续推进。
+  const pendingVideoTask = videoTasks.find((task) => !terminalStatuses.includes(task.status)) ?? null;
   useImageTaskEvents(imageTasks, setTasks);
-  usePolling(activeVideoTask, setTasks);
+  usePolling(pendingVideoTask, setTasks);
   usePolling(activeMusicTask, setTasks);
 
   // 停在生成历史页时随时把新记录标记成已读：用户正看着，不该再算未读
@@ -888,6 +891,7 @@ export function App() {
               setActiveVideoTaskId(task.id);
             }}
             onSelectTask={(task) => setActiveVideoTaskId(task.id)}
+            onDelete={requestDeleteTask}
             onToast={showToast}
             onDiagnostics={setDiagnosticTask}
           />

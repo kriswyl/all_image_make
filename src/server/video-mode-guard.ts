@@ -2,7 +2,7 @@ import { AppError } from "./app-error.js";
 import type { GenerationInput } from "../shared/types.js";
 import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities.js";
 import {
-  isVideoAdapterType, resolutionOptionsFor, videoModeSpec, videoModesFor, videoModeLabel,
+  isVideoAdapterType, referenceMediaLimits, resolutionOptionsFor, videoModeSpec, videoModesFor, videoModeLabel,
 } from "../shared/video-modes.js";
 
 /**
@@ -20,12 +20,14 @@ interface ChannelLike {
 }
 
 interface UploadFlags {
-  referenceVideoUpload?: boolean;
-  referenceAudioUpload?: boolean;
+  /** 本地参考视频的段数（Seedance 最多十段，万相/可灵一段） */
+  referenceVideoUploads?: number;
+  referenceAudioUploads?: number;
 }
 
 const IMAGE_TYPES = new Set(["first_frame", "last_frame", "reference_image", "image", "image_url"]);
 const VIDEO_TYPES = new Set(["reference_video", "video_url", "video"]);
+const AUDIO_TYPES = new Set(["reference_audio", "audio_url", "audio"]);
 
 function mediaOf(input: GenerationInput) {
   return [
@@ -89,8 +91,20 @@ export function assertVideoModeRequest(channel: ChannelLike, input: GenerationIn
 
   // 参考视频只能由本地文件上传换回地址（页面不再提供粘贴公网地址的入口），
   // API 直连仍可能自带 media，所以两种情况都算素材齐。
-  if (spec.needsReferenceVideo && !uploads.referenceVideoUpload && !hasMediaType(input, VIDEO_TYPES)) {
+  if (spec.needsReferenceVideo && !(uploads.referenceVideoUploads ?? 0) && !hasMediaType(input, VIDEO_TYPES)) {
     throw new AppError("MODE_MEDIA_REQUIRED", `${spec.label}需要上传一段参考视频`, 400);
+  }
+
+  // 参考视频 / 音频的段数按渠道 + 模型的上限复核：Seedance 2.0 各 3 段、
+  // 2.5 各 10 段，万相/可灵各 1 段。接口不能只信界面给的段数。
+  const limits = referenceMediaLimits(adapter, input.model, spec);
+  const videoCount = (uploads.referenceVideoUploads ?? 0) + mediaOf(input).filter((item) => VIDEO_TYPES.has(item.type)).length;
+  const audioCount = (uploads.referenceAudioUploads ?? 0) + mediaOf(input).filter((item) => AUDIO_TYPES.has(item.type)).length;
+  if (limits.videos && videoCount > limits.videos) {
+    throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}最多 ${limits.videos} 段参考视频（当前 ${videoCount} 段）`, 400);
+  }
+  if (limits.audios && audioCount > limits.audios) {
+    throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}最多 ${limits.audios} 段参考音频（当前 ${audioCount} 段）`, 400);
   }
 
   // 万相：文档地址与网页链接互斥，参考文件模式必须二选一

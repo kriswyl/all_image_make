@@ -1,5 +1,6 @@
 import { assertSafeUrl, safeFileName } from "./security.js";
 import { AppError } from "./app-error.js";
+import { referenceMediaType } from "../shared/reference-media.js";
 import type { DbChannel } from "./db.js";
 import type { KeyStore } from "./key-store.js";
 
@@ -15,11 +16,20 @@ export interface ReferenceMediaUpload {
 /** 兼容旧名字：可灵/万相/Seedance 的视频上传走的还是同一份实现。 */
 export type ReferenceVideoUpload = ReferenceMediaUpload;
 
-const VIDEO_MIMES = ["video/mp4", "video/quicktime"];
-const AUDIO_MIMES = ["audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/m4a", "audio/aacp"];
 /** 音频按「15 秒以内」定上限：和视频页的音轨限制保持一致。 */
 export const MAX_REFERENCE_AUDIO_BYTES = 15 * 1024 * 1024;
 export const MAX_REFERENCE_VIDEO_BYTES = 100 * 1024 * 1024;
+
+/**
+ * 上传的是哪类素材。
+ *
+ * 不能只看 `mimetype`：`.m4a` 在 Windows 上常常拿不到类型，前端补不上时
+ * multer 收到的是 `application/octet-stream`，按 MIME 白名单会把它当成非法
+ * 文件。判定规则和前端同一份（扩展名优先），两边不会各说一套。
+ */
+export function referenceMediaKindOf(file: { originalname: string; mimetype: string }): ReferenceMediaKind | null {
+  return referenceMediaType({ name: file.originalname, type: file.mimetype })?.kind ?? null;
+}
 
 function looksLikeAudio(buffer: Buffer) {
   if (buffer.length < 12) return false;
@@ -35,8 +45,9 @@ function looksLikeAudio(buffer: Buffer) {
 }
 
 export function validateReferenceMedia(file: ReferenceMediaUpload, kind: ReferenceMediaKind = "video") {
+  const detected = referenceMediaKindOf(file);
   if (kind === "audio") {
-    if (!AUDIO_MIMES.includes(file.mimetype) || !looksLikeAudio(file.buffer)) {
+    if (detected !== "audio" || !looksLikeAudio(file.buffer)) {
       throw new AppError("REFERENCE_AUDIO_INVALID", "仅支持有效的 MP3 / M4A / AAC / WAV 音频", 400);
     }
     if (file.buffer.length > MAX_REFERENCE_AUDIO_BYTES) {
@@ -44,7 +55,7 @@ export function validateReferenceMedia(file: ReferenceMediaUpload, kind: Referen
     }
     return;
   }
-  if (!VIDEO_MIMES.includes(file.mimetype) || file.buffer.length < 12 || file.buffer.subarray(4, 8).toString("ascii") !== "ftyp") {
+  if (detected !== "video" || file.buffer.length < 12 || file.buffer.subarray(4, 8).toString("ascii") !== "ftyp") {
     throw new AppError("REFERENCE_VIDEO_INVALID", "仅支持有效的 MP4 / MOV 视频", 400);
   }
   if (file.buffer.length > MAX_REFERENCE_VIDEO_BYTES) {

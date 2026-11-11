@@ -54,7 +54,7 @@ export function VideoParamsPanel(props: VideoParamsPanelProps) {
     onChange(caps.ratioField === "ratio" ? { ratio: value } : { aspectRatio: value });
   };
   const ratioLocked = adapter === "seedance-video" && seedanceVersion(model) === "2.5"
-    && (spec?.id === "first-frame" || spec?.id === "first-last-frame");
+    && (spec?.id === "frames" || spec?.id === "first-frame" || spec?.id === "first-last-frame");
   const smartDuration = caps.supportsSmartDuration && (spec?.durationEditable ?? true);
   const audioSupported = supportsAudioFor(adapter, spec?.id);
   const isMotion = spec?.id === "motion-control";

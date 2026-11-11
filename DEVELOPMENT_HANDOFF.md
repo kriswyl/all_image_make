@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-这是一个 Windows 桌面 AI 客户端（当前源码版本 `2.3.5`）：在同一个对话里聊天、处理文档与 PPT、生成图片 / 视频 / 音乐 / 配音，另有无限画布与分镜。前端提供渠道、模型和参数配置，后端通过中转站 API 调用不同模型。用户使用自己的中转站 API Key，不需要官方账号登录。代码结构见 `docs/architecture.md`。
+这是一个 Windows 桌面 AI 客户端（当前源码版本 `2.3.6`）：在同一个对话里聊天、处理文档与 PPT、生成图片 / 视频 / 音乐 / 配音，另有无限画布与分镜。前端提供渠道、模型和参数配置，后端通过中转站 API 调用不同模型。用户使用自己的中转站 API Key，不需要官方账号登录。代码结构见 `docs/architecture.md`。
 
 ## 当前架构
 
@@ -67,9 +67,10 @@
 
 - 四种视频渠道（通义万相 `wan-video`、Grok `grok-video`、豆包 Seedance `seedance-video`、可灵 `kling-video`），协议细节见 [`VIDEO_HANDOFF.md`](VIDEO_HANDOFF.md)。
 - 异步任务提交 → 持久化上游 task id → 轮询 → 下载落盘。**服务重启后，已拿到上游 task id 的视频任务会接着轮询**，不再一律判失败。
-- 视频页是一体化创作框：素材槽 + 提示词 + 底部参数胶囊，参数从胶囊弹出浮层，右侧没有固定参数面板；下方是「本次结果」大舞台 + 最近缩略记录。
-- 模式只在渠道/模型真正支持时出现（万相界面 6 种、Seedance 4 种、可灵按模型；只靠链接的「参考文件生视频」仅留接口），服务端 `video-mode-guard.ts` 用同一张表复核；草稿按 `adapter:mode` 分键，切模式/切模型不丢素材；提交即落参数快照，结果区可复用提示词与数值（素材需重新上传）。
-- 素材只走本地上传：创作框里没有粘贴公网地址的输入框；创作框右上角的 @ 弹出「全部/视频/图片/音频」素材列表，选中把 `@图片1` 插进提示词。
+- 视频页是**一页式**：标题 → 一体化创作框（提示词固定在右侧、左边留一列恒定的空白；默认参考素材折叠成窄窄一摞钉在左上角，悬停摊开时**就地横向盖在文字上**，不改动文本布局、不把文字推下去）→ 创作记录。素材层是绝对定位的覆盖层，折叠/展开两态正文的 x/y/宽/高与输入框尺寸完全一致。没有右侧参数面板，也没有常驻的「本次结果」大舞台；生成中的任务在卡片上显示进度，点卡片才打开播放器浮层。默认态输入区恒为 172px（折叠/展开都不变）、记录区整块显示且**不滚动**（多出来的靠右上角翻页）；手动展开 = 专注编辑，创作框占满工作区、记录区整块隐藏，收起后恢复并用 `ResizeObserver` 重算每页条数。
+- 界面上的生成方式收成合并入口：**提示词生视频**（无素材=文生、有素材=参考生）与**首尾帧生视频**（1 张=首帧、2 张=首尾帧），视频编辑/延长与运动控制语义独立才单列；提交前 `resolveStudioMode()` 落成上游真实模式，服务端 `video-mode-guard.ts` 按具体模式复核。**Grok 例外**：上游只有一个端点、靠 `reference_images` 区分文生/图生，没有模式表也不画模式胶囊，但 `studioAssetSpec()` 给创作框一份界面用的素材规格（最多 7 张参考图），服务端守卫只按参考图上限兜底。草稿按 `adapter:mode` 分键，切模式/切模型不丢素材；提交即落参数快照，结果区可复用提示词与数值（素材需重新上传）。
+- 素材只走本地上传：创作框里没有粘贴公网地址的输入框。能放可选素材的模式（提示词生视频）空着时最左留一个虚线「参考内容」格；点它按当前模式能收的素材列类型（图片 / 视频 / 音频），收多种先弹一层「添加图片 / 添加视频 / 添加音频」，只收一种就直接开系统选择框，不能传的写明原因。首尾帧（两格）与视频编辑/延长（专属参考视频格）不再额外挂这个入口。其余入口在 `@` 面板底部。素材是一层绝对定位的覆盖物钉在左上角（`--asset-gutter` 固定文字左边界：普通 148px、首尾帧 190px），空态是一个虚线「参考内容」格，多张素材只露最近 3 张、叠成一摞（错开间距已收窄到整摞 120px，轻微旋转 + 角标写总数），摞右边缘半叠一个小圆 `+`；**只有悬停在这一摞本身**才就地横向摊开盖在文字上（带实色底），移出整条素材排才收回；展开后一页放满靠两侧箭头翻页（不横向滚动、箭头不压格），点击格子看详情；首尾帧是固定的「首帧 / 尾帧」两个浅灰圆角方块 + 连接符，**并排、不折叠、不展开、无任何动画**。提示词里敲 `@` 或点右上角 @ 都会弹素材列表，面板跟着光标走，选中插入 `@图片1` / `@视频2` / `@音频1`——输入框是 contenteditable，记号从插进去那一刻起就是带缩略图的胶囊，编辑中和失焦后长得一样。参考视频/音频可多段：Seedance 2.0 三段、2.5 十段，万相/可灵各一段，额度 >1 时一次可选多个。
+- 创作记录：总条数 + 状态筛选（全部/进行中/已完成/失败）+ **右上角的翻页条**（与筛选页签同一行）+ 排序；网格/列表切换已移除，只有网格一种看法，**记录区不滚动**。一页放几张按记录区宽高算（列数看宽、行数看高，见 `client/video/record-paging.ts`），窗口越大放得越多；只有一页时翻页条不出现。卡片带缩略图、时长、状态点与模型/时长/分辨率，`⋯` 菜单给播放、下载、重生成、复用参数、诊断、取消，以及红色的「删除历史」（走 `App.requestDeleteTask` → `ClearHistoryDialog`）。
 - 视频任务的诊断记录采用「首尾完整 + 中间精简」：提交请求和最后一次轮询保留完整响应，中间的轮询只存一行状态摘要。
 
 ### 历史与素材目录
@@ -104,7 +105,7 @@ RELAY_API_KEY=替换为中转站密钥
 - `src/client/dialogs/`：设置与诊断弹窗。
 - `src/client/hooks/useReferenceImages.ts`、`hooks/usePolling.ts`：参考图/蒙版与任务轮询。
 - `src/client/VideoGenerateView.tsx`：视频页编排（渠道/模型 → 模式 → 草稿 → 提交）。
-- `src/client/video/`：一体化创作框 `VideoComposer`、参数浮层 `VideoParamsPanel`、结果面板 `VideoResultPanel`、媒体构造 `media-builders.ts`。
+- `src/client/video/`：一体化创作框 `VideoComposer`、提示词输入 `PromptEditor.tsx`（contenteditable，`@` 记号是带缩略图的原子胶囊）、参数浮层 `VideoParamsPanel`、创作记录 `VideoResultPanel`（网格/列表 + 播放器浮层）、媒体构造 `media-builders.ts`、`@` 素材面板 `VideoMentionPanel.tsx`。
 - `src/shared/video-modes.ts` / `video-draft.ts` / `video-snapshot.ts`：模式矩阵、草稿与参数收敛、任务参数快照（前后端共用）。
 - `src/server/video-mode-guard.ts`：提交前的模式/素材/参数复核。
 - `src/client/MusicGenerateView.tsx`：音乐工作台、全部模式、源歌曲选择、播放器与歌词。
@@ -182,7 +183,7 @@ src-tauri/target/release/image_relay_studio.exe
 npm run tauri:package:portable
 ```
 
-输出位于 `artifacts/chatcanvas-v2.3.5-portable-win-x64/` 和 `artifacts/chatcanvas-v2.3.5-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
+输出位于 `artifacts/chatcanvas-v2.3.6-portable-win-x64/` 和 `artifacts/chatcanvas-v2.3.6-portable-win-x64.zip`（目录名和版本号由 `scripts/package-portable.mjs` 从 `package.json` 读取，升级版本号后自动变化）。
 
 生成用于换电脑继续开发的源码包：
 
@@ -190,7 +191,7 @@ npm run tauri:package:portable
 npm run tauri:package:source
 ```
 
-输出为 `artifacts/chatcanvas-v2.3.5-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
+输出为 `artifacts/chatcanvas-v2.3.6-source-with-handoff.zip`，其中不包含 API Key、用户数据、依赖缓存和编译产物。
 
 直接分发时必须保留同目录的 `node.exe` 和 `resources/`。标准安装包命令是：
 

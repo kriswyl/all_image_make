@@ -20,7 +20,19 @@ import { seedanceLimits } from "./seedance-capabilities.js";
  * 那是接口能力，不是页面上的输入方式。
  */
 
-export type VideoStudioMode = WanVideoMode | SeedanceVideoMode | KlingVideoMode;
+/**
+ * 界面上的「合并模式」。
+ *
+ * 上游的模式是按素材类型切开的（文生 / 参考 / 首帧 / 首尾帧），但对用户来说
+ * 只有一件事：往框里放不放东西、放几张。所以界面上只留两个入口，
+ * 提交前再按实际素材解析成具体模式：
+ *
+ * - `prompt`：没素材 = 文生视频；有参考图/视频/音频 = 参考生视频
+ * - `frames`：1 张图 = 首帧生视频；2 张图 = 首尾帧生视频
+ */
+export type StudioComposeMode = "prompt" | "frames";
+
+export type VideoStudioMode = WanVideoMode | SeedanceVideoMode | KlingVideoMode | StudioComposeMode;
 
 /** 视频模式在 GenerationInput 上的字段名，按渠道二选一 */
 export type VideoModeField = "wanVideoMode" | "seedanceVideoMode" | "klingVideoMode";
@@ -33,6 +45,8 @@ export interface VideoModeSpec {
   imageSlots: readonly string[];
   /** 图片槽是否可重复（参考图模式可传多张） */
   imageRepeatable: boolean;
+  /** 固定槽位模式下至少要几张图，默认等于槽位数（合并的首尾帧是 1，尾帧可选） */
+  imageMin?: number;
   /** 接受一段参考视频（本地文件，提交时上传换公网地址） */
   acceptsReferenceVideo: boolean;
   /** 必须有参考视频才能提交（视频编辑 / 视频延长 / 运动控制） */
@@ -41,6 +55,8 @@ export interface VideoModeSpec {
   acceptsReferenceAudio: boolean;
   /** 该模式下 duration 是否可调 */
   durationEditable: boolean;
+  /** 合并入口标记：提交时要按素材数量落成具体模式 */
+  compose?: StudioComposeMode;
 }
 
 export const WAN_MODE_SPECS: Record<WanVideoMode, VideoModeSpec> = {
@@ -186,6 +202,130 @@ export function klingModeSpec(mode: KlingVideoMode): VideoModeSpec {
   };
 }
 
+/** 合并入口要按素材解析成具体模式时用的计数 */
+export interface StudioMediaCounts {
+  images: number;
+  video: boolean;
+  audio: boolean;
+}
+
+/**
+ * 参考视频 / 参考音频各能放几段。
+ *
+ * 上游不是一个口径：Seedance 2.0 能放 3 段视频 + 3 段音频，2.5 放到 10 + 10；
+ * 万相、可灵的参考视频接口只收一段。以前代码里按「各 1 段」写死，多段能力根本
+ * 没有入口，用户只能看到「只能上传一次」。
+ */
+export function referenceMediaLimits(
+  adapter: string | undefined,
+  model: string,
+  spec: VideoModeSpec | null,
+): { videos: number; audios: number } {
+  if (!spec) return { videos: 0, audios: 0 };
+  const seedance = adapter === "seedance-video" ? seedanceLimits(model) : null;
+  const videos = spec.acceptsReferenceVideo || spec.needsReferenceVideo ? (seedance?.maxVideos ?? 1) : 0;
+  const audios = spec.acceptsReferenceAudio ? (seedance?.maxAudios ?? 1) : 0;
+  return { videos, audios };
+}
+
+/**
+ * 「提示词生视频」入口：文生与参考生二合一。
+ *
+ * 模型没有参考模式（可灵 3.0 / Turbo）时这个入口就是纯文生：不给图片槽，
+ * 免得用户放进去一张图却只能按首帧提交、还以为自己在用参考图。
+ */
+function composePromptSpec(adapter: string, model: string): VideoModeSpec {
+  const caps = VIDEO_CAPABILITIES[adapter as VideoAdapter];
+  const kling = adapter === "kling-video";
+  const klingReference = kling && klingModesForModel(model).includes("reference");
+  const hasReference = !kling || klingReference;
+  const maxImages = kling
+    ? (klingReference ? caps.maxReferenceImages : 0)
+    : adapter === "seedance-video" ? seedanceLimits(model).maxImages : caps.maxReferenceImages;
+  const video = adapter === "wan-video" || adapter === "seedance-video";
+  const audio = adapter === "wan-video" || adapter === "seedance-video";
+  return {
+    id: "prompt",
+    label: hasReference ? "提示词生视频" : "文生视频",
+    hint: hasReference
+      ? `不传素材就是文生视频；上传参考图（最多 ${maxImages} 张）、参考视频或参考音频后，按参考生视频提交`
+      : "仅凭提示词生成；要放首帧 / 尾帧请切到「首尾帧生视频」",
+    imageSlots: hasReference ? ["reference_image"] : [],
+    imageRepeatable: hasReference,
+    imageMin: 0,
+    acceptsReferenceVideo: video,
+    needsReferenceVideo: false,
+    acceptsReferenceAudio: audio,
+    durationEditable: true,
+    compose: "prompt",
+  };
+}
+
+/** 「首尾帧生视频」入口：1 张图 = 首帧，2 张图 = 首尾帧 */
+function composeFramesSpec(): VideoModeSpec {
+  return {
+    id: "frames",
+    label: "首尾帧生视频",
+    hint: "上传 1 张图作为首帧；再加 1 张自动按首尾帧提交",
+    imageSlots: ["first_frame", "last_frame"],
+    imageRepeatable: false,
+    imageMin: 1,
+    acceptsReferenceVideo: false,
+    needsReferenceVideo: false,
+    acceptsReferenceAudio: false,
+    durationEditable: true,
+    compose: "frames",
+  };
+}
+
+/** 具体模式的查找：只在真实模式表里找，合并入口不算 */
+function concreteModeSpec(adapter: string | undefined, model: string, mode: string | undefined): VideoModeSpec | null {
+  return allVideoModes(adapter, model).find((spec) => spec.id === mode) ?? null;
+}
+
+/**
+ * 提交前的关键一步：把合并入口按素材解析成上游真实模式。
+ *
+ * 返回的 spec 已经带好该具体模式的槽位，素材构造函数直接按它分配角色。
+ */
+export function resolveStudioMode(
+  adapter: string | undefined,
+  model: string,
+  modeId: string | undefined,
+  counts: StudioMediaCounts,
+): { mode: string; spec: VideoModeSpec } | null {
+  const fallback = studioAssetSpec(adapter, model);
+  // Grok 这类没有模式表的渠道：界面规格就是全部真相，上游仍按有没有 reference_images
+  // 自己区分文生/图生，不需要往请求体里塞 mode 字段。
+  if (fallback && (!modeId || modeId === "prompt")) {
+    return { mode: "text-to-video", spec: fallback };
+  }
+  if (modeId === "frames") {
+    const id = counts.images >= 2 ? "first-last-frame" : "first-frame";
+    const spec = concreteModeSpec(adapter, model, id);
+    return spec ? { mode: id, spec } : null;
+  }
+  if (modeId === "prompt") {
+    const hasReferences = counts.images > 0 || counts.video || counts.audio;
+    if (hasReferences) {
+      const reference = concreteModeSpec(adapter, model, "reference");
+      if (reference) return { mode: "reference", spec: reference };
+    }
+    const text = concreteModeSpec(adapter, model, "text-to-video");
+    return text ? { mode: "text-to-video", spec: text } : null;
+  }
+  const spec = concreteModeSpec(adapter, model, modeId);
+  return spec ? { mode: String(spec.id), spec } : null;
+}
+
+/** 历史任务存的是具体模式；回到界面时折回合并入口，快照复用才不会「找不到模式」 */
+export function studioModeForConcrete(concreteId: string | undefined): string | undefined {
+  if (!concreteId) return undefined;
+  if (concreteId === "first-frame" || concreteId === "first-last-frame") return "frames";
+  if (concreteId === "text-to-video" || concreteId === "reference") return "prompt";
+  return concreteId;
+}
+
 /** 界面上真正列出来的顺序 */
 const WAN_MODE_ORDER: WanVideoMode[] = [
   "text-to-video", "first-frame", "first-last-frame", "reference",
@@ -214,10 +354,47 @@ export function allVideoModes(adapter: string | undefined, model: string): Video
   return [];
 }
 
-/** 该渠道 + 模型在界面上提供的模式；Grok 没有模式概念，返回空 */
+/**
+ * 界面上真正列出来的模式：合并后的入口 + 确实需要独立入口的模式。
+ *
+ * 文生/参考、首帧/首尾帧都收成两个入口；视频编辑/延长（万相）与运动控制
+ * （可灵）语义差得远，保留独立入口。
+ */
 export function videoModesFor(adapter: string | undefined, model: string): VideoModeSpec[] {
-  if (adapter === "wan-video") return WAN_MODE_ORDER.map((mode) => WAN_MODE_SPECS[mode]);
-  return allVideoModes(adapter, model);
+  if (adapter === "wan-video") {
+    return [
+      composePromptSpec(adapter, model), composeFramesSpec(),
+      WAN_MODE_SPECS["video-edit"], WAN_MODE_SPECS["video-extend"],
+    ];
+  }
+  if (adapter === "seedance-video") return [composePromptSpec(adapter, model), composeFramesSpec()];
+  if (adapter === "kling-video") {
+    const modes = [composePromptSpec(adapter, model), composeFramesSpec()];
+    if (klingModesForModel(model).includes("motion-control")) modes.push(klingModeSpec("motion-control"));
+    return modes;
+  }
+  return [];
+}
+
+/**
+ * 没有「生成方式」列表的渠道（Grok）在创作框里用的素材规格。
+ *
+ * Grok 上游只有一个端点，靠 `reference_images` 区分文生/图生，所以服务端
+ * 与对话工具都不给它模式表（`videoModesFor` 返回空）。但创作框仍需要知道
+ * 「能放几张参考图、能不能放视频音频、最多几张」——之前 `spec` 为 null，
+ * 参考内容入口整块不渲染，提交时 `resolveStudioMode` 也返回 null 直接报
+ * 「当前模型没有可用的生成方式」。这里给一个只用于界面/参数收敛的规格，
+ * 不把 Grok 塞进模式表，服务端的「按参考图上限兜底」校验原样保留。
+ */
+export function studioAssetSpec(adapter: string | undefined, model: string): VideoModeSpec | null {
+  if (!isVideoAdapterType(adapter)) return null;
+  if (videoModesFor(adapter, model).length) return null;
+  return composePromptSpec(adapter, model);
+}
+
+/** 按界面模式 id 找规格（含合并入口）；服务端守卫用 `videoModeSpec` 只认具体模式 */
+export function studioModeSpec(adapter: string | undefined, model: string, mode: string | undefined): VideoModeSpec | null {
+  return videoModesFor(adapter, model).find((spec) => spec.id === mode) ?? null;
 }
 
 export function videoModeSpec(adapter: string | undefined, model: string, mode: string | undefined): VideoModeSpec | null {
@@ -234,6 +411,8 @@ export const VIDEO_MODE_LABELS: Record<VideoStudioMode, string> = {
   "video-extend": "视频延长",
   "file-to-video": "参考文件生视频",
   "motion-control": "运动控制",
+  prompt: "提示词生视频",
+  frames: "首尾帧生视频",
 };
 
 export function videoModeLabel(mode: string | undefined): string | undefined {
@@ -250,12 +429,12 @@ export function videoModeField(adapter: string | undefined): VideoModeField | nu
 
 /** 该模式下最多能放几张图：可重复的参考图按渠道上限，其余按槽位数 */
 export function maxImagesForMode(adapter: string | undefined, model: string, mode: string | undefined): number {
-  const spec = videoModeSpec(adapter, model, mode);
+  // Grok 没有模式表但有素材规格：别因为 studioModeSpec 找不到就给出 0 张额度
+  const spec = studioModeSpec(adapter, model, mode) ?? studioAssetSpec(adapter, model);
   if (!spec) return 0;
   if (!spec.imageRepeatable) return spec.imageSlots.length;
   if (adapter === "seedance-video") return seedanceLimits(model).maxImages;
-  if (adapter === "wan-video") return VIDEO_CAPABILITIES["wan-video"].maxReferenceImages;
-  if (adapter === "kling-video") return VIDEO_CAPABILITIES["kling-video"].maxReferenceImages;
+  if (adapter && isVideoAdapterType(adapter)) return VIDEO_CAPABILITIES[adapter].maxReferenceImages;
   return 0;
 }
 
@@ -279,9 +458,9 @@ export const VIDEO_VARIANT_CHOICES = [
 
 /** 分辨率档位跟着模式走：运动控制只到 1080P */
 export function resolutionOptionsFor(adapter: string | undefined, mode: string | undefined): string[] {
-  if (adapter === "kling-video" && mode) {
-    const spec = klingModeSpec(mode as KlingVideoMode);
-    if (spec.id === "motion-control") return KLING_MODE_CAPABILITIES["motion-control"].resolutions;
+  // 合并过的入口（prompt / frames）没有独立档位，只有运动控制真的少一档
+  if (adapter === "kling-video" && mode === "motion-control") {
+    return KLING_MODE_CAPABILITIES["motion-control"].resolutions;
   }
   if (adapter && isVideoAdapterType(adapter)) return VIDEO_CAPABILITIES[adapter].resolutions;
   return [];

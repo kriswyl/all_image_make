@@ -14,6 +14,8 @@ import { MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
  */
 
 export interface LocalVideoFile {
+  /** 桶内唯一 id：移除、@ 引用、分页都靠它，文件名重复也不会串 */
+  id: string;
   file: File;
   duration: number;
   /** 本地预览用的 objectURL，由 hook 负责回收 */
@@ -21,17 +23,19 @@ export interface LocalVideoFile {
 }
 
 export interface LocalAudioFile {
+  id: string;
   file: File;
   duration: number;
 }
 
 export interface MediaBucket {
   images: ReferenceImageState[];
-  video: LocalVideoFile | null;
-  audio: LocalAudioFile | null;
+  /** 参考视频可以有多段（Seedance 2.0 三段、2.5 十段），万相/可灵只有一段 */
+  videos: LocalVideoFile[];
+  audios: LocalAudioFile[];
 }
 
-const EMPTY_BUCKET: MediaBucket = { images: [], video: null, audio: null };
+const EMPTY_BUCKET: MediaBucket = { images: [], videos: [], audios: [] };
 
 export interface MediaBucketsController {
   reading: boolean;
@@ -39,16 +43,26 @@ export interface MediaBucketsController {
   addImages: (key: string, files: File[], limit: number) => boolean;
   removeImage: (key: string, previewUrl: string) => void;
   clearImages: (key: string) => void;
-  setVideo: (key: string, file: File, duration: number) => void;
-  clearVideo: (key: string) => void;
-  setAudio: (key: string, file: File, duration: number) => void;
-  clearAudio: (key: string) => void;
+  addVideo: (key: string, file: File, duration: number, limit: number) => boolean;
+  removeVideo: (key: string, id: string) => void;
+  addAudio: (key: string, file: File, duration: number, limit: number) => boolean;
+  removeAudio: (key: string, id: string) => void;
 }
 
 export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) => void): MediaBucketsController {
-  const [buckets, setBuckets] = useState<Record<string, MediaBucket>>({});
+  // 状态只用来触发重渲染，真正的数据在 bucketsRef 里（见下面注释）
+  const [, setBuckets] = useState<Record<string, MediaBucket>>({});
   const [reading, setReading] = useState(false);
   const objectUrls = useRef(new Set<string>());
+  /**
+   * 和 `buckets` 并存的镜像。
+   *
+   * 一次选好几个文件时（多段额度下多选上传），同一个事件里会连着调好几次
+   * `addVideo`——这时 `buckets` 还是这次渲染的旧值，第二段看到的第一段还没进去，
+   * 既可能超额度，生成的 id 也会撞成同一个。所有读写都先落到这个 ref 上，
+   * 同一次回调里的连续调用就能看到彼此的结果。
+   */
+  const bucketsRef = useRef<Record<string, MediaBucket>>({});
 
   useEffect(() => () => {
     objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
@@ -67,15 +81,17 @@ export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) 
     objectUrls.current.delete(url);
   }
 
+  function commit(key: string, next: MediaBucket) {
+    bucketsRef.current = { ...bucketsRef.current, [key]: next };
+    setBuckets((current) => ({ ...current, [key]: next }));
+  }
+
   function patch(key: string, mutate: (bucket: MediaBucket) => MediaBucket) {
-    setBuckets((current) => {
-      const base = current[key] ?? EMPTY_BUCKET;
-      return { ...current, [key]: mutate(base) };
-    });
+    commit(key, mutate(get(key)));
   }
 
   function get(key: string): MediaBucket {
-    return buckets[key] ?? EMPTY_BUCKET;
+    return bucketsRef.current[key] ?? EMPTY_BUCKET;
   }
 
   function addImages(key: string, files: File[], limit: number): boolean {
@@ -103,25 +119,53 @@ export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) 
     patch(key, (current) => ({ ...current, images: [] }));
   }
 
-  function setVideo(key: string, file: File, duration: number) {
+  /**
+   * 加一段参考视频。
+   *
+   * 只有一个额度时（万相 / 可灵）再选就是**替换**——否则用户得先删掉旧的才换得了，
+   * 看起来就像「只能上传一次」。多段额度（Seedance）满了就直说，让用户自己挑一段删。
+   */
+  function addVideo(key: string, file: File, duration: number, limit: number): boolean {
     const bucket = get(key);
-    releaseUrl(bucket.video?.previewUrl);
-    const previewUrl = createUrl(file);
-    patch(key, (current) => ({ ...current, video: { file, duration, previewUrl } }));
+    if (limit <= 0) { onToast("error", "当前模式不接受参考视频"); return false; }
+    if (bucket.videos.length >= limit && limit > 1) {
+      onToast("error", `当前模式最多 ${limit} 段参考视频，先移除一段再换`);
+      return false;
+    }
+    const entry: LocalVideoFile = { id: `video-${Date.now()}-${bucket.videos.length}`, file, duration, previewUrl: createUrl(file) };
+    const replaceSingle = limit === 1 && bucket.videos.length >= 1;
+    if (replaceSingle) releaseUrl(bucket.videos[0]?.previewUrl);
+    patch(key, (current) => ({
+      ...current,
+      videos: replaceSingle ? [entry] : [...current.videos, entry],
+    }));
+    return true;
   }
 
-  function clearVideo(key: string) {
+  function removeVideo(key: string, id: string) {
     const bucket = get(key);
-    releaseUrl(bucket.video?.previewUrl);
-    patch(key, (current) => ({ ...current, video: null }));
+    releaseUrl(bucket.videos.find((item) => item.id === id)?.previewUrl);
+    patch(key, (current) => ({ ...current, videos: current.videos.filter((item) => item.id !== id) }));
   }
 
-  function setAudio(key: string, file: File, duration: number) {
-    patch(key, (current) => ({ ...current, audio: { file, duration } }));
+  function addAudio(key: string, file: File, duration: number, limit: number): boolean {
+    const bucket = get(key);
+    if (limit <= 0) { onToast("error", "当前模式不接受参考音频"); return false; }
+    if (bucket.audios.length >= limit && limit > 1) {
+      onToast("error", `当前模式最多 ${limit} 段参考音频，先移除一段再换`);
+      return false;
+    }
+    const entry: LocalAudioFile = { id: `audio-${Date.now()}-${bucket.audios.length}`, file, duration };
+    const replaceSingle = limit === 1 && bucket.audios.length >= 1;
+    patch(key, (current) => ({
+      ...current,
+      audios: replaceSingle ? [entry] : [...current.audios, entry],
+    }));
+    return true;
   }
 
-  function clearAudio(key: string) {
-    patch(key, (current) => ({ ...current, audio: null }));
+  function removeAudio(key: string, id: string) {
+    patch(key, (current) => ({ ...current, audios: current.audios.filter((item) => item.id !== id) }));
   }
 
   return {
@@ -133,9 +177,9 @@ export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) 
     },
     removeImage,
     clearImages,
-    setVideo,
-    clearVideo,
-    setAudio,
-    clearAudio,
+    addVideo,
+    removeVideo,
+    addAudio,
+    removeAudio,
   };
 }

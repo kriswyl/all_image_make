@@ -1,9 +1,11 @@
 /* ══════════════════════════════════════════════════════════════════════════
    视频生成工作台（一体化创作框）
 
-   布局：左侧导航与顶部模型/渠道沿用外壳，中央一栏 —— 标题、创作框、
-   本次结果、最近记录。不再有右侧固定参数面板：参数从创作框底部的胶囊
-   弹出浮层，浮层挂在 body 上（portal），编辑器始终留在 DOM 里。
+   整页固定在一屏：页头 + 一行标题 + 创作框 + 创作记录，页面本身不滚动，
+   只有记录区在内部滚动（滚动条隐藏，滚轮/触控板仍然能翻）。
+
+   创作框里素材在**上**（一排，翻页不滚动），提示词在下，底部是**一个**
+   参数模块——点它弹参数浮层。
    ══════════════════════════════════════════════════════════════════════════ */
 
 .vstudio-page {
@@ -11,29 +13,56 @@
   flex-direction: column;
   min-height: 0;
   flex: 1 1 auto;
+  overflow: hidden;
+  /* @ 记号的配色：底色淡到不抢戏，字色偏蓝，一眼能看出「这个引用生效了」 */
+  --mention-tint: rgba(37, 99, 235, .12);
+  --mention-ink: #1d4ed8;
+}
+
+html[data-theme="dark"] .vstudio-page {
+  --mention-tint: rgba(96, 165, 250, .22);
+  --mention-ink: #9cc4ff;
 }
 
 .vstudio-scroll {
+  display: flex;
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  padding: 8px 28px 40px;
+  overflow: hidden;
+  padding: 0 28px 16px;
 }
 
 .vstudio-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
-  max-width: 880px;
+  /* 一屏里记录区能铺多宽，决定一页能放几张卡片。1440 仍是设计稿的 880，
+     更宽的窗口慢慢放宽到 1120；窄窗口让 100% 说了算，绝不撑出横向滚动。 */
+  max-width: min(100%, clamp(880px, 62vw, 1120px));
   margin: 0 auto;
 }
 
+/* 标题不再占一大块：一页里留给创作框与记录 */
 .vstudio-hero {
-  margin: 26px auto 22px;
+  flex: 0 0 auto;
+  margin: 2px auto 10px;
   text-align: center;
-  font-size: 22px;
-  line-height: 1.5;
+}
+.vstudio-hero h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.4;
   font-weight: 500;
   color: var(--ink);
   letter-spacing: .01em;
+}
+.vstudio-hero p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 /* ── 创作框 ─────────────────────────────────────────────────────────────── */
@@ -49,7 +78,17 @@
 
 .vstudio-composer:focus-within {
   border-color: var(--line-hover);
-  box-shadow: var(--shadow-card);
+}
+
+/* 悬停只微调外层边框颜色，不改尺寸：卡片不会因为鼠标移入抖一下 */
+.vstudio-composer:hover:not(:focus-within) {
+  border-color: var(--line-hover);
+}
+
+/* 键盘 Tab 进来才给一圈低调但认得出的提示（鼠标点进来只有文字光标） */
+.vstudio-composer.is-kb-focus {
+  border-color: var(--ink-soft);
+  box-shadow: 0 0 0 3px var(--line);
 }
 
 .vstudio-composer.is-drop-target {
@@ -57,21 +96,41 @@
   background: var(--surface-soft);
 }
 
-.vstudio-composer-head {
+/* 展开态挂在创作框下方、居中的收起键（设计稿里的那个小圆钮） */
+.vstudio-composer-wrap {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  flex-direction: column;
 }
 
+.vstudio-collapse {
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  margin-top: 10px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: var(--shadow-panel);
+  transition: border-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.vstudio-collapse:hover { border-color: var(--line-hover); color: var(--ink); }
+
+/* 引用素材与展开键：贴在提示词右上角（设计稿位置） */
 .vstudio-composer-tools {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  flex: 0 0 auto;
+  gap: 2px;
 }
 
-/* 引用素材：截图里右上角那个 @ */
 .vstudio-tool {
   width: 26px;
   height: 26px;
@@ -94,18 +153,155 @@
   color: var(--ink);
 }
 
-.vstudio-slots {
+.vstudio-file-input { display: none; }
+
+/* ── 创作框主体：文本固定，素材是一层覆盖物 ───────────────────────────
+   提示词永远从同一个左边界开始、宽度恒定；素材钉在左上角的一层浮层，
+   默认折叠成窄窄一摞，悬停摊开时就地横向**盖在文字上**，绝不把文字推到
+   下面、也不挤窄正文。两种状态 body 都锁 176px，输入框尺寸也不变。 */
+
+.vstudio-body {
+  position: relative;
+  display: block;
+  min-height: 176px;
+  /* 文字左边固定让出的一列；与素材折叠/展开无关，首尾帧两格另给更宽的值 */
+  --asset-gutter: 148px;
+}
+.vstudio-body > .vstudio-prompt {
+  padding-left: var(--asset-gutter);
+  min-height: 176px;
+}
+/* 输入框高度写死：contenteditable 内容再多也只在内部滚，不能把创作框撑高
+   把下方的创作记录压到被截断。上传素材、敲长提示词、折叠/展开都一样高。 */
+.vstudio-body .vstudio-input {
+  height: 172px;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+/* 素材层脱离文档流：折叠时只占自己那点宽，展开时向右铺开覆盖文字前几行 */
+.vstudio-assets {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+  width: max-content;
+  max-width: calc(100% - 12px);
+  padding: 2px 0;
+}
+/* 展开时铺一层与卡片同色的底，别让文字从格子缝隙里透出来 */
+.vstudio-body:not(.is-folded) > .vstudio-assets {
+  padding: 2px 10px 2px 0;
+  border-radius: 10px;
+  background: var(--surface);
+}
+/* 多页展开时恒占满可用宽度：翻到素材少的页整层也不缩，两端翻页键钉在原地不动。
+   不然点「下一页」后整层变窄，按钮从指针底下溜走，指针落进正文误触 mouseleave，
+   素材排当场折叠，翻页操作被打断。 */
+.vstudio-body:not(.is-folded) > .vstudio-assets.has-pages {
+  width: calc(100% - 12px);
+}
+/* 折叠时那一排只占自己内容宽，别把 flex:1 的空条拉成整行 */
+.vstudio-body.is-folded .vstudio-asset-strip { flex: 0 0 auto; }
+/* 折叠时不翻页：箭头既看不见也不占这一摞的宽度 */
+.vstudio-body.is-folded .vstudio-asset-more { display: none; }
+/* 第一页不露「上一页」，但位置留着，翻回来时不会跳一下 */
+.vstudio-asset-more.is-first { visibility: hidden; }
+
+/* 一摞素材：默认错开叠着，悬停摊成一排；一页放满就翻页，不做横向滚动 */
+.vstudio-asset-strip {
+  display: flex;
+  align-items: center;
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 64px;
+  overflow: hidden;
 }
+
+.vstudio-asset-stack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  min-height: 64px;
+  position: relative;
+}
+
+/* 入场慢一点：一张接一张从左边落到位置，太快（<200ms）等于没看见 */
+.vstudio-asset-stack > * {
+  flex: 0 0 auto;
+  position: relative;
+  transform-origin: center bottom;
+  /* 折叠↔展开靠这两个属性过渡，不会改变排高，输入框尺寸永远不动 */
+  transition: margin-left 380ms var(--ease-out), transform 380ms var(--ease-out);
+  animation: vtile-in 420ms var(--ease-out) backwards;
+}
+.vstudio-asset-stack > *:nth-child(2) { animation-delay: 45ms; }
+.vstudio-asset-stack > *:nth-child(3) { animation-delay: 90ms; }
+.vstudio-asset-stack > *:nth-child(4) { animation-delay: 135ms; }
+.vstudio-asset-stack > *:nth-child(5) { animation-delay: 180ms; }
+.vstudio-asset-stack > *:nth-child(6) { animation-delay: 225ms; }
+.vstudio-asset-stack > *:nth-child(n + 7) { animation-delay: 260ms; }
+
+/* 不规则的一摞：最近 3 张错开、每张带一点角度，最新那张压在最上面 */
+.vstudio-asset-stack.is-collapsed > * {
+  z-index: calc(10 + var(--tile-i, 0));
+  transform: rotate(calc((var(--tile-i, 0) - 1) * 6deg)) translateY(calc(var(--tile-i, 0) * -2px));
+}
+.vstudio-asset-stack.is-collapsed > *:not(:first-child) { margin-left: -74px; }
+/* 角标写总数：一摞只露 3 张，不然看不出到底放了几段素材 */
+.vstudio-asset-stack.is-collapsed::after {
+  content: attr(data-count);
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 30;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--charcoal);
+  color: var(--accent-contrast);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* 叠起来时把入口/翻页以外的空白留白收住：这一摞只占自己那点宽度 */
+.vstudio-assets.is-stacked .vstudio-asset-more { opacity: 0; pointer-events: none; }
+
+@keyframes vtile-in {
+  from { opacity: 0; transform: translateX(-12px) scale(.94) rotate(-2deg); }
+}
+
+/* 翻页键：排在素材排两侧，不压住任何一格；到头了就置灰 */
+.vstudio-asset-more {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: opacity var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+.vstudio-asset-more:hover:not(:disabled) { border-color: var(--line-hover); color: var(--ink); }
+.vstudio-asset-more:disabled { opacity: .4; cursor: not-allowed; }
 
 .vstudio-slot {
   position: relative;
   width: 84px;
   height: 64px;
+  flex: 0 0 auto;
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-control);
   background: var(--surface-soft);
@@ -125,33 +321,30 @@
 .vstudio-slot input[type="file"] { display: none; }
 .vstudio-slot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .vstudio-slot.is-filled { border-style: solid; border-color: var(--line); }
-.vstudio-slot-role {
-  position: absolute;
-  left: 4px;
-  top: 4px;
-  z-index: 1;
-  padding: 1px 5px;
-  border-radius: var(--radius-pill);
-  background: rgba(0, 0, 0, .62);
-  color: #fff;
-  font-size: 10px;
-  line-height: 1.6;
+
+/* 首尾帧两格之间的 ⇄：纯装饰，说的是「首帧 → 尾帧」 */
+/* 首尾帧：两个静态浅灰圆角方块 + 中间 ⇌。固定并排，不折叠、不展开、无动画 */
+.vstudio-asset-stack.is-fixed-slots > * {
+  animation: none !important;
+  transition: none !important;
+  margin-left: 0 !important;
+  transform: none !important;
 }
-.vstudio-slot-remove {
-  position: absolute;
-  right: 3px;
-  top: 3px;
-  z-index: 2;
-  width: 18px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, .58);
-  color: #fff;
-  cursor: pointer;
+.vstudio-slot-pair { display: flex; align-items: center; gap: 6px; }
+.vstudio-slot-link { display: grid; place-items: center; color: var(--muted-soft); }
+.vstudio-slot-pair .vstudio-slot {
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  gap: 7px;
 }
+.vstudio-slot-pair .vstudio-slot:hover { border-color: var(--line-hover); color: var(--ink-soft); }
+.vstudio-slot-pair .vstudio-slot span { font-size: 11px; }
+/* 已填图时沿用同样的方形尺寸，两格始终对齐 */
+.vstudio-slot-pair .vstudio-media-tile { width: 72px; height: 72px; border-radius: 12px; }
 
 .vstudio-slot.is-locked {
   border-style: dotted;
@@ -159,19 +352,6 @@
   cursor: not-allowed;
 }
 .vstudio-slot.is-locked:hover { border-color: var(--line-strong); color: var(--muted-soft); }
-
-.vstudio-clear {
-  align-self: center;
-  padding: 4px 2px;
-  border: 0;
-  background: none;
-  color: var(--muted);
-  font-size: 11px;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.vstudio-clear:hover { color: var(--ink-soft); }
 
 .vstudio-file-chip {
   display: inline-flex;
@@ -192,51 +372,239 @@
 .vstudio-input {
   display: block;
   width: 100%;
-  min-height: 96px;
+  min-height: 104px;
   max-height: 320px;
-  margin-top: 10px;
-  padding: 10px 4px;
+  padding: 10px 74px 10px 4px;
+  overflow-y: auto;
   border: 0;
   background: transparent;
   color: var(--ink);
   font: inherit;
   font-size: 14px;
   line-height: 1.7;
-  resize: none;
+  /* 换行是真换行：contenteditable 里的 \n 靠 pre-wrap 排版，模型和读者看到的一致 */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  outline: none;
+  cursor: text;
   transition: min-height var(--dur-3) var(--ease-out);
 }
-.vstudio-input:focus { outline: none; }
-.vstudio-input::placeholder { color: var(--muted-soft); }
-.vstudio-composer.is-expanded .vstudio-input { min-height: 260px; }
-
-.vstudio-footer {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
+/* 输入框本身永远没有边框：全局的 input:focus 描边（浅色 3px 灰环 / 深色 3px 白环）
+   会在这里叠出「外层卡片 + 内层输入框」的双层黑框。焦点交给外层卡片。 */
+.vstudio-composer .vstudio-input,
+.vstudio-composer .vstudio-input:hover,
+.vstudio-composer .vstudio-input:focus,
+.vstudio-composer .vstudio-input:focus-visible {
+  border: 0;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
 }
+/* 空提示词的占位交给 :empty::before——只有真的一点内容都没有时才出现，
+   不会像 textarea 的 placeholder 那样和正文抢位置。 */
+.vstudio-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted-soft);
+  pointer-events: none;
+}
+/* 空状态创作框仍是 textarea，占位走原生这条 */
+.vstudio-input::placeholder { color: var(--muted-soft); }
+.vstudio-composer.is-expanded .vstudio-input { min-height: 190px; }
+
+/* ── 提示词里的 @ 记号：一直是带缩略图的胶囊 ─────────────────────────────
+   胶囊是 contenteditable=false 的原子节点：光标进不去，退格一次删掉整个记号，
+   宽度怎么变都不会和正文错位（这正是 textarea + 展示层方案做不到的）。 */
+
+.vstudio-prompt { position: relative; flex: 1 1 auto; min-width: 0; }
 
 .vstudio-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 10px;
+  height: 22px;
+  margin: 0 2px;
+  padding: 0 7px 0 2px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--mention-tint);
+  color: var(--mention-ink);
+  font-size: 12.5px;
+  line-height: 1;
+  vertical-align: -4px;
+  cursor: pointer;
+  /* 拖选时别把胶囊拆成两半 */
+  user-select: none;
+}
+.vstudio-chip:hover { border-color: var(--mention-tint); background: var(--surface); }
+.vstudio-chip-thumb {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--mention-ink);
+}
+.vstudio-chip-thumb img,
+.vstudio-chip-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vstudio-chip-text { white-space: nowrap; }
+
+/* ── 素材格：缩略图 + 类型标签，悬停出删除，点开看详情 ─────────────────── */
+
+.vstudio-media-tile {
+  position: relative;
+  width: 84px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+.vstudio-media-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+.vstudio-media-open img,
+.vstudio-media-open video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vstudio-media-open:has(.vstudio-audio-bars) { display: grid; place-items: center; }
+.vstudio-media-tag {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 4px 3px;
+  background: rgba(0, 0, 0, .56);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vstudio-media-remove {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .6);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out);
+}
+.vstudio-media-tile:hover .vstudio-media-remove,
+.vstudio-media-remove:focus-visible { opacity: 1; }
+
+.vstudio-audio-bars { display: inline-flex; align-items: center; gap: 2px; height: 24px; color: var(--ink-soft); }
+.vstudio-audio-bars i { width: 2px; height: 10px; border-radius: 2px; background: currentColor; }
+.vstudio-audio-bars i:nth-child(2) { height: 18px; }
+.vstudio-audio-bars i:nth-child(3) { height: 22px; }
+.vstudio-audio-bars i:nth-child(4) { height: 14px; }
+
+/* ── 素材详情浮层 ─────────────────────────────────────────────────── */
+
+.vstudio-media-detail { padding: 10px; }
+.vstudio-media-detail-body {
+  display: grid;
+  place-items: center;
+  max-height: 260px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #000;
+}
+.vstudio-media-detail-body img,
+.vstudio-media-detail-body video { width: 100%; max-height: 260px; object-fit: contain; display: block; }
+.vstudio-media-detail-body.is-图片 { background: var(--surface-soft); }
+.vstudio-media-detail-body.is-音频 { padding: 22px 12px; background: var(--surface-soft); }
+.vstudio-media-detail-body audio { width: 100%; }
+.vstudio-media-detail-empty { padding: 28px; color: var(--muted); }
+.vstudio-media-detail-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.vstudio-media-detail-meta strong { color: var(--ink); font-weight: 500; }
+.vstudio-media-detail-name {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vstudio-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* ── 参数模块：一整块，左边切生成方式，右边点开参数浮层 ───────────────── */
+
+.vstudio-bar {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   background: var(--surface);
+  transition: border-color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.vstudio-bar:hover { border-color: var(--line-strong); }
+
+.vstudio-bar-mode,
+.vstudio-bar-params {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 0;
+  background: transparent;
   color: var(--ink-soft);
   font-size: 12px;
   line-height: 1.7;
-  cursor: pointer;
   white-space: nowrap;
-  transition: border-color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
 }
-.vstudio-chip:hover { border-color: var(--line-hover); background: var(--surface-soft); }
-.vstudio-chip.is-static { cursor: default; color: var(--muted); }
-.vstudio-chip.is-static:hover { border-color: var(--line); background: var(--surface); }
-.vstudio-chip.is-mode { padding-left: 8px; }
-.vstudio-chip svg { color: var(--muted); }
+.vstudio-bar-mode:hover,
+.vstudio-bar-params:hover,
+.vstudio-bar-mode[aria-expanded="true"],
+.vstudio-bar-params[aria-expanded="true"] { background: var(--surface-soft); color: var(--ink); }
+.vstudio-bar-mode { flex: 0 0 auto; }
+.vstudio-bar-mode svg { color: var(--muted); }
+.vstudio-bar-params { min-width: 0; overflow: hidden; gap: 8px; }
+.vstudio-bar-item { display: inline-flex; align-items: center; gap: 4px; }
+.vstudio-bar-item svg { color: var(--muted); }
+.vstudio-bar-split { flex: 0 0 auto; width: 1px; height: 14px; background: var(--line); }
+.vstudio-bar-sep { flex: 0 0 auto; width: 1px; height: 11px; background: var(--muted-soft); opacity: .55; }
+.vstudio-bar-mode.is-static,
+.vstudio-bar-params.is-static { cursor: default; color: var(--muted); }
+.vstudio-bar-mode.is-static:hover,
+.vstudio-bar-params.is-static:hover { background: transparent; color: var(--muted); }
 
 .vstudio-spacer { flex: 1 1 auto; }
 
@@ -386,6 +754,63 @@
   color: var(--ink);
   font-weight: 500;
 }
+.vstudio-mention-tabs button em {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--muted);
+}
+.vstudio-mention-tabs button.is-active em { color: inherit; opacity: .7; }
+
+.vstudio-mention-empty {
+  margin: 6px 2px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vstudio-mention-uploads {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.vstudio-mention-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.vstudio-mention-upload:hover:not(:disabled) { border-color: var(--line-hover); background: var(--surface-soft); }
+.vstudio-mention-upload:disabled { color: var(--muted-soft); cursor: not-allowed; border-style: dotted; }
+.vstudio-mention-upload svg { flex: 0 0 auto; color: var(--muted); }
+.vstudio-mention-upload small {
+  flex: 1 1 100%;
+  margin-left: 20px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.vstudio-mention-upload:disabled small { color: var(--coral-ink); }
+
+/* 参考内容入口的类型选择：能收几种素材就摆几行，尺寸与面板宽度一致 */
+.vstudio-asset-add {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+}
+.vstudio-asset-add .vstudio-mention-upload { border-style: solid; }
+.vstudio-asset-add .vstudio-mention-upload:disabled { border-style: dotted; }
+
 .vstudio-mention-list { display: grid; gap: 2px; }
 .vstudio-mention-item {
   display: flex;
@@ -494,46 +919,460 @@
   color: var(--ink-soft);
 }
 
+/* 提示行固定占 20px：不出现时也在，创作框高度不受「有没有素材提示」影响 */
+.vstudio-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 20px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.vstudio-hints p {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .vstudio-hint {
-  margin: 6px 0 0;
   font-size: 11px;
   line-height: 1.7;
   color: var(--muted);
 }
 
-/* ── 结果区 ─────────────────────────────────────────────────────────────── */
-
-.vstudio-result-block { margin-top: 26px; }
-
-.vstudio-result-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 10px;
+/* 合并入口的「这一次会按哪种模式提交」 */
+.vstudio-mode-hint {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted-soft);
 }
-.vstudio-result-head h2 { margin: 0; font-size: 13px; font-weight: 500; color: var(--ink); }
-.vstudio-result-head span { font-size: 12px; color: var(--muted); }
 
-.vstudio-result .result-panel { border-radius: var(--radius-panel); }
-.vstudio-result .result-stage { min-height: 380px; }
+/* ══ 创作记录：筛选 + 网格/列表 + 卡片 ═══════════════════════════════════════ */
 
-.vstudio-snapshot {
+.vstudio-result-block {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 14px;
+}
+
+.record-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* 展开创作框时记录区整块让位（display:flex 会盖掉 UA 的 [hidden] 规则） */
+.record-panel[hidden] { display: none; }
+
+/* 记录区不滚动：一页放几张按这块宽高算，多出来的靠右上角翻页看。
+   既不出现滚动条，也不会在卡片下方留一大片空白。 */
+.record-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.record-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.record-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.record-count { font-size: 12px; color: var(--muted); }
+
+.record-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 视角切换去掉了：这一屏只有网格一种看法，右上只留排序 */
+
+/* 排序：自绘胶囊 + 浮层（原生 select 的弹出层是系统灰底，和这一页不是一套） */
+.record-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+.record-sort:hover { border-color: var(--line-hover); color: var(--ink); }
+.record-sort svg { color: var(--muted); transition: transform var(--dur-2) var(--ease-out); }
+.record-sort[aria-expanded="true"] { border-color: var(--line-hover); color: var(--ink); }
+.record-sort[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+.record-sort-menu { padding: 5px; }
+.record-sort-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+}
+.record-sort-menu button:hover { background: var(--surface-soft); color: var(--ink); }
+.record-sort-menu button.is-active { color: var(--ink); font-weight: 500; }
+.record-sort-menu button svg { flex: 0 0 auto; color: var(--ink); }
+
+/* 筛选页签与翻页同一行：翻页钉在右上方（设计稿红框位置） */
+.record-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+
+.record-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.record-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.record-tabs button:hover { background: var(--surface-soft); color: var(--ink-soft); }
+.record-tabs button em { font-style: normal; font-size: 11px; color: inherit; opacity: .8; }
+.record-tabs button.is-active {
+  background: var(--charcoal);
+  color: var(--accent-contrast);
+}
+
+/* ── 网格翻页（钉在筛选行右上角） ────────────────────────────────────── */
+
+.record-pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.record-pager > span { margin-right: 2px; }
+.record-pager em {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+}
+.record-pager button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.record-pager button:hover:not(:disabled) { border-color: var(--line-hover); color: var(--ink); }
+.record-pager button:disabled { color: var(--muted-soft); cursor: not-allowed; opacity: .55; }
+
+/* ── 网格 ────────────────────────────────────────────────────────────── */
+
+/* 列数由 JS 按可用宽度算（见 record-paging.ts），这里只定间距
+   间距 16 / 20 与 record-paging.ts 里的常量必须一致，否则行数会算多 */
+.record-grid {
+  display: grid;
+  gap: 20px 16px;
+}
+
+.record-card { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+
+.record-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+.record-card.is-active .record-thumb { border-color: var(--line-hover); box-shadow: var(--shadow-card); }
+.record-thumb .lazy-video,
+.record-thumb .lazy-video video { width: 100%; height: 100%; display: block; object-fit: cover; }
+.record-thumb-empty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted-soft);
+}
+
+.record-play {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, .52);
+  color: #fff;
+  backdrop-filter: blur(4px);
+}
+
+.record-duration {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.record-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, .74);
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.record-overlay em { font-style: normal; }
+.record-overlay.is-error { background: rgba(254, 243, 242, .86); color: var(--coral-ink); }
+html[data-theme="dark"] .record-overlay { background: rgba(18, 18, 18, .7); color: var(--ink-soft); }
+html[data-theme="dark"] .record-overlay.is-error { background: rgba(48, 20, 18, .82); color: #ffb4ab; }
+
+.record-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+.record-title-row { display: flex; align-items: flex-start; gap: 6px; }
+.record-title-row h3 {
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.record-more {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.record-more:hover { background: var(--surface-soft); color: var(--ink); }
+
+.record-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.record-meta-part { color: var(--muted); }
+.record-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted-soft);
+}
+.record-dot.is-done { background: var(--ok); }
+.record-dot.is-running { background: #2f6fed; }
+.record-dot.is-failed { background: var(--coral); }
+
+/* ── 空状态 ──────────────────────────────────────────────────────────── */
+
+.record-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 44px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-panel);
+  color: var(--muted);
+}
+.record-empty strong { font-size: 13px; font-weight: 500; color: var(--ink-soft); }
+.record-empty span { font-size: 12px; }
+
+/* ── 记录菜单 ────────────────────────────────────────────────────────── */
+
+.record-menu {
+  width: 188px;
+  padding: 6px;
+}
+.record-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.record-menu button:hover:not(:disabled) { background: var(--surface-soft); color: var(--ink); }
+.record-menu button:disabled { color: var(--muted-soft); cursor: not-allowed; }
+.record-menu button.is-danger { color: var(--coral-ink); }
+.record-menu button svg { color: var(--muted); flex: 0 0 auto; }
+.record-menu button.is-danger svg { color: currentColor; }
+
+/* ── 大播放器浮层 ────────────────────────────────────────────────────── */
+
+.record-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  max-height: calc(100vh - 64px);
+  overflow: hidden;
+  border-radius: var(--radius-dialog);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.record-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.record-dialog-head > div { flex: 1 1 auto; min-width: 0; }
+.record-dialog-head strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.record-dialog-head .record-meta { margin-top: 4px; }
+
+.record-dialog-close {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.record-dialog-close:hover { background: var(--surface-soft); }
+
+.record-dialog-stage {
+  display: grid;
+  place-items: center;
+  min-height: 260px;
+  background: #000;
+}
+.record-dialog-stage video {
+  display: block;
+  width: 100%;
+  max-height: min(56vh, 480px);
+  background: #000;
+}
+.record-dialog-stage.running,
+.record-dialog-stage.failed { background: var(--surface-soft); }
+
+.record-dialog-thumbs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px 0;
+  overflow-x: auto;
+}
+.record-dialog-thumbs button {
+  flex: 0 0 auto;
+  width: 72px;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+.record-dialog-thumbs button.is-active { border-color: var(--ink); }
+.record-dialog-thumbs video { width: 100%; height: 100%; display: block; object-fit: cover; }
+
+.record-dialog-params {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
+  padding: 10px 16px 0;
   font-size: 11px;
   color: var(--muted);
 }
-.vstudio-snapshot .vstudio-snapshot-item {
+.record-dialog-params span {
   padding: 2px 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   background: var(--surface-soft);
 }
-.vstudio-snapshot button {
+.record-dialog-params button {
   margin-left: auto;
   padding: 4px 10px;
   border: 1px solid var(--line-strong);
@@ -543,25 +1382,112 @@
   font-size: 11px;
   cursor: pointer;
 }
-.vstudio-snapshot button:hover { background: var(--surface-soft); }
+.record-dialog-params button:hover { background: var(--surface-soft); }
 
-/* ── 最近记录 ───────────────────────────────────────────────────────────── */
-
-.vstudio-recent {
-  margin-top: 22px;
-  padding-bottom: 8px;
+.record-dialog-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px 16px;
 }
-.vstudio-recent h2 { margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--ink); }
+.record-dialog-actions .secondary-button { min-height: 32px; }
+.record-dialog-actions .secondary-button.danger { color: var(--coral-ink); }
+.record-dialog-meta { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+/* ══ 专注编辑：展开时输入框吃掉工作区，创作记录暂时让位 ══════════════════════
+   两个区域不争抢同一块高度：默认态记录区完整显示、自己滚动；手动展开创作框时
+   记录区整块收起，收起后回来还是原来的高度和原来滚到的位置。 */
+
+.vstudio-page.is-focus .vstudio-composer-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.vstudio-page.is-focus .vstudio-composer {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.vstudio-page.is-focus .vstudio-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 素材排不跟着拉高：撑满整列会把一排格子吊在中间，输入框也看不出是主体 */
+.vstudio-page.is-focus .vstudio-assets {
+  flex: 0 0 auto;
+}
+
+/* 提示词是这一屏的主体：素材排保持原高，剩下的高度都给它 */
+.vstudio-page.is-focus .vstudio-prompt {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.vstudio-page.is-focus .vstudio-input {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 190px;
+  max-height: none;
+}
+
+/* 专注态只改高度：文字左边那一列与素材覆盖层的位置保持不变 */
+.vstudio-page.is-focus .vstudio-body { min-height: 0; }
+.vstudio-page.is-focus .vstudio-body > .vstudio-prompt {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* 展开态要把固定高度放开，让输入区占满工作区 */
+.vstudio-page.is-focus .vstudio-body .vstudio-input,
+.vstudio-composer.is-expanded .vstudio-body .vstudio-input {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 190px;
+  max-height: none;
+}
+
+.vstudio-page.is-focus .vstudio-result-block { display: none; }
 
 @media (max-width: 860px) {
-  .vstudio-scroll { padding: 4px 16px 32px; }
-  .vstudio-hero { font-size: 19px; margin: 18px auto 16px; }
+  /* 窄屏塞不进一页，退回整页滚动（否则记录区会只剩几十像素） */
+  .vstudio-scroll { display: block; overflow-y: auto; padding: 0 16px 28px; }
+  .vstudio-inner { display: block; }
+  .vstudio-result-block { display: block; }
+  .record-panel { display: block; }
+  .record-scroll { overflow: visible; }
+  .vstudio-page.is-focus .vstudio-input { min-height: 46vh; }
+  .vstudio-hero { margin: 6px auto 10px; }
+  .vstudio-hero h2 { font-size: 17px; }
   .vstudio-panel { width: min(330px, calc(100vw - 24px)); }
+  .record-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px 12px; }
+  .record-dialog { width: 100%; }
 }
 
 @media (max-width: 620px) {
-  .vstudio-slots { gap: 6px; }
+  .vstudio-assets { gap: 6px; }
+  .vstudio-asset-strip { gap: 6px; min-height: 56px; }
   .vstudio-slot { width: 72px; height: 56px; }
-  .vstudio-footer { gap: 5px; }
-  .vstudio-chip { padding: 4px 8px; font-size: 11px; }
+  .vstudio-footer { gap: 6px; }
+  .vstudio-bar-mode,
+  .vstudio-bar-params { padding: 4px 8px; font-size: 11px; }
+  .vstudio-bar-params { gap: 5px; }
+  .record-grid { grid-template-columns: 1fr; }
+  .record-sort { display: none; }
+}
+
+/* 屏幕太矮时同样退回滚动，别把创作框压扁 */
+@media (max-height: 560px) {
+  .vstudio-scroll { display: block; overflow-y: auto; }
+  .vstudio-inner { display: block; }
+  .vstudio-result-block { display: block; }
+  .record-panel { display: block; }
+  .record-scroll { overflow: visible; }
+  .vstudio-page.is-focus .vstudio-input { min-height: 46vh; }
 }

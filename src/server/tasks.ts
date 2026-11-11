@@ -85,9 +85,13 @@ interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage" |
   referenceImage?: StoredReferenceImage;
   referenceImages?: StoredReferenceImage[];
   maskImage?: StoredMaskImage;
+  /** 旧任务只有一段，读的时候和 referenceVideos 合并处理 */
   referenceVideo?: { relativePath: string; mimeType: string; fileName: string };
+  /** Seedance 参考视频可以有多段（2.0 三段、2.5 十段） */
+  referenceVideos?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
   /** Seedance 参考音频：和图床视频一样先落盘，提交前再上传换公网地址。 */
   referenceAudio?: { relativePath: string; mimeType: string; fileName: string };
+  referenceAudios?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
 }
 
 export interface ReferenceImageUpload {
@@ -195,10 +199,13 @@ export class TaskRunner {
     });
   }
 
-  async create({ referenceVideoUpload, referenceAudioUpload, ...input }: GenerationInput & {
+  async create({ referenceVideoUpload, referenceVideoUploads, referenceAudioUpload, referenceAudioUploads, ...input }: GenerationInput & {
     referenceVideoUpload?: ReferenceVideoUpload;
-    /** Seedance 参考音频；与 referenceVideoUpload 一样，提交前才上传换 URL。 */
+    /** 多段参考视频（Seedance）；单段入参仍然接受，画布与脚本还在用 */
+    referenceVideoUploads?: ReferenceVideoUpload[];
+    /** Seedance 参考音频；与参考视频一样，提交前才上传换 URL。 */
     referenceAudioUpload?: ReferenceMediaUpload;
+    referenceAudioUploads?: ReferenceMediaUpload[];
   }, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string, agentOperationId?: string): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
@@ -244,8 +251,16 @@ export class TaskRunner {
         throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
       }
     }
-    if (referenceVideoUpload) {
-      validateReferenceMedia(referenceVideoUpload, "video");
+    const videoUploads: ReferenceVideoUpload[] = [
+      ...(referenceVideoUpload ? [referenceVideoUpload] : []),
+      ...(referenceVideoUploads ?? []),
+    ];
+    const audioUploads: ReferenceMediaUpload[] = [
+      ...(referenceAudioUpload ? [referenceAudioUpload] : []),
+      ...(referenceAudioUploads ?? []),
+    ];
+    if (videoUploads.length) {
+      for (const upload of videoUploads) validateReferenceMedia(upload, "video");
       const wanMode = input.wanVideoMode;
       const wan = channel.adapterType === "wan-video" && (wanMode === "reference" || wanMode === "video-edit" || wanMode === "video-extend");
       const kling = channel.adapterType === "kling-video" && input.klingVideoMode === "motion-control";
@@ -259,8 +274,8 @@ export class TaskRunner {
         throw new AppError("REFERENCE_VIDEO_CONFLICT", "本地参考视频和视频链接只能选择一种", 400);
       }
     }
-    if (referenceAudioUpload) {
-      validateReferenceMedia(referenceAudioUpload, "audio");
+    if (audioUploads.length) {
+      for (const upload of audioUploads) validateReferenceMedia(upload, "audio");
       if (channel.adapterType !== "seedance-video" || input.seedanceVideoMode !== "reference") {
         throw new AppError("REFERENCE_AUDIO_UNSUPPORTED", "只有 Seedance 的参考生视频支持本地参考音频", 400);
       }
@@ -271,27 +286,37 @@ export class TaskRunner {
     }
     // 模式与素材的服务端复核：界面只渲染渠道支持的模式，但接口不能只信界面
     assertVideoModeRequest(channel, input, {
-      referenceVideoUpload: Boolean(referenceVideoUpload),
-      referenceAudioUpload: Boolean(referenceAudioUpload),
+      referenceVideoUploads: videoUploads.length,
+      referenceAudioUploads: audioUploads.length,
     });
     const storedInput = await this.persistInputImages(id, input, sources, maskSource);
-    const videoPath = referenceVideoUpload ? path.join(this.db.inputsDir, `${id}-reference.${referenceVideoUpload.mimetype === "video/quicktime" ? "mov" : "mp4"}`) : undefined;
-    const audioPath = referenceAudioUpload ? path.join(this.db.inputsDir, `${id}-reference-audio.${audioExtension(referenceAudioUpload.mimetype)}`) : undefined;
+    // 每段一个文件：`-reference-1.mp4`、`-reference-2.mp4`，重试时按序号还原顺序
+    const videoPaths = videoUploads.map((upload, index) => path.join(
+      this.db.inputsDir,
+      `${id}-reference-${index + 1}.${upload.mimetype === "video/quicktime" ? "mov" : "mp4"}`,
+    ));
+    const audioPaths = audioUploads.map((upload, index) => path.join(
+      this.db.inputsDir,
+      `${id}-reference-audio-${index + 1}.${audioExtension(upload.mimetype)}`,
+    ));
     try {
-      if (referenceVideoUpload && videoPath) {
-        await fs.writeFile(videoPath, referenceVideoUpload.buffer, { flag: "wx" });
-        storedInput.referenceVideo = { relativePath: path.basename(videoPath), mimeType: referenceVideoUpload.mimetype, fileName: safeFileName(referenceVideoUpload.originalname) };
+      storedInput.referenceVideos = [];
+      storedInput.referenceAudios = [];
+      for (const [index, upload] of videoUploads.entries()) {
+        const target = videoPaths[index]!;
+        await fs.writeFile(target, upload.buffer, { flag: "wx" });
+        storedInput.referenceVideos.push({ relativePath: path.basename(target), mimeType: upload.mimetype, fileName: safeFileName(upload.originalname) });
       }
-      if (referenceAudioUpload && audioPath) {
-        await fs.writeFile(audioPath, referenceAudioUpload.buffer, { flag: "wx" });
-        storedInput.referenceAudio = { relativePath: path.basename(audioPath), mimeType: referenceAudioUpload.mimetype, fileName: safeFileName(referenceAudioUpload.originalname) };
+      for (const [index, upload] of audioUploads.entries()) {
+        const target = audioPaths[index]!;
+        await fs.writeFile(target, upload.buffer, { flag: "wx" });
+        storedInput.referenceAudios.push({ relativePath: path.basename(target), mimeType: upload.mimetype, fileName: safeFileName(upload.originalname) });
       }
       this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId, agentOperationId });
     } catch (error) {
       const paths = [...(storedInput.referenceImages ?? []), ...(storedInput.maskImage ? [storedInput.maskImage] : [])]
         .map((file) => path.join(this.db.inputsDir, file.relativePath));
-      if (videoPath) paths.push(videoPath);
-      if (audioPath) paths.push(audioPath);
+      paths.push(...videoPaths, ...audioPaths);
       await Promise.allSettled(paths.map((file) => fs.rm(file, { force: true })));
       throw error;
     }
@@ -305,14 +330,17 @@ export class TaskRunner {
     try {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
-      const { referenceVideo, referenceAudio, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
+      const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
       const input = await this.hydrateInputImages(storedInput);
       const current = this.db.getTaskRow(taskId);
       if (!current || current.status === "cancelled") return;
       const key = this.resolveKey(channel);
       this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
-      if (referenceVideo) {
-        const file = await this.readReferenceVideo(referenceVideo);
+      // 旧任务只有 referenceVideo / referenceAudio 单段字段，读的时候折算成数组
+      const storedVideos = referenceVideos?.length ? referenceVideos : referenceVideo ? [referenceVideo] : [];
+      const storedAudios = referenceAudios?.length ? referenceAudios : referenceAudio ? [referenceAudio] : [];
+      for (const stored of storedVideos) {
+        const file = await this.readReferenceVideo(stored);
         const url = await uploadReferenceMedia(channel, this.sessionKeys, file, "video");
         if (this.db.getTaskRow(taskId)?.status !== "validating") return;
         if (channel.adapterType === "kling-video") {
@@ -325,8 +353,8 @@ export class TaskRunner {
           throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道不支持此参考视频", 400);
         }
       }
-      if (referenceAudio) {
-        const file = await this.readReferenceAudio(referenceAudio);
+      for (const stored of storedAudios) {
+        const file = await this.readReferenceAudio(stored);
         const url = await uploadReferenceMedia(channel, this.sessionKeys, file, "audio");
         if (this.db.getTaskRow(taskId)?.status !== "validating") return;
         if (channel.adapterType !== "seedance-video") {
@@ -415,12 +443,16 @@ export class TaskRunner {
     if (task.errorCode === "SUBMISSION_UNKNOWN") throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对提交结果", 409);
     if (!isTerminalStatus(task.status)) throw new AppError("TASK_IN_FLIGHT", "任务正在处理，请等待结果", 409);
     if (task.errorCode === "VIDEO_TIMEOUT") return this.continuePolling(taskId);
-    const { referenceVideo, referenceAudio, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
+    const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
     const input = await this.hydrateInputImages(storedInput);
-    const referenceVideoUpload = referenceVideo ? await this.readReferenceVideo(referenceVideo) : undefined;
-    const referenceAudioUpload = referenceAudio ? await this.readReferenceAudio(referenceAudio) : undefined;
+    const storedVideos = referenceVideos?.length ? referenceVideos : referenceVideo ? [referenceVideo] : [];
+    const storedAudios = referenceAudios?.length ? referenceAudios : referenceAudio ? [referenceAudio] : [];
+    const referenceVideoUploads = [];
+    for (const stored of storedVideos) referenceVideoUploads.push(await this.readReferenceVideo(stored));
+    const referenceAudioUploads = [];
+    for (const stored of storedAudios) referenceAudioUploads.push(await this.readReferenceAudio(stored));
     const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
-    return this.create({ ...input, referenceVideoUpload, referenceAudioUpload }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
+    return this.create({ ...input, referenceVideoUploads, referenceAudioUploads }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
   }
 
   continuePolling(taskId: string): Task {
@@ -438,7 +470,7 @@ export class TaskRunner {
   }
 
   private async readReferenceVideo(file: NonNullable<StoredGenerationInput["referenceVideo"]>): Promise<ReferenceVideoUpload> {
-    if (!/^[a-f0-9-]{36}-reference\.(mp4|mov)$/i.test(file.relativePath)) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频路径无效", 400);
+    if (!/^[a-f0-9-]{36}-reference(-\d+)?\.(mp4|mov)$/i.test(file.relativePath)) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频路径无效", 400);
     const fullPath = path.join(this.db.inputsDir, file.relativePath);
     const stat = await fs.lstat(fullPath).catch(() => null);
     if (!stat?.isFile() || stat.size > 100 * 1024 * 1024) throw new AppError("REFERENCE_VIDEO_MISSING", "找不到本地参考视频，请重新选择原视频", 400);
@@ -446,7 +478,7 @@ export class TaskRunner {
   }
 
   private async readReferenceAudio(file: NonNullable<StoredGenerationInput["referenceAudio"]>): Promise<ReferenceMediaUpload> {
-    if (!/^[a-f0-9-]{36}-reference-audio\.(mp3|m4a|aac|wav)$/i.test(file.relativePath)) throw new AppError("REFERENCE_AUDIO_INVALID", "参考音频路径无效", 400);
+    if (!/^[a-f0-9-]{36}-reference-audio(-\d+)?\.(mp3|m4a|aac|wav)$/i.test(file.relativePath)) throw new AppError("REFERENCE_AUDIO_INVALID", "参考音频路径无效", 400);
     const fullPath = path.join(this.db.inputsDir, file.relativePath);
     const stat = await fs.lstat(fullPath).catch(() => null);
     if (!stat?.isFile() || stat.size > 15 * 1024 * 1024) throw new AppError("REFERENCE_AUDIO_MISSING", "找不到本地参考音频，请重新选择原文件", 400);

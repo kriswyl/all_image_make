@@ -1077,7 +1077,7 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     await context.runner.waitFor(original.id, { timeoutMs: 4000 });
     const stored = JSON.parse(context.db.getTaskRow(original.id)!.inputJson);
     expect(stored.wanVideoMedia).toBeUndefined();
-    expect(await fs.readFile(path.join(context.db.inputsDir, stored.referenceVideo.relativePath))).toEqual(video);
+    expect(await fs.readFile(path.join(context.db.inputsDir, stored.referenceVideos[0].relativePath))).toEqual(video);
 
     const retried = (await request(app).post(`/api/generations/${original.id}/retry`).expect(202)).body.data;
     await context.runner.waitFor(retried.id, { timeoutMs: 4000 });
@@ -1085,8 +1085,8 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect(submitted).toEqual(["https://example.com/temporary-1.mp4", "https://example.com/temporary-2.mp4"]);
     const nextInput = JSON.parse(context.db.getTaskRow(retried.id)!.inputJson);
     await request(app).delete(`/api/generations/${original.id}`).expect(200);
-    expect(await fs.readFile(path.join(context.db.inputsDir, nextInput.referenceVideo.relativePath))).toEqual(video);
-    await expect(fs.stat(path.join(context.db.inputsDir, stored.referenceVideo.relativePath))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await fs.readFile(path.join(context.db.inputsDir, nextInput.referenceVideos[0].relativePath))).toEqual(video);
+    await expect(fs.stat(path.join(context.db.inputsDir, stored.referenceVideos[0].relativePath))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("pauses status checks at the deadline and continues the same upstream task after rate limiting", async () => {

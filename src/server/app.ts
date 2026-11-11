@@ -22,7 +22,7 @@ import type { Channel, ChannelInput, GenerationInput, ImageSizeValue } from "../
 import { DEFAULT_IMAGE_SIZE, IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_VIDEO_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
 import { AppDatabase, StylePresetError, type DbChannel, type StoredFileRef } from "./db.js";
 import { KeyStore } from "./key-store.js";
-import { uploadReferenceVideo } from "./reference-video.js";
+import { referenceMediaKindOf, uploadReferenceVideo } from "./reference-video.js";
 import { AppError, TaskRunner, extensionForMime, matchesImageSignature, normalizeError, type MaskImageUpload, type ReferenceImageUpload } from "./tasks.js";
 import { assertEndpoint, assertSafeUrl, displayFileName, redact, safeFileName } from "./security.js";
 import { buildConnectionTestRequest, requestForDiagnostic, sendPreparedRequest } from "./adapters.js";
@@ -103,17 +103,19 @@ const binaryDocumentUpload = multer({ storage: multer.memoryStorage(), limits: {
 const referenceVideoUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 1, fields: 1 },
-  fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime"].includes(file.mimetype)
+  fileFilter: (_req, file, callback) => referenceMediaKindOf(file) === "video"
     ? callback(null, true) : callback(new AppError("REFERENCE_VIDEO_INVALID", "仅支持 MP4 / MOV 视频", 400)),
 });
 /**
  * 参考素材（视频 + 音频）一次提交：Seedance 的参考生视频两个都可能要。
  * 音频上限在 `validateReferenceMedia` 里按 15 MB 卡，这里只放到视频的 100 MB。
+ * 类型判定走 `referenceMediaKindOf`（扩展名优先），不然空 MIME 的 `.m4a` 会
+ * 以 application/octet-stream 进来被误拒。
  */
 const referenceMediaUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 2, fields: 1 },
-  fileFilter: (_req, file, callback) => ["video/mp4", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/m4a"].includes(file.mimetype)
+  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 20, fields: 1 },
+  fileFilter: (_req, file, callback) => referenceMediaKindOf(file)
     ? callback(null, true) : callback(new AppError("REFERENCE_MEDIA_INVALID", "仅支持 MP4 / MOV 视频与 MP3 / M4A / AAC / WAV 音频", 400)),
 });
 
@@ -1201,23 +1203,26 @@ export function createApp(options: { dataDir?: string } = {}) {
   }));
 
   /**
-   * 参考素材一次提交：Seedance 参考生视频可能同时要视频与音频。
+   * 参考素材一次提交：Seedance 参考生视频可以同时带多段视频与音频
+   * （2.0 各 3 段、2.5 各 10 段，真正的上限在 `assertVideoModeRequest` 里按模型卡）。
    * 上传（图床）在任务执行时做，和万相/可灵同一条链路——本地文件不直接进请求体。
    */
   app.post("/api/generations/reference-media", referenceMediaUpload.fields([
-    { name: "video", maxCount: 1 },
-    { name: "audio", maxCount: 1 },
+    { name: "video", maxCount: 10 },
+    { name: "audio", maxCount: 10 },
   ]), asyncHandler(async (req, res) => {
     const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
-    if (!files.video?.[0] && !files.audio?.[0]) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
+    const videos = files.video ?? [];
+    const audios = files.audio ?? [];
+    if (!videos.length && !audios.length) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
     let body: unknown;
     try { body = JSON.parse(req.body.payload); }
     catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
     const input = generationSchema.parse(body);
     const task = await runner.create({
       ...input,
-      referenceVideoUpload: files.video?.[0],
-      referenceAudioUpload: files.audio?.[0],
+      referenceVideoUploads: videos,
+      referenceAudioUploads: audios,
     });
     res.status(202).json(ok(task));
   }));

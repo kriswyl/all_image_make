@@ -34,19 +34,20 @@ export async function buildWanMedia({ spec, bucket }: MediaBuildContext): Promis
     return `${spec.label}需要 ${spec.imageSlots.length} 张图片`;
   }
 
-  if (spec.needsReferenceVideo && !bucket.video) {
+  if (spec.needsReferenceVideo && !bucket.videos.length) {
     return `${spec.label}需要上传一段参考视频`;
   }
   // 本地视频由服务端在 multipart 上传后补 reference_video，这里先空着
-  if (spec.acceptsReferenceAudio && bucket.audio) {
-    media.push({ type: "reference_audio", url: await fileToDataUrl(bucket.audio.file) });
+  for (const audio of bucket.audios) {
+    if (!spec.acceptsReferenceAudio) break;
+    media.push({ type: "reference_audio", url: await fileToDataUrl(audio.file) });
   }
   return media;
 }
 
 export async function buildSeedanceMedia({ spec, bucket, model, inlineAudio }: MediaBuildContext): Promise<SeedanceMediaInput[] | string> {
   const slots = spec.imageSlots;
-  if (!slots.length && !bucket.video && !bucket.audio) return [];
+  if (!slots.length && !bucket.videos.length && !bucket.audios.length) return [];
   if (!spec.imageRepeatable && slots.length && bucket.images.length < slots.length) {
     return `${spec.label}需要 ${slots.length} 张图片`;
   }
@@ -60,8 +61,10 @@ export async function buildSeedanceMedia({ spec, bucket, model, inlineAudio }: M
     if (!role) return `${spec.label}最多 ${slots.length} 张图片`;
     media.push({ type: "image_url", url: await fileToVideoDataUrl(item.file), role: role as SeedanceMediaRole });
   }
-  if (bucket.audio && inlineAudio) {
-    media.push({ type: "audio_url", url: await fileToDataUrl(bucket.audio.file), role: "reference_audio" });
+  if (inlineAudio) {
+    for (const audio of bucket.audios) {
+      media.push({ type: "audio_url", url: await fileToDataUrl(audio.file), role: "reference_audio" });
+    }
   }
   // 参考视频/音频也可由提交时上传后补进 content，这里先不发空壳
   const problem = validateSeedanceMedia(media, model, { allowInlineAudio: inlineAudio });
@@ -85,8 +88,10 @@ export async function buildKlingMedia({ spec, bucket, draft }: MediaBuildContext
     media.push({ type: type as KlingMediaInput["type"], url: await fileToVideoDataUrl(item.file) });
   }
   if (spec.needsReferenceVideo) {
-    if (!bucket.video) return `${spec.label}需要上传一段参考视频`;
-    if (draft.orientation === "image" && bucket.video.duration > 10) return "角色朝向选「图片」时视频需 ≤10 秒";
+    if (!bucket.videos.length) return `${spec.label}需要上传一段参考视频`;
+    if (draft.orientation === "image" && bucket.videos.some((item) => item.duration > 10)) {
+      return "角色朝向选「图片」时视频需 ≤10 秒";
+    }
   }
   return media;
 }

@@ -91,11 +91,12 @@ describe("Seedance 参考视频 / 音频：与万相同一条图床上传链路"
     // 本地文件不进请求体，落地的是公网地址
     expect(JSON.stringify(submitted[0])).not.toContain("data:");
 
+    // 参考素材落库是数组：Seedance 可以带多段，旧任务的单段字段仍然能读
     const stored = JSON.parse(context.db.getTaskRow(created.id)!.inputJson);
-    expect(stored.referenceVideo.fileName).toBe("shot.mp4");
-    expect(stored.referenceAudio.fileName).toBe("bgm.mp3");
-    expect(stored.referenceAudio.relativePath).toMatch(/-reference-audio\.mp3$/);
-    expect(await fs.readFile(path.join(context.db.inputsDir, stored.referenceAudio.relativePath))).toEqual(mp3);
+    expect(stored.referenceVideos.map((item: { fileName: string }) => item.fileName)).toEqual(["shot.mp4"]);
+    expect(stored.referenceAudios.map((item: { fileName: string }) => item.fileName)).toEqual(["bgm.mp3"]);
+    expect(stored.referenceAudios[0].relativePath).toMatch(/-reference-audio-1\.mp3$/);
+    expect(await fs.readFile(path.join(context.db.inputsDir, stored.referenceAudios[0].relativePath))).toEqual(mp3);
   });
 
   it("重试会重新上传同一份本地素材（图床链接可能过期）", async () => {

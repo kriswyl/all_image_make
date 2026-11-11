@@ -15,9 +15,21 @@ import type { CSSProperties, RefObject } from "react";
  */
 export type PanelAlign = "start" | "end";
 
+/** 不是元素也能当锚点：textarea 的光标位置量出来就是这样一个矩形 */
+export interface PanelAnchorRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+function anchorRect(anchor: HTMLElement | PanelAnchorRect): PanelAnchorRect {
+  return "getBoundingClientRect" in anchor ? anchor.getBoundingClientRect() : anchor;
+}
+
 export function useAnchoredPanelStyle(
   open: boolean,
-  anchor: HTMLElement | null,
+  anchor: HTMLElement | PanelAnchorRect | null,
   width: number,
   maxHeight: number,
   align: PanelAlign = "start",
@@ -26,7 +38,7 @@ export function useAnchoredPanelStyle(
   useLayoutEffect(() => {
     if (!open || !anchor) { setStyle(null); return; }
     const place = () => {
-      const rect = anchor.getBoundingClientRect();
+      const rect = anchorRect(anchor);
       const panelWidth = Math.min(width, window.innerWidth - 16);
       const preferred = align === "end" ? rect.right - panelWidth : rect.left;
       const left = Math.min(Math.max(8, preferred), window.innerWidth - panelWidth - 8);

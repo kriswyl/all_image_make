@@ -57,7 +57,7 @@ src/
                      video-snapshot.ts（任务参数快照的脱敏与复用）、video-capabilities.ts
 src-tauri/            Rust 壳、sidecar、图标、打包配置
 scripts/             开发、打包、评测脚本
-tests/               vitest 用例（119 文件 / 904 项）
+tests/               vitest 用例（120 文件 / 924 项）
 docs/                设计与交接文档
 ```
 
@@ -175,7 +175,7 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 入口 | 用途 |
 |---|---|
-| `npm test` | 119 文件 / 904 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
+| `npm test` | 120 文件 / 924 项单元与集成测试（`node ./node_modules/vitest/vitest.mjs run` 更稳） |
 | `npm run eval:contract` | 离线 10 项契约跨轮评测（不调用模型） |
 | `npm run eval:contract:real` | 真实渠道 6 轮（计费，需 `--real --i-authorize-billing`） |
 | `npm run eval:declarative` | 真实生成 8 页后改第 3 页，验 freeform=0 与主题继承 |
@@ -208,14 +208,23 @@ objects[] → presentation-object-map.ts   按 cNvPr 名称定位（同名/缺�
 
 | 关注点 | 落点 | 规则 |
 |---|---|---|
-| 模式矩阵 | `shared/video-modes.ts` | 万相 7 种、Seedance 4 种、可灵按模型（omni 才有参考图，运动控制只有 kling-3.0）；只渲染支持的模式，`resolutionOptionsFor` 按模式给档位 |
+| 模式矩阵 | `shared/video-modes.ts` | 界面只给两个合并入口：**提示词生视频**（无素材=文生，有素材=参考生）与**首尾帧生视频**（1 张=首帧，2 张=首尾帧）；视频编辑/延长（万相）与运动控制（可灵）语义独立才保留入口。`resolveStudioMode()` 在提交前按素材数量落成上游真实模式，`studioModeForConcrete()` 把历史任务的具体模式折回入口 |
+| 模式守卫 | `server/video-mode-guard.ts` | 收的是解析后的具体模式：属于该模型、素材齐/不超、分辨率在档、时长在区间 |
 | 草稿 | `shared/video-draft.ts` + `client/hooks/useMediaBuckets.ts` | 草稿按 `adapter:mode` 分键：提示词/参数进 localStorage，图片/视频/音频在内存分桶；切模式只是换键，谁都不清空 |
-| 素材入口 | 只在创作框里上传本地文件 | 页面没有任何「粘贴公网地址」的输入框；需要参考视频的模式只在渠道配了 `uploadEndpoint` 时出现，否则不画入口 |
-| @ 引用 | `client/video/VideoMentionPanel.tsx` | 创作框右上角的 @ 弹出「全部/视频/图片/音频」素材列表，选中把 `@图片1` 这类记号插到光标处；记号顺序与提交时素材数组一致 |
+| 页面结构 | `VideoGenerateView` + `client/video/` | 固定一屏：`.vstudio-page` 撑满视口且不滚动，页头 → 小标题 → 创作框 → 创作记录全在一屏内；记录区（`.record-scroll`）也是 `overflow:hidden`，**不滚动**，多出来的记录靠右上角翻页。`.vstudio-inner` 用 `min(100%, clamp(880px, 62vw, 1120px))`，1440 仍是设计稿 880，大窗口才放宽（决定一页能放几张卡片）；窄窗口让 100% 说了算，不撑出横向滚动。侧栏/矮屏（≤860px 宽或 ≤560px 高）自动退回整页滚动。不再有右侧参数面板，也不再有常驻的「本次结果」大舞台；生成中的任务在卡片上显示进度，点卡片才打开播放器浮层 |
+| 默认态 / 专注态 | `VideoGenerateView` 的 `editingFocus` + `.vstudio-page.is-focus` | 两个区域不争同一块高度：默认态输入区 104px（整卡约 172px）、记录区完整显示；手动展开时创作框吃掉工作区（输入框 flex 撑满）、记录区整块 `hidden`，收起后恢复。记录区不再滚动，因此不需要记 `scrollTop`；展开/收起后 `ResizeObserver` 会重新量一次宽高并重算每页条数 |
+| 素材入口 | 创作框上方一排最左侧 + `@` 面板（`VideoMentionPanel` 底部上传键） | 页面没有任何「粘贴公网地址」的输入框。能放可选素材的模式（提示词生视频）即使空着也在最左留一个虚线「参考内容」格；点它按当前模式能收的素材列类型——收多种（图片 / 视频 / 音频）先弹一层「添加图片 / 添加视频 / 添加音频」并写明格式与上限，只收一种就直接开系统选择框，不能传的（渠道没配 `uploadEndpoint`）写明原因且禁用。首尾帧（首帧/尾帧两格）与视频编辑/延长（专属参考视频格）不再额外挂这个入口；图片到上限但参考视频/音频还空着时入口仍在。模型确实不支持参考素材时（只有文生的组合）不摆入口 |
+| 创作记录 | `client/video/VideoResultPanel.tsx` + `client/video/record-paging.ts` | 「创作记录 + 总条数」+ 状态筛选（全部/进行中/已完成/失败，带计数）+ **右上角的翻页条**（与筛选页签同一行）+ 最近在前/最早在前；网格/列表切换已移除，只有网格一种看法。一页放几张按 `.record-scroll` 的实际宽高算：列数 = 宽度 / 卡片宽（240–320px，最多 5 列），行数 = 剩余高度 / 卡片高（16:9 缩略图 + 文字区），相乘即容量；窗口特别矮时多分一列让卡片变窄变矮，保证至少一行放得下。`ResizeObserver` 量尺寸，量不到退回 3 条；记录区 `overflow:hidden` 不滚动。换筛选·排序回第一页、删记录后页数变少夹到最后一页、新任务不在当前页自动翻过去；只有一页时翻页条不出现。卡片是缩略图 + 播放角标 + 时长 + 标题 + 状态点/模型/时长/分辨率，`⋯` 菜单给播放、下载、重生成、复用参数、诊断、取消，最后一条是红色「删除历史」（交给 App 的删除确认弹窗） |
+| @ 引用 | `client/video/VideoMentionPanel.tsx` + `PromptEditor.promptCaretRect()` | 右上角 @ 或直接敲 `@` 都会弹「全部/视频/图片/音频」列表；面板锚在原生 `Range` 的光标矩形上（contenteditable 直接有坐标，不用再镜像测 textarea），跟着 @ 走、下方不够就上翻。选中把 `@图片1` / `@视频2` / `@音频1` 插到光标处（有选区就先替换），记号编号与提交时素材数组顺序一致 |
+| 素材展示 | `client/video/VideoComposer.tsx` + `asset-paging.ts` | **文本布局恒定，素材是一层覆盖物**：`.vstudio-body` 恒 `position:relative; display:block; min-height:176px`，`.vstudio-prompt` 恒 `padding-left: var(--asset-gutter)`（普通 148px、首尾帧 190px，行内样式按模式给）；`.vstudio-assets` 改 `position:absolute; top:6px; left:6px; z-index:2` 脱离文档流。折叠/展开时正文的 x/y/宽/高与文字起点**完全不变**，展开不是把文字推下去，而是就地横向铺开盖在文字上（展开态给素材层加 `var(--surface)` 实底，避免文字从格子缝隙透出）。输入框 `min-height:172px` 恒定，两态创作框高度一致。折叠时只露最近 3 张、负 margin `-74px` 错开（整摞 120px）、`--tile-i` 决定 ±6° 旋转与层叠顺序（最新压最上面），`::after { content: attr(data-count) }` 写总数，小圆 `+` 绝对定位半叠在摞右边缘不占宽；大虚线「参考内容」格只在展开/空态/单张时出现。**只有悬停在这一摞本身**（或键盘聚焦进这一排）才展开；移出整条素材排才收回。展开后按 `assetPageCapacity()` 量**整个 `.vstudio-body` 的宽度**算一页几格（折叠时素材排很窄，量它自己会退化成一页一张），**不横向滚动**，箭头排在两侧、第一页只隐藏「上一页」但留位置。**首尾帧例外**：`fixedSlotsMode` 下两格固定并排（72×72 浅灰圆角方块 + `⇌` + 「首帧」/「尾帧」），不叠放、不随 hover 展开、`.is-fixed-slots` 禁掉全部入场与过渡动画。专注态用 `display:flex; height:100%` 让输入框撑满，文字左边界不变 |
+| 提示词输入 | `client/video/PromptEditor.tsx`（contenteditable） | 输入框是 contenteditable：正文和 `@图片1` 胶囊在**同一棵 DOM** 里，所以胶囊一直是带缩略图的胶囊（编辑中、失焦后一个样），光标/选区/点击定位都由浏览器原生负责，不再有「胶囊宽度 ≠ 文字宽度 → 光标错位」的问题。胶囊是 `contenteditable=false` 的原子节点：光标进不去，退格一次删掉整个记号，点它开详情浮层。真源是文本：每次输入从 DOM 读出纯文本（胶囊读 `data-token`，`<br>`/块级边界算换行），只有「该出现胶囊的位置」和「DOM 里实际胶囊」对不上时才重建并按字符偏移复位光标（不每次按键重建，撤销栈与输入法都不受影响）；粘贴多行会被拍平回「文本 + `\n`」；中文组字期间一律不动 DOM |
+| 拖拽落点 | `client/useFileDrop.ts` + `VideoGenerateView` 的 `handleDrop` | 按扩展名／MIME 分派（`referenceMediaType()` 扩展名优先，小写 `.m4a` 也能认）：图片进图片桶，MP4/MOV 走 `selectVideos`，MP3/M4A/AAC/WAV 走 `selectAudios`，一次可拖多段，各自沿用格式/体积/时长校验；当前模式不收的类型与未知类型当场写明原因 |
+| 参考素材额度 | `shared/reference-media.ts` + `shared/video-modes.ts` + `client/hooks/useMediaBuckets.ts` + `server/tasks.ts` | 素材桶用 `videos` / `audios` 数组；`referenceMediaLimits()` 按模型给额度（Seedance 2.0 三段/三段、2.5 十段/十段，万相与可灵各一段），额度 >1 时文件对话框开 `multiple`，单额度渠道「再选即替换」。`bucketsRef` 镜像保证同一次回调里连续加多段不读旧状态；落库 `referenceVideos` / `referenceAudios`（旧单段字段读时折算成数组），服务端按 `fields([{video,10},{audio,10}])` 收文件、超限抛 `MODE_MEDIA_LIMIT`。**Grok 例外**：上游只有一个端点、靠 `reference_images` 区分文生/图生，`videoModesFor()` 仍返回空（不画模式胶囊），但 `studioAssetSpec()` 给创作框一份只用于界面/参数收敛的素材规格（最多 7 张参考图、不收视频音频），`resolveStudioMode()` 也认它；服务端守卫继续按「无模式表 → 只查参考图上限」兜底，图片走通用 `referenceImages` 上传 |
 | 参数收敛 | `reconcileVideoDraft()` | 换渠道/模型/模式后夹时长、换分辨率档、锁比例（2.5 首尾帧自适应），并回传改动原因给界面提示 |
-| 参数入口 | `client/video/VideoParamsPanel.tsx` | 从创作框底部胶囊弹出（portal）；「格式 MP4/MOV」「生成数量 1–4」可见但锁定——上游没有 format 与 n 字段，不做无效控件 |
+| 参数入口 | `client/video/VideoParamsPanel.tsx` | 底部参数是**一个**圆角模块（左：生成方式；右：比例/分辨率/时长/声音/1 条），点模块任意位置弹出参数浮层（portal）；「格式 MP4/MOV」「生成数量 1–4」可见但锁定——上游没有 format 与 n 字段，不做无效控件 |
+| 焦点样式 | `client/video-studio.css` | 输入框本身永远无边框：`.vstudio-composer .vstudio-input`（现在是 contenteditable 的 div）在默认/悬停/聚焦/`:focus-visible` 下清掉 border、box-shadow、outline（全局 `input:focus` / `textarea:focus` 的 3px 环会叠成双层黑框，深色主题下更明显）。焦点交给外层卡片：鼠标点进来只变边框色，键盘 Tab 才加 `.is-kb-focus`——`:focus-visible` 在鼠标点击时也可能成立，所以用 `keydown Tab` / `pointerdown` 自己记最近一次输入方式 |
 | 服务端守卫 | `server/video-mode-guard.ts` | `tasks.create` 前校验模式是否属于该模型、素材是否齐/超、分辨率与时长是否在档；`MODE_UNSUPPORTED` / `MODE_MEDIA_REQUIRED` / `MODE_MEDIA_LIMIT` / `MODE_PARAM_UNSUPPORTED` |
-| 参数快照 | `shared/video-snapshot.ts` + `tasks.input_json` | 提交即落库，`taskView` 输出脱敏快照（内联素材只留字节数）；结果区展示「本次参数」，可复用提示词与数值，素材一律提示重新上传；`retry` 重放 `input_json`，不读当前表单 |
+| 参数快照 | `shared/video-snapshot.ts` + `tasks.input_json` | 提交即落库，`taskView` 输出脱敏快照（内联素材只留字节数）；播放器浮层展示「本次参数」，可复用提示词与数值，素材一律提示重新上传；`retry` 重放 `input_json`，不读当前表单 |
 | 适配器 | `adapters.ts` | 万相 video-edit 不发 `duration`；可灵运动控制端点与参数按模式表；Seedance 的 content 按 role 组装 |
 
 ## 10. 已知边界

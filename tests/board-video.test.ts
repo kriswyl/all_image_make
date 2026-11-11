@@ -221,7 +221,7 @@ describe("无限画布视频生成", () => {
     const result = await request(app).post(`/api/boards/${boardId}/generate`).send({ nodeId: target.id }).expect(202);
     const input = JSON.parse(context.db.getTaskRow(result.body.data.task.id)!.inputJson);
     expect(input.klingVideoMode).toBe("motion-control");
-    expect(input.referenceVideo).toMatchObject({ mimeType: "video/mp4" });
+    expect(input.referenceVideos[0]).toMatchObject({ mimeType: "video/mp4" });
     expect(input.klingVideoMedia.some((item: { type: string }) => item.type === "video")).toBe(false);
     expect(input.klingVideoMedia.some((item: { type: string; url: string }) => item.type === "image" && item.url.startsWith("data:image/"))).toBe(true);
     await waitForTask(app, result.body.data.task.id);

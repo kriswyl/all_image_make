@@ -676,11 +676,16 @@ export class AppDatabase {
       referenceImage?: { relativePath?: string };
       maskImage?: { relativePath?: string };
       referenceVideo?: { relativePath?: string };
+      referenceVideos?: Array<{ relativePath?: string }>;
+      referenceAudio?: { relativePath?: string };
+      referenceAudios?: Array<{ relativePath?: string }>;
     }>(row.input_json, {});
     const stored = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
     // 局部重绘蒙版和参考图一样落在 inputs/，删任务时要一起收走
     if (input.maskImage) stored.push(input.maskImage);
     if (input.referenceVideo) stored.push(input.referenceVideo);
+    if (input.referenceAudio) stored.push(input.referenceAudio);
+    stored.push(...(input.referenceVideos ?? []), ...(input.referenceAudios ?? []));
     return [...new Set(stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string"))];
   }
 

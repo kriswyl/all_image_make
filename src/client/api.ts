@@ -9,6 +9,7 @@ import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-tem
 import type { StoryboardPreviewBoard, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 import type { PresentationVersionReport } from "../shared/presentation-report";
+import { withReferenceMediaType } from "./media-files";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
@@ -103,18 +104,19 @@ export const api = {
   generateWithReferenceVideo: (input: GenerationInput, file: File) => {
     const form = new FormData();
     form.append("payload", JSON.stringify(input));
-    form.append("file", file, file.name);
+    // 类型按扩展名补一次：空 MIME 的 `.m4a`/`.mp4` 会被服务端的类型白名单拒掉
+    form.append("file", withReferenceMediaType(file), file.name);
     return request<Task>("/api/generations/reference-video", { method: "POST", body: form });
   },
   /**
    * Seedance 参考生视频：视频与音频都走渠道图床上传，本地文件不直接进请求体。
-   * 与万相/可灵用的是同一套上传实现，替换的只是提交接口（两个素材槽）。
+   * 与万相/可灵用的是同一套上传实现，只是这里能一次送多段（2.0 三段、2.5 十段）。
    */
-  generateWithReferenceMedia: (input: GenerationInput, media: { video?: File | null; audio?: File | null }) => {
+  generateWithReferenceMedia: (input: GenerationInput, media: { videos?: File[]; audios?: File[] }) => {
     const form = new FormData();
     form.append("payload", JSON.stringify(input));
-    if (media.video) form.append("video", media.video, media.video.name);
-    if (media.audio) form.append("audio", media.audio, media.audio.name);
+    for (const file of media.videos ?? []) form.append("video", withReferenceMediaType(file), file.name);
+    for (const file of media.audios ?? []) form.append("audio", withReferenceMediaType(file), file.name);
     return request<Task>("/api/generations/reference-media", { method: "POST", body: form });
   },
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
