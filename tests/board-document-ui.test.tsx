@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "../src/client/api";
+import { useBoard } from "../src/client/board/useBoard";
 import { useBoardDocument } from "../src/client/board/useBoardDocument";
 import { createEmptyBoardDoc, DEFAULT_BOARD_VIEWPORT, type BoardView } from "../src/shared/board";
 
@@ -70,4 +71,38 @@ it("切板后旧保存响应不覆盖新板，版本冲突使用服务端快照"
     expect(ui.state.view).toEqual(latest);
     expect(ui.toast).toHaveBeenCalledWith("error", "无限画布已在别处更新，已重新加载");
   } finally { ui.unmount(); }
+});
+
+it.each(["导入模板", "恢复历史"] as const)("%s 的旧画布响应不会覆盖切换后的画布", async (action) => {
+  vi.spyOn(api, "board").mockImplementation(async id => board(id));
+  let finish!: (value: BoardView) => void;
+  const response = new Promise<BoardView>(resolve => { finish = resolve; });
+  const importTemplate = vi.spyOn(api, "importTemplateToBoard")
+    .mockImplementation(async () => ({ board: await response, addedNodes: 1 }));
+  const restoreVersion = vi.spyOn(api, "restoreBoardVersion").mockReturnValue(response);
+  const root = createRoot(document.createElement("div"));
+  const toast = vi.fn();
+  let state!: ReturnType<typeof useBoard>;
+  function Harness({ id }: { id: string }) {
+    state = useBoard(id, toast);
+    return null;
+  }
+  const show = (id: string) => act(async () => { root.render(<Harness id={id} />); });
+
+  try {
+    await show("a");
+    let pending!: Promise<number | null | void>;
+    await act(async () => {
+      pending = action === "导入模板" ? state.importTemplate("template") : state.restoreVersion(2);
+    });
+    if (action === "导入模板") expect(importTemplate).toHaveBeenCalledWith("a", "template");
+    else expect(restoreVersion).toHaveBeenCalledWith("a", 2, 1);
+    await show("b");
+    await act(async () => {
+      finish(board("a", 3));
+      await pending;
+    });
+    expect(state.view?.id).toBe("b");
+    expect(state.view?.version).toBe(1);
+  } finally { act(() => root.unmount()); }
 });

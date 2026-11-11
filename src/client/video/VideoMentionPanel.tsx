@@ -39,6 +39,8 @@ export interface VideoMentionPanelProps {
   /** 元素（@ 按钮）或光标矩形：敲 @ 时面板跟着 @ 符号走 */
   anchor: HTMLElement | PanelAnchorRect | null;
   items: MentionItem[];
+  /** 生图只使用图片时可省略媒体类型页签。 */
+  imagesOnly?: boolean;
   /** 当前模式下可上传的素材类型；没传就只显示列表 */
   uploads?: MentionUpload[];
   onUpload?: (kind: MentionUpload["kind"]) => void;
@@ -46,7 +48,7 @@ export interface VideoMentionPanelProps {
   onSelect: (label: string) => void;
 }
 
-export function VideoMentionPanel({ open, anchor, items, uploads = [], onUpload, onClose, onSelect }: VideoMentionPanelProps) {
+export function VideoMentionPanel({ open, anchor, items, imagesOnly = false, uploads = [], onUpload, onClose, onSelect }: VideoMentionPanelProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<Tab>("全部");
   // 跟着光标时左缘贴光标（面板朝右下展开）；挂在按钮上时右对齐，收进窗口
@@ -63,7 +65,7 @@ export function VideoMentionPanel({ open, anchor, items, uploads = [], onUpload,
 
   return createPortal(
     <div className="vstudio-panel vstudio-mention-panel" ref={panelRef} style={style} role="dialog" aria-label="引用素材">
-      <div className="vstudio-mention-tabs" role="tablist">
+      {!imagesOnly ? <div className="vstudio-mention-tabs" role="tablist">
         {TABS.map((item) => {
           const count = item === "全部" ? items.length : items.filter((entry) => entry.kind === item).length;
           return (
@@ -80,7 +82,7 @@ export function VideoMentionPanel({ open, anchor, items, uploads = [], onUpload,
             </button>
           );
         })}
-      </div>
+      </div> : null}
 
       {list.length ? (
         <div className="vstudio-mention-list">
@@ -105,7 +107,7 @@ export function VideoMentionPanel({ open, anchor, items, uploads = [], onUpload,
           ))}
         </div>
       ) : (
-        <p className="vstudio-mention-empty">还没有{tab === "全部" ? "" : tab}素材</p>
+        <p className="vstudio-mention-empty">{imagesOnly ? "还没有参考图" : `还没有${tab === "全部" ? "" : tab}素材`}</p>
       )}
 
       {uploadHere.length && onUpload ? (

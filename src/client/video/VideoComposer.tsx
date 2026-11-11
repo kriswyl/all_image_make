@@ -586,10 +586,11 @@ export function VideoComposer(props: VideoComposerProps) {
    */
   const fixedSlotsMode = Boolean(fixedSlots);
   const stacked = tiles.length > 1 && !assetsExpanded && !fixedSlotsMode;
+  const singleReference = !fixedSlotsMode && tiles.length === 1 && mediaCount === 1;
   /** 折叠态：素材是左上角一层窄浮层；展开后就地铺开覆盖文字 */
   const folded = showSlots && !assetsExpanded;
-  /** 折叠且已有好几张时，大虚线格换成摞旁一个小圆 +（设计图里的样子） */
-  const showBigAddSlot = !folded || tiles.length <= 1;
+  // 有素材时先让缩略图占据左上角，展开后再显示添加入口。
+  const showBigAddSlot = !folded || (tiles.length <= 1 && !singleReference);
 
   // 刚加的那张如果落在后一页，展开状态下直接翻过去，不然「传了像没传」。
   // 折叠时那一摞本来就包含全部素材，不翻页：否则一悬停就从「9 张叠着」跳成
@@ -621,7 +622,7 @@ export function VideoComposer(props: VideoComposerProps) {
 
         <div
           className={["vstudio-body", showSlots ? "has-assets" : "", folded ? "is-folded" : ""].filter(Boolean).join(" ")}
-          /* 文字左边固定让出的一列：首尾帧两格更宽，两种状态都不变 */
+          /* 有素材排才为其留列；首尾帧需要两格的宽度。 */
           style={{ "--asset-gutter": fixedSlotsMode ? "190px" : "148px" } as CSSProperties}
           ref={bodyRef}
         >
@@ -645,8 +646,8 @@ export function VideoComposer(props: VideoComposerProps) {
                 setAssetsExpanded(false);
               }}
             >
-              {/* 入口钉在最左边：翻到后面也随时能加 */}
-              {addableKinds.length && showBigAddSlot ? (
+              {/* 入口钉在最左边：翻到后面也随时能加。 */}
+              {addableKinds.length > 0 && showBigAddSlot ? (
                 <button
                   key="add"
                   type="button"

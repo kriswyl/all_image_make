@@ -254,9 +254,11 @@ it("空态在提示词左侧留一个虚线「参考内容」格，正文让出�
   expect(container.querySelector("button[aria-label='引用素材']")).toBeTruthy();
 });
 
-it("模型不支持参考素材时（可灵 3.0）不摆参考内容入口，就是一个干净的输入框", async () => {
+it("可灵文生视频没有素材栏，提示词不进入素材让位布局", async () => {
   await render({ channelId: "kling", model: "kling-3.0" });
+  expect(modeChip().textContent).toContain("文生视频");
   expect(container.querySelector(".vstudio-assets")).toBeNull();
+  expect(container.querySelector(".vstudio-body")?.classList.contains("has-assets")).toBe(false);
   expect(container.querySelector(".vstudio-prompt .vstudio-input")).toBeTruthy();
 });
 
@@ -449,6 +451,35 @@ it("参考内容铺成一排，不用悬停就看得见，点格子看详情", a
   expect(detail).toBeTruthy();
   expect(detail.querySelector("img")).toBeTruthy();
   expect(detail.textContent).toContain("图片1");
+});
+
+it("单个参考素材折叠时占用左侧入口位置，悬停后向右展开", async () => {
+  await render({ channelId: "wan", model: "wan2.5-i2v-preview" });
+  const input = container.querySelector("input[type=file][accept^='image']") as HTMLInputElement;
+  const file = new File([new Uint8Array([137, 80, 78, 71])], "ref.png", { type: "image/png" });
+  Object.defineProperty(input, "files", { value: [file], configurable: true });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+
+  const assets = container.querySelector(".vstudio-assets") as HTMLElement;
+  const stack = assets.querySelector(".vstudio-asset-stack") as HTMLElement;
+  const body = container.querySelector(".vstudio-body") as HTMLElement;
+  expect(body.classList.contains("is-folded")).toBe(true);
+  expect(stack.querySelector(".vstudio-media-tag")?.textContent).toBe("图片1");
+  expect(stack.classList.contains("is-collapsed")).toBe(false);
+  expect(assets.querySelector(".vstudio-slot-add")).toBeNull();
+
+  await act(async () => {
+    stack.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+  });
+  expect(body.classList.contains("is-folded")).toBe(false);
+  expect([...assets.children].map(node => node.className)).toEqual([
+    "vstudio-slot vstudio-slot-add", "vstudio-asset-strip",
+  ]);
+  await act(async () => {
+    assets.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }));
+  });
+  expect(body.classList.contains("is-folded")).toBe(true);
+  expect(assets.querySelector(".vstudio-slot-add")).toBeNull();
 });
 
 it("多张素材默认叠成 3 张一摞并写总数，只有悬停这一摞才摊开", async () => {

@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, LoaderCircle, Menu,
-  Pencil, Plus, Redo2, Trash2, Undo2, Upload, X,
+  Plus, Redo2, Trash2, Undo2, Upload,
 } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { confirmGeneration } from "../generation-confirm";
@@ -18,10 +18,11 @@ import { BoardNodeVersions } from "./BoardNodeVersions";
 import {
   createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
 } from "../../shared/board";
-import type { CanvasTemplateSummary } from "../../shared/canvas-template";
 import type { Asset } from "../../shared/types";
 import { BoardAgentPanel } from "./BoardAgentPanel";
 import { BoardCanvas } from "./BoardCanvas";
+import { BoardHistoryDrawer } from "./BoardHistoryDrawer";
+import { BoardTemplateDrawer } from "./BoardTemplateDrawer";
 import { BoardMaterialDialog } from "./BoardMaterialDialog";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "./CrossModeBridgeDialog";
 import { BoardInspector, type BoardImageAlias, type BoardVideoAlias } from "./BoardInspector";
@@ -52,34 +53,6 @@ function readMediaDuration(url: string, kind: "audio" | "video"): Promise<number
     element.onerror = () => finish(new Error("无法读取素材，请检查文件是否有效"));
     element.src = api.assetUrl(url);
   });
-}
-
-function historyReasonLabel(reason: string): string {
-  if (!reason || reason === "manual" || reason === "update") return reason === "update" ? "编辑节点" : "手动保存";
-  if (reason === "import") return "导入";
-  if (reason === "auto-layout") return "自动排版";
-  if (reason === "delete") return "删除节点";
-  if (reason === "duplicate") return "复制节点";
-  if (reason === "move") return "移动节点";
-  if (reason === "connect") return "新增连线";
-  if (reason === "disconnect") return "删除连线";
-  if (reason === "generate:result") return "生成结果回填";
-  if (reason === "generate:retry") return "重试生成";
-  if (reason === "generate:cancel") return "停止生成";
-  if (reason.startsWith("add:")) return "添加节点";
-  if (reason.startsWith("generate:")) return `生成 ${reason.slice("generate:".length)}`;
-  if (reason.startsWith("agent:")) return "无限画布助手修改";
-  if (reason.startsWith("restore:")) return `恢复自版本 ${reason.slice("restore:".length)}`;
-  if (reason.startsWith("asset:")) return "移除素材";
-  if (reason.startsWith("edge:")) return "修改连线角色";
-  if (reason.startsWith("group:")) return "分组调整";
-  return reason.slice(0, 40);
-}
-
-function historyTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function BoardSidebar({
@@ -171,21 +144,10 @@ export function BoardWorkspace({
   const [assetTargetId, setAssetTargetId] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState("");
   const [assetType, setAssetType] = useState<"all" | "image" | "video" | "audio">("all");
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyBoardId, setHistoryBoardId] = useState<string | null>(null);
+  const historyOpen = historyBoardId !== null && historyBoardId === currentId;
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [templateDrawerOpen, setTemplateDrawerOpen] = useState(false);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
-  const [templates, setTemplates] = useState<CanvasTemplateSummary[]>([]);
-  const [importingTemplateId, setImportingTemplateId] = useState<string | null>(null);
-  const [renamingTemplateId, setRenamingTemplateId] = useState<string | null>(null);
-  const [templateNameDraft, setTemplateNameDraft] = useState("");
-  const [migratingStoryboards, setMigratingStoryboards] = useState(false);
-  const [cleaningStoryboards, setCleaningStoryboards] = useState(false);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyEntries, setHistoryEntries] = useState<Array<{
-    version: number; reason: string; createdAt: string; current: boolean;
-  }>>([]);
-  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -310,11 +272,7 @@ export function BoardWorkspace({
     setTitleDraft(board.view.title);
   }, [board.view?.id, board.view?.title]);
 
-  useEffect(() => {
-    // 切板后历史列表属于上一块板，关掉抽屉，下一次打开再拉
-    setHistoryOpen(false);
-    setHistoryEntries([]);
-  }, [currentId]);
+  useEffect(() => { setHistoryBoardId(null); }, [currentId]);
 
   // 侧栏的节点数 / 标题跟着文档走；不重新请求列表，避免拖节点时整个侧栏闪一下
   useEffect(() => {
@@ -483,128 +441,17 @@ export function BoardWorkspace({
     }
   }, [onToast, refreshBoards]);
 
-  const refreshHistory = useCallback(async () => {
-    const id = currentId;
-    if (!id) return;
-    setHistoryLoading(true);
-    try {
-      const result = await api.boardHistory(id);
-      setHistoryEntries(result.entries);
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "创作历史加载失败");
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, [currentId, onToast]);
-
   const toggleHistory = useCallback(() => {
     setAssetDrawerOpen(false);
     setTemplateDrawerOpen(false);
-    setHistoryOpen((open) => {
-      if (!open) void refreshHistory();
-      return !open;
-    });
-  }, [refreshHistory]);
-
-  const refreshTemplates = useCallback(async () => {
-    setTemplatesLoading(true);
-    try {
-      setTemplates(await api.templates());
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "模板列表加载失败");
-    } finally {
-      setTemplatesLoading(false);
-    }
-  }, [onToast]);
+    setHistoryBoardId((openId) => openId === currentId ? null : currentId);
+  }, [currentId]);
 
   const toggleTemplates = useCallback(() => {
     setAssetDrawerOpen(false);
-    setHistoryOpen(false);
-    setTemplateDrawerOpen((open) => {
-      if (!open) void refreshTemplates();
-      return !open;
-    });
-  }, [refreshTemplates]);
-
-  const importTemplate = useCallback(async (template: CanvasTemplateSummary) => {
-    setImportingTemplateId(template.id);
-    try {
-      const added = await board.importTemplate(template.id);
-      if (added !== null) {
-        onToast("success", `已导入模板「${template.name}」：新增 ${added} 个节点`);
-        setTemplateDrawerOpen(false);
-        await refreshTemplates();
-      }
-    } finally {
-      setImportingTemplateId(null);
-    }
-  }, [board, onToast, refreshTemplates]);
-
-  const commitTemplateRename = useCallback(async (template: CanvasTemplateSummary) => {
-    const name = templateNameDraft.trim();
-    setRenamingTemplateId(null);
-    if (!name || name === template.name) return;
-    try {
-      await api.updateTemplate(template.id, { name });
-      await refreshTemplates();
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "重命名模板失败");
-    }
-  }, [onToast, refreshTemplates, templateNameDraft]);
-
-  const removeTemplate = useCallback(async (template: CanvasTemplateSummary) => {
-    if (!window.confirm(`删除模板「${template.name}」？已经导入画布的节点不受影响。`)) return;
-    try {
-      await api.deleteTemplate(template.id);
-      await refreshTemplates();
-      onToast("success", "模板已删除");
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "删除模板失败");
-    }
-  }, [onToast, refreshTemplates]);
-
-  const migrateStoryboards = useCallback(async () => {
-    if (!window.confirm("把旧分镜迁移成无限画布？会包含角色 / 场景设定参考；上一次迁移生成的旧版画布会升级重建，旧分镜数据仍在。")) return;
-    setMigratingStoryboards(true);
-    try {
-      const result = await api.migrateStoryboards({ replaceExisting: true });
-      await refreshTemplates();
-      await refreshBoards();
-      const failed = result.failed.length ? `，${result.failed.length} 个失败` : "";
-      onToast(
-        result.failed.length ? "error" : "success",
-        `已迁移 ${result.migrated.length} 个会话${result.skipped ? `，跳过 ${result.skipped} 个已迁移` : ""}${failed}；新画布已出现在侧栏`,
-      );
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "迁移旧分镜失败");
-    } finally {
-      setMigratingStoryboards(false);
-    }
-  }, [onToast, refreshBoards, refreshTemplates]);
-
-  const cleanupStoryboards = useCallback(async () => {
-    if (!window.confirm("删除已迁移会话的旧分镜表？迁移画布和模板不受影响，但旧分镜入口的数据将无法恢复。")) return;
-    setCleaningStoryboards(true);
-    try {
-      const result = await api.cleanupStoryboards();
-      onToast("success", `已清理 ${result.cleaned.length} 个会话的旧分镜${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "清理旧分镜失败");
-    } finally {
-      setCleaningStoryboards(false);
-    }
-  }, [onToast]);
-
-  const restoreHistory = useCallback(async (version: number) => {
-    if (!window.confirm(`恢复到版本 ${version}？当前内容会作为新版本保留在历史里，可以撤销。`)) return;
-    setRestoringVersion(version);
-    try {
-      await board.restoreVersion(version);
-      await refreshHistory();
-    } finally {
-      setRestoringVersion(null);
-    }
-  }, [board, refreshHistory]);
+    setHistoryBoardId(null);
+    setTemplateDrawerOpen((open) => !open);
+  }, []);
 
   const reloadBoard = useCallback(() => { void board.reload(); }, [board.reload]);
 
@@ -790,7 +637,7 @@ export function BoardWorkspace({
             type="button"
             className={`secondary-button compact board-action-primary ${assetDrawerOpen ? "is-on" : ""}`}
             onClick={() => {
-              setHistoryOpen(false);
+              setHistoryBoardId(null);
               setTemplateDrawerOpen(false);
               setAssetTargetId(null);
               setAssetDrawerOpen((open) => !open);
@@ -930,168 +777,23 @@ export function BoardWorkspace({
         />
       ) : null}
 
-      {templateDrawerOpen ? (
-        <aside className="board-asset-drawer board-template-drawer" aria-label="画布模板">
-          <header className="board-asset-head">
-            <div>
-              <strong>画布模板</strong>
-              <span>对话和分镜生成的模板 · 导入后不会自动生成</span>
-            </div>
-            <button type="button" className="icon-button compact" aria-label="关闭模板抽屉" onClick={() => setTemplateDrawerOpen(false)}>
-              <X size={14} />
-            </button>
-          </header>
-          <div className="board-template-list">
-            {templatesLoading ? (
-              <p className="board-asset-empty"><LoaderCircle size={12} className="spin" />正在读取模板…</p>
-            ) : null}
-            {!templatesLoading && templates.map((template) => (
-              <article key={template.id} className="board-template-row">
-                <span className="board-template-icon"><LayoutTemplate size={15} /></span>
-                <div className="board-template-main">
-                  {renamingTemplateId === template.id ? (
-                    <input
-                      value={templateNameDraft}
-                      autoFocus
-                      maxLength={80}
-                      aria-label="模板名称"
-                      onChange={(event) => setTemplateNameDraft(event.target.value)}
-                      onBlur={() => void commitTemplateRename(template)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.currentTarget.blur();
-                        if (event.key === "Escape") {
-                          setRenamingTemplateId(null);
-                          event.currentTarget.blur();
-                        }
-                      }}
-                    />
-                  ) : (
-                    <strong
-                      title={`${template.name}${template.description ? `\n${template.description}` : ""}`}
-                      onDoubleClick={() => {
-                        setRenamingTemplateId(template.id);
-                        setTemplateNameDraft(template.name);
-                      }}
-                    >
-                      {template.name}
-                    </strong>
-                  )}
-                  <span>
-                    {template.source === "storyboard" ? "分镜" : template.source === "import" ? "导入" : "对话"}
-                    {" · "}{template.nodeCount} 节点
-                    {template.groupCount ? ` · ${template.groupCount} 分组` : ""}
-                  </span>
-                  <time>{historyTime(template.createdAt)}</time>
-                </div>
-                <div className="board-template-actions">
-                  <button
-                    type="button"
-                    className="icon-button compact"
-                    title="重命名模板"
-                    aria-label="重命名模板"
-                    onClick={() => {
-                      setRenamingTemplateId(template.id);
-                      setTemplateNameDraft(template.name);
-                    }}
-                  >
-                    <Pencil size={11} />
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button compact danger"
-                    title="删除模板"
-                    aria-label="删除模板"
-                    onClick={() => void removeTemplate(template)}
-                  >
-                    <Trash2 size={11} />
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button compact"
-                    disabled={importingTemplateId !== null}
-                    onClick={() => void importTemplate(template)}
-                  >
-                    {importingTemplateId === template.id ? <LoaderCircle size={11} className="spin" /> : null}
-                    放入画布
-                  </button>
-                </div>
-              </article>
-            ))}
-            {!templatesLoading && !templates.length ? (
-              <p className="board-asset-empty">
-                还没有模板。在对话里让助手「做一个画布模板」或「拆成分镜」，生成后点工具卡上的「导入无限画布」；也可以在这里再次导入。
-              </p>
-            ) : null}
-          </div>
-          <footer className="board-template-foot">
-            <span>旧分镜入口已隐藏，可以迁移成画布继续使用；原数据不会删除。</span>
-            <div className="board-template-foot-actions">
-              <button
-                type="button"
-                className="secondary-button compact"
-                disabled={migratingStoryboards || cleaningStoryboards}
-                onClick={() => void migrateStoryboards()}
-              >
-                {migratingStoryboards ? <LoaderCircle size={11} className="spin" /> : <History size={11} />}
-                迁移旧分镜
-              </button>
-              <button
-                type="button"
-                className="secondary-button compact is-danger"
-                disabled={migratingStoryboards || cleaningStoryboards}
-                onClick={() => void cleanupStoryboards()}
-              >
-                {cleaningStoryboards ? <LoaderCircle size={11} className="spin" /> : <Trash2 size={11} />}
-                删除旧分镜数据
-              </button>
-            </div>
-          </footer>
-        </aside>
-      ) : null}
+      <BoardTemplateDrawer
+        open={templateDrawerOpen}
+        onClose={() => setTemplateDrawerOpen(false)}
+        onImport={board.importTemplate}
+        onBoardsChanged={refreshBoards}
+        onToast={onToast}
+      />
 
-      {historyOpen ? (
-        <aside className="board-asset-drawer board-history-drawer" aria-label="创作历史">
-          <header className="board-asset-head">
-            <div>
-              <strong>创作历史</strong>
-              <span>{historyEntries.length} 个版本 · 最多保留 50 个</span>
-            </div>
-            <button type="button" className="icon-button compact" aria-label="关闭创作历史" onClick={() => setHistoryOpen(false)}>
-              <X size={14} />
-            </button>
-          </header>
-          <div className="board-history-list">
-            {historyLoading ? (
-              <p className="board-asset-empty"><LoaderCircle size={12} className="spin" />正在读取历史…</p>
-            ) : null}
-            {!historyLoading && historyEntries.map((entry) => (
-              <article key={entry.version} className={`board-history-row ${entry.current ? "is-current" : ""}`}>
-                <div className="board-history-main">
-                  <div>
-                    <strong>版本 {entry.version}</strong>
-                    {entry.current ? <em>当前</em> : null}
-                  </div>
-                  <span>{historyReasonLabel(entry.reason)}</span>
-                  <time>{historyTime(entry.createdAt)}</time>
-                </div>
-                {entry.current ? null : (
-                  <button
-                    type="button"
-                    className="secondary-button compact"
-                    disabled={restoringVersion !== null}
-                    onClick={() => void restoreHistory(entry.version)}
-                  >
-                    {restoringVersion === entry.version ? <LoaderCircle size={11} className="spin" /> : null}
-                    恢复
-                  </button>
-                )}
-              </article>
-            ))}
-            {!historyLoading && !historyEntries.length ? (
-              <p className="board-asset-empty">还没有历史版本。第一次修改后这里会出现快照。</p>
-            ) : null}
-          </div>
-        </aside>
+      {currentId ? (
+        <BoardHistoryDrawer
+          key={currentId}
+          open={historyOpen}
+          boardId={currentId}
+          onClose={() => setHistoryBoardId(null)}
+          onRestore={board.restoreVersion}
+          onToast={onToast}
+        />
       ) : null}
 
       {versionNodeId && currentId ? <BoardNodeVersions boardId={currentId} nodeId={versionNodeId} onClose={() => setVersionNodeId(null)} onApply={async (task, asset) => {

@@ -217,6 +217,37 @@
 - 新增跨入口回归 `tests/presentation-cross-entry.test.ts`（H01–H10）：生成 → 修改 → 切换任务 → 补做 → 检查 → 发布。全量测试 114 文件 / 856 项通过，TypeScript 双配置检查通过。
 - 范围口径：目前是「可扩展的共同底座」，共用文件管理、候选发布与版本管理；Word / Excel 复用该底座，但不宣称具备 PPT 同等完整的契约核验能力。
 
+## v2.3.7 — 2026-11-11
+
+本轮以架构收口为主：把几个两千行上下的巨型文件拆成职责清晰的模块，顺手修掉图片/视频工作台的几处细节。对外接口与交互行为保持不变。
+
+### 服务端模块化
+
+- `app.ts` 2011 → 173 行：路由抽成 `routes/*`（canvas / conversations / documents / generations / channels / assets / storyboards / files / uploads / http / channel-config），中间件顺序、`chatThreadOnly` 守卫、错误处理保持原位；拆分前后 `/api/*` 路径逐条比对为 97 : 97，无增无漏。
+- `agent.ts` 1792 → 590 行：拆出 native / legacy 两套 turn 流程，以及 recovery、confirmation、native-budget、media-checkpoint；`agent-tools` 按图片 / 视频 / 音频 / 素材 / 公共分文件。
+- `db.ts` 改为仓储门面：新增 `db-tasks`、`db-conversations`、`db-conversation-messages`、`db-documents`、`db-storyboards`、`db-assets`、`db-config`、`db-canvas-templates`、`db-row`。
+- `board.ts` 1328 → 353 行：画布生成拆成 `board-generation-{text,image,video,audio,media-node,shared}`；`chat-tools/documents.ts` 981 → 183 行，拆成 `document-{tool-schema,text,presentation,office-edit,workspace,result}`。
+- `tasks.ts` 拆出 `task-input-files` / `task-output-files` / `task-media`。
+- 前端抽出 `useConversationStream`（会话流与重连）与 `useBoardDocument`（乐观编辑 + 版本化存盘队列）。
+
+### 图片工作台
+
+- `GenerateView` 拆分：提示词作曲区、结果工作区与样式抽成 `ImagePromptComposer` / `ImageResultWorkspace` / `image-workbench.css`，与视频页共用 `PromptEditor`、`VideoMentionPanel`。
+
+### 画布
+
+- `BoardWorkspace` 拆出 `BoardHistoryDrawer`、`BoardTemplateDrawer`；版本历史的文案与时间格式化抽到 `board-history.ts`。
+
+### 视频页细节
+
+- 没有素材时不再给文字预留 148px 左栏（只在该留时才留），单张素材时让缩略图占位、不再显示大虚线添加格。
+- 提示词里 `@` 插入素材受最大长度限制，超长直接不写入，避免撑爆输入上限。
+- `PromptEditor` 的 `onFocusChange` 改为可选，方便复用到图片工作台。
+
+### 测试
+
+- 新增 `tests/image-workbench-ui.test.tsx` 与画布抽屉相关回归；全量 127 文件 / 973 项通过。
+
 ## v2.3.6 — 2026-11-10
 
 视频生成页整体改版（共十八轮迭代，明细见上方各轮记录）：一页式工作台 + 参考内容排 + contenteditable 提示词。

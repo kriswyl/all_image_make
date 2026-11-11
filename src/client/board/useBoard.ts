@@ -724,12 +724,14 @@ export function useBoard(
   }, [applyLocal]);
 
   const importTemplate = useCallback(async (templateId: string) => {
-    if (!boardIdRef.current || !viewRef.current) return null;
+    const id = boardIdRef.current;
+    if (!id || viewRef.current?.id !== id) return null;
     // 模板会写进当前文档；先把本地改动落库再导入，避免冲突把其中一边冲掉
     await flush();
-    if (!viewRef.current) return null;
+    if (boardIdRef.current !== id || viewRef.current?.id !== id) return null;
     try {
-      const result = await api.importTemplateToBoard(boardIdRef.current, templateId);
+      const result = await api.importTemplateToBoard(id, templateId);
+      if (boardIdRef.current !== id) return null;
       adoptSavedView(result.board, true);
       return result.addedNodes;
     } catch (error) {
@@ -763,12 +765,15 @@ export function useBoard(
   }, [flush, setView]);
 
   const restoreVersion = useCallback(async (version: number) => {
-    if (!boardIdRef.current || !viewRef.current) return;
+    const id = boardIdRef.current;
+    if (!id || viewRef.current?.id !== id) return;
     // 先把当前未保存的改动落库，恢复操作才有一条可撤销的“恢复前”快照
     await flush();
-    if (!viewRef.current) return;
+    const current = viewRef.current;
+    if (boardIdRef.current !== id || current?.id !== id) return;
     try {
-      const next = await api.restoreBoardVersion(boardIdRef.current, version, viewRef.current.version);
+      const next = await api.restoreBoardVersion(id, version, current.version);
+      if (boardIdRef.current !== id) return;
       setView(next);
       toastRef.current("success", `已恢复到版本 ${version}`);
     } catch (error) {

@@ -31,7 +31,7 @@ export interface PromptEditorProps {
   placeholder: string;
   maxLength?: number;
   onChange: (next: string) => void;
-  onFocusChange: (focused: boolean) => void;
+  onFocusChange?: (focused: boolean) => void;
   /** 在输入框里敲下一个 @：把面板锚到光标处 */
   onTypedAt: (rect: PanelAnchorRect | null) => void;
   onOpenItem: (item: MentionItem, rect: PanelAnchorRect) => void;
@@ -304,11 +304,12 @@ export function PromptEditor(props: PromptEditorProps) {
       const from = text.slice(0, start).endsWith("@") ? start - 1 : start;
       const token = `@${label}`;
       const next = `${text.slice(0, from)}${token} ${text.slice(end)}`;
+      if (next.length > (props.maxLength ?? 20000)) return;
       element.focus();
       changeRef.current(next);
       paint(next, from + token.length + 1);
     },
-  }), [paint]);
+  }), [paint, props.maxLength]);
 
   /** 输入后统一收口：读文本、必要时重排胶囊、必要时弹 @ 面板 */
   function sync(options: { typed?: boolean } = {}) {
@@ -352,8 +353,8 @@ export function PromptEditor(props: PromptEditorProps) {
       data-placeholder={props.placeholder}
       spellCheck={false}
       onInput={() => sync({ typed: true })}
-      onFocus={() => props.onFocusChange(true)}
-      onBlur={() => props.onFocusChange(false)}
+      onFocus={() => props.onFocusChange?.(true)}
+      onBlur={() => props.onFocusChange?.(false)}
       onCompositionStart={() => { composingRef.current = true; }}
       onCompositionEnd={() => { composingRef.current = false; sync(); }}
       onKeyDown={(event) => {

@@ -168,8 +168,10 @@ html[data-theme="dark"] .vstudio-page {
   --asset-gutter: 148px;
 }
 .vstudio-body > .vstudio-prompt {
-  padding-left: var(--asset-gutter);
   min-height: 176px;
+}
+.vstudio-body.has-assets > .vstudio-prompt {
+  padding-left: var(--asset-gutter);
 }
 /* 输入框高度写死：contenteditable 内容再多也只在内部滚，不能把创作框撑高
    把下方的创作记录压到被截断。上传素材、敲长提示词、折叠/展开都一样高。 */

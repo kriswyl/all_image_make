@@ -114,7 +114,11 @@ describe("无限画布 Agent 端到端", () => {
     const base = `http://127.0.0.1:${(mock.address() as AddressInfo).port}`;
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "board-generation-confirm-"));
     const { app, context } = createApp({ dataDir });
-    cleanups.push(async () => { context.db.close(); await fs.rm(dataDir, { recursive: true, force: true }); });
+    cleanups.push(async () => {
+      context.agent.dispose();
+      context.db.close();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
     for (const [name, adapterType, model, endpoint] of [["brain", "openai-chat", "brain-model", "/v1/chat/completions"], ["image", "openai-images", "image-model", "/v1/images/generations"]]) {
       await request(app).post("/api/channels").send({ name, baseUrl: base, adapterType, authType: "none", authHeaderName: "", secretEnv: "", endpoint, models: [model], allowPrivateNetwork: true, enabled: true }).expect(201);
     }
@@ -129,8 +133,15 @@ describe("无限画布 Agent 端到端", () => {
     expect(confirmation?.confirm.message).toContain("1 个图片生成任务");
     expect(context.db.getBoardRecord(board.id)!.doc.nodes[0]).toMatchObject({ status: "empty" });
     await request(app).post(`/api/conversations/${board.threadId}/confirm`).send({ messageId: confirmation.id, decision: "approve" }).expect(200);
-    for (let i = 0; i < 100; i++) { await new Promise((resolve) => setTimeout(resolve, 50)); view = (await request(app).get(`/api/conversations/${board.threadId}`).expect(200)).body.data; if (view.messages.some((item: any) => item.toolName === "board_generate" && item.toolResult?.summary?.includes("任务已完成"))) break; }
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      view = (await request(app).get(`/api/conversations/${board.threadId}`).expect(200)).body.data;
+      if (!context.agent.isRunning(board.threadId)
+        && view.messages.some((item: any) => item.role === "assistant" && item.content === "图片任务已完成。")) break;
+    }
     expect(view.messages.some((item: any) => item.toolName === "board_generate" && item.toolResult?.summary?.includes("任务已完成"))).toBe(true);
+    expect(view.messages.some((item: any) => item.role === "assistant" && item.content === "图片任务已完成。")).toBe(true);
+    expect(context.agent.isRunning(board.threadId)).toBe(false);
   });
 
   it("助手主动读取指定节点的图片，明确标注未能读取的节点", async () => {
