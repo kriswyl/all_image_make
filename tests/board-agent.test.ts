@@ -169,6 +169,38 @@ describe("无限画布 Agent 工具", () => {
     expect(events.some((event) => event.type === "board_batch_progress")).toBe(true);
   });
 
+  it("停止批量生成时保留已提交任务，跳过剩余节点", async () => {
+    const { context } = await tempApp();
+    const baseUrl = await mockImageServer();
+    addChannel(context.db, { name: "brain", baseUrl: "http://127.0.0.1:9", adapterType: "openai-chat", models: ["test-chat"] });
+    addChannel(context.db, { name: "image", baseUrl, adapterType: "openai-images", models: ["mock-image"] });
+    const board = createBoard(context.db, { title: "停止批量生成" });
+    const ctx = toolContext(context, board.threadId);
+    const applied = await runAgentTool("board_apply", {
+      ops: [
+        { op: "add_node", tempId: "a", type: "image", x: 0, y: 0, text: "猫" },
+        { op: "add_node", tempId: "b", type: "image", x: 400, y: 0, text: "狗" },
+      ],
+    }, ctx);
+    expect(applied.result.ok, applied.result.summary).toBe(true);
+
+    const controller = new AbortController();
+    const result = await runAgentTool("board_generate_batch", { nodeRefs: ["n1", "n2"] }, {
+      ...ctx,
+      signal: controller.signal,
+      emit: (event) => {
+        if (event.type === "board_batch_progress") controller.abort();
+      },
+    });
+    const taskIds = [...new Set(context.db.listBoardTasksByBoard(board.id).map((row) => row.taskId))];
+    expect(taskIds).toHaveLength(1);
+    expect(result.result).toMatchObject({ ok: true, data: { taskIds } });
+    expect(result.result.summary).toContain("批量提交 1/2");
+    expect(result.result.summary).toContain("用户中止后续提交");
+    const task = await context.runner.waitFor(taskIds[0]!, { timeoutMs: 5_000 });
+    expect(task.status).toBe("succeeded");
+  });
+
   it("board_apply 一次建节点 + 连线，返回 tempId 到真实 ref 的映射", async () => {
     const { context } = await tempApp();
     addChannel(context.db, { name: "brain", baseUrl: "http://127.0.0.1:9", adapterType: "openai-chat", models: ["test-chat"] });

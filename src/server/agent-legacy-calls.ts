@@ -5,7 +5,9 @@ import { boardApplySchema, boardGenerateSchema } from "../shared/board-ops.js";
 import { buildConfirmPreview, shouldConfirm } from "./agent-confirm.js";
 import { MAX_SESSION_TASKS } from "./agent-constants.js";
 import { asString } from "./agent-plan.js";
-import { resolveVideoSelection, TOOL_SCHEMAS, type ToolContext, type VideoSelection } from "./agent-tools.js";
+import { BOARD_TOOL_SCHEMAS } from "./agent-tools/board-schema.js";
+import type { ToolContext } from "./agent-tools/shared.js";
+import { resolveVideoSelection, type VideoSelection } from "./agent-tools/video.js";
 import { previewBoardOps } from "./board-agent.js";
 import { inspectBoardGeneration } from "./board-assistant.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
@@ -66,7 +68,7 @@ export function previewLegacyConfirmation(
     return { message: `将在节点 ${check.ref} 提交 1 个${check.kind === "video" ? "视频" : check.kind === "audio" ? "音频" : "图片"}生成任务${count > 1 ? `，请求 ${count} 张结果` : ""}；模型：${check.model}。${check.warnings.length ? `注意：${check.warnings.join("；")}。` : ""}实际费用由渠道决定。`, summary: `${check.ref} · 1 个任务` };
   })() : null;
   const batchGeneration = board && calls.length === 1 && calls[0]!.tool === "board_generate_batch" ? (() => {
-    const args = TOOL_SCHEMAS.board_generate_batch.safeParse(calls[0]!.args);
+    const args = BOARD_TOOL_SCHEMAS.board_generate_batch.safeParse(calls[0]!.args);
     if (!args.success) return null;
     const checks = inspectBoardGeneration(db, board, buildCapabilityAliases(db.listChannels()), defaultAliases(), args.data.nodeRefs);
     if (checks.some((check) => check.errors.length || check.kind === "text")) return null;
@@ -79,7 +81,7 @@ export function previewLegacyConfirmation(
     return { message: `将提交 ${checks.length} 个生成任务：${lines}。实际费用由渠道决定，已生成节点可能被覆盖。`, summary: `${checks.length} 个节点 · ${checks.length} 个任务` };
   })() : null;
   const projectUpdate = board && calls.length === 1 && calls[0]!.tool === "board_storyboard_update" ? (() => {
-    const input = TOOL_SCHEMAS.board_storyboard_update.safeParse(calls[0]!.args);
+    const input = BOARD_TOOL_SCHEMAS.board_storyboard_update.safeParse(calls[0]!.args);
     if (!input.success) return null;
     const node = board.doc.nodes.find((item) => item.ref === input.data.nodeRef);
     const project = node?.storyboard && db.getStoryboardProject(node.storyboard.projectId);

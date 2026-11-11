@@ -8,7 +8,8 @@ import type { BrainContentPart } from "./brain.js";
 import type { AppDatabase, AssetRow } from "./db.js";
 import { assetVisionParts } from "./vision.js";
 import { modelFingerprint, readVisionUnsupported } from "./capabilities.js";
-import { resolveImageRefs, TOOL_SCHEMAS } from "./agent-tools.js";
+import { resolveImageRefs } from "./agent-tools/assets.js";
+import { BOARD_TOOL_SCHEMAS } from "./agent-tools/board-schema.js";
 import { MAX_VISION_IMAGES } from "./agent-constants.js";
 import { assetRef, type AgentPlan, type Conversation } from "../shared/agent-types.js";
 import type { BuiltContext } from "./agent-context.js";
@@ -110,7 +111,7 @@ export async function observeBoardImages(
   built: BuiltContext,
 ): Promise<BuiltContext> {
   const board = conversation.boardId ? db.getBoardRecord(conversation.boardId) : null;
-  const parsed = TOOL_SCHEMAS.board_view_images.safeParse(plan.args);
+  const parsed = BOARD_TOOL_SCHEMAS.board_view_images.safeParse(plan.args);
   const refs = parsed.success ? [...new Set(parsed.data.nodeRefs)].slice(0, MAX_VISION_IMAGES) : [];
   const parts: BrainContentPart[] = [];
   const seen: string[] = [];
