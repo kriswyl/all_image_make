@@ -84,10 +84,13 @@ it("文档目录可切换，旧记录按 base_dir 读取，版本清理保留最
       const name = `v${index + 1}.pptx`;
       await fs.writeFile(path.join(folder, name), `v${index + 1}`);
       const root = files[0];
-      const saved = db.addWorkspaceDocument(chat.id, name, name.length, undefined, undefined, custom, root ? { familyId: root, parentId: files[files.length - 1] } : undefined);
+      const saved = db.addWorkspaceDocument(chat.id, name, name.length, undefined, undefined, undefined, root ? { familyId: root, parentId: files[files.length - 1] } : undefined);
+      expect(saved.baseDir).toBe(custom);
       files.push(saved.id);
       expect(readWorkspaceFile(db, chat.id, saved.id).bytes.toString()).toBe(`v${index + 1}`);
     }
+    db.resetDocumentsDir();
+    expect(readWorkspaceFile(db, chat.id, files[0]!).bytes.toString()).toBe("v1");
     expect(db.listWorkspaceDocuments(chat.id)).toHaveLength(4);
     db.pruneWorkspaceFamily(chat.id, files[0]!, 2);
     expect(db.listWorkspaceDocuments(chat.id)).toHaveLength(3);

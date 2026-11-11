@@ -1,5 +1,5 @@
 /**
- * 看图（view_images）：把指定图片的缩略图附到下一轮大脑上下文。
+ * 把对话或画布中指定图片的缩略图附到下一次模型调用。
  *
  * 不生成、不落库；只读数据库和缩略图。单独拆出来是因为它和「生成执行」
  * 是两条完全不同的链路，混在一个类里时很难单独测试。
@@ -8,7 +8,7 @@ import type { BrainContentPart } from "./brain.js";
 import type { AppDatabase, AssetRow } from "./db.js";
 import { assetVisionParts } from "./vision.js";
 import { modelFingerprint, readVisionUnsupported } from "./capabilities.js";
-import { resolveImageRefs } from "./agent-tools.js";
+import { resolveImageRefs, TOOL_SCHEMAS } from "./agent-tools.js";
 import { MAX_VISION_IMAGES } from "./agent-constants.js";
 import { assetRef, type AgentPlan, type Conversation } from "../shared/agent-types.js";
 import type { BuiltContext } from "./agent-context.js";
@@ -99,5 +99,63 @@ export async function observeImages(
       { role: "user", content: parts },
     ],
     visionAttached: built.visionAttached || attached,
+  };
+}
+
+/** 把画布节点和本会话可访问的素材图片附到临时上下文。 */
+export async function observeBoardImages(
+  db: AppDatabase,
+  conversation: Conversation,
+  plan: AgentPlan,
+  built: BuiltContext,
+): Promise<BuiltContext> {
+  const board = conversation.boardId ? db.getBoardRecord(conversation.boardId) : null;
+  const parsed = TOOL_SCHEMAS.board_view_images.safeParse(plan.args);
+  const refs = parsed.success ? [...new Set(parsed.data.nodeRefs)].slice(0, MAX_VISION_IMAGES) : [];
+  const parts: BrainContentPart[] = [];
+  const seen: string[] = [];
+  const missed: string[] = [];
+  if (!parsed.success || !board || !conversation.visionEnabled || isVisionBlocked(db, conversation)) {
+    parts.push({ type: "text", text: "[画布看图失败] 参数无效、当前画布不存在或模型视觉不可用。没有看过任何图片，不能声称看过。" });
+  } else {
+    let remaining = MAX_VISION_IMAGES;
+    for (const ref of refs) {
+      if (remaining <= 0) { missed.push(`${ref}（附图已达上限）`); continue; }
+      const node = board.doc.nodes.find((item) => item.ref === ref);
+      const asset = node?.type === "image" && node.assetId ? db.getAsset(node.assetId) : null;
+      const view = asset
+        ? await assetVisionParts(db, asset, `画布图片 ${ref}「${node?.title ?? ""}」`, Math.max(1, Math.min(remaining, refs.length === 1 ? 6 : 2)))
+        : null;
+      if (!view?.loaded) { missed.push(ref); continue; }
+      parts.push(...view.parts);
+      remaining -= view.parts.filter((part) => part.type === "image_url").length;
+      seen.push(ref);
+    }
+    if (parsed.success) {
+      const taskIds = new Set(db.listBoardTasksByBoard(board.id).map((item) => item.taskId));
+      for (const id of [...new Set(parsed.data.assetIds)]) {
+        if (remaining <= 0) { missed.push(`素材 ${id}（附图已达上限）`); continue; }
+        const asset = db.getAsset(id);
+        const task = asset && db.getTaskRow(asset.taskId);
+        const isPublic = task?.libraryScope === "public" || (task?.libraryScope === "legacy" && db.listLibraryTaskViews().some((item) => item.id === task.id));
+        const permitted = asset && (isPublic || taskIds.has(asset.taskId) || db.findBoardAssetRefs(id).some((item) => item.boardId === board.id));
+        const view = permitted && asset?.mimeType.startsWith("image/")
+          ? await assetVisionParts(db, asset, `素材 ${id}（生成历史或公共素材）`, Math.max(1, Math.min(remaining, 4)))
+          : null;
+        if (!view?.loaded) { missed.push(`素材 ${id}`); continue; }
+        parts.push(...view.parts);
+        remaining -= view.parts.filter((part) => part.type === "image_url").length;
+        seen.push(`素材 ${id}`);
+      }
+    }
+    parts.unshift({ type: "text", text: `[画布看图] 实际附图：${seen.join("、") || "无"}；未能读取：${missed.join("、") || "无"}。只评价实际附图，未读取或未选中的图片不能声称看过。` });
+  }
+  return {
+    messages: [
+      ...built.messages,
+      { role: "assistant", content: JSON.stringify({ tool: plan.tool, args: plan.args }) },
+      { role: "user", content: parts },
+    ],
+    visionAttached: built.visionAttached || seen.length > 0,
   };
 }

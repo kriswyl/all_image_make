@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Jimp } from "jimp";
 import type { PresentationVisualCheck } from "../shared/presentation-report.js";
-import { readWorkspaceFile } from "./chat-tools/documents.js";
+import { readWorkspaceFile } from "./chat-tools/document-workspace.js";
 import type { AppDatabase } from "./db.js";
 import { readPresentationProject } from "./presentation-project.js";
 import { renderWithLocalWps } from "./wps-auto-render.js";

@@ -5,7 +5,7 @@
  * - `applyBoardOps`：在文档副本上执行一批 op，校验通过后只保存一次；
  * - `previewBoardOps`：在确认卡上提前算出「会删掉什么」。
  *
- * 这里不调用生成；生成在 board.ts 的 generateBoardConfig。
+ * 生成入口在 board-generation.ts 的 generateBoardConfig。
  */
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";

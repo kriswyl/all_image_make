@@ -102,6 +102,30 @@ it("B02：publish 是唯一转为 published 的入口，正式版本号在发布
   expect(result2.familyId).toBe(result.familyId);
 });
 
+it("发布日志写入失败时回滚候选状态和版本登记", async () => {
+  const db = await makeDb();
+  const conversationId = makeConversation(db);
+  const original = createCandidateDocument(db, {
+    conversationId, name: "成品", ext: "txt", bytes: Buffer.from("original"), operationId: "publish-original",
+  });
+  publishDocument(db, {
+    conversationId, candidateId: original.id, operationId: original.operationId,
+    expectedCandidateSha256: original.sha256, validationId: null, disposition: "ready",
+  });
+  // 模拟成品记录已移除，但保留了原发布日志。重复发布只能在日志写入时发现冲突。
+  db.deleteWorkspaceDocument(conversationId, original.id);
+  const next = createCandidateDocument(db, {
+    conversationId, name: "待发布", ext: "txt", bytes: Buffer.from("next"), operationId: "publish-next",
+  });
+  expect(() => db.publishCandidateDocument({
+    conversationId, candidateId: next.id, operationId: original.operationId,
+    log: { candidateSha256: next.sha256, targetName: "待发布.txt", validationId: null, disposition: "ready" },
+  })).toThrow(/document_publish_log/);
+  expect(db.getWorkspaceDocument(conversationId, next.id)).toBeNull();
+  expect(db.getCandidateByOperation(conversationId, next.operationId)?.meta).toEqual(next.meta);
+  expect(db.getPublishLog(conversationId, original.operationId)?.publishedId).toBe(original.id);
+});
+
 it("B03：候选与正式发布幂等键分离，晚到结果不刷版本", async () => {
   const db = await makeDb();
   const cid = makeConversation(db);

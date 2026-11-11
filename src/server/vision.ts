@@ -149,7 +149,7 @@ async function decode(bytes: Buffer) {
  * 写进 `assets.thumb_path`（相对 thumbs/ 的文件名）而不是绝对路径：
  * 数据目录被整个搬走时缩略图要跟着走。
  */
-export async function writeThumbnail(db: AppDatabase, assetId: string, source: Buffer): Promise<string | null> {
+export async function writeThumbnail(db: Pick<AppDatabase, "thumbsDir">, assetId: string, source: Buffer): Promise<string | null> {
   // Jimp 不认 SVG；没有缩略图时前端直接显示原文件（<img> 能渲染 SVG），不做假占位图。
   if (isSvgBytes(source)) return null;
   const image = await decode(source);

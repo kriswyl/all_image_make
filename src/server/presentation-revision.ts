@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AppDatabase } from "./db.js";
 import { AppError } from "./tasks.js";
-import { readWorkspaceFile, saveWorkspaceDocument } from "./chat-tools/documents.js";
+import { readWorkspaceFile, saveWorkspaceDocument } from "./chat-tools/document-workspace.js";
 import { renderAiPresentation } from "./mind-document.js";
 import { checkPresentation } from "./presentation-check.js";
 import { checkPresentationContract, type RequirementVerdict } from "./presentation-contract-check.js";

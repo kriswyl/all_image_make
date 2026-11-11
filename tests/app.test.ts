@@ -21,6 +21,32 @@ afterEach(async () => {
 });
 
 describe("generation API", () => {
+  it("任务写库失败时清理已保存的参考图和蒙版", async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "task-input-rollback-"));
+    const { context } = createApp({ dataDir });
+    cleanups.push(async () => {
+      context.agent.dispose();
+      context.db.close();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
+    const channel = context.db.saveChannel({
+      name: "Mock", baseUrl: "https://mock.invalid", adapterType: "openai-images", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "", models: ["mock-image"], allowPrivateNetwork: false, enabled: true,
+    });
+    const writeError = new Error("任务记录写入失败");
+    const insert = vi.spyOn(context.db, "createTask").mockImplementation(() => { throw writeError; });
+    const bytes = Buffer.from(pngBase64, "base64");
+    try {
+      await expect(context.runner.create(
+        { channelId: channel.id, model: "mock-image", prompt: "局部编辑" },
+        [{ bytes, mimeType: "image/png", fileName: "source.png" }],
+        { bytes, mimeType: "image/png", fileName: "mask.png" },
+      )).rejects.toBe(writeError);
+      expect(insert).toHaveBeenCalledOnce();
+      expect(await fs.readdir(context.db.inputsDir)).toEqual([]);
+    } finally { insert.mockRestore(); }
+  });
+
   it("工作台 SSE 推送公共任务变化，不泄露会话私有任务，并可在重连后补查", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "task-stream-"));
     const { app, context } = createApp({ dataDir });

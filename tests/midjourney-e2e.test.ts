@@ -143,7 +143,11 @@ describe("Midjourney 对话结果", () => {
     const mock = await startMock();
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "chatcanvas-mj-chat-"));
     const { app, context } = createApp({ dataDir });
-    cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    cleanups.push(() => {
+      context.agent.dispose();
+      context.db.close();
+      return fs.rm(dataDir, { recursive: true, force: true });
+    });
 
     const brain = await request(app).post("/api/channels").send({
       name: "Brain", baseUrl: mock.origin, adapterType: "openai-chat", authType: "none",
@@ -170,9 +174,11 @@ describe("Midjourney 对话结果", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       const view = (await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data as { messages: ToolRow[] };
       row = view.messages.find((item) => item.role === "tool" && item.status === "ok") ?? null;
-      if (row) break;
+      // 工具结果已落库时，Agent 可能还在请求模型生成收尾回复。
+      if (row && !context.agent.isRunning(conversationId)) break;
     }
 
+    expect(context.agent.isRunning(conversationId)).toBe(false);
     expect(row).toBeTruthy();
     expect(row!.toolResult?.data?.midjourneyButtons).toHaveLength(3);
     expect(row!.toolResult?.data?.midjourneyTaskId).toBeTruthy();

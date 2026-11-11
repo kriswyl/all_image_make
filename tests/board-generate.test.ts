@@ -4,8 +4,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
+import { generateBoardConfig } from "../src/server/board-generation";
 import type { BoardDoc, BoardNode } from "../src/shared/board";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -108,6 +109,25 @@ async function waitForTask(app: ReturnType<typeof createApp>["app"], taskId: str
 }
 
 describe("无限画布配置节点生成", () => {
+  it("保存结果占位文档失败时取消任务并保留原画布版本", async () => {
+    const { app, context } = await tempApp();
+    addMockChannel(context.db, await mockImageServer());
+    const { board, config } = await createBoardWithText(app);
+    const failure = new Error("画布快照保存失败");
+    const save = vi.spyOn(context.db, "saveBoardSnapshot").mockImplementationOnce(() => { throw failure; });
+    const cancel = vi.spyOn(context.runner, "cancel");
+    try {
+      await expect(generateBoardConfig({
+        db: context.db, runner: context.runner, keys: context.sessionKeys, boardId: board.id, nodeId: config.id,
+      })).rejects.toBe(failure);
+      expect(cancel).toHaveBeenCalledOnce();
+      const taskId = cancel.mock.calls[0]![0];
+      expect(context.db.getTaskRow(taskId)?.status).toBe("cancelled");
+      expect(context.db.listBoardTasksByTask(taskId)).toEqual([]);
+      expect(context.db.getBoardRecord(board.id)).toMatchObject({ version: board.version, doc: board.doc });
+    } finally { save.mockRestore(); cancel.mockRestore(); }
+  });
+
   it("节点版本对比只返回对应节点的生成结果", async () => {
     const { app, context } = await tempApp();
     const { board, doc } = await createBoardWithText(app);

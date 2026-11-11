@@ -1,18 +1,13 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import crypto from "node:crypto";
-import { DEFAULT_IMAGE_SIZE, MAX_MASK_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, normalizeImageSize } from "../shared/types.js";
-import type { GenerationInput, MaskImageInput, ReferenceImageInput, Task } from "../shared/types.js";
-import type { AppDatabase, DbChannel, TaskRow } from "./db.js";
+import { DEFAULT_IMAGE_SIZE, normalizeImageSize } from "../shared/types.js";
+import type { GenerationInput, Task } from "../shared/types.js";
+import type { AppDatabase, DbChannel } from "./db.js";
+import type { TaskPatch, TaskRow } from "./db-tasks.js";
 import {
   RemoteApiError,
-  applyAuth,
   buildGenerationRequest,
-  extractAudioCandidates,
-  extractImageCandidates,
   requestForDiagnostic,
   sendPreparedRequest,
-  type ImageCandidate,
 } from "./adapters.js";
 import {
   asyncProviderSpec,
@@ -22,19 +17,17 @@ import {
   type AsyncProviderSpec,
   type AsyncResult,
 } from "./async-providers.js";
-import { joinEndpoint, redact, safeFetch, safeFileName } from "./security.js";
-import { detectImageMime, writeThumbnail } from "./vision.js";
+import { joinEndpoint, redact, safeFetch } from "./security.js";
 import type { KeyStore } from "./key-store.js";
 import { AppError } from "./app-error.js";
-import { uploadReferenceMedia, validateReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
-import { assertVideoModeRequest } from "./video-mode-guard.js";
+import { uploadReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
+import { TaskInputFiles, type MaskImageUpload, type ReferenceImageUpload, type StoredGenerationInput } from "./task-input-files.js";
+import { TaskOutputFiles } from "./task-output-files.js";
+
+export type { MaskImageUpload, ReferenceImageUpload } from "./task-input-files.js";
+export { audioExtension, audioExtensionForMime, extensionForMime, matchesImageSignature, videoExtensionForMime, wavDurationSeconds } from "./task-media.js";
 
 export { AppError } from "./app-error.js";
-
-const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
-// 参考图的张数和体积都住在 shared/types.ts（前端校验、上传出口、这里三处共用一份）
-const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
-const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
 
 /** 应用侧 15 MiB 字符预算，base64 约放大 4/3，原始素材约 11.25 MiB；不是上游硬限制。 */
 const MAX_INLINE_MEDIA_CHARS = 15 * 1024 * 1024;
@@ -69,44 +62,6 @@ export function resolveImageSize(
 }
 
 
-interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
-  relativePath: string;
-  byteSize: number;
-}
-
-interface StoredMaskImage {
-  fileName: string;
-  mimeType: "image/png";
-  relativePath: string;
-  byteSize: number;
-}
-
-interface StoredGenerationInput extends Omit<GenerationInput, "referenceImage" | "referenceImages" | "maskImage"> {
-  referenceImage?: StoredReferenceImage;
-  referenceImages?: StoredReferenceImage[];
-  maskImage?: StoredMaskImage;
-  /** 旧任务只有一段，读的时候和 referenceVideos 合并处理 */
-  referenceVideo?: { relativePath: string; mimeType: string; fileName: string };
-  /** Seedance 参考视频可以有多段（2.0 三段、2.5 十段） */
-  referenceVideos?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
-  /** Seedance 参考音频：和图床视频一样先落盘，提交前再上传换公网地址。 */
-  referenceAudio?: { relativePath: string; mimeType: string; fileName: string };
-  referenceAudios?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
-}
-
-export interface ReferenceImageUpload {
-  bytes: Buffer;
-  mimeType: ReferenceImageInput["mimeType"];
-  fileName: string;
-}
-
-/** 局部重绘蒙版的上传形态：和参考图一样按字节进、按相对路径落盘 */
-export interface MaskImageUpload {
-  bytes: Buffer;
-  mimeType: "image/png";
-  fileName: string;
-}
-
 /** 任务的终态。Agent 的 `waitFor` 和续跑都盯着这一份 */
 export const TERMINAL_TASK_STATUSES = ["succeeded", "failed", "cancelled", "expired"] as const;
 
@@ -121,6 +76,12 @@ export interface TaskEvent {
 
 export type TaskListener = (event: TaskEvent) => void;
 
+type TaskRunnerStore = Pick<AppDatabase,
+  | "assetsDir" | "inputsDir" | "thumbsDir" | "getChannel" | "getSetting"
+  | "createTask" | "getTaskRow" | "getTaskView" | "updateTask" | "listPendingTasks"
+  | "taskHasConversationReferences" | "insertAsset" | "insertDiagnostic"
+>;
+
 export class TaskRunner {
   private readonly running = new Set<string>();
   /**
@@ -131,7 +92,13 @@ export class TaskRunner {
    */
   private readonly listeners = new Set<TaskListener>();
 
-  constructor(private readonly db: AppDatabase, private readonly sessionKeys: KeyStore) {}
+  private readonly inputFiles: TaskInputFiles;
+  private readonly outputFiles: TaskOutputFiles;
+
+  constructor(private readonly db: TaskRunnerStore, private readonly sessionKeys: KeyStore) {
+    this.inputFiles = new TaskInputFiles(db.inputsDir);
+    this.outputFiles = new TaskOutputFiles(db, sessionKeys);
+  }
 
   onTaskEvent(listener: TaskListener): () => void {
     this.listeners.add(listener);
@@ -150,7 +117,7 @@ export class TaskRunner {
   }
 
   /** 写库 + 广播，所有状态变更都从这里走，事件就不会漏 */
-  private updateTask(taskId: string, patch: Parameters<AppDatabase["updateTask"]>[1]) {
+  private updateTask(taskId: string, patch: TaskPatch) {
     this.db.updateTask(taskId, patch);
     const task = this.db.getTaskView(taskId);
     if (task) this.emitEvent({ kind: isTerminalStatus(task.status) ? "finished" : "progress", task });
@@ -225,99 +192,15 @@ export class TaskRunner {
     // 补默认值要早于落库：落进 tasks.input 的那份才是重试 / 崩溃恢复会重放的
     input.imageSize = resolveImageSize(channel.adapterType, input.imageSize, this.db.getSetting("geminiImageSize"));
     const id = crypto.randomUUID();
-    const sources = uploads.length ? uploads : referenceInputs(input).map((image) => ({
-      bytes: Buffer.from(image.base64, "base64"), mimeType: image.mimeType, fileName: image.fileName,
-    }));
-    /**
-     * 蒙版可以来自 multipart 上传，也可以来自重试时 hydrate 回 base64 的 `input.maskImage`。
-     * 校验放在落盘之前：非法蒙版不该留下已经写好的参考图文件。
-     */
-    const maskSource: MaskImageUpload | undefined = maskUpload ?? (input.maskImage ? {
-      bytes: Buffer.from(input.maskImage.base64, "base64"),
-      mimeType: "image/png",
-      fileName: input.maskImage.fileName,
-    } : undefined);
-    if (maskSource) {
-      if (channel.adapterType !== "openai-images") {
-        throw new AppError("MASK_UNSUPPORTED_ADAPTER", "局部重绘只支持 OpenAI Images 协议的渠道（gpt / gpt-c 生图）", 400);
-      }
-      if (!sources.length) {
-        throw new AppError("MASK_REQUIRES_REFERENCE_IMAGE", "局部重绘需要先添加 1 张参考图作为底图", 400);
-      }
-      if (sources.length !== 1) {
-        throw new AppError("MASK_REFERENCE_COUNT", `局部重绘只支持 1 张参考图（当前 ${sources.length} 张）`, 400);
-      }
-      if (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png")) {
-        throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
-      }
-    }
-    const videoUploads: ReferenceVideoUpload[] = [
-      ...(referenceVideoUpload ? [referenceVideoUpload] : []),
-      ...(referenceVideoUploads ?? []),
-    ];
-    const audioUploads: ReferenceMediaUpload[] = [
-      ...(referenceAudioUpload ? [referenceAudioUpload] : []),
-      ...(referenceAudioUploads ?? []),
-    ];
-    if (videoUploads.length) {
-      for (const upload of videoUploads) validateReferenceMedia(upload, "video");
-      const wanMode = input.wanVideoMode;
-      const wan = channel.adapterType === "wan-video" && (wanMode === "reference" || wanMode === "video-edit" || wanMode === "video-extend");
-      const kling = channel.adapterType === "kling-video" && input.klingVideoMode === "motion-control";
-      // Seedance 只有「参考生视频」模式接受参考视频；首帧/首尾帧是图片槽位，塞视频会被上游忽略。
-      const seedance = channel.adapterType === "seedance-video" && input.seedanceVideoMode === "reference";
-      if (!wan && !kling && !seedance) throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道或模式不支持本地参考视频", 400);
-      if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
-      if (input.wanVideoMedia?.some((item) => item.type === "reference_video")
-        || input.klingVideoMedia?.some((item) => item.type === "video")
-        || input.seedanceVideoMedia?.some((item) => item.type === "video_url")) {
-        throw new AppError("REFERENCE_VIDEO_CONFLICT", "本地参考视频和视频链接只能选择一种", 400);
-      }
-    }
-    if (audioUploads.length) {
-      for (const upload of audioUploads) validateReferenceMedia(upload, "audio");
-      if (channel.adapterType !== "seedance-video" || input.seedanceVideoMode !== "reference") {
-        throw new AppError("REFERENCE_AUDIO_UNSUPPORTED", "只有 Seedance 的参考生视频支持本地参考音频", 400);
-      }
-      if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置素材上传服务，无法上传音频", 400);
-      if (input.seedanceVideoMedia?.some((item) => item.type === "audio_url")) {
-        throw new AppError("REFERENCE_AUDIO_CONFLICT", "本地参考音频和音频链接只能选择一种", 400);
-      }
-    }
-    // 模式与素材的服务端复核：界面只渲染渠道支持的模式，但接口不能只信界面
-    assertVideoModeRequest(channel, input, {
-      referenceVideoUploads: videoUploads.length,
-      referenceAudioUploads: audioUploads.length,
+    const stored = await this.inputFiles.persist(id, input, channel, {
+      images: uploads, mask: maskUpload,
+      videos: [...(referenceVideoUpload ? [referenceVideoUpload] : []), ...(referenceVideoUploads ?? [])],
+      audios: [...(referenceAudioUpload ? [referenceAudioUpload] : []), ...(referenceAudioUploads ?? [])],
     });
-    const storedInput = await this.persistInputImages(id, input, sources, maskSource);
-    // 每段一个文件：`-reference-1.mp4`、`-reference-2.mp4`，重试时按序号还原顺序
-    const videoPaths = videoUploads.map((upload, index) => path.join(
-      this.db.inputsDir,
-      `${id}-reference-${index + 1}.${upload.mimetype === "video/quicktime" ? "mov" : "mp4"}`,
-    ));
-    const audioPaths = audioUploads.map((upload, index) => path.join(
-      this.db.inputsDir,
-      `${id}-reference-audio-${index + 1}.${audioExtension(upload.mimetype)}`,
-    ));
     try {
-      storedInput.referenceVideos = [];
-      storedInput.referenceAudios = [];
-      for (const [index, upload] of videoUploads.entries()) {
-        const target = videoPaths[index]!;
-        await fs.writeFile(target, upload.buffer, { flag: "wx" });
-        storedInput.referenceVideos.push({ relativePath: path.basename(target), mimeType: upload.mimetype, fileName: safeFileName(upload.originalname) });
-      }
-      for (const [index, upload] of audioUploads.entries()) {
-        const target = audioPaths[index]!;
-        await fs.writeFile(target, upload.buffer, { flag: "wx" });
-        storedInput.referenceAudios.push({ relativePath: path.basename(target), mimeType: upload.mimetype, fileName: safeFileName(upload.originalname) });
-      }
-      this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: storedInput, libraryScope, ownerConversationId, agentOperationId });
+      this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: stored.input, libraryScope, ownerConversationId, agentOperationId });
     } catch (error) {
-      const paths = [...(storedInput.referenceImages ?? []), ...(storedInput.maskImage ? [storedInput.maskImage] : [])]
-        .map((file) => path.join(this.db.inputsDir, file.relativePath));
-      paths.push(...videoPaths, ...audioPaths);
-      await Promise.allSettled(paths.map((file) => fs.rm(file, { force: true })));
+      await stored.rollback();
       throw error;
     }
     queueMicrotask(() => void this.run(id));
@@ -330,17 +213,14 @@ export class TaskRunner {
     try {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
-      const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
-      const input = await this.hydrateInputImages(storedInput);
+      const stored = JSON.parse(task.inputJson) as StoredGenerationInput;
+      const { input, videos: storedVideos, audios: storedAudios } = await this.inputFiles.restore(stored);
       const current = this.db.getTaskRow(taskId);
       if (!current || current.status === "cancelled") return;
       const key = this.resolveKey(channel);
       this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
-      // 旧任务只有 referenceVideo / referenceAudio 单段字段，读的时候折算成数组
-      const storedVideos = referenceVideos?.length ? referenceVideos : referenceVideo ? [referenceVideo] : [];
-      const storedAudios = referenceAudios?.length ? referenceAudios : referenceAudio ? [referenceAudio] : [];
       for (const stored of storedVideos) {
-        const file = await this.readReferenceVideo(stored);
+        const file = await this.inputFiles.readReferenceVideo(stored);
         const url = await uploadReferenceMedia(channel, this.sessionKeys, file, "video");
         if (this.db.getTaskRow(taskId)?.status !== "validating") return;
         if (channel.adapterType === "kling-video") {
@@ -354,7 +234,7 @@ export class TaskRunner {
         }
       }
       for (const stored of storedAudios) {
-        const file = await this.readReferenceAudio(stored);
+        const file = await this.inputFiles.readReferenceAudio(stored);
         const url = await uploadReferenceMedia(channel, this.sessionKeys, file, "audio");
         if (this.db.getTaskRow(taskId)?.status !== "validating") return;
         if (channel.adapterType !== "seedance-video") {
@@ -366,7 +246,7 @@ export class TaskRunner {
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared).catch(error => {
-        const hasExternalVideo = !referenceVideo && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url"));
+        const hasExternalVideo = !stored.referenceVideo && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url"));
         if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
@@ -391,27 +271,8 @@ export class TaskRunner {
         return;
       }
 
-      // 同步音频：Gemini TTS 把 WAV 以 base64 内联在 generateContent 响应里
-      const audioCandidates = extractAudioCandidates(result.payload);
-      if (audioCandidates.length) {
-        await this.saveAudios(taskId, audioCandidates.map((audio, index) => ({
-          ...audio,
-          kind: "audio" as const,
-          title: audio.title ?? speechTitle(input.prompt, index),
-        })), channel);
-        this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
-        return;
-      }
-
-      // Sync response: extract images immediately
-      const images = extractImageCandidates(result.payload);
-      if (images.length) {
-        await this.saveImages(taskId, images, channel);
-        this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
-        return;
-      }
-
-      throw new AppError("RESPONSE_PARSE_FAILED", "响应中没有找到可保存的产物", 502);
+      await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt);
+      this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
     } catch (error) {
       /**
        * 收尾写库本身也可能失败：应用退出或测试清理会先关数据库，而任务还在飞。
@@ -443,14 +304,12 @@ export class TaskRunner {
     if (task.errorCode === "SUBMISSION_UNKNOWN") throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对提交结果", 409);
     if (!isTerminalStatus(task.status)) throw new AppError("TASK_IN_FLIGHT", "任务正在处理，请等待结果", 409);
     if (task.errorCode === "VIDEO_TIMEOUT") return this.continuePolling(taskId);
-    const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, ...storedInput } = JSON.parse(task.inputJson) as StoredGenerationInput;
-    const input = await this.hydrateInputImages(storedInput);
-    const storedVideos = referenceVideos?.length ? referenceVideos : referenceVideo ? [referenceVideo] : [];
-    const storedAudios = referenceAudios?.length ? referenceAudios : referenceAudio ? [referenceAudio] : [];
+    const stored = JSON.parse(task.inputJson) as StoredGenerationInput;
+    const { input, videos: storedVideos, audios: storedAudios } = await this.inputFiles.restore(stored);
     const referenceVideoUploads = [];
-    for (const stored of storedVideos) referenceVideoUploads.push(await this.readReferenceVideo(stored));
+    for (const file of storedVideos) referenceVideoUploads.push(await this.inputFiles.readReferenceVideo(file));
     const referenceAudioUploads = [];
-    for (const stored of storedAudios) referenceAudioUploads.push(await this.readReferenceAudio(stored));
+    for (const file of storedAudios) referenceAudioUploads.push(await this.inputFiles.readReferenceAudio(file));
     const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
     return this.create({ ...input, referenceVideoUploads, referenceAudioUploads }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
   }
@@ -467,22 +326,6 @@ export class TaskRunner {
     const key = this.resolveKey(channel);
     void this.resumePolling(taskId, task.remoteTaskId, channel, spec, key);
     return this.db.getTaskView(taskId)!;
-  }
-
-  private async readReferenceVideo(file: NonNullable<StoredGenerationInput["referenceVideo"]>): Promise<ReferenceVideoUpload> {
-    if (!/^[a-f0-9-]{36}-reference(-\d+)?\.(mp4|mov)$/i.test(file.relativePath)) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频路径无效", 400);
-    const fullPath = path.join(this.db.inputsDir, file.relativePath);
-    const stat = await fs.lstat(fullPath).catch(() => null);
-    if (!stat?.isFile() || stat.size > 100 * 1024 * 1024) throw new AppError("REFERENCE_VIDEO_MISSING", "找不到本地参考视频，请重新选择原视频", 400);
-    return { buffer: await fs.readFile(fullPath), mimetype: file.mimeType, originalname: file.fileName };
-  }
-
-  private async readReferenceAudio(file: NonNullable<StoredGenerationInput["referenceAudio"]>): Promise<ReferenceMediaUpload> {
-    if (!/^[a-f0-9-]{36}-reference-audio(-\d+)?\.(mp3|m4a|aac|wav)$/i.test(file.relativePath)) throw new AppError("REFERENCE_AUDIO_INVALID", "参考音频路径无效", 400);
-    const fullPath = path.join(this.db.inputsDir, file.relativePath);
-    const stat = await fs.lstat(fullPath).catch(() => null);
-    if (!stat?.isFile() || stat.size > 15 * 1024 * 1024) throw new AppError("REFERENCE_AUDIO_MISSING", "找不到本地参考音频，请重新选择原文件", 400);
-    return { buffer: await fs.readFile(fullPath), mimetype: file.mimeType, originalname: file.fileName };
   }
 
   /**
@@ -678,7 +521,7 @@ export class TaskRunner {
             );
           }
           // 下载失败时会把产物链接带进报错，方便手动打开核对
-          await this.saveResults(localTaskId, chosen, channel);
+          await this.outputFiles.saveResults(localTaskId, chosen, channel);
           if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
           this.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
@@ -692,322 +535,6 @@ export class TaskRunner {
       // 最后一条轮询（成功、失败、超时都一样）保留完整响应：排查时最有用的是它
       flushPending();
     }
-  }
-
-  /**
-   * 按产物类型落盘。
-   *
-   * 视频走 `saveVideos`，音乐/配音走 `saveAudios`。把分派放在这里，
-   * 轮询器不用知道「视频怎么下载、音频怎么下载」。
-   */
-  private async saveResults(taskId: string, results: AsyncResult[], channel: DbChannel) {
-    const videos = results.filter((item) => item.kind === "video");
-    const audios = results.filter((item) => item.kind === "audio");
-    const images = results.filter((item) => item.kind === "image");
-    if (videos.length) await this.saveVideos(taskId, videos, channel);
-    if (audios.length) await this.saveAudios(taskId, audios, channel);
-    if (images.length) await this.saveImages(taskId, images.map((item) => ({ url: item.url, mimeType: item.mimeType })), channel);
-    if (!videos.length && !audios.length && !images.length) {
-      throw new AppError("RESPONSE_PARSE_FAILED", "暂不支持保存这种产物", 502);
-    }
-  }
-
-  private async saveVideos(taskId: string, videos: AsyncResult[], channel: DbChannel) {
-    // 目录在写盘和入库之间必须保持一致，取一次而不是每次读 getter
-    const baseDir = this.db.assetsDir;
-    let saved = 0;
-    // 一次可能返回多个结果（n>1，或上游把同一段视频放在多个字段里）；全部保存，
-    // 由展示层决定主产物，别再像以前那样只看第一个。
-    for (const video of videos.slice(0, 8)) {
-      const { bytes, contentType } = await this.fetchAssetBytes(video.url, channel, "视频");
-      if (bytes.length > MAX_VIDEO_BYTES) throw new AppError("ASSET_TOO_LARGE", "视频超过 200 MB 限制", 502);
-      const mimeType = video.mimeType ?? (contentType.startsWith("video/") ? contentType : undefined)
-        ?? (video.url.toLowerCase().includes(".webm") ? "video/webm" : "video/mp4");
-      const extension = videoExtensionForMime(mimeType);
-      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
-      const id = crypto.randomUUID();
-      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
-      const absolutePath = path.join(baseDir, fileName);
-      await fs.writeFile(absolutePath, bytes);
-      this.db.insertAsset({
-        id, taskId, fileName, mimeType, byteSize: bytes.length,
-        relativePath: fileName, baseDir, sha256, duration: video.duration,
-      });
-      saved += 1;
-    }
-    if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的视频", 502);
-  }
-
-  /**
-   * 音乐一次返回多首（Suno 通常是 2 首），每首带一张封面。
-   * 封面写进现有的 `thumb_path`，不再单独建一条图片 asset——否则历史里会多出
-   * 一张「不是用户要的图」，删除/清空时也不好解释。
-   */
-  private async saveAudios(taskId: string, audios: AsyncResult[], channel: DbChannel) {
-    const baseDir = this.db.assetsDir;
-    let saved = 0;
-    for (const audio of audios.slice(0, 8)) {
-      const { bytes, contentType } = await this.fetchAssetBytes(audio.url, channel, "音频");
-      if (bytes.length > MAX_AUDIO_BYTES) throw new AppError("ASSET_TOO_LARGE", "音频超过 100 MB 限制", 502);
-      const mimeType = audio.mimeType ?? (contentType.startsWith("audio/") ? contentType : undefined)
-        ?? (audio.url.toLowerCase().includes(".wav") ? "audio/wav"
-          : audio.url.toLowerCase().includes(".mp3") ? "audio/mpeg"
-            : "audio/mp4");
-      // 第二道闸：图片 inlineData 被误判成音频时，宁可跳过也不写一条 .m4a 的图片
-      if (!mimeType.startsWith("audio/")) continue;
-      const extension = audioExtensionForMime(mimeType);
-      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
-      const id = crypto.randomUUID();
-      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
-      const absolutePath = path.join(baseDir, fileName);
-      await fs.writeFile(absolutePath, bytes);
-
-      // 封面失败不影响音频本身：缩略图接口会 404，前端回落到通用音乐图标
-      let thumbPath: string | null = null;
-      if (audio.coverUrl) {
-        try {
-          const cover = await this.fetchAssetBytes(audio.coverUrl, channel, "音频封面", "image/*");
-          if (cover.contentType.startsWith("image/") || !cover.contentType) {
-            thumbPath = await writeThumbnail(this.db, id, cover.bytes);
-          }
-        } catch {
-          // 封面是装饰，丢了不影响听歌
-        }
-      }
-
-      const duration = audio.duration ?? (mimeType.includes("wav") ? wavDurationSeconds(bytes) : undefined);
-      this.db.insertAsset({
-        id, taskId, fileName, mimeType, byteSize: bytes.length,
-        relativePath: fileName, baseDir, sha256, duration, thumbPath,
-        title: audio.title,
-        lyrics: audio.lyrics,
-        tags: audio.tags,
-        remoteClipId: audio.remoteClipId,
-      });
-      saved += 1;
-    }
-    if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的音频", 502);
-  }
-
-  private async fetchAssetBytes(
-    url: string,
-    channel: DbChannel,
-    label: string,
-    accept = "*/*",
-  ): Promise<{ bytes: Buffer; contentType: string }> {
-    try {
-      // Gemini TTS 把音频内联成 data URI；不把它当网络地址去 fetch
-      if (url.startsWith("data:")) {
-        const match = url.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
-        if (!match) throw new AppError("ASSET_DOWNLOAD_FAILED", `${label}的 data URI 格式不合法`, 502);
-        const contentType = match[1] ?? "";
-        const bytes = match[2]
-          ? Buffer.from(match[3] ?? "", "base64")
-          : Buffer.from(decodeURIComponent(match[3] ?? ""), "utf8");
-        return { bytes, contentType };
-      }
-      const headers = this.assetDownloadHeaders(url, channel, accept);
-      const response = await safeFetch(url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-      if (!response.ok) {
-        throw new AppError(
-          "ASSET_DOWNLOAD_FAILED",
-          `下载${label}失败：HTTP ${response.status}。地址：${url}`,
-          502,
-        );
-      }
-      return {
-        bytes: Buffer.from(await response.arrayBuffer()),
-        contentType: response.headers.get("content-type") ?? "",
-      };
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      throw new AppError(
-        "ASSET_DOWNLOAD_FAILED",
-        `下载${label}失败：${error instanceof Error ? error.message : "未知错误"}。地址：${url}`,
-        502,
-      );
-    }
-  }
-
-
-  private async saveImages(taskId: string, images: ImageCandidate[], channel: DbChannel) {
-    const baseDir = this.db.assetsDir;
-    let saved = 0;
-    // 部分中转会把同一张图同时放在 base64 与 URL 等多个位置，按字节内容去重避免落盘重复图片
-    const seenHashes = new Set<string>();
-    for (const image of images.slice(0, 8)) {
-      const resolved = await this.resolveImage(image, channel);
-      if (resolved.bytes.length > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
-      /*
-       * 以字节头为准。Gemini 的 inlineData 经常把 JPEG 标成 image/png，
-       * 之前按声明存成 .png 后，再把这张图当参考图发出去就会被
-       * 「参考图格式与文件内容不匹配」拦住——整批分镜全挂。
-       */
-      const mimeType = detectImageMime(resolved.bytes) ?? resolved.mimeType;
-      if (!mimeType.startsWith("image/")) throw new AppError("ASSET_INVALID", "响应内容不是图片", 502);
-      const sha256 = crypto.createHash("sha256").update(resolved.bytes).digest("hex");
-      if (seenHashes.has(sha256)) continue;
-      seenHashes.add(sha256);
-      const extension = extensionForMime(mimeType);
-      const id = crypto.randomUUID();
-      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
-      const absolutePath = path.join(baseDir, fileName);
-      await fs.writeFile(absolutePath, resolved.bytes);
-      // 缩略图在这里就生成好（§11.4）：Agent 续跑时马上要拿它喂大脑和画布徽章，
-      // 「用的时候再缩」会让每一轮都白等一次解码。失败不抛异常，静默留空
-      const thumbPath = await writeThumbnail(this.db, id, resolved.bytes);
-      this.db.insertAsset({
-        id, taskId, fileName, mimeType, byteSize: resolved.bytes.length,
-        relativePath: fileName, baseDir, sha256, thumbPath,
-      });
-      saved += 1;
-    }
-    if (!saved) throw new AppError("RESPONSE_PARSE_FAILED", "没有可保存的图片", 502);
-  }
-
-  private async persistInputImages(
-    taskId: string,
-    input: GenerationInput,
-    sources: ReferenceImageUpload[],
-    maskSource?: MaskImageUpload,
-  ): Promise<StoredGenerationInput> {
-    if (!sources.length && !maskSource) {
-      return { ...input, referenceImage: undefined, referenceImages: undefined, maskImage: undefined };
-    }
-    // 上限取常量而不是写死 8：画布（最多 MAX_CANVAS_IMAGES 张）整组都会走到这里，
-    // 两处写死两个 8 的话，改一处就会出现「前端让选 12 张、这里按 8 张拒收」
-    if (sources.length > MAX_REFERENCE_IMAGES) {
-      throw new AppError("REFERENCE_IMAGE_LIMIT", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`, 400);
-    }
-    for (const source of sources) {
-      if (!source.bytes.length || source.bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
-        throw new AppError("REFERENCE_IMAGE_TOO_LARGE", "单张参考图不能超过 20 MB", 400);
-      }
-      if (!matchesImageSignature(source.bytes, source.mimeType)) {
-        throw new AppError("REFERENCE_IMAGE_INVALID", "参考图格式与文件内容不匹配", 400);
-      }
-    }
-    // 蒙版也要在写第一张参考图之前验完，否则一张坏蒙版会留下孤儿参考图文件
-    if (maskSource && (!maskSource.bytes.length || maskSource.bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(maskSource.bytes, "image/png"))) {
-      throw new AppError("MASK_INVALID", "蒙版必须是有效的 PNG 图片，且不能超过 20 MB（透明区域表示要重绘的部分）", 400);
-    }
-    const storedImages: StoredReferenceImage[] = [];
-    for (const [index, source] of sources.entries()) {
-      const extension = extensionForMime(source.mimeType);
-      const relativePath = safeFileName(`${taskId}-${index + 1}.${extension}`);
-      const originalName = safeFileName(source.fileName);
-      const stem = originalName.replace(/\.[^.]+$/, "").slice(0, 80) || `reference-${index + 1}`;
-      await fs.writeFile(path.join(this.db.inputsDir, relativePath), source.bytes);
-      storedImages.push({ fileName: `${stem}.${extension}`, mimeType: source.mimeType, relativePath, byteSize: source.bytes.length });
-    }
-    let storedMask: StoredMaskImage | undefined;
-    if (maskSource) {
-      // 固定用 taskId-mask.png，和参考图的 taskId-1.png 不会撞名
-      const relativePath = safeFileName(`${taskId}-mask.png`);
-      await fs.writeFile(path.join(this.db.inputsDir, relativePath), maskSource.bytes);
-      const originalName = safeFileName(maskSource.fileName) || "mask.png";
-      storedMask = {
-        fileName: originalName.toLowerCase().endsWith(".png") ? originalName : `${originalName}.png`,
-        mimeType: "image/png",
-        relativePath,
-        byteSize: maskSource.bytes.length,
-      };
-    }
-    return {
-      ...input,
-      referenceImage: undefined,
-      referenceImages: storedImages.length ? storedImages : undefined,
-      maskImage: storedMask,
-    };
-  }
-
-  private async hydrateInputImages(input: StoredGenerationInput): Promise<GenerationInput> {
-    const storedImages = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
-    const hydratedImages: ReferenceImageInput[] = [];
-    for (const image of storedImages) {
-      const absolutePath = path.resolve(this.db.inputsDir, image.relativePath);
-      if (!absolutePath.startsWith(path.resolve(this.db.inputsDir) + path.sep)) {
-        throw new AppError("REFERENCE_IMAGE_INVALID", "参考图路径无效", 400);
-      }
-      let bytes: Buffer;
-      try {
-        bytes = await fs.readFile(absolutePath);
-      } catch {
-        throw new AppError("REFERENCE_IMAGE_MISSING", "参考图文件不存在，请重新上传", 400);
-      }
-      if (!bytes.length || bytes.length > MAX_REFERENCE_IMAGE_BYTES || !matchesImageSignature(bytes, image.mimeType)) {
-        throw new AppError("REFERENCE_IMAGE_INVALID", "参考图文件无效", 400);
-      }
-      hydratedImages.push({ base64: bytes.toString("base64"), mimeType: image.mimeType, fileName: image.fileName });
-    }
-    let hydratedMask: MaskImageInput | undefined;
-    if (input.maskImage) {
-      const absolutePath = path.resolve(this.db.inputsDir, input.maskImage.relativePath);
-      if (!absolutePath.startsWith(path.resolve(this.db.inputsDir) + path.sep)) {
-        throw new AppError("MASK_INVALID", "蒙版路径无效", 400);
-      }
-      let bytes: Buffer;
-      try {
-        bytes = await fs.readFile(absolutePath);
-      } catch {
-        throw new AppError("MASK_IMAGE_MISSING", "蒙版文件不存在，请重新绘制", 400);
-      }
-      if (!bytes.length || bytes.length > MAX_MASK_IMAGE_BYTES || !matchesImageSignature(bytes, "image/png")) {
-        throw new AppError("MASK_INVALID", "蒙版文件无效或超过 20 MB，请重新绘制", 400);
-      }
-      hydratedMask = { base64: bytes.toString("base64"), mimeType: "image/png", fileName: input.maskImage.fileName };
-    }
-    return {
-      ...input,
-      referenceImage: undefined,
-      referenceImages: hydratedImages.length ? hydratedImages : undefined,
-      maskImage: hydratedMask,
-    };
-  }
-
-  /**
-   * 下载产物用的请求头。
-   *
-   * 中转站自带的资产地址（形如 `https://gateway.example/v1/images/assets/<uuid>`）通常要带 key
-   * 才肯给图，不带就是 403——用户看到的现象正是「响应体里明明有 url，却一直拿不到图片」。
-   * 但 key **只能发给渠道自己那台主机**：产物地址也可能是公开的 OSS / CDN，
-   * 往那儿带 Authorization 等于把密钥送给第三方。
-   *
-   * `query` 鉴权不在这里重放：那个类型要把 key 拼进 URL，而我们只是去取一个别人给的地址，
-   * 拼错了反而会把地址弄坏。这类网关的资产地址一般本来就是公开的。
-   */
-  private assetDownloadHeaders(url: string, channel: DbChannel, accept: string): Record<string, string> {
-    // 部分 CDN（Suno 的封面就是）对无 UA 的请求回 403，浏览器却能打开
-    const headers: Record<string, string> = { Accept: accept, "User-Agent": "Mozilla/5.0" };
-    if (channel.authType === "none" || channel.authType === "query") return headers;
-    let host = "";
-    let channelHost = "";
-    try {
-      host = new URL(url).host;
-      channelHost = new URL(channel.baseUrl).host;
-    } catch {
-      return headers;
-    }
-    if (!host || host !== channelHost) return headers;
-    const key = this.sessionKeys.get(channel.id) || (channel.secretEnv ? process.env[channel.secretEnv] : "");
-    if (!key) return headers;
-    applyAuth(url, headers, channel, key);
-    return headers;
-  }
-
-  private async resolveImage(image: ImageCandidate, channel: DbChannel) {
-    if (image.base64) {
-      const clean = image.base64.replace(/^data:image\/[^;]+;base64,/, "").replace(/\s/g, "");
-      return { bytes: Buffer.from(clean, "base64"), mimeType: image.mimeType ?? "image/png" };
-    }
-    if (!image.url) throw new AppError("ASSET_INVALID", "图片响应缺少 URL 或 Base64", 502);
-    const headers = this.assetDownloadHeaders(image.url, channel, "image/*");
-    const response = await safeFetch(image.url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-    if (!response.ok) throw new AppError("ASSET_DOWNLOAD_FAILED", `图片下载失败：HTTP ${response.status}`, 502);
-    const contentLength = Number(response.headers.get("content-length") ?? 0);
-    if (contentLength > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
-    const mimeType = (response.headers.get("content-type") ?? "application/octet-stream").split(";")[0];
-    return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
   }
 
   private resolveKey(channel: DbChannel) {
@@ -1037,83 +564,10 @@ function truncatePayload(payload: unknown) {
   return { truncated: true, preview: json.slice(0, 50000) };
 }
 
-export function extensionForMime(mimeType: string) {
-  if (mimeType.includes("jpeg")) return "jpg";
-  if (mimeType.includes("webp")) return "webp";
-  if (mimeType.includes("gif")) return "gif";
-  if (mimeType.includes("svg")) return "svg";
-  return "png";
-}
-
-export function videoExtensionForMime(mimeType: string) {
-  if (mimeType.includes("webm")) return "webm";
-  if (mimeType.includes("quicktime")) return "mov";
-  if (mimeType.includes("x-matroska")) return "mkv";
-  return "mp4";
-}
-
-/** 参考音频落盘用的扩展名；只覆盖校验放行的四种容器。 */
-export function audioExtension(mimeType: string) {
-  if (mimeType.includes("wav")) return "wav";
-  if (mimeType.includes("mpeg")) return "mp3";
-  if (mimeType.includes("aac")) return "aac";
-  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "m4a";
-  return "mp3";
-}
-
-/** TTS 没有歌名，用正文第一行的前几十个字当标题，历史里才分得清 */
-function speechTitle(prompt: string, index: number) {
-  const line = prompt.replace(/\s+/g, " ").trim();
-  if (!line) return `语音 ${index + 1}`;
-  return line.length > 40 ? `${line.slice(0, 40)}…` : line;
-}
-
-/**
- * 从 PCM WAV 头里算时长。
- * Gemini TTS 固定 24kHz / 16bit / mono，但它不返回值；历史列表需要时长。
- */
-export function wavDurationSeconds(bytes: Buffer): number | undefined {
-  if (bytes.length < 44 || bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WAVE") return undefined;
-  let offset = 12;
-  let byteRate = 0;
-  while (offset + 8 <= bytes.length) {
-    const id = bytes.toString("ascii", offset, offset + 4);
-    const size = bytes.readUInt32LE(offset + 4);
-    const dataStart = offset + 8;
-    if (id === "fmt " && size >= 16 && dataStart + 16 <= bytes.length) {
-      byteRate = bytes.readUInt32LE(dataStart + 8);
-    }
-    if (id === "data" && byteRate > 0) {
-      const available = Math.min(size, bytes.length - dataStart);
-      return Math.round((available / byteRate) * 100) / 100;
-    }
-    offset = dataStart + size + (size % 2);
-  }
-  return undefined;
-}
-
-export function audioExtensionForMime(mimeType: string) {
-  if (mimeType.includes("mpeg")) return "mp3";
-  if (mimeType.includes("wav")) return "wav";
-  if (mimeType.includes("ogg")) return "ogg";
-  if (mimeType.includes("flac")) return "flac";
-  if (mimeType.includes("aac")) return "aac";
-  // audio/mp4、audio/x-m4a、audio/m4a 都落到这里
-  return "m4a";
-}
-
-function referenceInputs(input: GenerationInput) {
-  return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
-}
-
 /** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */
 function inlineMediaSize(input: GenerationInput) {
   const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? []), ...(input.klingVideoMedia ?? [])];
   return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
-}
-
-export function matchesImageSignature(bytes: Buffer, mimeType: ReferenceImageInput["mimeType"]) {
-  return detectImageMime(bytes) === mimeType;
 }
 
 export function normalizeError(error: unknown) {

@@ -22,7 +22,7 @@ import { AssetLightbox } from "./chat/AssetLightbox";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
 import type { Asset, Channel, DefaultModelGroup, TaskKind } from "../shared/types";
 import {
-  assetRef, usesPlainChat, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent, type ChatToolScope,
+  assetRef, usesPlainChat, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type ChatToolScope,
   type ChatMessage, type ChatVideoFrames, type ConversationStatus, type ConversationSummary,
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
@@ -34,7 +34,8 @@ import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat
 import { ModelPanel } from "./chat/ModelPanel";
 import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
 import { buildRows } from "./chat/rows";
-import { ToolCard, type TaskProgress } from "./chat/ToolCard";
+import { ToolCard } from "./chat/ToolCard";
+import { useConversationStream } from "./chat/useConversationStream";
 import { AssetLibrary } from "./chat/AssetLibrary";
 import { ContextSummaryControl } from "./chat/ContextSummaryControl";
 import { BINARY_DOCUMENT_ATTACHMENT, OFFICE_ATTACHMENT } from "../shared/document-formats";
@@ -62,14 +63,6 @@ function formatTokenCount(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
   if (value >= 1000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
   return String(value);
-}
-
-function upsert(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
-  const index = messages.findIndex((item) => item.id === incoming.id);
-  if (index === -1) return [...messages, incoming].sort((left, right) => left.seq - right.seq);
-  const next = messages.slice();
-  next[index] = incoming;
-  return next;
 }
 
 /**
@@ -116,11 +109,6 @@ export function ChatView({
   const viewRef = useRef(view);
   viewRef.current = view;
   const [status, setStatus] = useState<ConversationStatus>("idle");
-  const [reasoning, setReasoning] = useState("");
-  const [draft, setDraft] = useState("");
-  const [plainStream, setPlainStream] = useState(false);
-  const [compressing, setCompressing] = useState(false);
-  const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
   const [capabilities, setCapabilities] = useState<Array<{
     alias: string; kind: TaskKind; model: string; channelName: string; channelId: string; adapterType: string;
   }>>([]);
@@ -357,79 +345,14 @@ export function ChatView({
     };
   }, [convMenu]);
 
-  // 切换会话：拉全量 + 开 SSE
   useEffect(() => {
-    if (!activeId) { setView(null); setStatus("idle"); return; }
+    if (!activeId) return;
     try { localStorage.setItem(STORAGE_KEY, activeId); } catch { /* 不影响打开会话 */ }
-    setReasoning("");
-    setDraft("");
-    setCompressing(false);
-    setProgress({});
-    void reloadView(activeId);
+  }, [activeId]);
 
-    const onEvent = (event: AgentStreamEvent) => {
-      switch (event.type) {
-        case "context_compression":
-          setCompressing(event.status === "started");
-          if (event.status === "finished") toast(/失败|不完整/.test(event.message) ? "error" : "ok", event.message);
-          break;
-        case "context_summary":
-          setView((current) => current && current.id === activeId ? { ...current, contextSummary: { text: event.text, throughSeq: event.throughSeq } } : current);
-          break;
-        case "reasoning":
-          setReasoning((current) => current + event.text);
-          break;
-        case "text_token":
-          setPlainStream(true);
-          setDraft((current) => current + event.text);
-          break;
-        case "token":
-          setPlainStream(false);
-          setDraft((current) => current + event.text);
-          break;
-        case "reset":
-          // 这一轮要重来：把上一段的流式内容丢掉，别和重试后的正文拼在一起
-          setReasoning("");
-          setDraft("");
-          break;
-        case "status":
-          setStatus(event.status);
-          break;
-        case "message":
-          setView((current) => {
-            if (!current || current.id !== event.message.conversationId) return current;
-            // 这一轮的正文已经落库了，临时气泡就该让位
-            if (event.message.role === "assistant") { setReasoning(""); setDraft(""); }
-            return { ...current, messages: upsert(current.messages, event.message) };
-          });
-          if (event.message.toolResult?.ok && event.message.toolResult.data?.continuedQuery === true) void reloadView(activeId);
-          break;
-        case "progress":
-          setProgress((current) => ({ ...current, [event.taskId]: { status: event.status, progress: event.progress } }));
-          break;
-        case "error":
-          toast("error", event.message);
-          break;
-        case "done":
-          setStatus(event.status);
-          setReasoning("");
-          setDraft("");
-          // 画布指针、任务额度这些都不在事件里，落定后拉一次最稳
-          void reloadView(activeId);
-          void reloadList();
-          break;
-        default:
-          break;
-      }
-    };
-
-    // 断线重连成功后补齐错过的消息：EventSource 自己会重试，我们只管在连上时对齐
-    return api.openConversationStream(activeId, {
-      onEvent,
-      onOpen: () => { void reloadView(activeId); },
-    });
-    // toast / reloadList / reloadView 现在都是身份稳定的，这个 effect 只在换会话时重开
-  }, [activeId, reloadView, reloadList, toast]);
+  const { reasoning, draft, plainStream, compressing, progress, clearOutput, setDraft, setCompressing } = useConversationStream({
+    activeId, activeIdRef, setView, setStatus, reloadView, reloadList, toast,
+  });
 
   /**
    * 滚动跟随。
@@ -505,8 +428,7 @@ export function ChatView({
     const refs = [...new Set([...(plain ? [] : viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
     // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
     forcedScrollConversation.current = activeId;
-    setReasoning("");
-    setDraft("");
+    clearOutput();
     try {
       await api.sendMessage(activeId, text, refs, videoFrames);
       setStatus("running");

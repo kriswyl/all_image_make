@@ -5,7 +5,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import net from "node:net";
 import JSZip from "jszip";
 import type { AppDatabase } from "./db.js";
-import { readWorkspaceFile } from "./chat-tools/documents.js";
+import { readWorkspaceFile } from "./chat-tools/document-workspace.js";
 import { AppError } from "./tasks.js";
 
 type PreviewJob = { id: string; secret: string; dir: string; source: string; first: number; last: number; total: number; expires: number };
