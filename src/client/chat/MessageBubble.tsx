@@ -1,9 +1,10 @@
 /**
  * 用户气泡、助手正文、系统提示条、以及流式输出的临时气泡（AGENT_PLAN.md §14）。
  */
-import { AlertCircle, Check, Copy, Download, FileText, Info, Maximize2, Play, X } from "lucide-react";
+import { AlertCircle, Check, Copy, Download, FileText, Film, Info, Maximize2, Music, Play, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage } from "../../shared/agent-types";
+import type { Asset } from "../../shared/types";
 import { api } from "../api";
 import { MindPptPreview } from "./MindPptPreview";
 import ReactMarkdown from "react-markdown";
@@ -60,13 +61,21 @@ const markdownComponents: Components = {
  * 所以把图直接摆在气泡里。缩略图 404 就退回原图——缩略图只是省流量，
  * 不该成为用户看不见自己那张图的原因（和 AssetStrip 一样的回退）。
  */
-export function UserBubble({ message, onPreview }: { message: ChatMessage; onPreview?: (assetId: string) => void }) {
+export function UserBubble({ message, asset, onPreview }: { message: ChatMessage; asset?: Asset; onPreview?: (assetId: string) => void }) {
   // 产出/上传的那一张走 assetId，从画布拖进来的那几张走 assetRefs，两者不重叠
-  const thumbs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
+  const media = asset && /^(audio|video)\//.test(asset.mimeType) ? asset : null;
+  const thumbs = [...(message.assetId && !media ? [message.assetId] : []), ...(message.assetRefs ?? [])];
   const [mind, setMind] = useState<{ id: string; name: string } | null>(null);
   return (
     <div className="chat-row chat-row-user">
       <div className="chat-bubble chat-bubble-user">
+        {media ? (
+          <button type="button" className="chat-document-chip" onClick={() => onPreview?.(media.id)} title={media.title || media.fileName}>
+            {media.mimeType.startsWith("audio/") ? <Music size={13} /> : <Film size={13} />}
+            <span>{media.title || media.fileName}</span>
+            <Play size={12} />
+          </button>
+        ) : null}
         {thumbs.length ? (
           <div className="chat-bubble-thumbs">
             {thumbs.map((assetId) => (
@@ -110,7 +119,7 @@ export function UserBubble({ message, onPreview }: { message: ChatMessage; onPre
             ))}
           </div>
         ) : null}
-        {message.content}
+        {media ? null : message.content}
         {mind ? <MindPptPreview conversationId={message.conversationId} documentId={mind.id} name={mind.name} onClose={() => setMind(null)} /> : null}
       </div>
     </div>

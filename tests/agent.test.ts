@@ -819,6 +819,8 @@ describe("视频做完，对话里有回音", () => {
     // 结果写回了那条消息：胶囊要靠 assetId 才能变成产物缩略图
     const videoMessage = view.messages.find((message) => message.role === "tool" && message.toolName === "generate_video");
     expect(videoMessage?.assetId).toBeTruthy();
+    const library = await request(app).get("/api/library").query({ limit: 10, mode: "assets", kind: "video", includeChat: "1" }).expect(200);
+    expect(library.body.data.items).toMatchObject([{ historySource: "chat", assets: [{ id: videoMessage!.assetId }] }]);
     // 而且大脑真的被叫回来说了一句
     expect(view.messages.some((message) => (message.content ?? "").includes("视频做好了"))).toBe(true);
   });

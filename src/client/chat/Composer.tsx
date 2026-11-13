@@ -13,12 +13,13 @@
  * 槽位由 ChatView 传进来：会话的大脑模型、视频确认策略这些开关属于会话，
  * 摆在这一行才符合「输入框下面挂着的都是我这次要用的设定」这个直觉。
  */
-import { ArrowUp, CornerDownLeft, FileText, LoaderCircle, Plus, Square, X } from "lucide-react";
+import { ArrowUp, CornerDownLeft, FileText, Film, LoaderCircle, Music, Plus, Square, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
 import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
 import { BINARY_DOCUMENT_ATTACHMENT, CHAT_DOCUMENT_ATTACHMENT, MAX_BINARY_DOCUMENT_BYTES } from "../../shared/document-formats";
+import { CHAT_MEDIA_ACCEPT, chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../../shared/chat-media";
 import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 import { CanvasTray, type CanvasTrayItem } from "./CanvasTray";
@@ -27,7 +28,7 @@ import type { ChatVideoFrames } from "../../shared/agent-types";
 /**
  * 待发附件。只放**本地文件**：
  * - 图片 `file`：从资源管理器拖/选进来的本地图片，发送时才真的上传
- * - 文档 `file`：`.txt` / `.md` 剧本，发送时读成文本再上传
+ * - 文档和音视频 `file`：发送时上传
  *
  * 会话里已有的产物不进这里——拖进来会直接进画布，和画布缩略图只出现一次。
  */
@@ -35,7 +36,7 @@ type PendingAttachment = {
   url: string;
   name: string;
   file: File;
-  kind: "image" | "document";
+  kind: "image" | "document" | "audio" | "video";
 };
 
 /** 和输入框同宽的图片白名单，和服务端那道真正的把关（看字节头）不是一回事 */
@@ -46,7 +47,7 @@ export function isScriptDocument(file: File): boolean {
   return CHAT_DOCUMENT_ATTACHMENT.test(file.name);
 }
 
-function isImageFile(file: File): boolean {
+export function isImageFile(file: File): boolean {
   return file.type.startsWith("image/") || IMAGE_EXTENSIONS.test(file.name);
 }
 
@@ -108,6 +109,7 @@ export function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   // 一轮正在跑的时候不让传：画布会在中途被换掉，大脑看到的和用户以为的对不上
   const blocked = running || Boolean(disabled) || Boolean(uploading);
+  const hasMedia = pending.some(item => item.kind === "audio" || item.kind === "video");
 
   // 组件卸载时把没发出去的预览地址收掉，否则每挂一张图就漏一个 blob
   const pendingRef = useRef(pending);
@@ -117,13 +119,18 @@ export function Composer({
   function addFiles(files: File[], assetIds: string[] = []) {
     const images = files.filter(isImageFile);
     const documents = files.filter(isScriptDocument);
+    const media = files.flatMap(file => {
+      if (isImageFile(file) || isScriptDocument(file)) return [];
+      const mime = chatMediaMime(file);
+      return mime ? [{ file, kind: mime.startsWith("audio/") ? "audio" as const : "video" as const }] : [];
+    });
     // 页内拖过来的产物不用再过格式和大小那两关：它本来就已经在会话里了
     const attachedAssets = assetIds.filter((id) => !canvasItems.some((item) => item.asset.id === id));
-    if (!images.length && !documents.length && !attachedAssets.length) {
-      // 拖了文件但没一张能收，才提示；拖的是别的东西就当没发生
-      if (files.length) setReject("支持图片和 DOCX、XLSX、PDF、PPTX、XMind、TXT、Markdown、CSV、JSON 文件");
+    if (files.length !== images.length + documents.length + media.length) {
+      setReject("支持图片、文档及 MP3、WAV、M4A、MP4、MOV、WebM 附件");
       return;
     }
+    if (!files.length && !attachedAssets.length) return;
     const currentImages = pending.filter((item) => item.kind === "image").length;
     const currentDocuments = pending.filter((item) => item.kind === "document").length;
     if (currentImages + images.length + (plainAttachments ? canvasItems.length + attachedAssets.length : 0) > MAX_REFERENCE_IMAGES) {
@@ -134,6 +141,12 @@ export function Composer({
       setReject(`一次最多 ${MAX_DOCUMENTS_PER_MESSAGE} 个文档`);
       return;
     }
+    if (pending.filter(item => item.kind === "audio" || item.kind === "video").length + media.length > MAX_CHAT_MEDIA_FILES) {
+      setReject(`一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`);
+      return;
+    }
+    const oversizedMedia = media.find(({ file }) => file.size > MAX_CHAT_MEDIA_BYTES);
+    if (oversizedMedia) { setReject(`${oversizedMedia.file.name} 超过 ${MAX_CHAT_MEDIA_MB} MB`); return; }
     const oversizedImage = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
     if (oversizedImage) { setReject(`${oversizedImage.name} 超过 20 MB`); return; }
     const oversizedDocument = documents.find((file) => file.size > (BINARY_DOCUMENT_ATTACHMENT.test(file.name) ? MAX_BINARY_DOCUMENT_BYTES : MAX_SCRIPT_FILE_BYTES));
@@ -143,6 +156,7 @@ export function Composer({
       ...current,
       ...images.map((file) => ({ file, name: file.name, url: URL.createObjectURL(file), kind: "image" as const })),
       ...documents.map((file) => ({ file, name: file.name, url: "", kind: "document" as const })),
+      ...media.map(({ file, kind }) => ({ file, name: file.name, url: "", kind })),
     ]);
     // 拖进来的既有产物直接进「这一轮要带的图」，不再额外挂一份附件
     for (const assetId of attachedAssets) onAssetAttached?.(assetId);
@@ -160,8 +174,7 @@ export function Composer({
 
   function submit() {
     const value = text.trim();
-    // 图必须跟着一句话走：助手拿到一张没有说明的图，只能瞎猜要拿它做什么
-    if (!value || running || disabled || uploading) return;
+    if ((!value && !hasMedia) || blocked) return;
     if (plainAttachments && canvasItems.length + pending.filter((item) => item.kind === "image").length > MAX_REFERENCE_IMAGES) {
       setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
@@ -192,24 +205,24 @@ export function Composer({
               onSetFirst={onSetCanvasFirst ?? (() => undefined)}
               onSetLast={onSetCanvasLast ?? (() => undefined)}
             />
-            {pending.map((item) => (
+            {pending.map((item, index) => (
               <div
-                key={item.kind === "document" ? `doc:${item.name}:${item.file?.size}` : item.url || item.name}
-                className={`composer-attachment ${item.kind === "document" ? "is-document" : ""}`}
+                key={item.url || `${item.kind}:${item.name}:${index}`}
+                className={`composer-attachment ${item.kind !== "image" ? "is-document" : ""}`}
                 title={item.kind === "document"
                   ? `${item.name} · 发送时读取全文，只在当轮交给助手`
-                  : item.file ? item.name : `${item.name} · 已在会话里`}
+                  : item.name}
               >
-                {item.kind === "document" ? (
+                {item.kind !== "image" ? (
                   <span className="composer-attachment-file">
-                    <FileText size={16} />
+                    {item.kind === "audio" ? <Music size={16} /> : item.kind === "video" ? <Film size={16} /> : <FileText size={16} />}
                     <span>{item.name}</span>
                   </span>
                 ) : <img src={item.url} alt={item.name} />}
                 <button
                   type="button"
                   className="composer-attachment-remove"
-                  title={item.kind === "document" ? "移除这个文档" : "移除这张"}
+                  title="移除附件"
                   aria-label={`移除 ${item.name}`}
                   onClick={() => removePending(item)}
                 >
@@ -251,7 +264,7 @@ export function Composer({
           <button
             type="button"
             className={`composer-attach ${pending.length ? "is-on" : ""}`}
-            title="传图片、文档或 PPTX 风格参考（支持直接拖入）"
+            title="上传图片、文档、音频或视频（可拖入）"
             disabled={blocked}
             onClick={() => fileRef.current?.click()}
           >
@@ -262,7 +275,7 @@ export function Composer({
             ref={fileRef}
             className="file-input"
             type="file"
-            accept="image/png,image/jpeg,image/webp,.txt,.md,.markdown,.csv,.json,.xmind,.pptx,.docx,.xlsx,.pdf,text/plain,text/markdown"
+            accept={`image/png,image/jpeg,image/webp,.txt,.md,.markdown,.csv,.json,.xmind,.pptx,.docx,.xlsx,.pdf,text/plain,text/markdown,${CHAT_MEDIA_ACCEPT}`}
             multiple
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
@@ -285,7 +298,7 @@ export function Composer({
                 type="button"
                 className="composer-send"
                 onClick={submit}
-                disabled={!text.trim() || disabled}
+                disabled={(!text.trim() && !hasMedia) || blocked}
                 title="发送（回车）"
                 aria-label="发送"
               >
@@ -311,7 +324,7 @@ export function Composer({
         ) : null}
         <div className="composer-hint-right">
           {statusSlot}
-          {uploading ? <span className="composer-hint-run">正在上传图片…</span>
+          {uploading ? <span className="composer-hint-run">正在上传附件…</span>
             : running ? <span className="composer-hint-run">助手正在处理…</span> : null}
         </div>
       </div>

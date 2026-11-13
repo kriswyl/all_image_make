@@ -30,7 +30,7 @@ export function usePolling(task: Task | null, setTasks: React.Dispatch<React.Set
 }
 
 /** 订阅公共任务事件；重连和新任务加入时补查，断线时低频兜底。 */
-export function useImageTaskEvents(tasks: Task[], setTasks: React.Dispatch<React.SetStateAction<Task[]>>) {
+export function usePublicTaskEvents(tasks: Task[], setTasks: React.Dispatch<React.SetStateAction<Task[]>>) {
   const pendingIds = tasks.filter((task) => !terminalStatuses.includes(task.status)).map((task) => task.id).sort().join(",");
   const pendingRef = useRef(pendingIds);
   pendingRef.current = pendingIds;

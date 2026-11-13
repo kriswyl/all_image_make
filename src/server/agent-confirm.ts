@@ -140,6 +140,9 @@ export function buildConfirmPreview(
         ...(asNumber(args.tempo) !== undefined ? { musicTempo: asNumber(args.tempo) } : {}),
         ...(asString(args.key) ? { musicKey: asString(args.key) } : {}),
         ...(asBool(args.loop) !== undefined ? { musicLoop: asBool(args.loop) } : {}),
+        ...(asNumber(args.targetDuration) !== undefined ? { musicTargetDuration: asNumber(args.targetDuration) } : {}),
+        ...(asNumber(args.styleWeight) !== undefined ? { musicStyleWeight: asNumber(args.styleWeight) } : {}),
+        ...(asNumber(args.weirdness) !== undefined ? { musicWeirdness: asNumber(args.weirdness) } : {}),
       };
     })() : {}),
     ...(videoInputs !== undefined ? { videoInputs } : {}),
@@ -157,7 +160,7 @@ export function buildConfirmPreview(
           : `这个会话已经提交过 ${conversation.taskCount} 个生成任务了，这次要一次提交 ${calls.length} 个任务并行跑（就是 ${calls.length} 笔费用）。确认继续吗？`
         : `这个会话已经提交过 ${conversation.taskCount} 个生成任务了，确认继续吗？`
       : isMusic
-        ? "接下来要生成音乐：一次会出 2 首，耗时 1 到 5 分钟，也会产生费用。确认一下参数："
+        ? "这次生成会产生费用，通常返回 2 个成品。请确认参数。"
         : "接下来要生成视频：耗时几分钟，也会产生费用。确认一下参数：",
   };
 }

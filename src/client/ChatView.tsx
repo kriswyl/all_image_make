@@ -27,7 +27,8 @@ import {
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
-import { Composer, isScriptDocument } from "./chat/Composer";
+import { Composer, isImageFile, isScriptDocument } from "./chat/Composer";
+import { chatMediaMime } from "../shared/chat-media";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
@@ -697,8 +698,10 @@ export function ChatView({
    * 拖进来的既有产物不用上传，并进画布就行。
    */
   async function sendWithFiles(text: string, files: File[], assetIds: string[]) {
-    // 图和文档分开传；文档放在最后，这样「文档消息 + 这句话」在库里是紧挨着的
-    const images = files.filter((file) => !isScriptDocument(file));
+    const conversationId = activeId;
+    if (!conversationId) return;
+    const images = files.filter(isImageFile);
+    const media = files.filter(file => !isImageFile(file) && !isScriptDocument(file) && Boolean(chatMediaMime(file)));
     const documents = files.filter(isScriptDocument);
     const plain = usesPlainChat(viewRef.current);
     const previousCanvas = viewRef.current?.canvasAssetIds ?? [];
@@ -711,6 +714,25 @@ export function ChatView({
     if (uploadedIds === null) return;
     if (plain && images.length && viewRef.current?.toolScope == null && !viewRef.current?.nativeImagePilot) await flushCanvas(previousCanvas);
     if (documents.length && !(await uploadDocuments(documents))) return;
+    if (media.length) {
+      setUploading(true);
+      try {
+        const next = await api.uploadConversationMedia(conversationId, media);
+        if (activeIdRef.current !== conversationId) {
+          void reloadList();
+          return;
+        }
+        forcedScrollConversation.current = conversationId;
+        setView(next);
+        void reloadList();
+      } catch (error) {
+        toastError(error);
+        return;
+      } finally {
+        setUploading(false);
+      }
+    }
+    if (!text || activeIdRef.current !== conversationId) return;
     if (plain) {
       if (await send(text, [...new Set([...uploadedIds, ...selectedForChat])], viewRef.current?.toolScope === "all" ? chatVideoFrames ?? undefined : undefined)) {
         setChatAssetIds([]);
@@ -984,7 +1006,7 @@ export function ChatView({
               ) : null}
 
               {rows.map((row) => {
-                if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message} onPreview={setPreview} />;
+                if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message} asset={row.message.assetId ? mediaAssets.find(item => item.asset.id === row.message.assetId)?.asset : undefined} onPreview={setPreview} />;
                 if (row.kind === "note") return <SystemNote key={row.message.id} message={row.message} />;
                 if (row.kind === "assistant") {
                   // 「还没被回答的那一条」才给按钮：翻回去看老记录时，那些选项早就失效了

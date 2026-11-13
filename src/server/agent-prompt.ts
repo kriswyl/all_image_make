@@ -15,7 +15,7 @@ export function buildSystemPrompt(
   /** 用户这一条消息有没有附带图片。有的话大脑已经看得到它们 */
   hasTurnAttachments = false,
   /** 本会话里带 Suno ID 的歌曲，翻唱/混音用 */
-  songs: Array<{ id: string; title?: string | null; tags?: string | null }> = [],
+  songs: Array<{ id: string; title?: string | null; tags?: string | null; channelName?: string }> = [],
   /** 本会话上传过的脚本文档（全文只在当轮上下文里） */
   documents: Array<{ fileName: string; charCount: number }> = [],
 ): string {
@@ -23,7 +23,7 @@ export function buildSystemPrompt(
     ? canvasImages.map((item, index) => (index === 0 ? `${assetRef(item.id)}（画布第 1 张）` : assetRef(item.id))).join("、")
     : "";
   const songLine = songs.length
-    ? songs.map((song) => `${assetRef(song.id)}《${song.title || "未命名"}》${song.tags ? `（${song.tags.slice(0, 60)}）` : ""}`).join("、")
+    ? songs.map((song) => `${assetRef(song.id)}《${song.title || "未命名"}》${song.channelName ? `［${song.channelName}］` : ""}${song.tags ? `（${song.tags.slice(0, 60)}）` : ""}`).join("、")
     : "没有（翻唱/混音前要先有一首带 Suno ID 的歌）";
   const documentLine = documents.length
     ? documents.map((document) => `《${document.fileName}》${document.charCount.toLocaleString()} 字`).join("、")
@@ -62,11 +62,12 @@ export function buildSystemPrompt(
     "  mode 只填这四个英文词：text-to-video / first-frame / first-last-frame / reference。Grok 渠道只支持 text-to-video 和 reference（图生视频）。",
     "  单张图又没说方式时可以留空，系统按 first-frame；**两张及以上又没写 mode 会失败**——先 ask 用户要首尾帧还是参考图。",
     "  resolution 也只用 480P / 720P / 1080P 这三种写法，拿不准就别写。",
-    "- generate_music — 生成音乐，一次固定出 2 首。args: {prompt, mode, title, tags, negativeTags, instrumental, sourceAssetRefs, tempo, key, loop, modelHint, version}",
+    "- generate_music — 生成音乐，通常返回 2 个成品。args: {prompt, mode, title, tags, negativeTags, instrumental, sourceAssetRefs, tempo, key, loop, modelHint, version, targetDuration, styleWeight, weirdness}",
     "  mode=inspiration：prompt 是风格/情绪描述（最多 500 字）。mode=custom：prompt 是歌词（最多 5000 字），必须给 tags 曲风。",
-    "  mode=cover：sourceAssetRefs 给 1 首本会话的歌，prompt 是新的唱法/风格。",
-    "  mode=mashup：sourceAssetRefs 给 2 首不同的歌，prompt 可留空。",
+    "  mode=cover：sourceAssetRefs 给 1 首本会话的歌，prompt 是翻唱歌词，省略则沿用原曲歌词。",
+    "  mode=mashup：sourceAssetRefs 给同一渠道的 2 首不同歌曲，prompt 可留空。",
     "  mode=sound：用 title/tags 描述音效，prompt 留空，可给 tempo(BPM) / key(调性) / loop(是否循环)。",
+    "  词元流墟灵感和自定义模式支持 targetDuration=45 或 60（秒，目标时长）。自定义可给 styleWeight、weirdness（0 到 1）。",
     "  mode=playlist / sample：prompt 描述风格或取样方向；sample 文档标记开发中。",
     "  用户只想哼一段不要人声时把 instrumental 设 true（音效模式固定纯音乐）。拿不准用哪个模式就先 ask。",
     "- generate_speech — 配音 / 旁白 / 朗读。args: {text(必填), voice, style, language, secondVoice, modelHint}",

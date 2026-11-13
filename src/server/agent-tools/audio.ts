@@ -1,5 +1,6 @@
 import { assetRef, type GenerateMusicArgs, type GenerateSpeechArgs } from "../../shared/agent-types.js";
 import { formatTtsDialogue, TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts.js";
+import { isSunoSong, MUSIC_MODE_LABELS, SUNO_DAMOBI_MODEL } from "../../shared/suno.js";
 import type { GenerationInput } from "../../shared/types.js";
 import { describeAliasChoice, resolveAlias } from "../capabilities.js";
 import type { AssetRow } from "../db.js";
@@ -29,11 +30,11 @@ export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMu
     ?? (args.sourceAssetRefs?.length
       ? (args.sourceAssetRefs.length >= 2 ? "mashup" : "cover")
       : args.tags?.trim() || args.title?.trim() ? "custom" : "inspiration");
-  const prompt = (ctx.verbatimPrompt ?? args.prompt ?? "").trim();
+  let prompt = (ctx.verbatimPrompt ?? args.prompt ?? "").trim();
   const instrumental = mode === "sound" ? true : args.instrumental ?? false;
 
-  if (mode !== "sound" && mode !== "mashup" && !prompt) {
-    return failResult("这个音乐模式需要 prompt。请让用户描述风格、歌词或翻唱方向", "MUSIC_PROMPT_REQUIRED");
+  if (mode !== "sound" && mode !== "mashup" && mode !== "cover" && !prompt) {
+    return failResult("这个音乐模式需要 prompt。请让用户描述风格或提供歌词", "MUSIC_PROMPT_REQUIRED");
   }
   if (mode === "inspiration" && prompt.length > 500) {
     return failResult("灵感描述最多 500 字，请压缩后再提交", "MUSIC_PROMPT_TOO_LONG");
@@ -41,8 +42,8 @@ export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMu
   if (mode === "custom" && !args.tags?.trim()) {
     return failResult("自定义歌词模式需要曲风（tags）。请先用 ask 问用户想要什么曲风，或改成灵感模式", "MUSIC_TAGS_REQUIRED");
   }
-  if (mode === "sound" && !args.tags?.trim()) {
-    return failResult("音效模式需要标题或标签来描述音效内容", "MUSIC_SOUND_TAGS_REQUIRED");
+  if (mode === "sound" && !args.tags?.trim() && !prompt) {
+    return failResult("音效模式需要描述音效内容", "MUSIC_SOUND_TAGS_REQUIRED");
   }
 
   // 翻唱 / 混音要引用本会话里带 Suno custom_id 的歌
@@ -60,13 +61,22 @@ export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMu
   for (const ref of sourceRefs) {
     const resolved = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
     if (!resolved) return failResult(`找不到歌曲 ${ref}，请用本会话里出现过的产物编号`, "MUSIC_SOURCE_NOT_FOUND");
-    if (!resolved.asset.mimeType.startsWith("audio/") || !resolved.asset.remoteClipId) {
+    const sourceTask = ctx.db.getTaskView(resolved.asset.taskId);
+    const sourceAsset = sourceTask?.assets.find(asset => asset.id === resolved.asset.id);
+    if (!sourceTask || !sourceAsset || !isSunoSong(sourceTask, sourceAsset)) {
       return failResult(`${ref} 不是带 Suno ID 的音乐产物，不能用它翻唱或混音`, "MUSIC_SOURCE_INVALID");
+    }
+    if (sourceTask.channelId !== channel.id) {
+      return failResult(`${ref} 来自 ${sourceTask.channelName}，请使用源歌曲所在的渠道`, "MUSIC_SOURCE_CHANNEL_MISMATCH");
     }
     sourceAssets.push(resolved.asset);
   }
   if (mode === "cover" && sourceAssets.length !== 1) {
     return failResult("翻唱需要正好 1 首源歌曲（sourceAssetRefs 给 1 个）", "MUSIC_COVER_SOURCE_REQUIRED");
+  }
+  if (mode === "cover") {
+    prompt ||= sourceAssets[0]!.lyrics.trim().slice(0, 5000);
+    if (!prompt) return failResult("翻唱需要歌词，请提供要演唱的文本", "MUSIC_PROMPT_REQUIRED");
   }
   if (mode === "mashup") {
     if (sourceAssets.length !== 2) {
@@ -84,11 +94,15 @@ export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMu
     musicMode: mode,
     musicInstrumental: instrumental,
     musicVersion: args.version,
+    ...(resolution.model === SUNO_DAMOBI_MODEL && (mode === "inspiration" || mode === "custom")
+      ? { musicTargetDuration: args.targetDuration } : {}),
+    ...(resolution.model === SUNO_DAMOBI_MODEL && mode === "custom"
+      ? { musicStyleWeight: args.styleWeight, musicWeirdness: args.weirdness } : {}),
     ...(["custom", "mashup", "sound"].includes(mode) ? {
       musicTitle: args.title?.trim() || undefined,
     } : {}),
     ...(["custom", "sound"].includes(mode) ? {
-      musicTags: args.tags?.trim(),
+      musicTags: args.tags?.trim() || (mode === "sound" ? prompt : undefined),
       musicNegativeTags: args.negativeTags?.trim() || undefined,
     } : {}),
     ...(mode === "cover" ? { musicCoverClipId: sourceAssets[0]!.remoteClipId! } : {}),
@@ -114,22 +128,14 @@ export async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): 
     const created = await ctx.runner.create(input, [], undefined, "conversation", ctx.conversation.id, ctx.operationId);
     ctx.emit({ type: "progress", taskId: created.id, status: created.status, progress: created.progress });
     const choice = describeAliasChoice(resolution);
-    const modeLabel: Record<string, string> = {
-      inspiration: instrumental ? "纯音乐" : "灵感描述",
-      custom: "自定义歌词",
-      cover: "翻唱",
-      mashup: "混音",
-      sound: "音效",
-      playlist: "歌单风格",
-      sample: "取样",
-    };
+    const modeLabel = mode === "inspiration" && instrumental ? "纯音乐" : MUSIC_MODE_LABELS[mode];
     const sourcePart = sourceAssets.length
       ? `，源歌曲 ${sourceAssets.map((asset) => assetRef(asset.id)).join(" + ")}`
       : "";
     const summary = [
       `已提交音乐任务 ${created.id.slice(0, 8)}，模型 ${resolution.model}（${resolution.alias}）${choice ? `，${choice}` : ""}，`,
-      `${modeLabel[mode] ?? mode}${args.title?.trim() ? `《${args.title.trim()}》` : ""}${sourcePart}。`,
-      "一次会生成 2 首，完成后我会接着处理。",
+      `${modeLabel}${args.title?.trim() ? `《${args.title.trim()}》` : ""}${sourcePart}。`,
+      "通常返回 2 个成品。",
     ].join("");
     return okResult(summary, {
       async: true,

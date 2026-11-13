@@ -20,6 +20,8 @@ import { referenceImageMimeTypes } from "./uploads.js";
 import { removeStoredFiles } from "./files.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
 import type { Express, RequestHandler } from "express";
+import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../../shared/chat-media.js";
+import { mediaUploadExtension } from "../task-media.js";
 
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -33,6 +35,11 @@ const conversationUpload = multer({
   fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
     ? callback(null, true)
     : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 图片", 400)),
+});
+
+const conversationMediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_CHAT_MEDIA_BYTES + 1, files: MAX_CHAT_MEDIA_FILES, fields: 0 },
 });
 
 const conversationCreateSchema = z.object({
@@ -375,6 +382,42 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     const attachmentStaysInTurn = conversation.toolScope != null
       || (conversation.chatMode === "chat" && conversation.nativeImagePilot);
     if (uploaded.length && !attachmentStaysInTurn) db.updateConversation(id, { canvasAssetIds: uploaded });
+    res.status(201).json(ok(agent.buildView(id)));
+  }));
+
+  app.post("/api/conversations/:id/media", chatThreadOnly, conversationMediaUpload.array("files", MAX_CHAT_MEDIA_FILES), asyncHandler(async (req, res) => {
+    const id = routeParam(req.params.id);
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) throw new AppError("UPLOAD_EMPTY", "没有收到音频或视频", 400);
+
+    const baseDir = db.assetsDir;
+    const uploads = files.map(file => {
+      const mimeType = chatMediaMime({ name: file.originalname, type: file.mimetype });
+      const extension = mimeType && mediaUploadExtension(file.buffer, mimeType);
+      if (!mimeType || !extension) throw new AppError("CHAT_MEDIA_INVALID", "文件格式不匹配。支持 MP3、WAV、M4A、MP4、MOV 和 WebM", 400);
+      if (file.size > MAX_CHAT_MEDIA_BYTES) throw new AppError("CHAT_MEDIA_TOO_LARGE", `单个音视频文件不能超过 ${MAX_CHAT_MEDIA_MB} MB`, 400);
+      const taskId = crypto.randomUUID();
+      const fileName = `${taskId}-1.${extension}`;
+      const title = displayFileName(file.originalname);
+      const kind = mimeType.startsWith("audio/") ? "音频" : "视频";
+      return {
+        buffer: file.buffer,
+        content: `上传了${kind} ${title}`,
+        asset: {
+          id: crypto.randomUUID(), taskId, fileName, title, mimeType, byteSize: file.size,
+          relativePath: fileName, baseDir, sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
+        },
+      };
+    });
+
+    try {
+      for (const { buffer, asset } of uploads) await fs.promises.writeFile(path.join(baseDir, asset.fileName), buffer);
+      if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+      db.recordConversationMediaUploads(id, uploads);
+    } catch (error) {
+      await removeStoredFiles(uploads.map(item => item.asset), [], db.inputsDir);
+      throw error;
+    }
     res.status(201).json(ok(agent.buildView(id)));
   }));
 }

@@ -1,4 +1,5 @@
 import type { AdapterType } from "../shared/types.js";
+import type { SunoTrackInfo } from "../shared/suno.js";
 import { extractVideoCandidates } from "./adapters.js";
 
 /**
@@ -34,6 +35,7 @@ export interface AsyncResult {
   lyrics?: string;
   tags?: string;
   remoteClipId?: string;
+  suno?: SunoTrackInfo;
   /**
    * 字段名/扩展名本身就足以断定「这是成品」。
    * 中转生成完却不更新 status 时，只有强候选能单独作为完成依据。
@@ -209,9 +211,16 @@ function sunoStatus(payload: unknown): AsyncStatus {
     ? data as Record<string, unknown>
     : {};
   const raw = record.status;
-  const mapped = typeof raw === "number"
-    ? ({ 1: "queued", 2: "running", 3: "success", 4: "fail" } as Record<number, string>)[raw] ?? null
-    : typeof raw === "string" ? raw.toLowerCase() : null;
+  const numeric = typeof raw === "string" && /^[1-4]$/.test(raw) ? Number(raw) : raw;
+  let mapped = typeof numeric === "number"
+    ? ({ 1: "queued", 2: "running", 3: "success", 4: "fail" } as Record<number, string>)[numeric] ?? null
+    : typeof numeric === "string" ? numeric.toLowerCase() : null;
+  if (mapped === "success" && typeof record.custom_id === "string") {
+    const ownTrack = sunoTracks(record).find(track => track.id === record.custom_id);
+    const clipStatus = typeof ownTrack?.status === "string" ? ownTrack.status.toLowerCase() : "";
+    if (["submitted", "queued", "running", "processing", "streaming"].includes(clipStatus)) mapped = "running";
+    if (["failed", "error"].includes(clipStatus)) mapped = "fail";
+  }
   const progress = typeof record.progress === "number"
     ? Math.min(99, Math.max(0, record.progress))
     : null;
@@ -235,6 +244,31 @@ function sunoTracks(data: Record<string, unknown>): Array<Record<string, unknown
   return [];
 }
 
+export function sunoRemoteIds(payload: unknown): string[] {
+  const data = (payload as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return [];
+  return [...new Set(data.filter(id => typeof id === "string" || typeof id === "number").map(String).filter(id => /^\d+$/.test(id)))].slice(0, 2);
+}
+
+function sunoTrackMetadata(track: Record<string, unknown>, metadata: Record<string, unknown>): SunoTrackInfo {
+  const sound = metadata.sound_configs as Record<string, unknown> | undefined;
+  const controls = metadata.control_sliders as Record<string, unknown> | undefined;
+  return {
+    model: typeof track.model_name === "string" ? track.model_name : undefined,
+    version: typeof track.major_model_version === "string" ? track.major_model_version : undefined,
+    task: typeof metadata.task === "string" ? metadata.task : undefined,
+    ...(sound ? { sound: {
+      tempo: typeof sound.user_tempo === "number" ? sound.user_tempo : undefined,
+      key: typeof sound.user_key === "string" ? sound.user_key : undefined,
+      loop: typeof sound.user_loop === "boolean" ? sound.user_loop : undefined,
+    } } : {}),
+    ...(controls ? { controls: {
+      styleWeight: typeof controls.style_weight === "number" ? controls.style_weight : undefined,
+      weirdness: typeof controls.weirdness_constraint === "number" ? controls.weirdness_constraint : undefined,
+    } } : {}),
+  };
+}
+
 function sunoResults(payload: unknown): AsyncResult[] {
   const data = payload && typeof payload === "object"
     ? (payload as Record<string, unknown>).data
@@ -256,9 +290,12 @@ function sunoResults(payload: unknown): AsyncResult[] {
     tags: unknown,
     remoteClipId: unknown,
     strong: boolean,
+    suno?: SunoTrackInfo,
   ) => {
-    if (typeof url !== "string" || !/^https?:\/\//i.test(url) || url.includes("/api/forbidden") || seen.has(url)) return;
-    seen.add(url);
+    if (typeof url !== "string" || !/^https?:\/\//i.test(url) || url.includes("/api/forbidden")) return;
+    const identity = typeof remoteClipId === "string" && remoteClipId ? remoteClipId : url;
+    if (seen.has(identity)) return;
+    seen.add(identity);
     results.push({
       kind: "audio",
       url,
@@ -271,14 +308,17 @@ function sunoResults(payload: unknown): AsyncResult[] {
       ...(typeof tags === "string" && tags.trim() ? { tags } : {}),
       ...(typeof remoteClipId === "string" && remoteClipId ? { remoteClipId } : {}),
       strong,
+      ...(suno ? { suno } : {}),
     });
   };
 
-  for (const track of sunoTracks(record)) {
+  const tracks = sunoTracks(record);
+  for (const track of tracks) {
     const metadata = track.metadata && typeof track.metadata === "object" && !Array.isArray(track.metadata)
       ? track.metadata as Record<string, unknown>
       : {};
     const status = typeof track.status === "string" ? track.status.toLowerCase() : "";
+    if (status !== "complete") continue;
     push(
       track.audio_url,
       track.title,
@@ -288,12 +328,15 @@ function sunoResults(payload: unknown): AsyncResult[] {
       metadata.prompt,
       metadata.tags,
       track.id,
-      status === "complete",
+      true,
+      sunoTrackMetadata(track, metadata),
     );
   }
 
   // 没有 extend（或格式变了）时退回主歌曲；成功状态下同样会走到这里
-  push(fileInfo.mp3Url, record.taskName, fileInfo.duration, fileInfo.bigUrl ?? fileInfo.cosUrl, null, null, null, false);
+  if (!tracks.length && sunoStatus(payload).status === "success") {
+    push(fileInfo.mp3Url, record.taskName, fileInfo.duration, fileInfo.bigUrl ?? fileInfo.cosUrl, null, null, record.custom_id, false);
+  }
   return results;
 }
 

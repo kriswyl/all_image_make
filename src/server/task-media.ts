@@ -16,6 +16,17 @@ export function videoExtensionForMime(mimeType: string) {
   return "mp4";
 }
 
+export function mediaUploadExtension(bytes: Buffer, mime: string): string | null {
+  if (["video/mp4", "video/quicktime", "audio/mp4", "audio/x-m4a"].includes(mime)) {
+    if (bytes.length < 12 || bytes.toString("ascii", 4, 8) !== "ftyp") return null;
+    return mime.startsWith("video/") ? videoExtensionForMime(mime) : "m4a";
+  }
+  if ((mime === "video/webm" || mime === "audio/webm") && bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "webm";
+  if ((mime === "audio/wav" || mime === "audio/x-wav") && bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WAVE") return "wav";
+  if (mime === "audio/mpeg" && (bytes.toString("ascii", 0, 3) === "ID3" || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0))) return "mp3";
+  return null;
+}
+
 /** 参考音频落盘用的扩展名；只覆盖校验放行的四种容器。 */
 export function audioExtension(mimeType: string) {
   if (mimeType.includes("wav")) return "wav";

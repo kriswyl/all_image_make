@@ -109,6 +109,9 @@ export const generateMusicSchema = z.object({
   loop: z.coerce.boolean().optional(),
   modelHint: z.string().trim().max(80).optional(),
   version: z.string().trim().max(40).optional(),
+  targetDuration: z.union([z.literal(45), z.literal(60)]).optional(),
+  styleWeight: z.number().min(0).max(1).optional(),
+  weirdness: z.number().min(0).max(1).optional(),
 });
 
 export const generateSpeechSchema = z.object({

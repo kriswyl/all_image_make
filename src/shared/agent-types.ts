@@ -318,8 +318,11 @@ export interface GenerateMusicArgs {
   key?: string;
   loop?: boolean;
   modelHint?: string;
-  /** Suno 模型版本，例如 chirp-v3-5 */
+  /** Suno 模型版本，例如 chirp-hawk */
   version?: string;
+  targetDuration?: 45 | 60;
+  styleWeight?: number;
+  weirdness?: number;
 }
 
 export interface GenerateSpeechArgs {
@@ -469,6 +472,9 @@ export interface ConfirmPreview {
   musicTempo?: number;
   musicKey?: string;
   musicLoop?: boolean;
+  musicTargetDuration?: number;
+  musicStyleWeight?: number;
+  musicWeirdness?: number;
   speechVoice?: string;
   speechSecondVoice?: string;
   speechStyle?: string;

@@ -22,6 +22,7 @@ import {
   type AgentToolName, type CanvasAsset, type ChatMessage, type ToolResult,
 } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
+import { MUSIC_MODE_LABELS } from "../../shared/suno";
 import {
   midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton,
 } from "../../shared/midjourney";
@@ -87,10 +88,14 @@ function resultDetail(tool: AgentToolName, result: ToolResult | null) {
     if (typeof data.count === "number" && data.count > 1) rows.push(["张数", String(data.count)]);
   }
   if (tool === "generate_music") {
-    rows.push(["方式", data.musicMode === "custom" ? "自定义歌词" : "灵感描述"]);
+    const mode = typeof data.musicMode === "string" && Object.hasOwn(MUSIC_MODE_LABELS, data.musicMode)
+      ? data.musicMode as keyof typeof MUSIC_MODE_LABELS : "inspiration";
+    rows.push(["方式", MUSIC_MODE_LABELS[mode]]);
+    if (typeof data.musicResultModels === "string" && data.musicResultModels) rows.push(["成品模型", data.musicResultModels]);
+    if (typeof data.musicWarning === "string" && data.musicWarning) rows.push(["成品状态", data.musicWarning]);
     if (typeof data.musicTitle === "string") rows.push(["标题", data.musicTitle]);
     if (typeof data.musicTags === "string") rows.push(["曲风", data.musicTags]);
-    if (data.musicInstrumental === true) rows.push(["纯音乐", "是"]);
+    if (mode !== "sound" && data.musicInstrumental === true) rows.push(["纯音乐", "是"]);
   }
   if (typeof data.round === "number") rows.push(["轮次", `第 ${data.round} 轮`]);
   if (typeof data.templateId === "string") {

@@ -7,6 +7,7 @@ import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES, type Asset } from "../sha
 import { AppError, extensionForMime, matchesImageSignature, type ReferenceImageUpload } from "./tasks.js";
 import { writeThumbnail } from "./vision.js";
 import { boardView, requireBoard } from "./board-core.js";
+import { mediaUploadExtension } from "./task-media.js";
 
 const IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_IMAGE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
@@ -16,11 +17,7 @@ function boardUploadExtension(bytes: Buffer, mime: string): string | null {
   if (IMAGE_MIME.includes(mime as typeof IMAGE_MIME[number])) {
     return bytes.length <= MAX_IMAGE_BYTES && matchesImageSignature(bytes, mime as ReferenceImageUpload["mimeType"]) ? extensionForMime(mime) : null;
   }
-  if ((mime === "video/mp4" || mime === "audio/mp4" || mime === "audio/x-m4a") && bytes.length >= 12 && bytes.toString("ascii", 4, 8) === "ftyp") return mime === "video/mp4" ? "mp4" : "m4a";
-  if ((mime === "video/webm" || mime === "audio/webm") && bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "webm";
-  if ((mime === "audio/wav" || mime === "audio/x-wav") && bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WAVE") return "wav";
-  if (mime === "audio/mpeg" && (bytes.toString("ascii", 0, 3) === "ID3" || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0))) return "mp3";
-  return null;
+  return mime === "video/quicktime" ? null : mediaUploadExtension(bytes, mime);
 }
 
 export interface BoardBridgeItem {

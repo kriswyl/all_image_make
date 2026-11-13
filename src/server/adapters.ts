@@ -5,6 +5,7 @@ import { frameParameters, gifBudgetMessage } from "../shared/image-formats.js";
 import { validateSeedanceMedia } from "../shared/seedance-capabilities.js";
 import { TTS_DEFAULT_VOICE, splitTtsDialogue } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
+import { isSunoV6Version, SUNO_DAMOBI_MODEL, SUNO_TARGET_DURATIONS, SUNO_V6_DEFAULT } from "../shared/suno.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
 
 export interface PreparedRequest {
@@ -42,6 +43,10 @@ export class RemoteApiError extends Error {
   constructor(public status: number, public payload: unknown, message = "中转接口返回错误") {
     super(message);
   }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function compact<T extends Record<string, unknown>>(value: T) {
@@ -430,7 +435,11 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     // 文档的部分音乐接口要求 New-Api-User；补上不影响已验证的灵感/自定义模式
     headers["New-Api-User"] = "1";
     const mode = input.musicMode ?? "inspiration";
-    const mv = input.musicVersion?.trim() || sunoDefaultVersion(mode);
+    const damobi = input.model === SUNO_DAMOBI_MODEL;
+    const version = input.musicVersion?.trim();
+    const mv = damobi
+      ? (mode === "sound" || !isSunoV6Version(version) ? SUNO_V6_DEFAULT : version)
+      : version || sunoDefaultVersion(mode);
     const instrumental = input.musicInstrumental ?? false;
     const customMetadata = { create_mode: "custom" as const };
 
@@ -483,7 +492,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
         task: "sound",
         generation_type: "TEXT",
         title: input.musicTitle,
-        tags: input.musicTags,
+        tags: input.musicTags?.trim() || input.prompt.trim() || undefined,
         negative_tags: input.musicNegativeTags,
         mv,
         prompt: "",
@@ -526,6 +535,40 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
         make_instrumental: instrumental,
         ...raw,
       });
+    }
+    if (damobi) {
+      // 表单和原始参数共用同一份 metadata，避免覆盖音效或创作滑块的同级配置。
+      const rawMetadata = objectRecord(raw.metadata);
+      const metadata = {
+        ...(mode !== "inspiration" ? customMetadata : {}),
+        ...rawMetadata,
+      } as Record<string, unknown>;
+      if (mode === "sound") {
+        metadata.sound_configs = {
+          user_tempo: input.musicSoundConfigs?.tempo ?? 99,
+          user_key: input.musicSoundConfigs?.key?.trim() || "C",
+          user_loop: input.musicSoundConfigs?.loop ?? false,
+          ...objectRecord(rawMetadata.sound_configs),
+        };
+      }
+      if (mode === "custom" && (input.musicStyleWeight !== undefined || input.musicWeirdness !== undefined)) {
+        metadata.control_sliders = {
+          ...compact({ style_weight: input.musicStyleWeight, weirdness_constraint: input.musicWeirdness }),
+          ...objectRecord(rawMetadata.control_sliders),
+        };
+      }
+      const target = input.musicTargetDuration;
+      if ((mode === "custom" || mode === "inspiration") && target !== undefined) {
+        if (!SUNO_TARGET_DURATIONS.some((value) => value === target)) throw new Error("Suno 目标时长只能选 45 或 60 秒");
+        body = { duration: target, ...body };
+      }
+      const rawVersion = typeof raw.mv === "string" ? raw.mv.trim() : undefined;
+      body = {
+        ...body,
+        ...((mode === "mashup" || mode === "sound") && body.prompt === undefined ? { prompt: "" } : {}),
+        mv: mode !== "sound" && isSunoV6Version(rawVersion) ? rawVersion : mv,
+        ...(Object.keys(metadata).length ? { metadata } : {}),
+      };
     }
   } else if (channel.adapterType === "openai-images" && references.length) {
     /**

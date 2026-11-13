@@ -148,10 +148,18 @@ describe("对话里生成音乐", () => {
     expect(media).toHaveLength(2);
     expect(media.map((item) => item.asset.title)).toEqual(["雨后的城", "晚风"]);
     expect(media.every((item) => Boolean(item.asset.lyrics))).toBe(true);
+    for (const mode of ["assets", "records"]) {
+      const library = await request(app).get("/api/library").query({ limit: 10, mode, kind: "audio", includeChat: "1" }).expect(200);
+      expect(library.body.data.items).toMatchObject([{
+        historySource: "chat", assets: resultRow.toolResult!.assetIds!.map(id => ({ id })),
+      }]);
+    }
+    const publicLibrary = await request(app).get("/api/library").query({ limit: 10, mode: "assets", kind: "audio" }).expect(200);
+    expect(publicLibrary.body.data.items).toEqual([]);
 
     expect(submitted).toMatchObject({
       gpt_description_prompt: "雨后的城市，温暖民谣",
-      mv: "chirp-v3-5",
+      mv: "chirp-hawk",
       make_instrumental: false,
     });
     expect(musicRequests).toEqual(["/api/queue/makeAiMusic"]);

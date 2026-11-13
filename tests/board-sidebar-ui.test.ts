@@ -15,7 +15,7 @@ vi.mock("../src/client/board/BoardWorkspace", () => ({ BoardWorkspace: (props: {
   props.sidebarHost ? createPortal(React.createElement("div", null,
     React.createElement("button", { onClick: props.onBoardSelected }, "选择画布")), props.sidebarHost) : null,
 ) }));
-vi.mock("../src/client/hooks/usePolling", () => ({ useImageTaskEvents: () => undefined, usePolling: () => undefined }));
+vi.mock("../src/client/hooks/usePolling", () => ({ usePublicTaskEvents: () => undefined, usePolling: () => undefined }));
 vi.mock("../src/client/theme", () => ({ useTheme: () => ({ mode: "light", resolved: "light" }), setThemeMode: () => undefined }));
 import { App } from "../src/client/App";
 

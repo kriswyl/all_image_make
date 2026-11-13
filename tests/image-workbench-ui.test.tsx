@@ -82,6 +82,20 @@ it("切历史与切本次候选互相独立，历史 MJ 操作跟随选中的任
     expect(quick().querySelector('[aria-label="尺寸"]')).not.toBeNull();
     expect(quick().querySelector('[aria-label="模型版本"]')).toBeNull();
     expect(container.querySelector(".image-advanced")?.hasAttribute("open")).toBe(false);
+    await click('[aria-label="生成参数"]');
+    const parameters = container.querySelector<HTMLDetailsElement>(".image-parameters")!;
+    expect(parameters.open).toBe(true);
+    await click('.image-quick-params [aria-label="尺寸"]');
+    const sizeOption = document.querySelector<HTMLButtonElement>('[role="listbox"][aria-label="尺寸"] [role="option"]')!;
+    await act(async () => {
+      sizeOption.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      sizeOption.click();
+    });
+    expect(parameters.open).toBe(true);
+    await act(async () => {
+      container.querySelector(".image-result-stage")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    });
+    expect(parameters.open).toBe(false);
     await click('[aria-label="结果 2"]');
     expect(container.querySelector(".image-preview-trigger img")?.getAttribute("src")).toBe("/assets/two");
     const reference = [...container.querySelectorAll<HTMLButtonElement>(".image-result-tools button")]

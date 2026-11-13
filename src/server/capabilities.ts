@@ -167,7 +167,7 @@ function videoTraits(adapterType: AdapterType): string {
 }
 
 const AUDIO_TRAITS: Record<string, string> = {
-  "suno-music": "一次生成 2 首  灵感|自定义歌词|纯音乐  时长自动（约 2-5 分钟）",
+  "suno-music": "灵感、自定义歌词、翻唱、混音、音效，通常返回 2 个成品",
   "gemini-tts": "配音/旁白  30 个预置音色  单人|双人对话  风格/语种可控  输出 24kHz WAV",
 };
 

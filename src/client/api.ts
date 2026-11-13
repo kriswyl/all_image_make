@@ -40,7 +40,7 @@ function assetExtension(asset: Asset) {
     : asset.mimeType.startsWith("video/")
       ? ["mp4", "webm", "mov", "m4v", "mkv"]
       : asset.mimeType.startsWith("audio/")
-        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac"]
+        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac", "webm"]
         : [];
   if (fileExtension && compatible.includes(fileExtension)) return fileExtension;
   if (asset.mimeType === "image/jpeg") return "jpg";
@@ -146,9 +146,9 @@ export const api = {
   task: (id: string) => request<Task>(`/api/generations/${id}`),
   tasks: () => request<Task[]>("/api/generations"),
   library: () => request<Task[]>("/api/library"),
-  libraryPage: (options: { offset?: number; query?: string; kind?: string; mode?: string; includeChatImages?: boolean }) => {
+  libraryPage: (options: { offset?: number; query?: string; kind?: string; mode?: string; includeChat?: boolean }) => {
     const params = new URLSearchParams({ limit: "60", offset: String(options.offset ?? 0), q: options.query ?? "", kind: options.kind ?? "all", mode: options.mode ?? "all" });
-    if (options.includeChatImages) params.set("includeChatImages", "1");
+    if (options.includeChat) params.set("includeChat", "1");
     return request<{ items: Task[]; hasMore: boolean }>(`/api/library?${params}`);
   },
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
@@ -265,6 +265,11 @@ export const api = {
     const form = new FormData();
     for (const file of files) form.append("images", file, file.name);
     return request<ConversationView>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
+  },
+  uploadConversationMedia: (id: string, files: File[]) => {
+    const form = new FormData();
+    for (const file of files) form.append("files", file, file.name);
+    return request<ConversationView>(`/api/conversations/${id}/media`, { method: "POST", body: form });
   },
   /** 脚本文档：内容本来就已经在内存里，直接走 JSON，不必再编一次 multipart */
   uploadMindDocument: (id: string, file: File) => {
@@ -541,7 +546,7 @@ export const api = {
    * 而「发消息」和「收事件」分成两个请求之后，重连时不需要重放任何东西——
    * 重连成功会触发一次 `open`，调用方在那里重新拉一遍会话即可补齐错过的消息。
    */
-  openTaskStream(handlers: { onTask: (task: Task) => void; onOpen: () => void; onError: () => void }, scope?: "chat-images"): () => void {
+  openTaskStream(handlers: { onTask: (task: Task) => void; onOpen: () => void; onError: () => void }, scope?: "library"): () => void {
     const source = new EventSource(apiUrl(scope ? `/api/generations/events?scope=${scope}` : "/api/generations/events"));
     source.onmessage = (event: MessageEvent<string>) => {
       try { handlers.onTask(JSON.parse(event.data) as Task); } catch { /* 忽略无效事件 */ }

@@ -9,6 +9,7 @@
 import { AlertCircle, Check, Film, Image as ImageIcon, Mic, Music, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { MUSIC_MODE_LABELS } from "../../shared/suno";
 import {
   assetRef, type ChatMessage, type ConfirmPreview, type ConversationVideoRole, type GenerateVideoArgs,
 } from "../../shared/agent-types";
@@ -134,24 +135,21 @@ export function ConfirmCard({
           {preview.speechLanguage ? ` · ${preview.speechLanguage}` : ""}
           {preview.speechStyle ? ` · ${preview.speechStyle}` : ""}
         </div> : null}
-        {isMusic ? (() => {
-          const labels: Record<string, string> = {
-            inspiration: "灵感描述", custom: "自定义歌词", cover: "翻唱",
-            mashup: "混音", sound: "音效", playlist: "歌单风格", sample: "取样",
-          };
-          return (
+        {isMusic ? (
             <div className="confirm-card-batch">
-              一次会生成 2 首：{labels[preview.musicMode ?? "inspiration"] ?? "音乐"}
+              {MUSIC_MODE_LABELS[preview.musicMode ?? "inspiration"] ?? "音乐"} · 通常返回 2 个成品
               {preview.musicTitle ? ` · 《${preview.musicTitle}》` : ""}
-              {preview.musicInstrumental ? " · 纯音乐" : ""}
+              {preview.musicInstrumental && preview.musicMode !== "sound" ? " · 纯音乐" : ""}
               {preview.musicTags ? ` · ${preview.musicTags}` : ""}
               {preview.musicSourceAssetRefs?.length ? ` · 源歌曲 ${preview.musicSourceAssetRefs.join("、")}` : ""}
               {preview.musicTempo ? ` · ${preview.musicTempo} BPM` : ""}
               {preview.musicKey ? ` · ${preview.musicKey}` : ""}
-              {preview.musicLoop ? " · 循环" : ""}
+              {preview.musicLoop === undefined ? "" : preview.musicLoop ? " · 循环" : " · 单次"}
+              {preview.musicTargetDuration === undefined ? "" : ` · 目标 ${preview.musicTargetDuration} 秒`}
+              {preview.musicStyleWeight === undefined ? "" : ` · 风格强度 ${Math.round(preview.musicStyleWeight * 100)}%`}
+              {preview.musicWeirdness === undefined ? "" : ` · 创意偏离度 ${Math.round(preview.musicWeirdness * 100)}%`}
             </div>
-          );
-        })() : null}
+        ) : null}
 
         {isVideo ? (
           <>

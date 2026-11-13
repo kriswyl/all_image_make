@@ -5,9 +5,10 @@ import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
 import { StatusBadge, formatTime, terminalStatuses } from "../task-ui";
 import { taskKind, type ClearScope, type Channel, type Task } from "../../shared/types";
+import { isSunoSong, sunoResultLabel, sunoTrackInfo, type SunoSourceSelection } from "../../shared/suno";
 import type { ReferenceController, Toast } from "../app-shared";
 
-export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onToast }: {
+export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onUseMusicSource, onToast }: {
   channels: Channel[];
   tasks: Task[];
   references: ReferenceController;
@@ -17,6 +18,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   onClear: (scope: ClearScope, records: Task[]) => void;
   onOpenAssetSettings: () => void;
   onDiagnostics: (task: Task) => void;
+  onUseMusicSource?: (selection: SunoSourceSelection) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
   const [filter, setFilter] = useState<"all" | "image" | "video" | "audio">("all");
@@ -27,7 +29,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [chatRevision, setChatRevision] = useState(0);
+  const [libraryRevision, setLibraryRevision] = useState(0);
   const requestId = useRef(0);
   const libraryRef = useRef(library);
   libraryRef.current = library;
@@ -42,13 +44,13 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
     let timer: number | undefined;
     const refresh = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => setChatRevision(value => value + 1), 250);
+      timer = window.setTimeout(() => setLibraryRevision(value => value + 1), 250);
     };
     const close = api.openTaskStream({
       onTask: task => { if (task.status === "queued" || terminalStatuses.includes(task.status)) refresh(); },
       onOpen: refresh,
       onError: () => undefined,
-    }, "chat-images");
+    }, "library");
     return () => { window.clearTimeout(timer); close(); };
   }, []);
   useEffect(() => {
@@ -64,7 +66,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         const items: Task[] = [];
         let more = true;
         while (more && items.length < targetCount && current === requestId.current) {
-          const page = await api.libraryPage({ offset: items.length, query, kind: filter, mode, includeChatImages: true });
+          const page = await api.libraryPage({ offset: items.length, query, kind: filter, mode, includeChat: true });
           items.push(...page.items);
           more = page.hasMore && page.items.length > 0;
         }
@@ -75,13 +77,13 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         .finally(() => { if (current === requestId.current) setLoading(false); });
     }, query ? 250 : 0);
     return () => { window.clearTimeout(timer); requestId.current++; };
-  }, [tasks, query, filter, mode, chatRevision]);
+  }, [tasks, query, filter, mode, libraryRevision]);
   async function loadMore() {
     if (loading || !hasMore) return;
     const current = requestId.current;
     setLoading(true);
     try {
-      const page = await api.libraryPage({ offset: library.length, query, kind: filter, mode, includeChatImages: true });
+      const page = await api.libraryPage({ offset: library.length, query, kind: filter, mode, includeChat: true });
       if (current === requestId.current) { setLibrary((items) => [...items, ...page.items]); setHasMore(page.hasMore); setVisibleCount((count) => count + 60); setLoadError(""); }
     } catch (error) { if (current === requestId.current) setLoadError(error instanceof Error ? error.message : "加载素材失败"); }
     finally { if (current === requestId.current) setLoading(false); }
@@ -100,7 +102,8 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const filteredAssets = filtered.flatMap((task) => task.assets.map((asset, index) => ({ task, asset, index })));
   const visibleAssets = filteredAssets.slice(0, visibleCount);
   const selectedTasks = records.filter((task) => selected.has(task.id));
-  const allFilteredSelected = visibleRecords.length > 0 && visibleRecords.every((task) => selected.has(task.id));
+  const selectableRecords = visibleRecords.filter(task => task.historySource !== "chat");
+  const allFilteredSelected = selectableRecords.length > 0 && selectableRecords.every(task => selected.has(task.id));
 
   // 列表刷新后，已经被删掉/过期的勾选要跟着清掉，否则「已选 N 条」和实际能删的对不上
   useEffect(() => {
@@ -125,7 +128,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   }
 
   function toggleAll() {
-    setSelected(allFilteredSelected ? new Set() : new Set(visibleRecords.map((task) => task.id)));
+    setSelected(allFilteredSelected ? new Set() : new Set(selectableRecords.map(task => task.id)));
   }
 
   function toggleOne(id: string) {
@@ -195,7 +198,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       <div className="data-table-wrap">
         <table className="data-table history-table">
           <thead><tr>
-            <th className="history-select"><input ref={selectAllRef} type="checkbox" checked={allFilteredSelected} disabled={!visibleRecords.length} onChange={toggleAll} aria-label="全选已显示的记录" /></th>
+            <th className="history-select"><input ref={selectAllRef} type="checkbox" checked={allFilteredSelected} disabled={!selectableRecords.length} onChange={toggleAll} aria-label="全选已显示的记录" /></th>
             <th aria-label="预览" /><th>任务</th><th>渠道</th><th>模型</th><th>状态</th><th>时间</th><th aria-label="操作" />
           </tr></thead>
           <tbody>{visibleRecords.map((task) => {
@@ -203,7 +206,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             const first = task.assets[0];
             return (
               <tr key={task.id} className={selected.has(task.id) ? "selected" : ""}>
-                <td className="history-select"><input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /></td>
+                <td className="history-select">{task.historySource !== "chat" ? <input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /> : null}</td>
                 <td>
                   <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>
                     {first
@@ -223,7 +226,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
                 <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
                 <td><div className="table-actions">
                   <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button>
-                  <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button>
+                  {task.historySource !== "chat" ? <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button> : null}
                 </div></td>
               </tr>
             );
@@ -233,19 +236,20 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       </div>}
       {loading ? <div className="table-empty"><LoaderCircle size={18} className="spin" /><span>加载中…</span></div> : null}
       {!loading && visibleCount < (mode === "assets" ? filteredAssets.length : filteredRecords.length) ? <button type="button" className="secondary-button" onClick={() => setVisibleCount((count) => count + 60)}>显示更多</button> : !loading && hasMore ? <button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button> : null}
-      {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onToast={onToast} /> : null}
+      {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onUseMusicSource={onUseMusicSource} onToast={onToast} /> : null}
       {bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
     </div>
   );
 }
 
-function HistoryPreview({ task, initialIndex, channels, references, onClose, onSendToBoard, onToast }: {
+function HistoryPreview({ task, initialIndex, channels, references, onClose, onSendToBoard, onUseMusicSource, onToast }: {
   task: Task;
   initialIndex: number;
   channels: Channel[];
   references: ReferenceController;
   onClose: () => void;
   onSendToBoard: (asset: import("../../shared/types").Asset) => void;
+  onUseMusicSource?: (selection: SunoSourceSelection) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
   const [index, setIndex] = useState(initialIndex);
@@ -268,6 +272,9 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
   if (!asset) return null;
   const isAssetVideo = asset.mimeType.startsWith("video/");
   const isAssetAudio = asset.mimeType.startsWith("audio/");
+  const musicLabel = sunoResultLabel(sunoTrackInfo(task, asset.remoteClipId));
+  const canUseMusicSource = isSunoSong(task, asset)
+    && channels.some(channel => channel.id === task.channelId && channel.enabled && channel.adapterType === "suno-music");
   return (
     <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="历史预览" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="image-preview history-preview">
@@ -276,6 +283,7 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
           <div className="history-audio-preview">
             {asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" /> : <Music size={76} />}
             <strong>{asset.title || task.prompt}</strong>
+            {musicLabel ? <small>{musicLabel}</small> : null}
             <audio src={api.assetUrl(asset.url)} controls controlsList="nodownload" autoPlay onContextMenu={(event) => event.preventDefault()} />
             {asset.lyrics ? (
               <details className="music-lyrics history-lyrics">
@@ -291,6 +299,11 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
         )}
         <div className="history-preview-bar">
           <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
+          {canUseMusicSource && onUseMusicSource ? (["cover", "mashup"] as const).map(mode => (
+            <button key={mode} type="button" className="secondary-button" onClick={() => onUseMusicSource({ mode, task, asset })}>
+              {mode === "cover" ? "翻唱" : "混音"}
+            </button>
+          )) : null}
           {task.historySource !== "chat" ? <button type="button" className="secondary-button" onClick={() => onSendToBoard(asset)}><LayoutGrid size={16} />加入画布</button> : null}
           {!isVideo && kind !== "audio" ? <button type="button" className="secondary-button" disabled={references.reading} onClick={() => void references.addFromAsset(asset)}><Wand2 size={16} />添加到参考图</button> : null}
           {task.assets.length > 1 ? <div className="history-preview-thumbs">{task.assets.map((item, i) => {

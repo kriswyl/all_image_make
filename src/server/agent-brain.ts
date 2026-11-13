@@ -24,6 +24,7 @@ import { isVisionBlocked } from "./agent-vision.js";
 import { assetRef, usesNativeCreativeTools, usesPlainChat, type AgentStreamEvent, type Conversation, type ChatMessage } from "../shared/agent-types.js";
 import type { ImageBoardNode } from "../shared/board.js";
 import { isImageAsset } from "../shared/types.js";
+import { isSunoSong } from "../shared/suno.js";
 import { projectToolSpecs, protocolErrorFeature, readToolProtocol, recordToolProtocol } from "./tool-protocol.js";
 
 export interface BrainHost {
@@ -303,10 +304,15 @@ export class BrainRunner {
     const canvasImages = db.canvasImages(conversation);
     const hasTurnAttachments = turnAttachmentIds.length > 0;
     // 翻唱 / 混音要引用本会话里带 Suno custom_id 的歌
-    const songs = db.listConversationAssets(conversation.id)
-      .map((entry) => entry.asset)
-      .filter((asset) => asset.mimeType.startsWith("audio/") && Boolean(asset.remoteClipId))
-      .map((asset) => ({ id: asset.id, title: asset.title, tags: asset.tags }));
+    const sourceTasks = new Map<string, ReturnType<AppDatabase["getTaskView"]>>();
+    const songs = db.listConversationAssets(conversation.id).flatMap(({ asset }) => {
+      if (!asset.remoteClipId || !asset.mimeType.startsWith("audio/")) return [];
+      if (!sourceTasks.has(asset.taskId)) sourceTasks.set(asset.taskId, db.getTaskView(asset.taskId));
+      const task = sourceTasks.get(asset.taskId);
+      const source = task?.assets.find(item => item.id === asset.id);
+      if (!task || !source || !isSunoSong(task, source)) return [];
+      return [{ id: asset.id, title: asset.title, tags: asset.tags, channelName: task.channelName }];
+    });
 
     const summary = db.getContextSummary(conversation.id);
     const history = db.listMessagesAfter(conversation.id, summary?.throughSeq ?? 0);

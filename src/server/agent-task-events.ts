@@ -11,6 +11,7 @@ import { MAX_AUTO_CONTINUE } from "./agent-constants.js";
 import { assetRef, usesPlainChat, type AgentStreamEvent, type ChatMessage, type Conversation, type ToolResult } from "../shared/agent-types.js";
 import type { NativeMediaConfirmation } from "./chat-tools/native-image.js";
 import { taskKindFor } from "../shared/types.js";
+import { sunoResultLabel } from "../shared/suno.js";
 import { midjourneyUsableButtons } from "../shared/midjourney.js";
 import { auditParameters } from "./diagnose.js";
 
@@ -72,14 +73,14 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
     .map((asset) => asset.title)
     .filter((title): title is string => Boolean(title));
   const boardRef = typeof pending.toolResult?.data?.nodeRef === "string" ? pending.toolResult.data.nodeRef : "";
-  const label = kind === "audio" ? pending.toolName === "generate_speech" ? "配音" : "音乐" : kind === "image" ? "图片" : "视频";
+  const label = kind === "audio" ? pending.toolName === "generate_speech" ? "配音" : event.task.effectiveParameters?.task === "sound" ? "音效" : "音乐" : kind === "image" ? "图片" : "视频";
   const summary = conversation.kind === "board" && boardRef
     ? ok ? `画布节点 ${boardRef} 的${kind === "image" ? "图片" : kind === "video" ? "视频" : "音频"}任务已完成，结果将由画布回填。` : `画布节点 ${boardRef} 的生成失败：${event.task.errorMessage ?? event.task.errorCode ?? "上游没有返回结果"}`
     : ok && produced
     ? label === "配音"
       ? `配音完成${produced.duration ? `，约 ${produced.duration.toFixed(1)} 秒` : ""}，已保存 ${assetRef(produced.id)}。`
       : kind === "audio"
-        ? `音乐生成完成（${event.task.model}），共 ${producedAssets.length} 首${titles.length ? `：${titles.join(" / ")}` : ""}。`
+        ? `${label}生成完成，共 ${producedAssets.length} ${label === "音效" ? "条" : "首"}${titles.length ? `：${titles.join(" / ")}` : ""}。${event.task.remoteMeta?.suno?.warning ?? ""}`
       : `${label}生成完成（${event.task.model}），产物 ${assetRef(produced.id)}${produced.duration ? `，约 ${produced.duration} 秒` : ""}。`
     : `${label}生成失败：${event.task.errorMessage ?? event.task.errorCode ?? "上游没有返回结果"}`;
   // async 标记只在「等任务」时有意义；落库时丢掉，免得回放给大脑时它以为还没做完
@@ -91,8 +92,11 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
   const imageData = state?.target.kind === "image" && operation && adapter
     ? { model: event.task.model, count: producedAssets.length, parameterNotes: auditParameters(adapter, operation.toolArgs ?? {}, event.task.effectiveParameters) }
     : undefined;
-  const data = previous.data || imageData || midjourneyButtons.length || continued ? {
+  const suno = event.task.remoteMeta?.suno;
+  const observedModels = [...new Set((suno?.tracks ?? []).map(sunoResultLabel).filter(Boolean))];
+  const data = previous.data || imageData || suno || midjourneyButtons.length || continued ? {
     ...previous.data, ...imageData,
+    ...(suno ? { musicResultModels: observedModels.join(" / "), musicWarning: suno.warning ?? "" } : {}),
     ...(continued ? { continuedQuery: true } : {}),
     ...(midjourneyButtons.length ? { midjourneyButtons, midjourneyTaskId: event.task.id } : {}),
   } : undefined;

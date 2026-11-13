@@ -112,4 +112,22 @@ describe("上下文设置浮层", () => {
     render(true);
     expect(container.querySelector(".composer-image-warning")?.textContent).toBe("当前模型不接受图片输入");
   });
+
+  it("选中音视频后可在没有文字时发送", () => {
+    const onSend = vi.fn();
+    act(() => root.render(React.createElement(Composer, {
+      running: false, onSend, onInterrupt: vi.fn(),
+    })));
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const send = container.querySelector<HTMLButtonElement>('[aria-label="发送"]')!;
+    expect(send.disabled).toBe(true);
+    const files = [new File(["audio"], "旁白.m4a"), new File(["video"], "预览.mp4")];
+    Object.defineProperty(picker, "files", { value: files });
+    act(() => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("旁白.m4a");
+    expect(container.textContent).toContain("预览.mp4");
+    expect(send.disabled).toBe(false);
+    act(() => send.click());
+    expect(onSend).toHaveBeenCalledWith("", files, []);
+  });
 });

@@ -48,12 +48,12 @@ export class TaskOutputFiles {
    * 视频走 `saveVideos`，音乐/配音走 `saveAudios`。把分派放在这里，
    * 轮询器不用知道「视频怎么下载、音频怎么下载」。
    */
-  async saveResults(taskId: string, results: AsyncResult[], channel: DbChannel) {
+  async saveResults(taskId: string, results: AsyncResult[], channel: DbChannel, audioOffset = 0) {
     const videos = results.filter((item) => item.kind === "video");
     const audios = results.filter((item) => item.kind === "audio");
     const images = results.filter((item) => item.kind === "image");
     if (videos.length) await this.saveVideos(taskId, videos, channel);
-    if (audios.length) await this.saveAudios(taskId, audios, channel);
+    if (audios.length) await this.saveAudios(taskId, audios, channel, audioOffset);
     if (images.length) await this.saveImages(taskId, images.map((item) => ({ url: item.url, mimeType: item.mimeType })), channel);
     if (!videos.length && !audios.length && !images.length) {
       throw new AppError("RESPONSE_PARSE_FAILED", "暂不支持保存这种产物", 502);
@@ -91,7 +91,7 @@ export class TaskOutputFiles {
    * 封面写进现有的 `thumb_path`，不再单独建一条图片 asset——否则历史里会多出
    * 一张「不是用户要的图」，删除/清空时也不好解释。
    */
-  private async saveAudios(taskId: string, audios: AsyncResult[], channel: DbChannel) {
+  private async saveAudios(taskId: string, audios: AsyncResult[], channel: DbChannel, offset = 0) {
     const baseDir = this.db.assetsDir;
     let saved = 0;
     for (const audio of audios.slice(0, 8)) {
@@ -106,7 +106,7 @@ export class TaskOutputFiles {
       const extension = audioExtensionForMime(mimeType);
       const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
       const id = crypto.randomUUID();
-      const fileName = safeFileName(`${taskId}-${saved + 1}.${extension}`);
+      const fileName = safeFileName(`${taskId}-${offset + saved + 1}.${extension}`);
       const absolutePath = path.join(baseDir, fileName);
       await fs.writeFile(absolutePath, bytes);
 

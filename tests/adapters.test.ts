@@ -477,7 +477,7 @@ describe("Suno 各模式请求体", () => {
   it("灵感模式发 gpt_description_prompt", () => {
     expect(sunoBody({ prompt: "雨后的城市", musicMode: "inspiration", musicVersion: "chirp-v3-5" })).toMatchObject({
       gpt_description_prompt: "雨后的城市",
-      mv: "chirp-v3-5",
+      mv: "chirp-hawk",
       make_instrumental: false,
     });
   });
@@ -487,15 +487,15 @@ describe("Suno 各模式请求体", () => {
       prompt: "歌词……", musicMode: "custom", musicTags: "民谣, 温暖",
       musicTitle: "雨后的城", musicVersion: "chirp-v4",
     })).toMatchObject({
-      prompt: "歌词……", tags: "民谣, 温暖", title: "雨后的城", mv: "chirp-v4", make_instrumental: false,
+      prompt: "歌词……", tags: "民谣, 温暖", title: "雨后的城", mv: "chirp-hawk", make_instrumental: false,
     });
   });
 
   it("翻唱带 cover_clip_id 和 task=cover", () => {
     expect(sunoBody({
-      prompt: "改成爵士", musicMode: "cover", musicCoverClipId: "clip-1", musicVersion: "chirp-v3-5-tau",
+      prompt: "翻唱歌词", musicMode: "cover", musicCoverClipId: "clip-1", musicVersion: "chirp-v3-5-tau",
     })).toMatchObject({
-      task: "cover", prompt: "改成爵士", cover_clip_id: "clip-1", mv: "chirp-v3-5-tau",
+      task: "cover", prompt: "翻唱歌词", cover_clip_id: "clip-1", mv: "chirp-hawk",
       metadata: { create_mode: "custom" },
     });
   });
@@ -504,7 +504,7 @@ describe("Suno 各模式请求体", () => {
     expect(sunoBody({
       prompt: "", musicMode: "mashup", musicMashupClipIds: ["clip-1", "clip-2"], musicVersion: "chirp-crow",
     })).toMatchObject({
-      task: "mashup_condition", generation_type: "TEXT", mv: "chirp-crow",
+      task: "mashup_condition", generation_type: "TEXT", mv: "chirp-hawk",
       mashup_clip_ids: ["clip-1", "clip-2"], metadata: { create_mode: "custom" },
     });
   });
@@ -515,7 +515,7 @@ describe("Suno 各模式请求体", () => {
       musicSoundConfigs: { tempo: 99, key: "D", loop: true }, musicVersion: "chirp-crow",
     })).toMatchObject({
       task: "sound", generation_type: "TEXT", title: "Rain", tags: "rain",
-      mv: "chirp-crow", make_instrumental: true,
+      mv: "chirp-hawk", prompt: "", make_instrumental: true,
       metadata: {
         create_mode: "custom",
         sound_configs: { user_tempo: 99, user_key: "D", user_loop: true },
@@ -523,13 +523,13 @@ describe("Suno 各模式请求体", () => {
     });
   });
 
-  it("歌单风格和取样各自带 task，mv 缺省跟随模式", () => {
+  it("歌单风格和取样各自带 task，并默认请求 v6", () => {
     expect(sunoBody({ prompt: "city pop", musicMode: "playlist" })).toMatchObject({
-      task: "playlist_condition", generation_type: "TEXT", mv: "chirp-v3-5-tau",
+      task: "playlist_condition", generation_type: "TEXT", mv: "chirp-hawk",
       make_instrumental: false,
     });
     expect(sunoBody({ prompt: "lofi", musicMode: "sample" })).toMatchObject({
-      task: "chop_sample_condition", generation_type: "TEXT", mv: "chirp-crow",
+      task: "chop_sample_condition", generation_type: "TEXT", mv: "chirp-hawk",
     });
   });
 

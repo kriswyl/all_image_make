@@ -19,6 +19,7 @@ import { registerCanvasRoutes } from "./routes/canvas.js";
 import { registerChannelRoutes } from "./routes/channels.js";
 import { registerGenerationRoutes } from "./routes/generations.js";
 import { registerConversationRoutes, registerConversationEvents } from "./routes/conversations.js";
+import { MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../shared/chat-media.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerAssetRoutes } from "./routes/assets.js";
 
@@ -142,6 +143,10 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = crypto.randomUUID();
     if (error instanceof multer.MulterError) {
+      if (/^\/api\/conversations\/[^/]+\/media\/?$/.test(req.path)) {
+        const message = error.code === "LIMIT_FILE_SIZE" ? `单个音视频文件不能超过 ${MAX_CHAT_MEDIA_MB} MB` : `一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`;
+        return res.status(400).json(fail("CHAT_MEDIA_UPLOAD_LIMIT", message, requestId));
+      }
       // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
       if (error.code === "LIMIT_FILE_SIZE") {
         if (/\/api\/conversations\/[^/]+\/(?:documents\/upload|mind-documents)$/.test(req.path)) {

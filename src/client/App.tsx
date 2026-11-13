@@ -31,10 +31,11 @@ import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { LoadingScreen, StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "./task-ui";
 import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
+import type { SunoSourceSelection } from "../shared/suno";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
 import { useInpaintMask, useReferenceImages } from "./hooks/useReferenceImages";
 import { useMediaBuckets } from "./hooks/useMediaBuckets";
-import { useImageTaskEvents, usePolling } from "./hooks/usePolling";
+import { usePublicTaskEvents, usePolling } from "./hooks/usePolling";
 import { ClearHistoryDialog, HistoryView } from "./views/HistoryView";
 import { SettingsDialog } from "./dialogs/SettingsDialog";
 import { DiagnosticDialog } from "./dialogs/DiagnosticDialog";
@@ -88,6 +89,7 @@ export function App() {
   const [videoModel, setVideoModel] = usePersistentState("videoModel", "");
   const [musicChannelId, setMusicChannelId] = usePersistentState("musicChannelId", "");
   const [musicModel, setMusicModel] = usePersistentState("musicModel", "");
+  const [musicSource, setMusicSource] = useState<SunoSourceSelection | null>(null);
   const [speechChannelId, setSpeechChannelId] = usePersistentState("speechChannelId", "");
   const [speechModel, setSpeechModel] = usePersistentState("speechModel", "");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -416,13 +418,12 @@ export function App() {
       .finally(() => setLoading(false));
   }, []);
 
-  // 图片与视频任务各自轮询，切换视图也不会中断。
+  // 图片、音乐和语音订阅任务事件，切换历史结果也能更新未完成的任务。
   // 视频页是卡片网格，列表里可能同时有好几条在跑；轮询最新一条未完成的，
   // 而不是只盯「当前选中」——刷新页面后没选中任何一条时也能继续推进。
   const pendingVideoTask = videoTasks.find((task) => !terminalStatuses.includes(task.status)) ?? null;
-  useImageTaskEvents(imageTasks, setTasks);
+  usePublicTaskEvents([...imageTasks, ...musicTasks, ...speechTasks], setTasks);
   usePolling(pendingVideoTask, setTasks);
-  usePolling(activeMusicTask, setTasks);
 
   // 停在生成历史页时随时把新记录标记成已读：用户正看着，不该再算未读
   useEffect(() => {
@@ -903,13 +904,14 @@ export function App() {
             selectedModel={musicModel}
             activeTask={activeMusicTask}
             tasks={musicTasks}
+            sourceSelection={musicSource}
+            onSourceSelectionApplied={() => setMusicSource(null)}
             onChannelChange={selectMusicChannel}
             onModelChange={setMusicModel}
             onAddChannel={() => setWizardOpen(true)}
             onConfigureChannel={(channel) => setEditorChannel(channel)}
             onTask={(task) => {
               setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
-              setActiveMusicTaskId(task.id);
             }}
             onSelectTask={(task) => setActiveMusicTaskId(task.id)}
             onToast={showToast}
@@ -946,6 +948,12 @@ export function App() {
             onDeleteSelected={requestDeleteSelected}
             onClear={requestClearTasks}
             onOpenAssetSettings={() => setAssetDirOpen(true)}
+            onUseMusicSource={(selection) => {
+              setTasks(current => current.some(task => task.id === selection.task.id) ? current : [selection.task, ...current]);
+              setActiveMusicTaskId(selection.task.id);
+              setMusicSource(selection);
+              switchView("music");
+            }}
             onDiagnostics={setDiagnosticTask}
             onToast={showToast}
           />

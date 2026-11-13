@@ -45,6 +45,34 @@ function upload(app: ReturnType<typeof createApp>["app"], conversationId: string
   return request(app).post(`/api/conversations/${conversationId}/uploads`).attach("images", bytes, name);
 }
 
+it("把音频和视频作为会话消息保存，刷新后仍可读取", async () => {
+  const { app, conversationId } = await bootConversation("chat-media-upload-");
+  const wav = Buffer.from("RIFF0000WAVE");
+  const mp4 = Buffer.from("0000ftypisom");
+  await request(app).post(`/api/conversations/${conversationId}/media`)
+    .attach("files", wav, { filename: "旁白.wav", contentType: "application/octet-stream" })
+    .attach("files", mp4, { filename: "预览.mp4", contentType: "application/octet-stream" })
+    .expect(201);
+
+  const { body } = await request(app).get(`/api/conversations/${conversationId}`).expect(200);
+  const view = body.data as import("../src/shared/agent-types").ConversationView;
+  const [audio, video] = view.mediaAssets.map(item => item.asset);
+  expect(view.canvasAssetIds).toEqual([]);
+  expect(view.messages.map(message => message.assetId)).toEqual([audio!.id, video!.id]);
+  expect(audio).toMatchObject({ title: "旁白.wav", mimeType: "audio/wav" });
+  expect(video).toMatchObject({ title: "预览.mp4", mimeType: "video/mp4" });
+  await request(app).get(audio!.url).expect("Content-Type", /audio\/wav/).expect(200);
+  await request(app).get(video!.url).set("Range", "bytes=0-3").expect("Content-Range", "bytes 0-3/12").expect(206);
+  await request(app).post(`/api/conversations/${conversationId}/media`)
+    .attach("files", wav, "有效.wav")
+    .attach("files", pngBytes, "错误.mp4")
+    .expect(400);
+  const reloaded = await request(app).get(`/api/conversations/${conversationId}`).expect(200);
+  expect(reloaded.body.data.mediaAssets).toHaveLength(2);
+  const library = await request(app).get("/api/library").query({ limit: 10, mode: "assets", includeChat: "1" }).expect(200);
+  expect(library.body.data.items).toEqual([]);
+});
+
 describe("对话里上传图片（需求.md 问题 4）", () => {
   it("对话图片允许 20 MB，超过限制时拒绝", async () => {
     const { app, conversationId } = await bootConversation("image-relay-upload-limit-");

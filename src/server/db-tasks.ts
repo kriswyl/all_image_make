@@ -47,7 +47,7 @@ export type TaskPatch = Partial<Pick<TaskRow, "status" | "progress" | "remoteTas
 
 export type InsertDiagnosticInput = { taskId: string; request: unknown; response: unknown; httpStatus?: number | null; durationMs?: number | null };
 
-export type LibraryTaskQuery = { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records"; includeChatImages?: boolean };
+export type LibraryTaskQuery = { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records"; includeChat?: "all" | "image" };
 
 export class TaskRepository {
   constructor(
@@ -200,15 +200,19 @@ export class TaskRepository {
     const query = options?.query.trim().toLowerCase() ?? "";
     const hasChatMessage = `EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
       LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND (m.task_id = tasks.id OR a.task_id = tasks.id))`;
-    const chatImage = options?.includeChatImages ? `(tasks.origin = 'generate' AND ${kindSql} = 'image' AND (
-      (tasks.library_scope = 'conversation' AND tasks.owner_conversation_id IS NOT NULL)
+    const chatTask = options?.includeChat ? `(tasks.origin = 'generate'
+      ${options.includeChat === "image" ? `AND ${kindSql} = 'image'` : ""}
+      AND (
+      (tasks.library_scope = 'conversation' AND EXISTS (
+        SELECT 1 FROM conversations owner WHERE owner.id = tasks.owner_conversation_id AND owner.kind = 'chat'
+      ))
       OR (tasks.library_scope = 'legacy' AND ${hasChatMessage})
     ))` : "0";
     const rows = this.db.prepare(`
       SELECT tasks.*, COALESCE(channels.name, '已删除渠道') AS channel_name,
-             channels.adapter_type AS channel_adapter_type, CASE WHEN ${chatImage} THEN 'chat' END AS history_source
+             channels.adapter_type AS channel_adapter_type, CASE WHEN ${chatTask} THEN 'chat' END AS history_source
       FROM tasks LEFT JOIN channels ON channels.id = tasks.channel_id
-      WHERE (tasks.library_scope = 'public' OR ${chatImage} OR (tasks.library_scope = 'legacy' AND (
+      WHERE (tasks.library_scope = 'public' OR ${chatTask} OR (tasks.library_scope = 'legacy' AND (
         EXISTS (SELECT 1 FROM board_tasks bt WHERE bt.task_id = tasks.id)
         OR EXISTS (SELECT 1 FROM assets a JOIN board_assets ba ON ba.asset_id = a.id WHERE a.task_id = tasks.id)
         OR (tasks.origin = 'upload' AND tasks.prompt = '无限画布上传')

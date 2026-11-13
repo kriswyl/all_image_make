@@ -114,6 +114,17 @@ export function GenerateView(props: {
   const [raw, setRaw] = useScopedPersistentState(draftScope, "raw", "{}");
   const [submitting, setSubmitting] = useState(false);
   const [maskEditorOpen, setMaskEditorOpen] = useState(false);
+  const parametersRef = useRef<HTMLDetailsElement>(null);
+  const parameterInteraction = useRef<Event | null>(null);
+  useEffect(() => {
+    function dismissParameters(event: PointerEvent) {
+      const panel = parametersRef.current;
+      if (!panel?.open || event === parameterInteraction.current) return;
+      if (event.target instanceof Node && !panel.contains(event.target)) panel.open = false;
+    }
+    document.addEventListener("pointerdown", dismissParameters);
+    return () => document.removeEventListener("pointerdown", dismissParameters);
+  }, []);
   const references = props.references;
   const referenceImages = references.images;
   const readingImage = references.reading;
@@ -285,7 +296,11 @@ export function GenerateView(props: {
               } : undefined}
             />
             <div className="image-composer-controls">
-              <details className="image-parameters">
+              <details ref={parametersRef} className="image-parameters"
+                onPointerDownCapture={(event) => {
+                  // 参数下拉通过 portal 渲染，React 事件仍会经过参数面板。
+                  parameterInteraction.current = event.nativeEvent;
+                }}>
                 <summary className="vstudio-bar" aria-label="生成参数">
                   <Settings2 size={13} />
                   {quickSummary.map(value => <span key={value} className="image-parameter-value">{value}</span>)}

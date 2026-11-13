@@ -426,7 +426,7 @@ function ConfigNodeView({ node, upstream, onUpdateNode, onDelete, onGenerate, on
           {node.mode === "video"
             ? `${node.durationSeconds ? `${node.durationSeconds} 秒` : "默认时长"}${node.resolution ? ` · ${node.resolution}` : ""}`
             : node.mode === "text" ? "1 段"
-              : node.mode === "audio" ? (node.audioKind === "music" ? "2 首" : "1 段")
+              : node.mode === "audio" ? (node.audioKind === "music" ? "通常 2 首" : "1 段")
                 : `${node.count} 张`}
         </span>
         {node.status === "loading" ? <span className="board-badge is-active"><LoaderCircle size={10} className="spin" />生成中</span> : null}

@@ -20,7 +20,7 @@ function assetDownloadName(asset: { fileName: string; mimeType: string }): strin
     : asset.mimeType.startsWith("video/")
       ? ["mp4", "webm", "mov", "m4v", "mkv"]
       : asset.mimeType.startsWith("audio/")
-        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac"]
+        ? ["wav", "mp3", "m4a", "aac", "ogg", "flac", "webm"]
         : [];
   const byMime: Record<string, string> = {
     "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg",
@@ -91,11 +91,11 @@ export function registerAssetRoutes(app: Express, db: AppDatabase) {
     const id = routeParam(req.params.id);
     // 按主键直查：以前这里先取 1000 个任务再逐个查产物，历史一多，每个缩略图都要跑上千次查询
     const asset = db.getAsset(id);
-    if (!asset) return res.status(404).json(fail("ASSET_NOT_FOUND", "图片不存在"));
+    if (!asset) return res.status(404).json(fail("ASSET_NOT_FOUND", "素材不存在"));
     // 目录跟着记录走：用户换过素材目录后，老产物的绝对路径不能拿当前目录拼
     const baseDir = path.resolve(asset.baseDir);
     const absolutePath = path.resolve(baseDir, asset.relativePath);
-    if (!absolutePath.startsWith(baseDir + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "图片路径无效"));
+    if (!absolutePath.startsWith(baseDir + path.sep)) return res.status(400).json(fail("ASSET_INVALID", "素材路径无效"));
     if (req.query.download === "1") return res.download(absolutePath, assetDownloadName(asset));
     res.type(asset.mimeType).sendFile(absolutePath);
   });

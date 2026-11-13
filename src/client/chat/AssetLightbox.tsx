@@ -49,7 +49,7 @@ export function AssetLightbox({
         {isAudio ? (
           <div className="chat-audio-lightbox">
             {asset?.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" /> : null}
-            <strong>{asset?.title || "音乐"}</strong>
+            <strong>{asset?.title || "音频"}</strong>
             <audio src={api.assetUrl(`/api/assets/${assetId}/file`)} controls controlsList="nodownload" autoPlay onContextMenu={(event) => event.preventDefault()} />
             {asset?.lyrics ? (
               <details className="music-lyrics chat-lyrics">
@@ -69,7 +69,7 @@ export function AssetLightbox({
           <img src={api.assetUrl(`/api/assets/${assetId}/file`)} alt="" />
         )}
         <div className="chat-lightbox-bar">
-          <span>{assetRef(assetId)}{asset ? ` · ${asset.fileName}` : ""}</span>
+          <span>{assetRef(assetId)}{asset ? ` · ${asset.title || asset.fileName}` : ""}</span>
           <div className="chat-lightbox-actions">
             {!isAudio && !isVideo && onSetFirst ? (
               <button type="button" className="secondary-button" onClick={() => onSetFirst(assetId)} title="放到画布第 1 张（生视频首帧）">

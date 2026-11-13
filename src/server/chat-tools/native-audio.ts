@@ -16,7 +16,7 @@ export const nativeAudioSpecs = {
     type: "function",
     function: {
       name: "generate_music",
-      description: "生成音乐或音效。只有用户明确要求时单独调用并等待确认。自定义歌词需要 tags；翻唱指定一首、混音指定两首已有会话歌曲的 ID。",
+      description: "生成音乐或音效。只有用户明确要求时单独调用并等待确认。自定义歌词需要 tags。翻唱指定一首已有会话歌曲并提供歌词，省略歌词时沿用原词。混音指定同一渠道的两首不同会话歌曲。音效可设置 tempo、key、loop。词元流墟 v6 创作支持 45/60 秒目标时长，自定义歌词可设置 0 到 1 的 styleWeight 和 weirdness。",
       parameters: z.toJSONSchema(musicSchema),
     },
   },
@@ -45,6 +45,9 @@ export function prepareNativeAudio(ctx: ToolContext, tool: keyof typeof nativeAu
     const args = {
       ...parsed.data, modelHint: resolution.alias, prompt: input.prompt, mode, instrumental,
       sourceAssetRefs: sourceAssets.map(asset => asset.id),
+      targetDuration: input.musicTargetDuration,
+      styleWeight: input.musicStyleWeight,
+      weirdness: input.musicWeirdness,
       ...(input.musicSoundConfigs ? input.musicSoundConfigs : {}),
     };
     const preview = buildConfirmPreview(ctx.db, ctx.conversation, [{ tool, args }], "native_audio", undefined, undefined, ctx.defaultAliases);

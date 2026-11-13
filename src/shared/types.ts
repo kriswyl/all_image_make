@@ -1,4 +1,5 @@
 import type { TaskInputSnapshot } from "./video-snapshot.js";
+import type { SunoTaskMeta } from "./suno.js";
 // 参数核对结果（需求.md 问题 1）的类型住在 agent-types 里，因为 Agent 卡片先用到它。
 // 这里只要类型、不要运行时的东西，所以用 `import type`——编译后整行消失，不会绕成一个环。
 import type { ParamNote } from "./agent-types.js";
@@ -328,8 +329,11 @@ export interface GenerationInput {
   musicNegativeTags?: string;
   /** 纯音乐（无人声） */
   musicInstrumental?: boolean;
-  /** Suno 模型版本，例如 chirp-v3-5；不填由适配器补默认值 */
+  /** Suno 模型版本，例如 chirp-hawk；不填由适配器补默认值 */
   musicVersion?: string;
+  musicTargetDuration?: number;
+  musicStyleWeight?: number;
+  musicWeirdness?: number;
   /** 翻唱源曲的 Suno custom_id */
   musicCoverClipId?: string;
   /** 混音源曲的两个 Suno custom_id */
@@ -402,8 +406,8 @@ export interface Task {
   attemptCount: number;
   errorCode: string | null;
   errorMessage: string | null;
-  /** 上游任务的附加元数据；Midjourney 用它带回按钮（U1-U4 / V1-V4 / 重绘） */
-  remoteMeta?: { midjourney?: MidjourneyMeta } | null;
+  /** 上游任务的附加元数据，包括 Midjourney 操作和 Suno 成品信息 */
+  remoteMeta?: { midjourney?: MidjourneyMeta; suno?: SunoTaskMeta } | null;
   assets: Asset[];
   /**
    * 提交时的参数快照（脱敏）。来自任务落库的 `input_json`，之后改表单不会影响它；

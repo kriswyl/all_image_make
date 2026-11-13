@@ -833,8 +833,8 @@ it.each(["画一只猫", "帮我生成一张重庆夜景图片"])("全部能力�
   const { app } = mock;
   const uploaded = (await request(app).post(`${base}/uploads`).attach("images", Buffer.from(pngBase64, "base64"), "私有参考.png").expect(201)).body.data;
   const inputId = uploaded.sessionImages.find((entry: { source: string }) => entry.source === "upload").asset.id;
-  for (const mode of ["records", "assets"]) {
-    const history = (await request(app).get("/api/library").query({ limit: 10, mode, kind: "image", includeChatImages: "1" }).expect(200)).body.data.items;
+  for (const [mode, flag] of [["records", "includeChatImages"], ["assets", "includeChat"]] as const) {
+    const history = (await request(app).get("/api/library").query({ limit: 10, mode, kind: "image", [flag]: "1" }).expect(200)).body.data.items;
     expect(history).toHaveLength(1);
     expect(history[0]).toMatchObject({ historySource: "chat", assets: [expect.objectContaining({ id: assetId })] });
     expect(history.flatMap((task: { assets: { id: string }[] }) => task.assets).map((asset: { id: string }) => asset.id)).not.toContain(inputId);

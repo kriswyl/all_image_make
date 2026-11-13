@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { DEFAULT_IMAGE_SIZE, normalizeImageSize } from "../shared/types.js";
 import type { GenerationInput, Task } from "../shared/types.js";
+import type { SunoTaskMeta } from "../shared/suno.js";
 import type { AppDatabase, DbChannel } from "./db.js";
 import type { TaskPatch, TaskRow } from "./db-tasks.js";
 import {
   RemoteApiError,
+  applyAuth,
   buildGenerationRequest,
   requestForDiagnostic,
   sendPreparedRequest,
@@ -14,6 +16,7 @@ import {
   extractAsyncTaskId,
   nextPollDelay,
   readRetryAfter,
+  sunoRemoteIds,
   type AsyncProviderSpec,
   type AsyncResult,
 } from "./async-providers.js";
@@ -177,7 +180,8 @@ export class TaskRunner {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
-    if (!input.prompt.trim()) throw new AppError("INVALID_INPUT", "提示词不能为空", 400);
+    const musicPromptOptional = channel.adapterType === "suno-music" && (input.musicMode === "sound" || input.musicMode === "mashup");
+    if (!input.prompt.trim() && !musicPromptOptional) throw new AppError("INVALID_INPUT", "提示词不能为空", 400);
     if (input.prompt.length > 20000) throw new AppError("INVALID_INPUT", "提示词不能超过 20000 个字符", 400);
     const rawSize = JSON.stringify(input.rawParameters ?? {}).length;
     if (rawSize > 65536) throw new AppError("INVALID_INPUT", "高级参数不能超过 64 KB", 400);
@@ -251,7 +255,7 @@ export class TaskRunner {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
         const transportInterrupted = error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name);
-        if (task.agentOperationId && transportInterrupted) {
+        if ((task.agentOperationId || channel.adapterType === "suno-music") && transportInterrupted) {
           throw new AppError("SUBMISSION_UNKNOWN", "生成请求在返回结果前断开，上游可能已接收，请先到渠道核对任务", 409);
         }
         throw error;
@@ -262,15 +266,22 @@ export class TaskRunner {
 
       // 异步厂商（视频 / 音乐）：提交响应里拿远端 id，交给统一的轮询器
       const spec = asyncProviderSpec(channel.adapterType);
-      const asyncTaskId = spec ? (spec.extractTaskId?.(result.payload) ?? extractAsyncTaskId(result.payload)) : null;
+      const sunoIds = channel.adapterType === "suno-music" ? sunoRemoteIds(result.payload) : [];
+      const asyncTaskId = sunoIds[0] ?? (spec ? (spec.extractTaskId?.(result.payload) ?? extractAsyncTaskId(result.payload)) : null);
 
       if (spec && asyncTaskId) {
         // 先记下上游 task id：进程重启后靠它接着轮询，而不是把任务判死
-        this.updateTask(taskId, { remoteTaskId: asyncTaskId });
+        this.updateTask(taskId, {
+          remoteTaskId: asyncTaskId,
+          ...(sunoIds.length ? { remoteMeta: JSON.stringify({ suno: { remoteIds: sunoIds } }) } : {}),
+        });
         await this.pollAsyncTask(taskId, asyncTaskId, channel, key, spec);
         return;
       }
 
+      if (channel.adapterType === "suno-music") {
+        throw new AppError("SUBMISSION_UNKNOWN", "渠道未返回可查询的任务 ID，请先核对渠道记录", 409);
+      }
       await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt);
       this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
     } catch (error) {
@@ -340,7 +351,7 @@ export class TaskRunner {
       const channel = task.remoteTaskId ? this.db.getChannel(task.channelId) : null;
       const spec = channel ? asyncProviderSpec(channel.adapterType) : null;
       if (!channel || !spec) {
-        if (task.agentOperationId && task.status === "submitting") {
+        if ((task.agentOperationId || task.channelAdapterType === "suno-music") && task.status === "submitting") {
           this.markFailed(task.id, "SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果，请先到渠道核对任务");
         } else {
           this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
@@ -411,6 +422,10 @@ export class TaskRunner {
     options: { immediate?: boolean } = {},
   ) {
     this.updateTask(localTaskId, { status: "running", remoteTaskId, errorCode: null, errorMessage: null, finishedAt: null });
+    if (channel.adapterType === "suno-music") {
+      await this.pollSunoBatch(localTaskId, remoteTaskId, channel, key, spec, options.immediate);
+      return;
+    }
     // 提交路径走 joinEndpoint（会吃掉 Base URL 的尾斜杠），轮询这里必须一致，
     // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
     const url = joinEndpoint(channel.baseUrl, spec.pollPath(remoteTaskId));
@@ -535,6 +550,117 @@ export class TaskRunner {
       // 最后一条轮询（成功、失败、超时都一样）保留完整响应：排查时最有用的是它
       flushPending();
     }
+  }
+
+  private async pollSunoBatch(taskId: string, primaryId: string, channel: DbChannel, key: string, spec: AsyncProviderSpec, immediate = false) {
+    const meta: SunoTaskMeta = this.db.getTaskView(taskId)?.remoteMeta?.suno ?? {};
+    const ids = meta.remoteIds?.length ? meta.remoteIds : [primaryId];
+    const expected = 2;
+    const headers = { Accept: "application/json", "New-Api-User": "1" };
+    const deadline = Date.now() + spec.polling.windowMs;
+    const interval = POLL_DELAY_OVERRIDE_MS ?? spec.polling.runningMs;
+    const finished = new Set<string>();
+    const failures = new Map<string, string>();
+    const candidates = new Map<string, AsyncResult>();
+    const running = () => this.db.getTaskRow(taskId)?.status === "running";
+    let delay = Math.max(immediate ? 0 : (POLL_DELAY_OVERRIDE_MS ?? spec.polling.initialMs), (this.db.getTaskRow(taskId)?.remotePollAfter ?? 0) - Date.now());
+    let legacyPartial = false;
+
+    while (Date.now() < deadline) {
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
+      if (!running() || Date.now() >= deadline) break;
+      delay = interval;
+      for (const id of ids) {
+        if (finished.has(id) || !running() || Date.now() >= deadline) continue;
+        const requestHeaders: Record<string, string> = { ...headers };
+        const url = applyAuth(joinEndpoint(channel.baseUrl, spec.pollPath(id)), requestHeaders, channel, key);
+        const startedAt = Date.now();
+        try {
+          const response = await safeFetch(url, {
+            method: "GET", headers: requestHeaders,
+            signal: AbortSignal.timeout(Math.max(1, Math.min(15_000, deadline - startedAt))),
+          }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+          if (!running()) return;
+          if (response.status === 429 || response.status === 408 || response.status >= 500) {
+            const retryAfter = readRetryAfter(response.headers.get("retry-after"));
+            delay = Math.max(delay, retryAfter);
+            if (retryAfter) {
+              this.db.updateTask(taskId, { remotePollAfter: Date.now() + retryAfter });
+              break;
+            }
+            continue;
+          }
+          const payload = await response.json().catch(() => null);
+          if (!running()) return;
+          const status = spec.extractStatus(payload);
+          if (!response.ok || (status.status && spec.failureStatuses.includes(status.status))) {
+            failures.set(id, status.error || `歌曲任务查询失败（HTTP ${response.status}）`);
+            finished.add(id);
+          } else {
+            for (const item of spec.extractResults(payload)) {
+              const duplicate = [...candidates].find(([, existing]) => existing.url === item.url && (!existing.remoteClipId || !item.remoteClipId));
+              if (!duplicate || item.remoteClipId && !duplicate[1].remoteClipId) {
+                if (duplicate) candidates.delete(duplicate[0]);
+                candidates.set(item.remoteClipId ?? item.url, item);
+              }
+            }
+            if (status.progress !== null) {
+              const current = this.db.getTaskRow(taskId)?.progress ?? 0;
+              if (status.progress > current) this.updateTask(taskId, { progress: status.progress });
+            }
+            if (status.status && spec.successStatuses.includes(status.status)) {
+              // 批次可能先返回主歌曲；另一首还在 streaming 时继续查。
+              if (ids.length > 1 || candidates.size >= expected) finished.add(id);
+            }
+          }
+          if (finished.has(id) || candidates.size >= expected) {
+            this.db.insertDiagnostic({
+              taskId, request: { remoteTaskId: id, method: "GET" },
+              response: redact(truncatePayload(payload)), httpStatus: response.status, durationMs: Date.now() - startedAt,
+            });
+          }
+        } catch (error) {
+          if (!(error instanceof TypeError) && !(error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name))) throw error;
+        }
+        if (candidates.size >= expected) break;
+      }
+      if (candidates.size >= expected || finished.size === ids.length) break;
+      // 历史单 ID 任务只能查询原结果，给第二首一次补齐机会。
+      if (ids.length === 1 && candidates.size === 1) {
+        if (legacyPartial) break;
+        legacyPartial = true;
+      }
+    }
+
+    if (!running()) return;
+    const existingAssets = this.db.getTaskView(taskId)?.assets ?? [];
+    const existing = new Set(existingAssets.map(asset => asset.remoteClipId).filter(Boolean));
+    const tracks = new Map((meta.tracks ?? []).map(item => [item.clipId, item]));
+    let saved = existingAssets.length;
+    let downloadError: unknown;
+    for (const item of candidates.values()) {
+      if (!running()) return;
+      if (saved >= expected) break;
+      if (item.remoteClipId && existing.has(item.remoteClipId)) continue;
+      try {
+        await this.outputFiles.saveResults(taskId, [item], channel, saved);
+        if (item.remoteClipId && item.suno) tracks.set(item.remoteClipId, { ...item.suno, clipId: item.remoteClipId });
+        if (item.remoteClipId) existing.add(item.remoteClipId);
+        saved += 1;
+      } catch (error) { downloadError = error; }
+    }
+    if (!running()) return;
+    const timedOut = Date.now() >= deadline && finished.size < ids.length && candidates.size < expected;
+    const warning = saved > 0 && saved < expected
+      ? `本批已保存 ${saved} 首。另一首${timedOut ? "尚未完成" : downloadError ? "下载失败" : "未返回成品"}。`
+      : undefined;
+    this.updateTask(taskId, { remoteMeta: JSON.stringify({ suno: { remoteIds: ids, tracks: [...tracks.values()], warning } }) });
+    if (timedOut) throw new AppError("VIDEO_TIMEOUT", "已暂停查询，可继续查询原任务。", 504);
+    if (!saved) {
+      if (downloadError) throw downloadError;
+      throw new AppError("REMOTE_TASK_FAILED", failures.values().next().value || "没有返回已完成的音频", 502);
+    }
+    this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
   }
 
   private resolveKey(channel: DbChannel) {

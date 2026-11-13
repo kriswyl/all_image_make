@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
-  AlertCircle, AudioLines, Download, Eye, KeyRound, LoaderCircle, Mic, Plus, RotateCcw, Square, Upload,
+  AudioLines, ChevronRight, KeyRound, List, LoaderCircle, Mic, Plus, Upload,
 } from "lucide-react";
 import { api } from "./api";
 import { useFileDrop } from "./useFileDrop";
@@ -8,16 +8,32 @@ import { confirmGeneration } from "./generation-confirm";
 import { ChannelPicker } from "./chat/ChannelPicker";
 import { ModelPicker } from "./chat/ModelPicker";
 import { SelectMenu } from "./ui/SelectMenu";
-import {
-  StatusBadge, formatDuration, statusLabels, terminalStatuses, usePersistentState,
-} from "./task-ui";
-import type { Asset, Channel, Task } from "../shared/types";
+import { usePersistentState } from "./task-ui";
+import type { Channel, Task } from "../shared/types";
 import { TTS_DEFAULT_VOICE, TTS_LANGUAGES, TTS_STYLE_PRESETS, TTS_VOICES, splitTtsDialogue, formatTtsDialogue } from "../shared/tts";
+import { SpeechResultPanel } from "./views/SpeechResultPanel";
+import "./views/speech-workbench.css";
 
 type Toast = { kind: "success" | "error"; message: string };
 type SpeechMode = "single" | "duo";
 
 const DRAFT_PREFIX = "vector-image:speech-draft:";
+const VOICE_OPTIONS = TTS_VOICES.map((value) => ({ value, label: value }));
+const COMMON_STYLE_LABELS = ["自然", "温柔", "新闻播报"];
+
+function SpeechVoice({ speaker, value, onChange }: { speaker?: "A" | "B"; value: string; onChange: (value: string) => void }) {
+  const label = speaker ? "说话人 " + speaker : "音色";
+  return (
+    <div className="speech-voice">
+      {speaker ? <span className="speech-speaker" aria-hidden="true">{speaker}</span> : null}
+      <div className="speech-voice-field">
+        <span>{label}</span>
+        <SelectMenu value={value} options={VOICE_OPTIONS} onChange={onChange}
+          ariaLabel={speaker ? label + " 音色" : label} className="param-select" minWidth={160} />
+      </div>
+    </div>
+  );
+}
 
 export function SpeechGenerateView(props: {
   channels: Channel[];
@@ -42,6 +58,7 @@ export function SpeechGenerateView(props: {
   const [language, setLanguage] = usePersistentState("language", "zh-CN", DRAFT_PREFIX);
   const [timeoutSeconds, setTimeoutSeconds] = usePersistentState("timeoutSeconds", 300, DRAFT_PREFIX);
   const [submitting, setSubmitting] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
 
@@ -59,6 +76,17 @@ export function SpeechGenerateView(props: {
     } catch { props.onToast("error", "读取失败，请使用 UTF-8 编码的文本文件"); }
   }
   const textDrop = useFileDrop(!submitting, (files) => { if (files[0]) void importText(files[0]); });
+
+  function formatScript() {
+    try {
+      const formatted = formatTtsDialogue(text);
+      if (formatted.length > 20000) return props.onToast("error", "整理后的文本超过 20000 字");
+      setText(formatted);
+      props.onToast("success", "已整理为 A/B 格式");
+    } catch (error) {
+      props.onToast("error", error instanceof Error ? error.message : "对话格式不正确");
+    }
+  }
 
   async function generate() {
     if (!channel) return props.onToast("error", "请先选择语音渠道");
@@ -88,7 +116,7 @@ export function SpeechGenerateView(props: {
             { speaker: "B", voice: secondVoice },
           ],
         } : {}),
-        timeoutMs: Math.max(300, timeoutSeconds) * 1000,
+        timeoutMs: Math.round(Math.min(600, Math.max(300, timeoutSeconds))) * 1000,
       });
       props.onTask(task);
       props.onToast("success", "配音任务已提交");
@@ -100,7 +128,7 @@ export function SpeechGenerateView(props: {
   }
 
   return (
-    <div className="page generate-page">
+    <div className="page generate-page speech-workbench-page">
       <div className="page-header">
         <div>
           <h1>语音生成</h1>
@@ -144,255 +172,102 @@ export function SpeechGenerateView(props: {
           <button className="primary-button" onClick={props.onAddChannel}><Plus size={17} />添加渠道</button>
         </div>
       ) : (
-        <div className="generation-grid">
-          <section className="control-panel">
-            <div className="control-scroll">
-              <div className="section-title"><div><Mic size={17} /><h2>生成方式</h2></div></div>
-              <div className="mode-picker" role="radiogroup" aria-label="配音方式">
-                <button type="button" role="radio" aria-checked={mode === "single"} className={`mode-chip ${mode === "single" ? "active" : ""}`} onClick={() => setMode("single")}>单人配音</button>
-                <button type="button" role="radio" aria-checked={mode === "duo"} className={`mode-chip ${mode === "duo" ? "active" : ""}`} onClick={() => setMode("duo")}>双人对话</button>
+        <div className="speech-workbench">
+          <section className="speech-card speech-composer" aria-label="配音创作">
+            <header className="speech-card-header"><h2><Mic size={17} />配音创作</h2></header>
+            <div className="speech-composer-content">
+              <div className="speech-modes" role="group" aria-label="配音方式">
+                <button type="button" className="secondary-button" aria-pressed={mode === "single"} onClick={() => setMode("single")}>单人配音</button>
+                <button type="button" className="secondary-button" aria-pressed={mode === "duo"} onClick={() => setMode("duo")}>双人对话</button>
               </div>
-              <p className="mode-hint">
-                {mode === "duo"
-                  ? "每行用 A：或 B：标注说话人；带外层引号的对话可整理为标准格式。"
-                  : "一段文字配一个音色；长文建议按 50–200 字分段生成，便于重录。"}
-              </p>
-
-              <div className="section-title">
-                <div><AudioLines size={17} /><h2>朗读文本</h2></div>
-                <div className="tts-text-actions">{mode === "duo" ? <button type="button" className="secondary-button compact" onClick={() => { try { setText(formatTtsDialogue(text)); props.onToast("success", "已整理为 A：B：格式"); } catch (error) { props.onToast("error", error instanceof Error ? error.message : "对话格式不正确"); } }}>整理 A/B 格式</button> : null}<span>{text.length} / 20000</span></div>
-              </div>
-              <div className={`tts-import-drop ${textDrop.active ? "active" : ""}`} {...textDrop.dropProps}>
-                <label className="tts-import-button"><Upload size={15} />导入文本<input type="file" accept=".txt,.md,text/plain,text/markdown" className="file-input" disabled={submitting} onChange={(event) => { const file = event.target.files?.[0]; if (file) void importText(file); event.target.value = ""; }} /></label>
-                <span>选择或拖入 TXT / Markdown 文件，也可直接粘贴文字</span>
-              </div>
-              <textarea
-                className="prompt-input"
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                onBlur={() => { if (mode === "duo" && text.trim()) { try { const formatted = formatTtsDialogue(text); if (formatted.length <= 20000 && formatted !== text) setText(formatted); } catch { /* 未完成的内容保持原样 */ } } }}
-                maxLength={20000}
-                placeholder={mode === "duo" ? "A：你听说了吗？\nB：听说什么？" : "输入旁白、口播稿或要朗读的文字…"}
-              />
-
-              <div className="section-title parameters-title"><div><Mic size={17} /><h2>音色与风格</h2></div><span>Gemini TTS</span></div>
-              <div className="parameter-grid">
-                <label>
-                  <span>{mode === "duo" ? "说话人 A 音色" : "音色"}</span>
-                  <SelectMenu
-                    value={voice}
-                    options={TTS_VOICES.map((item) => ({ value: item, label: item }))}
-                    onChange={setVoice}
-                    ariaLabel={mode === "duo" ? "说话人 A 音色" : "音色"}
-                    className="param-select"
-                    minWidth={200}
-                  />
-                </label>
-                {mode === "duo" ? (
-                  <label>
-                    <span>说话人 B 音色</span>
-                    <SelectMenu
-                      value={secondVoice}
-                      options={TTS_VOICES.map((item) => ({ value: item, label: item }))}
-                      onChange={setSecondVoice}
-                      ariaLabel="说话人 B 音色"
-                      className="param-select"
-                      minWidth={200}
-                    />
-                  </label>
-                ) : null}
-                <label>
-                  <span>语种</span>
-                  <SelectMenu
-                    value={language}
-                    options={TTS_LANGUAGES.map((item) => ({ value: item.value, label: item.label }))}
-                    onChange={setLanguage}
-                    ariaLabel="语种"
-                    className="param-select"
-                    minWidth={180}
-                  />
-                </label>
-                <label className="tts-style-field">
-                  <span>风格 <small>会被当作语气标注，不会读出来</small></span>
-                  <input value={style} onChange={(event) => setStyle(event.target.value)} maxLength={200} placeholder="例如：温柔、放慢，像深夜电台" />
-                </label>
-              </div>
-              <div className="mode-picker tts-style-picker" aria-label="风格快捷选择">
-                {TTS_STYLE_PRESETS.map((item) => (
-                  <button key={item} type="button" className={`mode-chip ${style === item ? "active" : ""}`} onClick={() => setStyle(item)}>{item}</button>
-                ))}
+              <div className="speech-voices" data-duo={mode === "duo"}>
+                <SpeechVoice speaker={mode === "duo" ? "A" : undefined} value={voice} onChange={setVoice} />
+                {mode === "duo" ? <SpeechVoice speaker="B" value={secondVoice} onChange={setSecondVoice} /> : null}
               </div>
 
-              <details className="advanced-panel">
-                <summary><Mic size={16} /><span>高级</span></summary>
-                <div className="advanced-body">
-                  <div className="parameter-grid">
-                    <label>
-                      <span>等待时长 <small>秒</small></span>
-                      <input type="number" min={60} max={600} step={30} value={timeoutSeconds}
-                        onChange={(event) => setTimeoutSeconds(Math.max(60, Math.min(600, Number(event.target.value) || 300)))} />
-                    </label>
+              <div className={`speech-editor${textDrop.active ? " is-drop-target" : ""}`} {...textDrop.dropProps}>
+                <div className="speech-editor-header">
+                  <label htmlFor="speech-script">朗读文本</label>
+                  <div className="speech-editor-actions">
+                    <button type="button" className="secondary-button" disabled={submitting} onClick={() => fileInput.current?.click()}>
+                      <Upload size={14} />导入文本
+                    </button>
+                    <input ref={fileInput} type="file" accept=".txt,.md,text/plain,text/markdown" hidden disabled={submitting}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void importText(file);
+                        event.target.value = "";
+                      }} />
+                    {mode === "duo" ? (
+                      <button type="button" className="secondary-button" disabled={!text.trim() || submitting} onClick={formatScript}>
+                        <List size={14} />整理 A/B
+                      </button>
+                    ) : null}
                   </div>
-                  <p className="mode-hint">
-                    输出固定为 24kHz / 16bit / 单声道 WAV；不支持自定义音色、克隆、SSML 或变速。
-                  </p>
                 </div>
+                <textarea id="speech-script" value={text} onChange={(event) => setText(event.target.value)}
+                  onBlur={() => {
+                    if (mode !== "duo" || !text.trim()) return;
+                    try {
+                      const formatted = formatTtsDialogue(text);
+                      if (formatted !== text && formatted.length <= 20000) setText(formatted);
+                    } catch { /* 未写完的对话保留原样。 */ }
+                  }}
+                  maxLength={20000} aria-describedby="speech-script-hint"
+                  placeholder={mode === "duo" ? "A：今晚的故事，从一封旧信说起。\nB：信里写了什么？" : "输入旁白、口播稿或要朗读的文字…"} />
+                <div className="speech-editor-footer">
+                  <span id="speech-script-hint">{mode === "duo" ? "每行用 A：或 B：标记说话人" : "支持拖入 TXT 或 Markdown"}</span>
+                  <span>{text.length} / 20000</span>
+                </div>
+              </div>
+
+              <div className="speech-style">
+                <label htmlFor="speech-style">风格</label>
+                <input id="speech-style" value={style} onChange={(event) => setStyle(event.target.value)} maxLength={200}
+                  placeholder="例如：自然、像在讲故事" title="风格作为语气提示，不会朗读" />
+                <div className="speech-style-presets" role="group" aria-label="常用风格">
+                  {TTS_STYLE_PRESETS.slice(0, 3).map((item, index) => (
+                    <button key={item} type="button" className="secondary-button" aria-pressed={style === item}
+                      onClick={() => setStyle(item)}>{COMMON_STYLE_LABELS[index]}</button>
+                  ))}
+                </div>
+              </div>
+
+              <details className="advanced-panel speech-advanced">
+                <summary><ChevronRight size={15} /><span>更多设置</span></summary>
+                <div className="speech-settings-grid">
+                  <label><span>语种</span>
+                    <SelectMenu value={language} options={TTS_LANGUAGES.map((item) => ({ value: item.value, label: item.label }))}
+                      onChange={setLanguage} ariaLabel="语种" className="param-select" minWidth={180} />
+                  </label>
+                  <label><span>等待时长（秒）</span>
+                    <input type="number" min={300} max={600} step={30} value={timeoutSeconds}
+                      onChange={(event) => setTimeoutSeconds(Number(event.target.value))} />
+                  </label>
+                </div>
+                <div className="speech-style-presets" role="group" aria-label="更多风格">
+                  {TTS_STYLE_PRESETS.slice(3).map((item) => (
+                    <button key={item} type="button" className="secondary-button" aria-pressed={style === item}
+                      onClick={() => setStyle(item)}>{item}</button>
+                  ))}
+                </div>
+                <p className="field-hint">输出格式为 24 kHz / 16 bit / 单声道 WAV。</p>
               </details>
             </div>
 
-            <div className="submit-row">
-              {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : <span />}
-              <button className="primary-button generate-button" onClick={generate} disabled={submitting || !channel || !props.selectedModel}>
-                {submitting ? <LoaderCircle className="spin" size={18} /> : <Mic size={18} />}
+            <div className="speech-submit">
+              {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : null}
+              <button className="primary-button" onClick={generate} disabled={submitting || !channel || !props.selectedModel || !text.trim()}>
+                {submitting ? <LoaderCircle className="spin" size={17} /> : <Mic size={17} />}
                 {mode === "duo" ? "生成双人对话" : "生成配音"}
               </button>
             </div>
           </section>
 
-          <SpeechResultPanel
-            task={props.activeTask}
-            tasks={props.tasks}
-            onDiagnostics={props.onDiagnostics}
-            onTask={props.onTask}
-            onSelectTask={props.onSelectTask}
-            onToast={props.onToast}
-          />
+          <SpeechResultPanel task={props.activeTask ?? props.tasks[0] ?? null} tasks={props.tasks}
+            onDiagnostics={props.onDiagnostics} onTask={props.onTask} onSelectTask={props.onSelectTask} onToast={props.onToast} />
         </div>
       )}
-    </div>
-  );
-}
-
-function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelectTask, onToast }: {
-  task: Task | null;
-  tasks: Task[];
-  onDiagnostics: (task: Task) => void;
-  onTask: (task: Task) => void;
-  onSelectTask: (task: Task) => void;
-  onToast: (kind: Toast["kind"], message: string) => void;
-}) {
-  const busy = task && !terminalStatuses.includes(task.status);
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const recent = tasks.filter((item) => !terminalStatuses.includes(item.status) || (item.status === "succeeded" && item.assets.length > 0)).slice(0, 8);
-
-  async function cancel() {
-    if (!task) return;
-    try { onTask(await api.cancel(task.id)); }
-    catch (error) { onToast("error", error instanceof Error ? error.message : "取消失败"); }
-  }
-
-  async function retry() {
-    if (!task) return;
-    if (!confirmGeneration({ kind: "语音生成", model: task.model, channel: task.channelName, retry: true })) return;
-    try { onTask(await api.retry(task.id)); onToast("success", "已重新提交"); }
-    catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
-  }
-
-  async function download(asset: Asset) {
-    setDownloadingId(asset.id);
-    try {
-      if (await api.downloadAsset(asset)) onToast("success", "音频已保存");
-    } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "下载失败");
-    } finally {
-      setDownloadingId(null);
-    }
-  }
-
-  return (
-    <section className="result-panel music-result-panel speech-result-panel">
-      <div className="result-toolbar">
-        <div><Mic size={17} /><h2>结果</h2>{task ? <StatusBadge status={task.status} /> : null}</div>
-        <div className="icon-actions">
-          {task ? <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={17} /></button> : null}
-          {busy ? <button className="icon-button danger" title="取消任务" onClick={cancel}><Square size={16} /></button> : null}
-          {task && task.status === "failed" ? <button className="icon-button" title="重试" onClick={retry}><RotateCcw size={16} /></button> : null}
-        </div>
-      </div>
-
-      <div className={`result-stage music-stage ${task?.assets.length ? "has-tracks" : ""}`}>
-        {!task ? <SpeechEmpty /> : null}
-        {busy ? (
-          <div className="task-progress">
-            <LoaderCircle className="spin" size={30} />
-            <strong>{statusLabels[task.status]}</strong>
-            {task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}
-            <span>{task.model}</span>
-            <small>配音通常几十秒完成，长文本会更久</small>
-          </div>
-        ) : null}
-        {task && task.status === "failed" ? (
-          <div className="task-error"><AlertCircle size={30} /><strong>{task.errorCode}</strong><span>{task.errorMessage}</span></div>
-        ) : null}
-        {task && !busy && task.status !== "failed" && !task.assets.length ? <SpeechEmpty /> : null}
-        {task && task.assets.length ? (
-          <div className="music-stage-head">
-            <span>{task.assets.length} 段音频</span>
-            <span>{task.model}</span>
-          </div>
-        ) : null}
-        {task && task.assets.length ? (
-          <div className="music-track-list">
-            {task.assets.map((asset, index) => (
-              <article className="music-track" key={asset.id}>
-                <div className="music-cover speech-cover"><Mic size={28} /></div>
-                <div className="music-track-main">
-                  <div className="music-track-head">
-                    <strong>{asset.title || `配音 ${index + 1}`}</strong>
-                    {asset.duration ? <span>{formatDuration(asset.duration)}</span> : null}
-                  </div>
-                  <audio
-                    controls
-                    controlsList="nodownload"
-                    preload="metadata"
-                    src={api.assetUrl(asset.url)}
-                    onContextMenu={(event) => event.preventDefault()}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="secondary-button speech-download"
-                  title="下载音频"
-                  onClick={() => void download(asset)}
-                  disabled={downloadingId === asset.id}
-                >
-                  {downloadingId === asset.id ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
-                  下载
-                </button>
-              </article>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      {recent.length ? (
-        <div className="recent-strip">
-          <div className="recent-strip-head"><span>最近</span><span className="muted">{recent.length} 条</span></div>
-          <div className="recent-thumbs">
-            {recent.map((item) => (
-              <button
-                key={item.id}
-                className={`recent-thumb ${task?.id === item.id ? "active" : ""}`}
-                title={`${statusLabels[item.status]} · ${item.prompt}`}
-                aria-label={`${statusLabels[item.status]}：${item.prompt}`}
-                onClick={() => onSelectTask(item)}
-              >
-                {!terminalStatuses.includes(item.status) ? <LoaderCircle className="spin recent-task-icon" size={18} /> : <Mic size={17} />}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function SpeechEmpty() {
-  return (
-    <div className="empty-result">
-      <Mic size={30} />
-      <strong>等待配音</strong>
-      <span>输入旁白或对话文本，选择音色后生成</span>
     </div>
   );
 }

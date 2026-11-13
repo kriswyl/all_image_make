@@ -1266,6 +1266,24 @@ export class AppDatabase {
     return this.conversationMessages.appendMessage(input);
   }
 
+  recordConversationMediaUploads(conversationId: string, uploads: Array<{ asset: InsertAssetInput; content: string }>) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const { asset, content } of uploads) {
+        this.createTask({
+          id: asset.taskId, channelId: "", model: "", prompt: content,
+          input: {}, origin: "upload", libraryScope: "conversation", ownerConversationId: conversationId, status: "succeeded",
+        });
+        this.insertAsset(asset);
+        this.appendMessage({ conversationId, role: "user", content, assetId: asset.id });
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   updateMessage(id: string, patch: MessagePatch) {
     return this.conversationMessages.updateMessage(id, patch);
   }

@@ -140,6 +140,9 @@ const generationSchema = z.object({
   musicNegativeTags: z.string().trim().max(1000).optional(),
   musicInstrumental: z.boolean().optional(),
   musicVersion: z.string().trim().max(40).optional(),
+  musicTargetDuration: z.union([z.literal(45), z.literal(60)]).optional(),
+  musicStyleWeight: z.number().min(0).max(1).optional(),
+  musicWeirdness: z.number().min(0).max(1).optional(),
   musicCoverClipId: z.string().trim().max(100).optional(),
   musicMashupClipIds: z.array(z.string().trim().min(1).max(100)).max(2).optional(),
   musicSoundConfigs: z.object({
@@ -248,15 +251,15 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
   }));
 
   app.get("/api/library", (req, res) => {
-    const includeChatImages = req.query.includeChatImages === "1";
-    if (req.query.limit === undefined) return res.json(ok(db.listLibraryTaskViews(includeChatImages
-      ? { limit: -1, offset: 0, query: "", kind: "all", mode: "all", includeChatImages }
+    const includeChat = req.query.includeChat === "1" ? "all" : req.query.includeChatImages === "1" ? "image" : undefined;
+    if (req.query.limit === undefined) return res.json(ok(db.listLibraryTaskViews(includeChat
+      ? { limit: -1, offset: 0, query: "", kind: "all", mode: "all", includeChat }
       : undefined)));
     const limit = Math.max(1, Math.min(100, Math.floor(Number(req.query.limit) || 60)));
     const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
     const kind = req.query.kind === "image" || req.query.kind === "video" || req.query.kind === "audio" ? req.query.kind : "all";
     const mode = req.query.mode === "assets" || req.query.mode === "records" ? req.query.mode : "all";
-    const items = db.listLibraryTaskViews({ limit: limit + 1, offset, query: String(req.query.q ?? "").slice(0, 200), kind, mode, includeChatImages });
+    const items = db.listLibraryTaskViews({ limit: limit + 1, offset, query: String(req.query.q ?? "").slice(0, 200), kind, mode, includeChat });
     res.json(ok({ items: items.slice(0, limit), hasMore: items.length > limit }));
   });
 
@@ -276,9 +279,10 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     res.json(ok(db.listTaskViews(limit)));
   });
 
-  // 生成历史单独订阅聊天图片，工作台仍订阅公共任务。
+  // 素材管理订阅公共任务和普通对话生成，工作台订阅公共任务。
   app.get("/api/generations/events", (req, res) => {
     const chatImagesOnly = req.query.scope === "chat-images";
+    const includeChat = req.query.scope === "library" || chatImagesOnly;
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
@@ -288,9 +292,11 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     res.write(":ok\n\n");
     const unsubscribe = runner.onTaskEvent((event) => {
       const task = db.getTaskRow(event.task.id);
-      const chatImage = task?.libraryScope === "conversation" && Boolean(task.ownerConversationId) && task.origin === "generate"
-        && taskKindFor(task.channelAdapterType ?? undefined, event.task.assets.map(asset => asset.mimeType)) === "image";
-      if (chatImagesOnly ? chatImage : task?.libraryScope === "public") {
+      const chatTask = includeChat && task?.libraryScope === "conversation" && task.origin === "generate"
+        && task.ownerConversationId && db.getConversation(task.ownerConversationId)?.kind === "chat";
+      const showChat = chatTask && (!chatImagesOnly
+        || taskKindFor(task.channelAdapterType ?? undefined, event.task.assets.map(asset => asset.mimeType)) === "image");
+      if (showChat || (!chatImagesOnly && task?.libraryScope === "public")) {
         res.write(`data: ${JSON.stringify(event.task)}\n\n`);
       }
     });
