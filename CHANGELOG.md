@@ -17,7 +17,7 @@
 
 ### macOS：新增 Intel（x86_64）安装包
 
-- GitHub Release 现在同时产出 `ezcanvas_<版本>_aarch64.dmg` 与 `ezcanvas_<版本>_x64.dmg`。Intel Mac（含 2017 款 13" MacBook Pro / Ventura 13.7）可以直接安装，不再只有 Apple Silicon 能装。
+- GitHub Release 现在同时产出 `ChatCanvas_<版本>_aarch64.dmg` 与 `ChatCanvas_<版本>_x64.dmg`。Intel Mac（含 2017 款 13" MacBook Pro / Ventura 13.7）可以直接安装，不再只有 Apple Silicon 能装。
 - CI：`build-macos` 改成 matrix（`aarch64-apple-darwin` / `x86_64-apple-darwin`），各自 `rustup target add`、独立 rust-cache key、按 target 取 `src-tauri/target/<triple>/release/bundle/dmg`。
 - `scripts/prepare-tauri.mjs`：node sidecar 不再无脑复制 `process.execPath`，改为按 `TAURI_ENV_TARGET_TRIPLE` 匹配架构。交叉编译时下载官方 `node-v<ver>-darwin-x64` 并缓存到 `~/.cache/ezcanvas-node`——否则 arm64 runner 会把 arm64 的 node 塞进 Intel 包，包能装、后端起不来。也可用 `TAURI_NODE_BINARY` 显式指定。
 - x64 的冒烟测试需要在 arm64 runner 上跑 Intel 二进制，CI 里加了 `softwareupdate --install-rosetta` 兜底。
