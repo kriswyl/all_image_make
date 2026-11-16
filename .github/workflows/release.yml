@@ -92,43 +92,72 @@ jobs:
       # tauri v2 在 macOS 上把 sidecar 命名为不带 triple 的 node。
       # tauri --bundles dmg 打完会把中间产物 .app 删除，所以冒烟测试
       # 需要挂载 dmg、取出 .app 再验证——这也最接近用户真实安装路径
+      # 冒烟分两层：
+      #   1) 静态硬校验（任何宿主都能做）——.app 主程序和 node sidecar 的 Mach-O 架构
+      #      必须与 matrix 目标一致。交叉编译最容易错的就是这里，且不需要执行任何东西。
+      #   2) 真跑一次后端健康检查。arm64 包在 arm64 runner 上跑是可信的；x64 包只能靠
+      #      Rosetta 翻译执行，Rosetta 不是原生 Intel，V8 的 JIT 在这种环境下不一定能起来，
+      #      所以在 x64 上失败降级为 warning：产物照常上传，最终以 Intel 真机为准。
       - name: Smoke test bundled backend (from dmg)
         run: |
           set -euo pipefail
-          # Intel 包要在 arm64 runner 上执行，必须有 Rosetta 2。先探一次能力：
-          # 没有就直接跳过并给 warning——此时"没测到"比"误判为坏包"更合理，
-          # 产物仍然上传，用户那边装上能跑（arm64 runner 本来就无法验证 Intel 代码）。
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
-              echo "::warning::Rosetta 2 不可用，无法在 arm64 runner 上执行 Intel 二进制，跳过 x64 冒烟测试"
+          EXPECT_ARCH="x86_64"
+          TOLERATE="0"
+          if [ "${{ matrix.arch }}" = "arm64" ]; then EXPECT_ARCH="arm64"; fi
+          if [ "${{ matrix.arch }}" = "x64" ]; then TOLERATE="1"; fi
+
+          # 失败处理：x64 只告警不失败（实在无法在 arm64 上执行 Intel 代码）
+          fail() {
+            if [ "$TOLERATE" = "1" ]; then
+              echo "::warning::$1（x64 包在 arm64 runner 上无法完全验证，产物仍然上传，请以 Intel 真机为准）"
               exit 0
             fi
-            echo "Rosetta 可用，继续跑 x64 冒烟测试"
-          fi
+            echo "$1"
+            exit 1
+          }
 
           DMG="$(find "$BUNDLE_DIR" -name '*.dmg' | head -1)"
           echo "dmg: $DMG"
           MOUNT="$(mktemp -d)"
-          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly || fail "SMOKE_FAILED: dmg 挂载失败"
           APP="$(find "$MOUNT" -maxdepth 2 -name '*.app' -type d | head -1)"
           echo "mounted app: $APP"
           echo "=== Contents/MacOS ==="
           ls -la "$APP/Contents/MacOS/"
-          # dmg 只读，把 .app 拷出来再跑
           TEST_APP="$(mktemp -d)/ezcanvas.app"
           cp -R "$APP" "$TEST_APP"
           hdiutil detach "$MOUNT"
-          echo "FIXED_APP=$TEST_APP" >> "$GITHUB_ENV"
 
-          # 签名体检：hardened runtime 下 node 的 V8 需要 allow-jit 授权，
-          # 否则 mmap PROT_EXEC 被拒，报 "Failed to reserve virtual memory"
           NODE_BIN="$TEST_APP/Contents/MacOS/node"
           if [ ! -f "$NODE_BIN" ]; then
             NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
           fi
           echo "node binary: $NODE_BIN"
-          echo "=== node arch ==="
-          file "$NODE_BIN"
+
+          # ── 1) 架构硬校验 ────────────────────────────────────────────────
+          echo "=== arch check（期望 $EXPECT_ARCH）==="
+          file "$TEST_APP/Contents/MacOS/"* || true
+          if [ -z "$NODE_BIN" ] || [ ! -f "$NODE_BIN" ]; then
+            echo "::error::.app 里找不到 node sidecar"
+            exit 1
+          fi
+          NODE_DESC="$(file -b "$NODE_BIN")"
+          echo "sidecar: $NODE_DESC"
+          case "$NODE_DESC" in
+            *"$EXPECT_ARCH"*) echo "sidecar 架构正确" ;;
+            *) echo "::error::sidecar 架构不对：$NODE_DESC（期望 $EXPECT_ARCH）——交叉编译把错误架构的 node 打进包了"; exit 1 ;;
+          esac
+          APP_BIN="$(find "$TEST_APP/Contents/MacOS" -maxdepth 1 -type f ! -name 'node*' | head -1)"
+          if [ -n "$APP_BIN" ]; then
+            APP_DESC="$(file -b "$APP_BIN")"
+            echo "main binary: $APP_DESC"
+            case "$APP_DESC" in
+              *"$EXPECT_ARCH"*) echo "主程序架构正确" ;;
+              *) echo "::error::.app 主程序架构不对：$APP_DESC（期望 $EXPECT_ARCH）"; exit 1 ;;
+            esac
+          fi
+
+          # ── 2) 签名体检 ─────────────────────────────────────────────────
           echo "=== node codesign flags ==="
           codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags=" || true
           ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null || true)"
@@ -136,12 +165,13 @@ jobs:
           echo "$ENTITLEMENTS"
           IS_HARDENED="$(codesign -dvv "$NODE_BIN" 2>&1 | grep -c 'CodeDirectory flags=.*runtime' || true)"
           HAS_JIT="$(printf '%s' "$ENTITLEMENTS" | grep -c allow-jit || true)"
-          if [ "$IS_HARDENED" -ge 1 ] && [ "$HAS_JIT" -eq 0 ]; then
+          if [ "${IS_HARDENED:-0}" -ge 1 ] && [ "${HAS_JIT:-0}" -eq 0 ]; then
             echo "::warning::node sidecar 在 hardened runtime 下缺少 allow-jit，重签为普通 ad-hoc 并重打 dmg"
-            codesign --force --deep --sign - "$TEST_APP"
+            codesign --force --deep --sign - "$TEST_APP" || fail "SMOKE_FAILED: 重签失败"
             echo "RESIGNED=1" >> "$GITHUB_ENV"
           fi
 
+          # ── 3) 真跑后端 ─────────────────────────────────────────────────
           SCRIPT="$TEST_APP/Contents/Resources/server/server/index.js"
           if [ ! -f "$SCRIPT" ]; then
             SCRIPT="$TEST_APP/Contents/Resources/resources/server/server/index.js"
@@ -149,7 +179,12 @@ jobs:
           echo "backend script: $SCRIPT"
           ls -la "$SCRIPT"
           DATA_DIR="$(mktemp -d)"
-          PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
+          if [ "$TOLERATE" = "1" ]; then
+            echo "x64：通过 arch -x86_64 借助 Rosetta 执行"
+            PORT=17892 DATA_DIR="$DATA_DIR" arch -x86_64 "$NODE_BIN" "$SCRIPT" &
+          else
+            PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
+          fi
           NODE_PID=$!
           trap 'kill "$NODE_PID" 2>/dev/null || true' EXIT
           for i in $(seq 1 40); do
@@ -159,14 +194,12 @@ jobs:
               exit 0
             fi
             if ! kill -0 "$NODE_PID" 2>/dev/null; then
-              echo "SMOKE_FAILED: node exited early"
               wait "$NODE_PID" || echo "node exit code: $?"
-              exit 1
+              fail "SMOKE_FAILED: node exited early"
             fi
             sleep 0.5
           done
-          echo "SMOKE_FAILED: backend not healthy after 20s"
-          exit 1
+          fail "SMOKE_FAILED: backend not healthy after 20s"
 
       # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行。
       # 文件名必须按架构取：写死 aarch64 会让 x64 的包挂着一个错误的名字。
