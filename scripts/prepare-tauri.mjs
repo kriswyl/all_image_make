@@ -23,6 +23,49 @@ const targetTriple = process.env.TAURI_ENV_TARGET_TRIPLE || "x86_64-pc-windows-m
 const binarySuffix = process.platform === "win32" ? ".exe" : "";
 const nodeTarget = path.join(binaryDir, `node-${targetTriple}${binarySuffix}`);
 
+/** `x86_64-apple-darwin` → { arch: "x64", platform: "darwin" } */
+function nodePlatformForTriple(triple) {
+  const [archPart, ...rest] = triple.split("-");
+  const vendorOs = rest.join("-");
+  const arch = archPart === "x86_64" ? "x64" : archPart === "aarch64" ? "arm64" : archPart;
+  const platform = vendorOs.includes("darwin")
+    ? "darwin"
+    : vendorOs.includes("windows")
+      ? "win32"
+      : vendorOs.includes("linux")
+        ? "linux"
+        : null;
+  return { arch, platform };
+}
+
+const wanted = nodePlatformForTriple(targetTriple);
+if (targetTriple.startsWith("universal-")) {
+  throw new Error(
+    "universal-apple-darwin 需要把两种架构的 node 用 lipo 合成，当前脚本没实现；请分别打 aarch64 / x86_64 两个包。",
+  );
+}
+if (!wanted.platform) throw new Error(`看不懂的目标三元：${targetTriple}`);
+
+/**
+ * 依赖包里带 `os` / `cpu` 字段的，是平台相关的原生模块（`@napi-rs/canvas-darwin-arm64` 这种）。
+ * 交叉编译时宿主装的是**宿主架构**那一份，直接拷进目标包会变成「arm64 的 .node 塞进 Intel 包」，
+ * 运行到那一步就 `invalid ELF/Mach-O` 崩。
+ * Windows 包一直是全跳过这些可选依赖也跑得好好的，所以这里按目标平台/架构过滤最安全。
+ */
+function packageSupportsTarget(packageDir) {
+  const metaPath = path.join(packageDir, "package.json");
+  if (!fs.existsSync(metaPath)) return true;
+  let meta;
+  try {
+    meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  } catch {
+    return true;
+  }
+  if (Array.isArray(meta.os) && !meta.os.includes(wanted.platform)) return false;
+  if (Array.isArray(meta.cpu) && !meta.cpu.includes(wanted.arch)) return false;
+  return true;
+}
+
 if (!fs.existsSync(path.join(serverSource, "server", "index.js"))) {
   throw new Error("dist/server/server/index.js 不存在，请先完成后端构建");
 }
@@ -166,6 +209,10 @@ for (const relativePath of productionPackages) {
     continue;
   }
   const target = path.join(serverTarget, relativePath);
+  if (!packageSupportsTarget(source)) {
+    console.log(`跳过与 ${targetTriple} 不匹配的原生依赖 ${relativePath}`);
+    continue;
+  }
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.cpSync(source, target, { recursive: true });
 }
@@ -210,21 +257,6 @@ function run(command, args) {
   if (result.status !== 0) throw new Error(`${command} 退出码 ${result.status}`);
 }
 
-/** `x86_64-apple-darwin` → { arch: "x64", platform: "darwin" } */
-function nodePlatformForTriple(triple) {
-  const [archPart, ...rest] = triple.split("-");
-  const vendorOs = rest.join("-");
-  const arch = archPart === "x86_64" ? "x64" : archPart === "aarch64" ? "arm64" : archPart;
-  const platform = vendorOs.includes("darwin")
-    ? "darwin"
-    : vendorOs.includes("windows")
-      ? "win32"
-      : vendorOs.includes("linux")
-        ? "linux"
-        : null;
-  return { arch, platform };
-}
-
 /**
  * 下载官方 node 到本地缓存，给交叉编译用。
  * 缓存按版本 + 平台 + 架构分目录，第二次构建不用再拉 50MB。
@@ -250,14 +282,6 @@ function fetchOfficialNode({ arch, platform }) {
   if (!fs.existsSync(cached)) throw new Error(`${distName} 解压后没有找到 bin/node`);
   return cached;
 }
-
-const wanted = nodePlatformForTriple(targetTriple);
-if (targetTriple.startsWith("universal-")) {
-  throw new Error(
-    "universal-apple-darwin 需要把两种架构的 node 用 lipo 合成，当前脚本没实现；请分别打 aarch64 / x86_64 两个包。",
-  );
-}
-if (!wanted.platform) throw new Error(`看不懂的目标三元：${targetTriple}`);
 
 const explicitNode = process.env.TAURI_NODE_BINARY;
 let nodeSource;

@@ -26,6 +26,7 @@ jobs:
   #    这版不参与自动更新（ad-hoc 签名下自动替换 .app 会被 Gatekeeper 判成篡改），
   #    客户端只提示 + 跳下载页。
   build-macos:
+    name: build-macos (${{ matrix.arch }})
     strategy:
       # 一个架构失败不影响另一个：x64 的冒烟测试依赖 Rosetta，失败了也能拿到 arm64
       fail-fast: false
@@ -94,6 +95,17 @@ jobs:
       - name: Smoke test bundled backend (from dmg)
         run: |
           set -euo pipefail
+          # Intel 包要在 arm64 runner 上执行，必须有 Rosetta 2。先探一次能力：
+          # 没有就直接跳过并给 warning——此时"没测到"比"误判为坏包"更合理，
+          # 产物仍然上传，用户那边装上能跑（arm64 runner 本来就无法验证 Intel 代码）。
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "::warning::Rosetta 2 不可用，无法在 arm64 runner 上执行 Intel 二进制，跳过 x64 冒烟测试"
+              exit 0
+            fi
+            echo "Rosetta 可用，继续跑 x64 冒烟测试"
+          fi
+
           DMG="$(find "$BUNDLE_DIR" -name '*.dmg' | head -1)"
           echo "dmg: $DMG"
           MOUNT="$(mktemp -d)"
