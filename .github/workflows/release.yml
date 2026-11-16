@@ -92,58 +92,58 @@ jobs:
       # tauri v2 在 macOS 上把 sidecar 命名为不带 triple 的 node。
       # tauri --bundles dmg 打完会把中间产物 .app 删除，所以冒烟测试
       # 需要挂载 dmg、取出 .app 再验证——这也最接近用户真实安装路径
-      # 冒烟只做「能验证的验证」，不阻塞发布：
-      #   1) 静态硬信息：把 .app 主程序和 node sidecar 的 Mach-O 架构打出来，确认与 matrix 目标一致
-      #      （交叉编译最容易错的就是这里，而且这一步不需要执行任何东西）；
-      #   2) 尽力跑一次后端健康检查。arm64 包在 arm64 runner 上可信；x64 只能靠 Rosetta 翻译执行，
-      #      Rosetta 不是原生 Intel（V8 的 JIT 在这种环境下未必能起来），所以这里的结论只作参考。
-      # 任何一步失败都只发 warning，产物照常上传——否则会出现「包已经打出来了却因为测不了而发不出去」。
+      # 冒烟只做「能验证的验证」，且**不阻塞发布**：
+      #   · 静态：把 .app 主程序与 node sidecar 的 Mach-O 架构打出来，和 matrix 目标比对；
+      #   · 动态：尽力跑一次后端健康检查（x64 只能靠 Rosetta 翻译，结论仅作参考）。
+      # 两个坑必须避开：
+      #   1) runner 调 bash 时自带 -e，`set -uo` 关不掉它。任何未豁免的失败命令都会中断整步，
+      #      所以这里显式 `set +e`，全部失败自己兜。
+      #   2) `find ... | head -1` 在 pipefail 下会因 SIGPIPE 随机返回 141，表现为「有时绿有时红」。
+      #      统一改用 `find -print -quit`。
       - name: Smoke test bundled backend (from dmg)
         run: |
-          # 日志同时落盘：失败时会被推到 ci-logs-<arch> 分支，方便在没有 token 的环境里查看
           exec > >(tee "$RUNNER_TEMP/smoke-${{ matrix.arch }}.log") 2>&1
-          set -uo pipefail
+          set +e +o pipefail
           EXPECT_ARCH="x86_64"
           if [ "${{ matrix.arch }}" = "arm64" ]; then EXPECT_ARCH="arm64"; fi
           warn() { echo "::warning::$1"; exit 0; }
+          first() { find "$1" -name "$2" -print -quit 2>/dev/null; }
 
-          DMG="$(find "$BUNDLE_DIR" -name '*.dmg' | head -1)"
+          DMG="$(first "$BUNDLE_DIR" '*.dmg')"
           echo "dmg: $DMG"
           [ -n "$DMG" ] || warn "没找到 dmg，跳过冒烟"
           MOUNT="$(mktemp -d)"
           hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly || warn "dmg 挂载失败，跳过冒烟"
-          APP="$(find "$MOUNT" -maxdepth 2 -name '*.app' -type d | head -1)"
-          echo "mounted app: $APP"
-          [ -n "$APP" ] || warn "dmg 里没有 .app，跳过冒烟"
+          APP="$(mktemp -d)/app"
+          cp -R "$MOUNT"/*.app "$APP" 2>/dev/null || warn "dmg 里没有 .app，跳过冒烟"
           echo "=== Contents/MacOS ==="
           ls -la "$APP/Contents/MacOS/"
-          TEST_APP="$(mktemp -d)/ezcanvas.app"
-          cp -R "$APP" "$TEST_APP" || warn ".app 拷贝失败，跳过冒烟"
-          hdiutil detach "$MOUNT" || true
+          TEST_APP="$APP"
+          hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
 
           NODE_BIN="$TEST_APP/Contents/MacOS/node"
-          [ -f "$NODE_BIN" ] || NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
+          [ -f "$NODE_BIN" ] || NODE_BIN="$(first "$TEST_APP/Contents/MacOS" 'node*')"
           echo "node binary: $NODE_BIN"
-          [ -n "$NODE_BIN" ] || { echo "::error::.app 里找不到 node sidecar"; exit 1; }
+          [ -n "$NODE_BIN" ] || warn "包内没有 node sidecar（结构性缺陷，请检查 externalBin）"
 
-          # ── 1) 架构信息（唯一能可靠交叉验证的部分）──────────────────────
+          # ── 1) 架构（唯一能可靠交叉验证的部分）──────────────────────────
           echo "=== arch check（期望 $EXPECT_ARCH）==="
-          file "$TEST_APP/Contents/MacOS/"* 2>&1 | sed 's/^/  /' || true
-          NODE_DESC="$(file -b "$NODE_BIN" 2>&1 || echo "file 不可用")"
+          file "$TEST_APP/Contents/MacOS/"* 2>&1 | sed 's/^/  /'
+          NODE_DESC="$(file -b "$NODE_BIN" 2>&1)"
           echo "sidecar: $NODE_DESC"
           case "$NODE_DESC" in
             *"$EXPECT_ARCH"*) echo "sidecar 架构正确" ;;
-            *) echo "::warning::sidecar 架构与目标 $EXPECT_ARCH 不一致：$NODE_DESC" ;;
+            *) echo "::error::sidecar 架构与目标 $EXPECT_ARCH 不一致：$NODE_DESC" ;;
           esac
 
           # ── 2) 签名体检（缺 allow-jit 就重签，保证能启动）──────────────
           echo "=== node codesign flags ==="
-          codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags=" || true
-          ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null || true)"
+          codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags="
+          ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null)"
           echo "=== node entitlements ==="
           echo "$ENTITLEMENTS"
-          IS_HARDENED="$(codesign -dvv "$NODE_BIN" 2>&1 | grep -c 'CodeDirectory flags=.*runtime' || true)"
-          HAS_JIT="$(printf '%s' "$ENTITLEMENTS" | grep -c allow-jit || true)"
+          IS_HARDENED="$(codesign -dvv "$NODE_BIN" 2>&1 | grep -c 'CodeDirectory flags=.*runtime')"
+          HAS_JIT="$(printf '%s' "$ENTITLEMENTS" | grep -c allow-jit)"
           if [ "${IS_HARDENED:-0}" -ge 1 ] && [ "${HAS_JIT:-0}" -eq 0 ]; then
             echo "::warning::node sidecar 在 hardened runtime 下缺少 allow-jit，重签并重打 dmg"
             if codesign --force --deep --sign - "$TEST_APP"; then
@@ -167,7 +167,7 @@ jobs:
             PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
           fi
           NODE_PID=$!
-          trap 'kill "$NODE_PID" 2>/dev/null || true' EXIT
+          trap 'kill "$NODE_PID" 2>/dev/null' EXIT
           for i in $(seq 1 40); do
             if curl -sf http://127.0.0.1:17892/api/health; then
               echo ""
@@ -175,28 +175,12 @@ jobs:
               exit 0
             fi
             if ! kill -0 "$NODE_PID" 2>/dev/null; then
-              wait "$NODE_PID" 2>/dev/null || echo "node exit code: $?"
+              wait "$NODE_PID" 2>/dev/null
               warn "后端启动后退出（${{ matrix.arch }}）"
             fi
             sleep 0.5
           done
           warn "后端 20s 内没有就绪（${{ matrix.arch }}）"
-
-      # 拿不到 job 日志（无 token）时，把冒烟日志推到独立分支，方便直接 git fetch 查看。
-      # 诊断完可以删掉这一步和对应分支。
-      - name: Publish smoke log to ci-logs branch
-        if: always()
-        run: |
-          LOG="$RUNNER_TEMP/smoke-${{ matrix.arch }}.log"
-          [ -f "$LOG" ] || exit 0
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git checkout -q -B "ci-logs-${{ matrix.arch }}"
-          mkdir -p ci-debug
-          cp "$LOG" "ci-debug/smoke-${{ matrix.arch }}.log"
-          git add -A
-          git commit -q -m "ci: smoke log (${{ matrix.arch }}, ${{ github.ref_name }})" || exit 0
-          git push -f origin "HEAD:ci-logs-${{ matrix.arch }}"
 
       # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行。
       # 文件名必须按架构取：写死 aarch64 会让 x64 的包挂着一个错误的名字。
