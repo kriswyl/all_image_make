@@ -100,6 +100,8 @@ jobs:
       # 任何一步失败都只发 warning，产物照常上传——否则会出现「包已经打出来了却因为测不了而发不出去」。
       - name: Smoke test bundled backend (from dmg)
         run: |
+          # 日志同时落盘：失败时会被推到 ci-logs-<arch> 分支，方便在没有 token 的环境里查看
+          exec > >(tee "$RUNNER_TEMP/smoke-${{ matrix.arch }}.log") 2>&1
           set -uo pipefail
           EXPECT_ARCH="x86_64"
           if [ "${{ matrix.arch }}" = "arm64" ]; then EXPECT_ARCH="arm64"; fi
@@ -179,6 +181,22 @@ jobs:
             sleep 0.5
           done
           warn "后端 20s 内没有就绪（${{ matrix.arch }}）"
+
+      # 拿不到 job 日志（无 token）时，把冒烟日志推到独立分支，方便直接 git fetch 查看。
+      # 诊断完可以删掉这一步和对应分支。
+      - name: Publish smoke log to ci-logs branch
+        if: always()
+        run: |
+          LOG="$RUNNER_TEMP/smoke-${{ matrix.arch }}.log"
+          [ -f "$LOG" ] || exit 0
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -q -B "ci-logs-${{ matrix.arch }}"
+          mkdir -p ci-debug
+          cp "$LOG" "ci-debug/smoke-${{ matrix.arch }}.log"
+          git add -A
+          git commit -q -m "ci: smoke log (${{ matrix.arch }}, ${{ github.ref_name }})" || exit 0
+          git push -f origin "HEAD:ci-logs-${{ matrix.arch }}"
 
       # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行。
       # 文件名必须按架构取：写死 aarch64 会让 x64 的包挂着一个错误的名字。
