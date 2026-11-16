@@ -1,13 +1,14 @@
 /**
- * 无限画布工作区：独立于对话的整页画布 + 右侧检查器 + 侧栏无限画布列表。
+ * 无限画布工作区：独立于对话的整页画布和侧栏画布列表。
  *
  * 侧栏列表 portal 到 App 的「最近」位置，和对话列表复用同一套视觉，
  * 但两者的数据、线程、素材完全独立。
  */
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, LoaderCircle, Menu,
+  Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, Menu,
   Plus, Redo2, Trash2, Undo2, Upload,
 } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
@@ -19,6 +20,7 @@ import {
   createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
+import { referenceVideoDurationRange } from "../../shared/video-modes";
 import { BoardAgentPanel } from "./BoardAgentPanel";
 import { BoardCanvas } from "./BoardCanvas";
 import { BoardHistoryDrawer } from "./BoardHistoryDrawer";
@@ -78,7 +80,7 @@ function BoardSidebar({
       </div>
       <div className="sidebar-conv-list">
         {loading && !boards.length ? (
-          <div className="board-sidebar-empty"><LoaderCircle size={12} className="spin" />加载中…</div>
+          <div className="board-sidebar-empty"><LoadingIndicator variant="dots" size={24} />加载中…</div>
         ) : null}
         {boards.map((item) => (
           <div key={item.id} className={`sidebar-conv ${item.id === activeId ? "is-active" : ""}`}>
@@ -142,6 +144,7 @@ export function BoardWorkspace({
   const [agentUi, setAgentUi] = useState<BoardAgentUiState | undefined>(undefined);
   const [assetDrawerOpen, setAssetDrawerOpen] = useState(false);
   const [assetTargetId, setAssetTargetId] = useState<string | null>(null);
+  const [referenceTargetId, setReferenceTargetId] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState("");
   const [assetType, setAssetType] = useState<"all" | "image" | "video" | "audio">("all");
   const [historyBoardId, setHistoryBoardId] = useState<string | null>(null);
@@ -156,6 +159,8 @@ export function BoardWorkspace({
   const initializedRef = useRef(false);
 
   const board = useBoard(currentId, onToast);
+  const activeViewRef = useRef(board.view);
+  activeViewRef.current = board.view;
 
   const refreshBoards = useCallback(async () => {
     setBoardsLoading(true);
@@ -239,6 +244,7 @@ export function BoardWorkspace({
           channelName: alias.channelName,
           channelId: alias.channelId,
           adapterType: alias.adapterType,
+          localVideoUploadConfigured: alias.localVideoUploadConfigured,
         }));
       setImageAliases(map("image"));
       setVideoAliases(map("video"));
@@ -313,12 +319,6 @@ export function BoardWorkspace({
     // version 变化 = 生成结果刚保存完，board_assets 已重建；重新拉一次才能显示新图
   }, [assetKey, board.view?.version, currentId]);
 
-  const selectedNode = useMemo(() => {
-    if (!board.view || board.selection.length !== 1) return null;
-    const id = board.selection[0];
-    return board.view.doc.nodes.find((node) => node.id === id) ?? null;
-  }, [board.selection, board.view]);
-
   const selectedImageAssets = useMemo(() => {
     if (!board.view) return [];
     const seen = new Set<string>();
@@ -351,6 +351,7 @@ export function BoardWorkspace({
 
   const pickImage = useCallback((nodeId: string | null) => {
     if (nodeId) {
+      setReferenceTargetId(null);
       setAssetTargetId(nodeId);
       setAssetSearch("");
       const node = board.view?.doc.nodes.find((item) => item.id === nodeId);
@@ -358,19 +359,46 @@ export function BoardWorkspace({
       setAssetDrawerOpen(true);
       return;
     }
-    uploadTargetRef.current = nodeId;
-    fileInputRef.current?.click();
+    uploadTargetRef.current = null;
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = "image/png,image/jpeg,image/webp";
+      fileInputRef.current.multiple = true;
+      fileInputRef.current.click();
+    }
   }, [board.view]);
 
-  const handleFiles = useCallback(async (files: File[], position?: { x: number; y: number }) => {
+  const uploadMediaIntoNode = (nodeId: string) => {
+    uploadTargetRef.current = nodeId;
+    if (fileInputRef.current) {
+      const target = board.view?.doc.nodes.find((node) => node.id === nodeId);
+      fileInputRef.current.accept = target?.type === "video" ? "video/mp4,video/webm" : "image/png,image/jpeg,image/webp";
+      fileInputRef.current.multiple = false;
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFiles = useCallback(async (files: File[], position?: { x: number; y: number }, targetNodeId: string | null = null) => {
     if (!files.length || !currentId) return;
     for (const [index, file] of files.entries()) {
-      const targetId = index === 0 ? uploadTargetRef.current : null;
+      const targetId = index === 0 ? targetNodeId : null;
       if (targetId) {
+        const target = board.view?.doc.nodes.find((node) => node.id === targetId);
+        if (!target || (target.type !== "image" && target.type !== "video") || target.status === "loading") return;
+        if (!file.type.startsWith(`${target.type}/`)) {
+          onToast("error", target.type === "video" ? "请选择视频文件" : "请选择图片文件");
+          return;
+        }
         try {
-          const asset = await api.uploadBoardAsset(currentId!, file);
+          const asset = await api.uploadBoardAsset(currentId, file);
+          const latest = activeViewRef.current;
+          if (latest?.id !== currentId) return;
           setAssets((current) => new Map(current).set(asset.id, asset));
-          board.updateNode(targetId, { assetId: asset.id, source: "upload", status: "succeeded" } as Partial<BoardNode>);
+          const updatedTarget = latest.doc.nodes.find((node) => node.id === targetId);
+          if (updatedTarget?.type !== target.type || updatedTarget.status === "loading" || updatedTarget.assetId !== target.assetId) {
+            onToast("success", "图片已上传到素材库");
+            return;
+          }
+          board.updateNode(targetId, { assetId: asset.id, source: "upload", status: "succeeded", error: undefined });
         } catch (error) {
           onToast("error", error instanceof Error ? error.message : "上传失败");
         }
@@ -379,7 +407,6 @@ export function BoardWorkspace({
         if (asset) setAssets((current) => new Map(current).set(asset.id, asset));
       }
     }
-    uploadTargetRef.current = null;
   }, [board, currentId, onToast]);
 
   const exportBoard = useCallback(async () => {
@@ -443,12 +470,14 @@ export function BoardWorkspace({
 
   const toggleHistory = useCallback(() => {
     setAssetDrawerOpen(false);
+    setReferenceTargetId(null);
     setTemplateDrawerOpen(false);
     setHistoryBoardId((openId) => openId === currentId ? null : currentId);
   }, [currentId]);
 
   const toggleTemplates = useCallback(() => {
     setAssetDrawerOpen(false);
+    setReferenceTargetId(null);
     setHistoryBoardId(null);
     setTemplateDrawerOpen((open) => !open);
   }, []);
@@ -465,7 +494,8 @@ export function BoardWorkspace({
     if (!target || target.type === "text") return;
     const kind = target.type === "config" ? target.mode : target.type;
     const label = kind === "video" ? "视频" : kind === "audio" ? "音频" : kind === "text" ? "文本" : "图片";
-    const count = target.type === "config" && kind === "image" ? target.count : 1;
+    const count = kind === "image" && (target.type === "config" || target.type === "image")
+      ? target.count ?? 1 : 1;
     const model = target.model?.trim() || "当前默认模型";
     if (kind === "video" && board.view) {
       const alias = videoAliases.find((item) => item.alias === (target.model || defaultVideoAlias)) ?? videoAliases[0];
@@ -477,20 +507,25 @@ export function BoardWorkspace({
           const asset = item.assetId ? assets.get(item.assetId) : undefined;
           if (!asset) throw new Error(`节点 ${item.ref} 没有可用素材`);
           const duration = await readMediaDuration(asset.url, item.type);
-          const min = item.type === "audio" ? 0 : alias?.adapterType === "kling-video" ? 3 : 1;
-          const max = item.type === "audio" ? 15 : alias?.adapterType === "kling-video" ? 30 : 15;
+          const { min, max } = item.type === "audio" ? { min: 0, max: 15 }
+            : referenceVideoDurationRange(alias?.adapterType === "kling-video" ? "motion-control" : "reference");
           if (duration <= 0 || duration < min || duration > max) throw new Error(`节点 ${item.ref} 的${item.type === "audio" ? "音频" : "视频"}时长须为 ${min}–${max} 秒`);
         }
       } catch (error) { onToast("error", error instanceof Error ? error.message : "读取素材失败"); return; }
     }
     const hasReferenceVideo = kind === "video" && board.view?.doc.edges.some((edge) => edge.kind === "input" && edge.target === nodeId && board.view?.doc.nodes.some((item) => item.id === edge.source && item.type === "video" && item.assetId));
-    const detail = hasReferenceVideo ? "参考视频将上传到渠道图床，上传后可通过公网访问。" : count > 1 ? `请求数量：${count} 张` : undefined;
+    const detail = hasReferenceVideo ? "参考视频将上传到渠道图床，上传后可通过公网访问。" : count > 1 ? `将提交 ${count} 次独立生图请求` : undefined;
     if (!confirmGeneration({ kind: `${label}生成`, model, detail })) return;
     const inPlace = target.type !== "config";
     const result = await board.generate(nodeId);
     if (!result) return;
     if (result.kind === "text") {
       onToast("success", "文本已生成，结果节点在配置节点右侧");
+    } else if (result.kind === "image" && result.resultNodeIds.length > 1) {
+      const submitted = result.taskIds?.length ?? result.resultNodeIds.length;
+      const failed = result.resultNodeIds.length - submitted;
+      if (failed > 0) onToast("error", `已提交 ${submitted} 次，${failed} 次提交失败，请查看对应卡片`);
+      else onToast("success", inPlace ? `已提交 ${submitted} 次，首张回填当前卡片，其余排在右侧` : `已提交 ${submitted} 次，结果排在配置节点右侧`);
     } else if (inPlace) {
       onToast("success", `已提交${result.kind === "video" ? "视频" : result.kind === "audio" ? "音频" : "图片"}任务，结果会回填当前节点`);
     } else if (result.kind === "video") {
@@ -628,9 +663,9 @@ export function BoardWorkspace({
           </button>
           <span className={`board-save-state ${board.saving || board.retrying ? "is-saving" : ""}`}>
             {board.retrying
-              ? <><LoaderCircle size={11} className="spin" />重试中</>
+              ? <><LoadingIndicator variant="dots" size={24} />重试中</>
               : board.saving
-                ? <><LoaderCircle size={11} className="spin" />保存中</>
+                ? <><LoadingIndicator variant="dots" size={24} />保存中</>
                 : <><Check size={11} />已保存</>}
           </span>
           <button
@@ -640,6 +675,7 @@ export function BoardWorkspace({
               setHistoryBoardId(null);
               setTemplateDrawerOpen(false);
               setAssetTargetId(null);
+              setReferenceTargetId(null);
               setAssetDrawerOpen((open) => !open);
             }}
             title="查看这块无限画布用到的素材"
@@ -683,40 +719,51 @@ export function BoardWorkspace({
           board={board}
           assets={assets}
           onPickImage={pickImage}
+          onUploadMediaIntoNode={uploadMediaIntoNode}
           onUploadFiles={(files, position) => void handleFiles(files, position)}
           onPreviewAsset={setPreview}
-          onGenerate={(nodeId) => void generateNode(nodeId)}
-          onStopTask={(taskId) => void board.cancelTask(taskId)}
-          onRetryTask={(taskId) => void retryBoardTask(taskId)}
+          onDeleteNode={deleteNode}
+          onCompareVersions={setVersionNodeId}
+          onExtractFrame={(nodeId) => void extractFrame(nodeId)}
+          renderNodeSettings={(selectedNode, locate) => board.view && (
+            <BoardInspector
+              view={board.view}
+              node={selectedNode}
+              assets={assets}
+              imageAliases={imageAliases}
+              defaultImageAlias={defaultImageAlias}
+              videoAliases={videoAliases}
+              defaultVideoAlias={defaultVideoAlias}
+              audioAliases={audioAliases}
+              defaultSpeechAlias={defaultSpeechAlias}
+              defaultMusicAlias={defaultMusicAlias}
+              onUpdateNode={board.updateNode}
+              onUpdateEdge={(edgeId, patch) => { board.updateEdge(edgeId, patch); }}
+              onConnectReference={(source, targetId, role) => board.addEdge(source.id, targetId, "input", role)}
+              onLocateReference={locate}
+              onRemoveReference={(edgeId) => board.removeEdges([edgeId])}
+              onPickReference={(nodeId) => {
+                setAssetTargetId(null);
+                setReferenceTargetId(nodeId);
+                setAssetSearch("");
+                setAssetType("image");
+                setAssetDrawerOpen(true);
+              }}
+              onDeleteNode={deleteNode}
+              onPreview={setPreview}
+              onPickImage={pickImage}
+              onUploadMediaIntoNode={uploadMediaIntoNode}
+              onRemoveAsset={(nodeId) => board.updateNode(nodeId, { assetId: null, status: "empty" } as Partial<BoardNode>)}
+              onGenerate={(nodeId) => void generateNode(nodeId)}
+              onStopTask={(taskId) => void board.cancelTask(taskId)}
+              onRetryTask={(taskId) => void retryBoardTask(taskId)}
+              onExtractFrame={(nodeId) => void extractFrame(nodeId)}
+              onCompareVersions={setVersionNodeId}
+              onApplyStyle={(preset, nodeIds) => board.applyStyle(preset, nodeIds)}
+              onClose={() => board.setSelection([])}
+            />
+          )}
         />
-        {selectedNode ? (
-          <BoardInspector
-            view={board.view!}
-            node={selectedNode}
-            selectedCount={board.selection.length}
-            assets={assets}
-            imageAliases={imageAliases}
-            defaultImageAlias={defaultImageAlias}
-            videoAliases={videoAliases}
-            defaultVideoAlias={defaultVideoAlias}
-            audioAliases={audioAliases}
-            defaultSpeechAlias={defaultSpeechAlias}
-            defaultMusicAlias={defaultMusicAlias}
-            onUpdateNode={board.updateNode}
-            onUpdateEdge={(edgeId, patch) => { board.updateEdge(edgeId, patch); }}
-            onDeleteNode={deleteNode}
-            onPreview={setPreview}
-            onPickImage={pickImage}
-            onRemoveAsset={(nodeId) => board.updateNode(nodeId, { assetId: null, status: "empty" } as Partial<BoardNode>)}
-            onGenerate={(nodeId) => void generateNode(nodeId)}
-            onStopTask={(taskId) => void board.cancelTask(taskId)}
-            onRetryTask={(taskId) => void retryBoardTask(taskId)}
-            onExtractFrame={(nodeId) => void extractFrame(nodeId)}
-            onCompareVersions={setVersionNodeId}
-            onApplyStyle={(preset, nodeIds) => board.applyStyle(preset, nodeIds)}
-            onClose={() => board.setSelection([])}
-          />
-        ) : null}
       </div>
 
       <input
@@ -728,7 +775,9 @@ export function BoardWorkspace({
         onChange={(event) => {
           const files = [...(event.target.files ?? [])];
           event.target.value = "";
-          if (files.length) void handleFiles(files);
+          const targetId = uploadTargetRef.current;
+          uploadTargetRef.current = null;
+          if (files.length) void handleFiles(targetId ? files.slice(0, 1) : files, undefined, targetId);
         }}
       />
 
@@ -805,7 +854,23 @@ export function BoardWorkspace({
         board.updateNode(versionNodeId, { assetId: asset.id, taskId: task.id, status: "succeeded" } as Partial<BoardNode>);
         onToast("success", "已切换节点素材；提示词和参数保持当前设置");
       }} /> : null}
-      {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId} onPreview={setPreview} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); }} onToast={onToast} /> : null}
+      {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId}
+        onUseReferenceImage={referenceTargetId ? async (asset) => {
+          if (!currentId || !asset.mimeType.startsWith("image/")) return false;
+          if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后重试");
+          if (activeViewRef.current?.id !== currentId) return false;
+          await api.linkBoardAsset(currentId, asset.id);
+          const latest = activeViewRef.current;
+          if (latest?.id !== currentId) return false;
+          const target = latest.doc.nodes.find((item) => item.id === referenceTargetId);
+          if (!(target?.type === "video" || (target?.type === "config" && target.mode === "video"))) throw new Error("视频节点已变更，请重新选择");
+          const inputCount = latest.doc.edges.filter((edge) => edge.kind === "input" && edge.target === target.id).length;
+          const added = board.addImageNode(asset, { x: target.x - 400, y: target.y + 180 * inputCount }, undefined, target.id);
+          if (!added) return false;
+          setAssets((items) => new Map(items).set(asset.id, asset));
+          return true;
+        } : undefined}
+        onPreview={setPreview} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); setReferenceTargetId(null); }} onToast={onToast} /> : null}
 
       {preview ? (
         <AssetLightbox

@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Check, ChevronRight, CloudRain, Eye, KeyRound, LoaderCircle, Moon, Music, Plus, Sparkles, Sun,
+  Check, ChevronRight, CloudRain, Eye, KeyRound, Moon, Music, Plus, Sparkles, Sun,
 } from "lucide-react";
 import { api } from "./api";
 import { confirmGeneration } from "./generation-confirm";
@@ -592,7 +593,7 @@ export function MusicGenerateView(props: {
                 </button>
               ) : null}
               <button className="primary-button generate-button" onClick={generate} disabled={submitting || !channel || !props.selectedModel}>
-                {submitting ? <LoaderCircle className="spin" size={17} /> : <Music size={17} />}
+                {submitting ? <LoadingIndicator variant="dots" size={24} /> : <Music size={17} />}
                 {submitting ? "提交中" : sound ? "生成音效" : "生成音乐"}
               </button>
               <small>{sound ? "通常返回 2 条音效" : targetDurationAvailable && targetDuration !== "auto" ? `通常返回 2 首 · 目标 ${targetDuration} 秒` : "通常返回 2 首"}</small>

@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { LoaderCircle, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api } from "../api";
 import { openExternal } from "../external";
 import { assertWpsPreviewResult } from "./wps-result";
@@ -102,7 +103,7 @@ export function WpsPreview({ conversationId, fileId, name, onClose }: { conversa
   }
   return createPortal(<div className="mind-preview-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) { active.current?.abort(); onClose(); } }}><section className="mind-preview-dialog wps-preview-dialog" role="dialog" aria-modal="true" aria-label="WPS PPT 预览">
     <header><div><strong>WPS 逐页预览（测试版）</strong><small>{name} · 通过本机 WPS 只读渲染临时副本</small></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => { active.current?.abort(); onClose(); }}><X size={18} /></button></header>
-    <main>{error ? <p role="alert" className="story-review-error">{error}</p> : null}{notice ? <p role="status" className="mind-preview-hint">{busy ? <LoaderCircle className="spin" size={14} /> : null} {notice}</p> : null}{!images.length ? <p className="mind-preview-hint">首次使用请先启用加载项；完成后开始预览。预览仅使用应用生成文件的临时副本。</p> : <div className="wps-preview-pages">{images.map((image) => <figure key={image.page}><figcaption>第 {image.page} 页</figcaption><img src={image.url} alt={`第 ${image.page} 页`} /></figure>)}</div>}</main>
-    <footer><button type="button" className="secondary-button" onClick={() => void enable()} disabled={busy}>启用 WPS 加载项</button>{job && job.first > 1 ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void render(Math.max(1, job.first - 20))}>上一批</button> : null}{job && job.last < job.total ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void render(job.last + 1)}>下一批</button> : null}<button type="button" className="primary-button" disabled={busy} onClick={() => void render(job?.first ?? 1)}>{busy ? <LoaderCircle className="spin" size={15} /> : null}{images.length ? "重新预览" : "开始预览"}</button></footer>
+    <main>{error ? <p role="alert" className="story-review-error">{error}</p> : null}{notice ? <p role="status" className="mind-preview-hint">{busy ? <LoadingIndicator variant="dots" size={24} /> : null} {notice}</p> : null}{!images.length ? <p className="mind-preview-hint">首次使用请先启用加载项；完成后开始预览。预览仅使用应用生成文件的临时副本。</p> : <div className="wps-preview-pages">{images.map((image) => <figure key={image.page}><figcaption>第 {image.page} 页</figcaption><img src={image.url} alt={`第 ${image.page} 页`} /></figure>)}</div>}</main>
+    <footer><button type="button" className="secondary-button" onClick={() => void enable()} disabled={busy}>启用 WPS 加载项</button>{job && job.first > 1 ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void render(Math.max(1, job.first - 20))}>上一批</button> : null}{job && job.last < job.total ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void render(job.last + 1)}>下一批</button> : null}<button type="button" className="primary-button" disabled={busy} onClick={() => void render(job?.first ?? 1)}>{busy ? <LoadingIndicator variant="dots" size={24} /> : null}{images.length ? "重新预览" : "开始预览"}</button></footer>
   </section></div>, document.body);
 }

@@ -11,8 +11,9 @@
  * 行的折叠规则在 `chat/rows.ts`：那个模块被单独拆出去，一是它有单测，
  * 二是这个文件还要 export 组件，混着 export 纯函数会让 Fast Refresh 整个失效。
  */
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import {
-  Brain, Film, Images, ListTree, LoaderCircle, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Film, Images, ListTree, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -1055,10 +1056,10 @@ export function ChatView({
                 );
               })}
 
-              {hasStream ? <StreamingBubble reasoning={reasoning} content={draft} plain={plainStream} /> : null}
+              {hasStream || running ? <StreamingBubble reasoning={reasoning} content={draft} plain={plainStream} /> : null}
 
               {status === "waiting_task" ? (
-                <div className="chat-note"><LoaderCircle size={13} className="spin" /><span>任务在后台生成，完成后会更新结果</span></div>
+                <div className="chat-note"><LoadingIndicator variant="dots" size={24} /><span>任务在后台生成，完成后会更新结果</span></div>
               ) : null}
               {view.toolScope === "all" && view.toolsUnsupported ? <div className="chat-note">当前模型未接受工具调用，本会话暂以文字回答。切换对话模型后可重新使用工具。</div> : null}
               </div>

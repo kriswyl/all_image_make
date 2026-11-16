@@ -5,7 +5,8 @@
  * tool 那行存结果。渲染时把后面那行折进前面的卡片里，
  * 用户看到的就是「他说要做什么 → 做成了什么」一件事，而不是两条消息。
  */
-import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, FileDown, FileText, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, LoaderCircle, Maximize2, Mic, Music, Search, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { AlertCircle, CheckCircle2, ChevronDown, Clapperboard, Download, Eye, FileDown, FileText, Film, History as HistoryIcon, Image as ImageIcon, Layers, LayoutGrid, Maximize2, Mic, Music, Search, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { api, isTauriRuntime } from "../api";
 import { StoryboardReview } from "./StoryboardReview";
@@ -21,7 +22,8 @@ import {
   agentToolLabels, assetRef, readCanvasAssetIds, readParamNotes,
   type AgentToolName, type CanvasAsset, type ChatMessage, type ToolResult,
 } from "../../shared/agent-types";
-import type { Asset } from "../../shared/types";
+import type { Asset, TaskStatus } from "../../shared/types";
+import { statusLabels } from "../task-ui";
 import { MUSIC_MODE_LABELS } from "../../shared/suno";
 import {
   midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton,
@@ -289,7 +291,7 @@ export function ToolCard({
           <span className="tool-pill-name">{agentToolLabels[tool] ?? LEGACY_TOOL_LABELS[tool] ?? tool}</span>
           {pillArg ? <span className="tool-pill-arg">{pillArg}</span> : null}
           <span className="tool-pill-status">
-            {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoaderCircle size={13} className="spin" />)
+            {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoadingIndicator variant="dots" size={24} />)
               : orphaned || paused ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
             {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : paused ? "已暂停" : failed ? "失败" : "已完成"}</span> : null}
           </span>
@@ -297,7 +299,7 @@ export function ToolCard({
         </button>
 
         {isPending && progress?.progress != null ? (
-          <div className="tool-card-bar"><span style={{ width: `${Math.max(2, Math.min(100, progress.progress))}%` }} /></div>
+          <div className="tool-card-bar"><span style={{ width: `${Math.max(0, Math.min(100, progress.progress))}%` }} /></div>
         ) : null}
 
         {orphaned ? <div className="tool-card-result">{message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
@@ -310,10 +312,10 @@ export function ToolCard({
         {paused && !workflowRunId && onResumePresentation ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" onClick={onResumePresentation}>继续 PPT</button></div> : null}
 
         {workspaceFileId && pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId) || deletedWorkspaceFile} onClick={() => void deleteWorkspaceFile()}>{deletedWorkspaceFile ? "已删除" : "确认删除"}</button><span>{workspaceFileName}</span></div> : null}
-        {workspaceFileId && !pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadWorkspaceFile()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载文件</button>{isTauriRuntime() ? <button type="button" className="secondary-button compact" onClick={() => { void api.revealWorkspaceFile(message.conversationId, workspaceFileId).catch((error) => onToast?.("error", error instanceof Error ? error.message : "无法打开目录")); }}>打开所在文件夹</button> : null}{/\.pptx$/i.test(workspaceFileName) ? <button type="button" className="secondary-button compact" onClick={() => setWpsOpen(true)}><Eye size={12} />WPS 预览</button> : null}<span>{workspaceFileName}</span></div> : null}
+        {workspaceFileId && !pendingWorkspaceDeletion ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadWorkspaceFile()}>{downloadingId ? <LoadingIndicator variant="dots" size={24} /> : <Download size={12} />}下载文件</button>{isTauriRuntime() ? <button type="button" className="secondary-button compact" onClick={() => { void api.revealWorkspaceFile(message.conversationId, workspaceFileId).catch((error) => onToast?.("error", error instanceof Error ? error.message : "无法打开目录")); }}>打开所在文件夹</button> : null}{/\.pptx$/i.test(workspaceFileName) ? <button type="button" className="secondary-button compact" onClick={() => setWpsOpen(true)}><Eye size={12} />WPS 预览</button> : null}<span>{workspaceFileName}</span></div> : null}
         {wpsOpen && workspaceFileId ? <WpsPreview conversationId={message.conversationId} fileId={workspaceFileId} name={workspaceFileName} onClose={() => setWpsOpen(false)} /> : null}
 
-        {documentOutputId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadDocument()}>{downloadingId ? <LoaderCircle className="spin" size={12} /> : <Download size={12} />}下载 PPT</button><span>{documentFileName}</span></div> : null}
+        {documentOutputId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={Boolean(downloadingId)} onClick={() => void downloadDocument()}>{downloadingId ? <LoadingIndicator variant="dots" size={24} /> : <Download size={12} />}下载 PPT</button><span>{documentFileName}</span></div> : null}
 
         {templateId ? (
           <div className="tool-card-template-action">
@@ -351,7 +353,7 @@ export function ToolCard({
               ) : null}
               {produced ? (
                 <button type="button" className="link-btn" onClick={() => void downloadFile(produced)} disabled={Boolean(downloadingId)}>
-                  {downloadingId === produced.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
+                  {downloadingId === produced.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={12} />}下载
                 </button>
               ) : null}
               {result?.taskId ? (
@@ -390,7 +392,7 @@ export function ToolCard({
                     </span>
                     {item ? (
                       <button type="button" className="link-btn" onClick={() => void downloadFile(item)} disabled={Boolean(downloadingId)}>
-                        {downloadingId === item.id ? <LoaderCircle size={12} className="spin" /> : <Download size={12} />}下载
+                        {downloadingId === item.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={12} />}下载
                       </button>
                     ) : null}
                   </div>
@@ -468,6 +470,8 @@ function ResultThumb({ assetId, asset, isVideo }: { assetId: string; asset: Asse
 }
 
 function ProgressLabel({ progress }: { progress: TaskProgress }) {
-  const label = progress.progress == null ? "生成中" : `生成中 ${progress.progress}%`;
-  return <span className="tool-card-progress-label"><LoaderCircle size={12} className="spin" />{label}</span>;
+  const status = Object.hasOwn(statusLabels, progress.status) ? statusLabels[progress.status as TaskStatus] : "处理中";
+  return <span className="tool-card-progress-label">
+    <LoadingIndicator variant="dots" size={24} />{status}{progress.progress != null ? ` ${progress.progress}%` : ""}
+  </span>;
 }

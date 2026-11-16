@@ -26,7 +26,7 @@ async function tempApp() {
   return created;
 }
 
-async function mockImageServer(delayMs = 0) {
+async function mockImageServer(delayMs = 0, onRequest?: (count: number) => boolean) {
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(chunk));
@@ -37,6 +37,11 @@ async function mockImageServer(delayMs = 0) {
         return;
       }
       setTimeout(() => {
+        if (onRequest && !onRequest(Number(JSON.parse(Buffer.concat(chunks).toString()).n))) {
+          res.writeHead(422, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "该张生成失败" } }));
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
       }, delayMs);
@@ -315,6 +320,61 @@ describe("无限画布配置节点生成", () => {
     const task = await waitForTask(app, payload.task.id);
     expect(task.status).toBe("succeeded");
     expect(task.assets).toHaveLength(1);
+  });
+
+  it("图片节点发出五次单图请求，单张失败不影响其他结果，右侧网格避开已有卡片", async () => {
+    const { app, context } = await tempApp();
+    let received = 0;
+    const requested = vi.fn((_count: number) => ++received !== 2);
+    addMockChannel(context.db, await mockImageServer(0, requested));
+    const { body: { data: board } } = await request(app).post("/api/boards").send({ title: "多图" }).expect(201);
+    const image = nodeBase("n1", "image", {
+      x: 55, y: 70, assetId: null, source: "upload", status: "empty",
+      prompt: "不同角度的城市天际线", model: "mock-image", count: 5,
+    });
+    const obstacle = nodeBase("n2", "text", { x: 460, y: 70, text: "已有卡片" });
+    await request(app).put(`/api/boards/${board.id}`).send({
+      doc: { version: 1, nextRef: 3, nodes: [image, obstacle], edges: [] },
+      baseVersion: 1,
+    }).expect(200);
+
+    const { body: { data: batch } } = await request(app).post(`/api/boards/${board.id}/generate`)
+      .send({ nodeId: image.id }).expect(202);
+    const results = batch.resultNodeIds.map((id: string) => batch.board.doc.nodes.find((node: BoardNode) => node.id === id));
+    expect(results.map((node: { resultIndex: number }) => node.resultIndex)).toEqual([0, 0, 0, 0, 0]);
+    expect(results[0]).toMatchObject({ id: image.id, x: 55, y: 70, count: 5 });
+    expect(results[0].imageResultGroup).toEqual({ expanded: false, memberIds: batch.resultNodeIds.slice(1) });
+    const [topLeft, topRight, bottomLeft, bottomRight] = results.slice(1);
+    expect(topLeft.x).toBeGreaterThan(image.x + image.width);
+    expect(topLeft.y).toBeGreaterThanOrEqual(obstacle.y + obstacle.height);
+    expect([topRight.x, topRight.y]).toEqual([bottomRight.x, topLeft.y]);
+    expect([bottomLeft.x, bottomLeft.y]).toEqual([topLeft.x, bottomRight.y]);
+    expect(topRight.x - topLeft.x).toBeGreaterThan(topLeft.width);
+    expect(bottomLeft.y - topLeft.y).toBeGreaterThan(topLeft.height);
+    expect(new Set(batch.taskIds).size).toBe(5);
+    expect(results.map((node: { taskId: string }) => node.taskId)).toEqual(batch.taskIds);
+    for (const [index, taskId] of batch.taskIds.entries()) {
+      expect(context.db.listBoardTasksByTask(taskId).map((row) => row.resultNodeId)).toEqual([batch.resultNodeIds[index]]);
+    }
+    const tasks = await Promise.all(batch.taskIds.map((id: string) => waitForTask(app, id)));
+    expect(requested.mock.calls).toEqual([[1], [1], [1], [1], [1]]);
+    expect(tasks.filter((task) => task.status === "succeeded").map((task) => task.assets.length)).toEqual([1, 1, 1, 1]);
+    expect(tasks.filter((task) => task.status === "failed")).toHaveLength(1);
+  });
+
+  it("生图配置节点也发出独立请求，并为每张卡保存不同任务", async () => {
+    const { app, context } = await tempApp();
+    const requested = vi.fn(() => true);
+    addMockChannel(context.db, await mockImageServer(0, requested));
+    const { board, config } = await createBoardWithText(app, { count: 2 });
+    const { body: { data: result } } = await request(app).post(`/api/boards/${board.id}/generate`)
+      .send({ nodeId: config.id }).expect(202);
+    expect(new Set(result.taskIds).size).toBe(2);
+    expect(result.board.doc.nodes.find((node: BoardNode) => node.id === config.id).imageBatchResultIds).toEqual(result.resultNodeIds);
+    expect(result.board.doc.nodes.find((node: BoardNode) => node.id === result.resultNodeIds[0]).imageResultGroup)
+      .toEqual({ expanded: false, memberIds: result.resultNodeIds.slice(1) });
+    await Promise.all(result.taskIds.map((id: string) => waitForTask(app, id)));
+    expect(requested.mock.calls).toEqual([[1], [1]]);
   });
 
   it("生成结果不会盖住落点上已有的节点", async () => {

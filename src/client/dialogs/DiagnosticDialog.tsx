@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, LoaderCircle, X } from "lucide-react";
+import { Activity, X } from "lucide-react";
 import { api } from "../api";
 import { LoadingScreen, StatusBadge, formatTime } from "../task-ui";
 import type { Diagnostic, Task } from "../../shared/types";

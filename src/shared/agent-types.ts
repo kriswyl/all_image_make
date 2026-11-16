@@ -292,6 +292,8 @@ export interface GenerateVideoArgs {
    * reference 1~N 张。不填时用本条消息附带的图，再退到「画布只有一张」。
    */
   imageRefs?: string[];
+  /** 原始会话视频素材 ID，按参考顺序排列，仅用于 reference 模式。 */
+  videoRefs?: string[];
   /**
    * 老参数：`none` = 纯文生视频；`current` = 用当前画布。
    * 新计划应当直接用 `imageRefs` 说清用哪张，别把「当前画布」当成默认目标。
@@ -428,7 +430,9 @@ export interface ChatVideoFrames {
 /** 确认卡上要展示的「哪几张图、各自什么角色」 */
 export interface ConfirmVideoInput {
   assetId: string;
-  role: ConversationVideoRole;
+  role: ConversationVideoRole | "reference_video";
+  fileName?: string;
+  duration?: number;
 }
 
 /**
@@ -486,6 +490,7 @@ export interface ConfirmPreview {
    * 不写这个字段时，前端回退到下面那份老的单图字段。
    */
   videoInputs?: ConfirmVideoInput[];
+  videoUploadTarget?: { channelId: string; channelVersion: string };
   /**
    * @deprecated 老卡片的首帧引用。新卡片请用 `videoInputs`。
    * 保留它是为了让升级前已经待确认的卡片照常显示、照常能确认。

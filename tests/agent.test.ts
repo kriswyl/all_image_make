@@ -206,6 +206,21 @@ describe("alias layer", () => {
     expect(manifest).toContain("图生图=✔");
     expect(manifest).toContain("视觉=✔");
   });
+
+  it("按模型版本区分对话的参考图和视频工作台的参考视频能力", () => {
+    const manifest = buildCapabilityManifest(buildCapabilityAliases([
+      channel({ id: "seedance-channel", adapterType: "seedance-video", models: ["sd-2.0-fast", "sd-2.5"], uploadEndpoint: "/private/upload" }),
+      channel({ id: "wan-channel", adapterType: "wan-video", models: ["wan-3.0-video"] }),
+    ]));
+    const line = (alias: string) => manifest.split("\n").find((item) => item.startsWith(`alias=${alias}  `));
+    expect(line("seedance-2.0-fast")).toContain("对话参考图≤9");
+    expect(line("seedance-2.0-fast")).toContain("参考视频≤3 段");
+    expect(line("seedance-2.5")).toContain("参考视频≤10 段");
+    expect(line("seedance-2.5")).toContain("本地视频上传服务已配置");
+    expect(line("wan-3.0-video")).toContain("参考视频≤1 段");
+    expect(line("wan-3.0-video")).toContain("本地视频上传服务未配置");
+    expect(manifest).not.toContain("/private/upload");
+  });
 });
 
 describe("shouldConfirm", () => {

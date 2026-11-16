@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useMemo, useState } from "react";
-import { AlertCircle, ArrowLeft, ArrowRight, CheckCircle2, KeyRound, LoaderCircle, Plus, Server, SlidersHorizontal, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, CheckCircle2, KeyRound, Plus, Server, SlidersHorizontal, X } from "lucide-react";
 import { api } from "../api";
 import { adapterLabels, type ToastKind } from "../labels";
 import {
@@ -315,7 +316,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                             ) : "新建渠道"}
                         </td>
                         <td>
-                          {result?.status === "saving" ? <LoaderCircle className="spin" size={15} />
+                          {result?.status === "saving" ? <LoadingIndicator variant="dots" size={24} />
                             : result?.status === "done" ? (
                               <span className="positive"><CheckCircle2 size={15} />{test
                                 ? test.status === "testing" ? "测试中" : test.status === "ok" ? `连接正常 ${test.message}` : `连接失败：${test.message}`
@@ -346,7 +347,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
               </>
             ) : (
               <button type="button" className="primary-button" onClick={save} disabled={saving || !reviewRows.length}>
-                {saving ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}开始保存
+                {saving ? <LoadingIndicator variant="dots" size={24} /> : <CheckCircle2 size={16} />}开始保存
               </button>
             )
           ) : (

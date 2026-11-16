@@ -10,6 +10,7 @@ export interface ToolContext {
   db: AppDatabase;
   runner: TaskRunner;
   operationId?: string;
+  confirmed?: boolean;
   strictSubmission?: boolean;
   backgroundMedia?: boolean;
   sessionKeys: KeyStore;

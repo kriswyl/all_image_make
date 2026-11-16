@@ -1,8 +1,9 @@
 import { AppError } from "./app-error.js";
 import type { GenerationInput } from "../shared/types.js";
 import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities.js";
+import { seedanceLimits } from "../shared/seedance-capabilities.js";
 import {
-  isVideoAdapterType, referenceMediaLimits, resolutionOptionsFor, videoModeSpec, videoModesFor, videoModeLabel,
+  allVideoModes, isVideoAdapterType, maxImagesForMode, referenceMediaLimits, resolutionOptionsFor, videoModeSpec, videoModeLabel,
 } from "../shared/video-modes.js";
 
 /**
@@ -50,7 +51,7 @@ function hasMediaType(input: GenerationInput, types: Set<string>): boolean {
 export function assertVideoModeRequest(channel: ChannelLike, input: GenerationInput, uploads: UploadFlags = {}): void {
   const adapter = channel.adapterType;
   if (!isVideoAdapterType(adapter)) return;
-  const modes = videoModesFor(adapter, input.model);
+  const modes = allVideoModes(adapter, input.model);
   // Grok 没有模式概念，只按参考图上限兜底
   if (!modes.length) {
     const caps = VIDEO_CAPABILITIES[adapter as VideoAdapter];
@@ -83,9 +84,9 @@ export function assertVideoModeRequest(channel: ChannelLike, input: GenerationIn
       throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}最多 ${spec.imageSlots.length} 张图片`, 400);
     }
   } else {
-    const caps = VIDEO_CAPABILITIES[adapter as VideoAdapter];
-    if (images > caps.maxReferenceImages) {
-      throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}参考图最多 ${caps.maxReferenceImages} 张`, 400);
+    const maxImages = maxImagesForMode(adapter, input.model, spec.id);
+    if (images > maxImages) {
+      throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}参考图最多 ${maxImages} 张`, 400);
     }
   }
 
@@ -100,11 +101,17 @@ export function assertVideoModeRequest(channel: ChannelLike, input: GenerationIn
   const limits = referenceMediaLimits(adapter, input.model, spec);
   const videoCount = (uploads.referenceVideoUploads ?? 0) + mediaOf(input).filter((item) => VIDEO_TYPES.has(item.type)).length;
   const audioCount = (uploads.referenceAudioUploads ?? 0) + mediaOf(input).filter((item) => AUDIO_TYPES.has(item.type)).length;
-  if (limits.videos && videoCount > limits.videos) {
+  if (videoCount > limits.videos) {
     throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}最多 ${limits.videos} 段参考视频（当前 ${videoCount} 段）`, 400);
   }
-  if (limits.audios && audioCount > limits.audios) {
+  if (audioCount > limits.audios) {
     throw new AppError("MODE_MEDIA_LIMIT", `${spec.label}最多 ${limits.audios} 段参考音频（当前 ${audioCount} 段）`, 400);
+  }
+  if (adapter === "seedance-video") {
+    const { maxTotal } = seedanceLimits(input.model);
+    if (images + videoCount + audioCount > maxTotal) {
+      throw new AppError("MODE_MEDIA_LIMIT", `素材合计最多 ${maxTotal} 份`, 400);
+    }
   }
 
   // 万相：文档地址与网页链接互斥，参考文件模式必须二选一

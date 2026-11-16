@@ -13,7 +13,8 @@
  * 槽位由 ChatView 传进来：会话的大脑模型、视频确认策略这些开关属于会话，
  * 摆在这一行才符合「输入框下面挂着的都是我这次要用的设定」这个直觉。
  */
-import { ArrowUp, CornerDownLeft, FileText, Film, LoaderCircle, Music, Plus, Square, X } from "lucide-react";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { ArrowUp, CornerDownLeft, FileText, Film, Music, Plus, Square, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
@@ -268,7 +269,7 @@ export function Composer({
             disabled={blocked}
             onClick={() => fileRef.current?.click()}
           >
-            {uploading ? <LoaderCircle size={14} className="spin" /> : <Plus size={15} />}
+            {uploading ? <LoadingIndicator variant="dots" size={24} /> : <Plus size={15} />}
           </button>
           {/* 系统文件对话框只能按 MIME 提示过滤，真正的把关在服务端（字节头要对得上） */}
           <input

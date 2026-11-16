@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { History, LayoutTemplate, LoaderCircle, Pencil, Trash2, X } from "lucide-react";
+import { History, LayoutTemplate, Pencil, Trash2, X } from "lucide-react";
 import type { CanvasTemplateSummary } from "../../shared/canvas-template";
 import { api } from "../api";
 import { historyTime } from "./board-history";
@@ -124,7 +125,7 @@ export function BoardTemplateDrawer({
       </header>
       <div className="board-template-list">
         {templatesLoading ? (
-          <p className="board-asset-empty"><LoaderCircle size={12} className="spin" />正在读取模板…</p>
+          <p className="board-asset-empty"><LoadingIndicator variant="dots" size={24} />正在读取模板…</p>
         ) : null}
         {!templatesLoading && templates.map((template) => (
           <article key={template.id} className="board-template-row">
@@ -192,7 +193,7 @@ export function BoardTemplateDrawer({
                 disabled={importingTemplateId !== null}
                 onClick={() => void importTemplate(template)}
               >
-                {importingTemplateId === template.id ? <LoaderCircle size={11} className="spin" /> : null}
+                {importingTemplateId === template.id ? <LoadingIndicator variant="dots" size={24} /> : null}
                 放入画布
               </button>
             </div>
@@ -213,7 +214,7 @@ export function BoardTemplateDrawer({
             disabled={migratingStoryboards || cleaningStoryboards}
             onClick={() => void migrateStoryboards()}
           >
-            {migratingStoryboards ? <LoaderCircle size={11} className="spin" /> : <History size={11} />}
+            {migratingStoryboards ? <LoadingIndicator variant="dots" size={24} /> : <History size={11} />}
             迁移旧分镜
           </button>
           <button
@@ -222,7 +223,7 @@ export function BoardTemplateDrawer({
             disabled={migratingStoryboards || cleaningStoryboards}
             onClick={() => void cleanupStoryboards()}
           >
-            {cleaningStoryboards ? <LoaderCircle size={11} className="spin" /> : <Trash2 size={11} />}
+            {cleaningStoryboards ? <LoadingIndicator variant="dots" size={24} /> : <Trash2 size={11} />}
             删除旧分镜数据
           </button>
         </div>

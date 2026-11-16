@@ -294,6 +294,8 @@ it("点卡片打开大播放器，能关掉；生成中的卡片打开是进度�
   await act(async () => { (runCard.querySelector(".record-thumb") as HTMLButtonElement).click(); });
   const pending = document.querySelector(".record-dialog") as HTMLElement;
   expect(pending.querySelector(".task-progress")).toBeTruthy();
+  expect(pending.querySelector(".loading-indicator--aurora")).toBeTruthy();
+  expect(pending.querySelector(".progress-line b")?.textContent).toBe("40%");
   expect((pending.querySelector(".progress-track span") as HTMLElement).style.width).toBe("40%");
 });
 
@@ -301,4 +303,8 @@ it("没有记录时给空状态，而不是一片空白", async () => {
   await mount([]);
   expect(container.querySelector(".record-empty")?.textContent).toContain("还没有创作记录");
   expect(container.querySelector(".record-count")?.textContent).toBe("还没有记录");
+  // 空态用「时间码 + 空时间轴」表达等待，不再放示例视频
+  expect(container.querySelector(".record-empty-timecode")?.textContent).toBe("00:00:00:00");
+  expect(container.querySelector(".record-empty-timeline")).toBeTruthy();
+  expect(container.querySelector(".record-empty img")).toBeNull();
 });

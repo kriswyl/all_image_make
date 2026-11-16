@@ -4,6 +4,7 @@ import { isVisionError } from "./agent-brain-errors.js";
 import type { BrainRunner } from "./agent-brain.js";
 import type { AgentConfirmationService } from "./agent-confirmation.js";
 import { MAX_VISION_READS_PER_ROUND } from "./agent-constants.js";
+import { collectTurnAssetIds } from "./agent-context.js";
 import { createNativeTurnBudget } from "./agent-native-budget.js";
 import { createNativeToolRegistry } from "./agent-native-tools.js";
 import type { ToolContext } from "./agent-tools.js";
@@ -79,6 +80,8 @@ export async function runNativeTurn(
   const initialGroups = initialToolGroups({
     text: userMessage?.content ?? text ?? db.lastUserText(conversationId) ?? null,
     hasAttachments: turnAttachmentIds.length > 0,
+    hasVideoAttachments: userMessage ? collectTurnAssetIds(db, conversationId, userMessage.seq)
+      .some((id) => db.getAsset(id)?.mimeType.startsWith("video/")) : false,
     hasDocuments: db.listConversationDocuments(conversationId).length > 0
       || db.listWorkspaceDocuments(conversationId).length > 0,
     hasImages: db.canvasImages(turnConversation).length > 0

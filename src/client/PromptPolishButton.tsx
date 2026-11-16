@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useState } from "react";
-import { LoaderCircle, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import { api } from "./api";
 import type { Toast } from "./app-shared";
 
@@ -39,7 +40,7 @@ export function PromptPolishButton(props: {
       disabled={props.disabled || polishing || !props.prompt.trim()}
       title="调用对话模型润色提示词（不会生成图片）"
     >
-      {polishing ? <LoaderCircle className="spin" size={14} /> : <Wand2 size={14} />}
+      {polishing ? <LoadingIndicator variant="dots" size={24} /> : <Wand2 size={14} />}
       {polishing ? "润色中" : "润色"}
     </button>
   );

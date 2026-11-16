@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Copy, Download, Eye, Image as ImageIcon, LoaderCircle, RotateCcw, Square, Wand2, X } from "lucide-react";
+import { AlertCircle, Copy, Download, Eye, Image as ImageIcon, RotateCcw, Square, Wand2, X } from "lucide-react";
 import { midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import type { Asset, Task } from "../../shared/types";
 import { api } from "../api";
 import type { ReferenceController, Toast } from "../app-shared";
 import { copyImageToClipboard } from "../clipboard";
 import { confirmGeneration } from "../generation-confirm";
-import { formatTime, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
+import { formatTime, GenerationActivity, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { IMAGE_STARTERS } from "./image-starters";
 
-export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, onTask, onSelectTask, onToast }: {
+export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, onTask, onSelectTask, onToast, onStarterPrompt }: {
   task: Task | null; tasks: Task[]; references: ReferenceController;
   onDiagnostics: (task: Task) => void; onTask: (task: Task) => void; onSelectTask: (task: Task) => void; onToast: (kind: Toast["kind"], message: string) => void;
+  /** 空态里点示例图：把对应提示词填进下方输入框 */
+  onStarterPrompt?: (prompt: string) => void;
 }) {
   const busy = task && !terminalStatuses.includes(task.status);
   const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
@@ -129,50 +133,60 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
       setActingCustomId(null);
     }
   }
+  /**
+   * 结果操作条。有图时贴在图片底部（overlay），没图时（生成中 / 失败 / 空态）
+   * 退到图片下方一行——否则会压在创作提示或进度上。
+   */
+  function renderResultTools(overlay: boolean) {
+    if (!task) return null;
+    return (
+      <div className={`image-result-tools ${overlay ? "is-overlay" : "is-inline"}`} role="group" aria-label="结果操作">
+        {activeAsset ? (
+          <>
+            <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
+              {downloadingAssetId === activeAsset.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={16} />}下载
+            </button>
+            <button type="button" className="secondary-button" disabled={copying} onClick={() => void copyActiveImage()} title="复制图片（Ctrl+C）">
+              {copying ? <LoadingIndicator variant="dots" size={24} /> : <Copy size={16} />}复制
+            </button>
+            <button type="button" className="secondary-button" title="用作参考图" disabled={references.reading} onClick={() => void references.addFromAsset(activeAsset)}><Wand2 size={16} />参考</button>
+          </>
+        ) : null}
+        {busy ? <button type="button" className="secondary-button" title="取消任务" onClick={() => void cancel()}><Square size={16} />取消</button>
+          : activeAsset || task.status === "failed" || task.status === "cancelled" ? (
+            <button type="button" className="secondary-button" title={continueQuery ? "继续查询" : "按原参数重新生成"} onClick={() => void retry()}>
+              <RotateCcw size={16} />{continueQuery ? "续查" : "重绘"}
+            </button>
+          ) : null}
+        <button type="button" className="secondary-button" onClick={() => onDiagnostics(task)}><Eye size={16} />诊断</button>
+      </div>
+    );
+  }
+
   return (
     <section className="image-results" aria-label="图片生成结果">
-      <nav className="image-history" aria-label="最近生成">
-        <h2>最近生成</h2>
-        <div className="image-history-list">
-          {recentTasks.map((item) => {
-            const pending = !terminalStatuses.includes(item.status);
-            const label = `${statusLabels[item.status]}：${item.prompt}`;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className="image-history-item"
-                aria-current={item.id === task?.id ? "true" : undefined}
-                title={`${label} · ${formatTime(item.createdAt)}`}
-                aria-label={label}
-                onClick={() => onSelectTask(item)}
-              >
-                {pending ? <LoaderCircle className="spin" size={19} />
-                  : item.assets[0] ? <ImageThumbnail asset={item.assets[0]} />
-                    : item.status === "succeeded" ? <ImageIcon size={19} /> : <AlertCircle size={19} />}
-                {!pending && item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
-              </button>
-            );
-          })}
-          {!recentTasks.length ? <span className="image-history-empty">暂无任务</span> : null}
-        </div>
-      </nav>
-
       <div className="image-preview-column">
         <div className="image-result-heading">
-          <h2>生成结果</h2>
           {task ? <><StatusBadge status={task.status} /><span title={`${task.channelName} · ${formatTime(task.createdAt)}`}>{task.model}</span></> : null}
         </div>
         <div className={`result-stage image-result-stage ${activeAsset ? "has-image" : ""}`}>
           {activeAsset ? (
-            <button className="image-preview-trigger" type="button" onClick={() => setPreviewAsset(activeAsset)} aria-label="放大预览图片">
-              <img src={api.assetUrl(activeAsset.url)} alt="生成结果" />
-            </button>
+            <>
+              <button className="image-preview-trigger" type="button" onClick={() => setPreviewAsset(activeAsset)} aria-label="放大预览图片">
+                <img src={api.assetUrl(activeAsset.url)} alt="生成结果" />
+              </button>
+              {renderResultTools(true)}
+            </>
           ) : busy ? (
             <div className="task-progress" role="status">
-              <LoaderCircle className="spin" size={26} />
+              <GenerationActivity status={task.status} visual />
               <strong>{statusLabels[task.status]}</strong>
-              {task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}
+              {task.progress != null ? (
+                <div className="progress-line">
+                  <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div>
+                  <b>{Math.round(task.progress)}%</b>
+                </div>
+              ) : null}
               <span>{task.model}</span>
             </div>
           ) : task?.status === "failed" ? (
@@ -182,9 +196,28 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
               {task.errorMessage ? <span>{task.errorMessage}</span> : null}
             </div>
           ) : (
-            <div className="empty-result"><div className="empty-result-icon"><ImageIcon size={28} /></div><strong>{task?.status === "cancelled" ? "任务已取消" : "等待生成"}</strong></div>
+            <div className="starter-stage">
+              {/* 空态不是「还没内容」，而是「下一幅作品的位置」：五张示例就是五个可点的起点 */}
+              <h2 className="starter-title">下一幅精彩，由你创作。</h2>
+              <div className="starter-row">
+                {IMAGE_STARTERS.map((starter, index) => (
+                  <button
+                    key={starter.id}
+                    type="button"
+                    className={`starter-card starter-card-${index + 1}`}
+                    title={`使用示例：${starter.label}`}
+                    aria-label={`使用示例：${starter.label}，点击把提示词填入输入框`}
+                    onClick={() => onStarterPrompt?.(starter.prompt)}
+                  >
+                    <img src={starter.src} alt="" loading="lazy" decoding="async" draggable={false} />
+                  </button>
+                ))}
+              </div>
+              {task?.status === "cancelled" ? <p className="starter-hint">上次任务已取消。</p> : null}
+            </div>
           )}
         </div>
+        {activeAsset ? null : renderResultTools(false)}
         {task && task.assets.length > 1 ? (
           <div className="stage-thumbs image-result-candidates" role="group" aria-label="本次生成结果">
             {task.assets.map((asset, index) => (
@@ -211,28 +244,31 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
           />
         ) : null}
       </div>
-      {task ? (
-        <div className="image-result-tools" role="group" aria-label="结果操作">
-          {activeAsset ? (
-            <>
-              <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
-                {downloadingAssetId === activeAsset.id ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载
+      {/* 最近生成挪到右侧：左边留给结果，阅读顺序「先看结果，再翻历史」 */}
+      <nav className="image-history" aria-label="最近生成">
+        <div className="image-history-list">
+          {recentTasks.map((item) => {
+            const pending = !terminalStatuses.includes(item.status);
+            const label = `${statusLabels[item.status]}：${item.prompt}`;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className="image-history-item"
+                aria-current={item.id === task?.id ? "true" : undefined}
+                title={`${label} · ${formatTime(item.createdAt)}`}
+                aria-label={label}
+                onClick={() => onSelectTask(item)}
+              >
+                {pending ? <LoadingIndicator variant="dots" size={28} />
+                  : item.assets[0] ? <ImageThumbnail asset={item.assets[0]} />
+                    : item.status === "succeeded" ? <ImageIcon size={19} /> : <AlertCircle size={19} />}
+                {!pending && item.assets.length > 1 ? <span className="recent-thumb-count">{item.assets.length}</span> : null}
               </button>
-              <button type="button" className="secondary-button" disabled={copying} onClick={() => void copyActiveImage()} title="复制图片（Ctrl+C）">
-                {copying ? <LoaderCircle className="spin" size={16} /> : <Copy size={16} />}复制
-              </button>
-              <button type="button" className="secondary-button" title="用作参考图" disabled={references.reading} onClick={() => void references.addFromAsset(activeAsset)}><Wand2 size={16} />参考</button>
-            </>
-          ) : null}
-          {busy ? <button type="button" className="secondary-button" title="取消任务" onClick={() => void cancel()}><Square size={16} />取消</button>
-            : activeAsset || task.status === "failed" || task.status === "cancelled" ? (
-              <button type="button" className="secondary-button" title={continueQuery ? "继续查询" : "按原参数重新生成"} onClick={() => void retry()}>
-                <RotateCcw size={16} />{continueQuery ? "续查" : "重绘"}
-              </button>
-            ) : null}
-          <button type="button" className="secondary-button" onClick={() => onDiagnostics(task)}><Eye size={16} />诊断</button>
+            );
+          })}
         </div>
-      ) : null}
+      </nav>
       {previewAsset ? (
         <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewAsset(null); }}>
           <div className="image-preview">

@@ -1,13 +1,14 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  AudioLines, Clock3, Download, Eye, FileText, LoaderCircle, Mic, Pause, Play, RotateCcw, Square, Volume2, VolumeX,
+  AudioLines, Clock3, Download, Eye, FileText, Mic, Pause, Play, RotateCcw, Square, Volume2, VolumeX,
 } from "lucide-react";
 import type { Asset, Task } from "../../shared/types";
 import { splitTtsDialogue } from "../../shared/tts";
 import { api } from "../api";
 import type { Toast } from "../app-shared";
 import { confirmGeneration } from "../generation-confirm";
-import { formatDuration, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
+import { formatDuration, GenerationActivity, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
 
 function speechTitle(task: Task) {
   return task.assets[0]?.title?.trim() || task.prompt.trim().split(/\r?\n/, 1)[0]?.replace(/^[AB]\s*[:：]\s*/i, "") || "配音";
@@ -142,7 +143,7 @@ export function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelect
         </header>
         {busy ? (
           <div className="speech-result-message" role="status">
-            <LoaderCircle className="spin" size={17} />
+            <GenerationActivity status={task.status} size={72} />
             <div><strong>{statusLabels[task.status]}</strong>
               {task.progress != null ? <progress max={100} value={task.progress} aria-label="配音进度" /> : null}
             </div>
@@ -166,7 +167,7 @@ export function SpeechResultPanel({ task, tasks, onDiagnostics, onTask, onSelect
                 <small>{dialogue ? "双人对话" : "单人配音"} · {asset.mimeType.includes("wav") ? "WAV" : "音频"}</small>
               </div>
               <button type="button" className="secondary-button" disabled={Boolean(downloadingId)} onClick={() => void download(asset)}>
-                {downloadingId === asset.id ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+                {downloadingId === asset.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={15} />}
                 {asset.mimeType.includes("wav") ? "下载 WAV" : "下载音频"}
               </button>
             </div>

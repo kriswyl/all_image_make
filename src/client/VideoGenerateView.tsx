@@ -17,7 +17,7 @@ import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilit
 import {
   applySnapshotToDraft, defaultVideoDraft, draftKey, reconcileVideoDraft, type VideoDraft,
 } from "../shared/video-draft";
-import { maxImagesForMode, referenceMediaLimits, resolveStudioMode, studioAssetSpec, studioModeForConcrete, videoModeLabel, videoModesFor } from "../shared/video-modes";
+import { maxImagesForMode, referenceMediaLimits, referenceVideoDurationRange, resolveStudioMode, studioAssetSpec, studioModeForConcrete, videoModeLabel, videoModesFor } from "../shared/video-modes";
 import type { Channel, GenerationInput, Task } from "../shared/types";
 
 type Toast = { kind: "success" | "error"; message: string };
@@ -53,8 +53,9 @@ export function VideoGenerateView(props: {
   const caps = adapterType ? VIDEO_CAPABILITIES[adapterType] : null;
   // 需要参考视频的模式（视频编辑/延长、运动控制）要先把文件传到渠道的上传服务；
   // 渠道没配 uploadEndpoint 时这些模式没有可用入口，就不列出来，避免点进去只能卡住
+  const localVideoUploadConfigured = Boolean(channel?.uploadEndpoint?.trim());
   const modes = videoModesFor(adapterType, props.selectedModel)
-    .filter((item) => !item.needsReferenceVideo || Boolean(channel?.uploadEndpoint));
+    .filter((item) => !item.needsReferenceVideo || referenceMediaLimits(adapterType, props.selectedModel, item, localVideoUploadConfigured).videos > 0);
 
   /** 每个渠道记一个当前模式，切渠道/切模型后按新能力复核 */
   const [modeByAdapter, setModeByAdapter] = usePersistentState<Record<string, string>>("studio:mode", {});
@@ -78,7 +79,7 @@ export function VideoGenerateView(props: {
   const bucket = props.media.get(key);
   const maxImages = spec ? maxImagesForMode(adapterType, props.selectedModel, spec.id) : caps?.maxReferenceImages ?? 0;
   /** 参考视频/音频各能放几段：Seedance 2.0 三段、2.5 十段，万相/可灵各一段 */
-  const mediaLimits = referenceMediaLimits(adapterType, props.selectedModel, spec);
+  const mediaLimits = referenceMediaLimits(adapterType, props.selectedModel, spec, localVideoUploadConfigured);
   const draft = drafts[key] ?? defaultVideoDraft(adapterType, spec?.id);
   const reading = props.media.reading || readingVideo;
   const seedanceInlineAudio = draft.inlineAudio || !channel?.uploadEndpoint;
@@ -116,16 +117,14 @@ export function VideoGenerateView(props: {
   /** 单段视频的校验 + 入桶；失败已经弹过提示，返回 false 让批量循环停下 */
   async function selectVideo(file: File): Promise<boolean> {
     try {
-      if (!channel?.uploadEndpoint) throw new Error("该渠道未配置上传服务，暂时无法上传参考视频");
+      if (!localVideoUploadConfigured) throw new Error("该渠道未配置上传服务，暂时无法上传参考视频");
       // 认类型交给扩展名（MIME 在有的机器上是空串），补上规范类型再往下传
       if (referenceMediaType(file)?.kind !== "video") throw new Error("请选择 MP4 或 MOV 视频");
       if (file.size > 100 * 1024 * 1024) throw new Error("视频不能超过 100 MB");
       setReadingVideo(true);
       const typed = withReferenceMediaType(file);
       const seconds = await mediaDuration(typed, "video");
-      const isMotion = spec?.id === "motion-control";
-      const max = isMotion ? (draft.orientation === "image" ? 10 : 30) : 15;
-      const min = isMotion ? 3 : 1;
+      const { min, max } = referenceVideoDurationRange(spec?.id, draft.orientation);
       if (seconds < min || seconds > max) throw new Error(`视频时长需为 ${min}–${max} 秒`);
       if (!props.media.addVideo(key, typed, seconds, mediaLimits.videos)) throw new Error("当前模式放不下这段参考视频");
       return true;

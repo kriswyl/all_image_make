@@ -35,6 +35,28 @@
   --accent-soft: #f0f0f0;
   /* 主色块上的文字：浅色主题是黑底白字，深色主题反过来是白底黑字 */
   --accent-contrast: #ffffff;
+
+  /* ── 品牌点缀色（Soft Spectrum）───────────────────────────────────────────
+     黑白骨架不动，颜色只出现在 Logo、导航图标、空状态和选中态上：
+     主按钮仍是黑底白字，不要把按钮做成彩虹。
+     每个色相成对使用：
+       --tone-*       图标 / 线条色（比设计稿的粉彩深一档，16px 下才看得清）
+       --tone-*-soft  底衬 / 悬停底色（同一色相的极淡版本） */
+  --tone-blue: #5b9bd5;
+  --tone-mint: #45a294;
+  --tone-lavender: #8674c6;
+  --tone-pink: #c4748f;
+  --tone-cream: #c1924a;
+  --tone-blue-soft: #eaf4fd;
+  --tone-mint-soft: #e8f6f3;
+  --tone-lavender-soft: #f1edfb;
+  --tone-pink-soft: #fdeef3;
+  --tone-cream-soft: #fdf4e6;
+  /* 品牌渐变：只给 Logo 用，五个色顺着一个方向铺过去 */
+  --brand-gradient: linear-gradient(135deg, #9bc9f7 0%, #a8ddd4 26%, #f6d6a6 52%, #f5bdd1 76%, #c9b8f2 100%);
+  /* 生成进度条 / 创作区专用：横向五色，颜色只出现在「内容」这一侧。
+     比 Logo 那版深一档——5px 的细条上，太淡会看不清 */
+  --spectrum-gradient: linear-gradient(90deg, #6aa9e0, #5bb9aa, #d6a55e, #d187a2, #9580d4);
   --coral: #d92d20;
   --coral-ink: #b42318;
   --coral-line: #f0c9c5;
@@ -261,12 +283,21 @@ button.brand:hover .brand-chevron { color: var(--ink-soft); }
 
 .brand-mark {
   display: grid;
-  width: 22px;
-  height: 22px;
-  flex: 0 0 22px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
   place-items: center;
 }
-.brand-mark-img { display: block; width: 100%; height: 100%; object-fit: contain; }
+/* Logo：产品标母版是黑色 mark，直接当蒙版填 --ink。
+   浅色主题是黑、深色主题是暖白，跟着文字色走，不再上品牌渐变。 */
+.brand-mark-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--ink);
+  -webkit-mask: url("/brand-mark.png") center / contain no-repeat;
+  mask: url("/brand-mark.png") center / contain no-repeat;
+}
 
 /* 导航是固定的一块，不参与高度竞争：会话多了应该让下面的列表滚，
    而不是把「渠道」这一项挤出可视区（截图里那个侧栏内部滚动条就是这么来的） */
@@ -398,8 +429,6 @@ button.brand:hover .brand-chevron { color: var(--ink-soft); }
 .update-progress-track { height: 5px; overflow: hidden; background: var(--surface-soft); border-radius: var(--radius-pill); }
 .update-progress-bar { height: 100%; background: var(--accent); border-radius: var(--radius-pill); transition: width .2s ease; }
 .update-error { color: var(--coral); }
-.spin { animation: update-spin 1s linear infinite; }
-@keyframes update-spin { to { transform: rotate(360deg); } }
 
 .workspace { min-width: 0; min-height: 0; overflow: auto; background: var(--canvas); }
 .page { width: 100%; min-height: 100%; max-width: 1180px; margin: 0 auto; padding: 22px 26px 34px; }
@@ -816,11 +845,73 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .recent-thumb-count { position: absolute; right: 2px; bottom: 2px; min-width: 15px; padding: 0 3px; color: #fff; background: rgba(0, 0, 0, .72); border-radius: var(--radius-xs); font-size: 9px; font-weight: 700; line-height: 14px; text-align: center; }
 .empty-result, .task-progress, .task-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); text-align: center; }
 .empty-result strong, .task-progress strong, .task-error strong { color: var(--ink-soft); font-size: 14px; }
-.empty-result-icon { display: grid; width: 68px; height: 68px; place-items: center; color: var(--muted); background: rgba(255,255,255,.78); border: 1px solid var(--line-strong); border-radius: var(--radius-xs); }
+
+/* 进度条与百分比：数字用等宽字，宽度变化时不抖 */
+.progress-line { display: flex; width: min(280px, 74%); align-items: center; gap: 10px; }
+.progress-line .progress-track { width: 100%; }
+.progress-line b {
+  min-width: 30px;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-align: right;
+}
+/* 空白创作区 = 「下一幅作品的位置」：五张示例错落摆开，点一张就把提示词填进输入框。
+   这是整个界面里唯一成组出现颜色的地方——工具克制，内容多彩 */
+.starter-stage { display: flex; width: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 8px 20px; text-align: center; }
+.starter-title { margin: 0; color: var(--ink); font-size: clamp(17px, 2.1vw, 23px); font-weight: 600; letter-spacing: -.01em; }
+.starter-row { display: flex; align-items: center; justify-content: center; gap: clamp(6px, 1.1vw, 14px); }
+.starter-card {
+  position: relative;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  transition: transform var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease-out);
+}
+.starter-card img { display: block; width: clamp(64px, 9vw, 116px); aspect-ratio: 3 / 4; object-fit: cover; border-radius: 10px; box-shadow: 0 10px 24px rgba(0, 0, 0, .12); }
+.starter-card-1 { transform: rotate(-8deg) translateY(6px); }
+.starter-card-2 { transform: rotate(-4deg) translateY(2px); }
+.starter-card-3 { transform: scale(1.05); }
+.starter-card-4 { transform: rotate(4deg) translateY(2px); }
+.starter-card-5 { transform: rotate(8deg) translateY(6px); }
+/* 悬停时立正、抬起：错落只是静态的呼吸感，选中前要能看清整张图 */
+.starter-card:hover { z-index: 1; transform: translateY(-6px) rotate(0deg) scale(1.04); }
+.starter-card:focus-visible { outline: 2px solid var(--focus-border); outline-offset: 3px; }
+.starter-hint { max-width: 460px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.7; }
+@media (prefers-reduced-motion: reduce) {
+  .starter-card { transition: none; }
+}
 .task-progress > span, .task-error > span { max-width: 420px; font-size: 12px; line-height: 1.6; }
 .task-error { color: var(--coral-ink); }
 .progress-track { width: min(260px, 70%); height: 5px; overflow: hidden; background: var(--line-strong); border-radius: var(--radius-xs); }
-.progress-track span { display: block; height: 100%; background: var(--accent); }
+/* 生成中的进度条是唯一会动的彩色元素：五色按比例铺满已完成的宽度，
+   再叠一道缓慢扫过的高光表示「正在画」。不用整体位移，否则某个瞬间只会剩下两三种颜色 */
+.progress-track span {
+  position: relative;
+  display: block;
+  height: 100%;
+  overflow: hidden;
+  background-image: var(--spectrum-gradient);
+  background-size: 100% 100%;
+  border-radius: var(--radius-xs);
+}
+.progress-track span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .55), transparent);
+  transform: translateX(-100%);
+  animation: spectrum-sheen 1.9s ease-in-out infinite;
+}
+@keyframes spectrum-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-track span::after { animation: none; opacity: 0; }
+}
 .image-preview-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; padding: 32px; place-items: center; background: rgba(0, 0, 0, .88); }
 .image-preview { position: relative; display: grid; max-width: 100%; max-height: 100%; place-items: center; }
 .image-preview img { display: block; max-width: calc(100vw - 64px); max-height: calc(100vh - 64px); object-fit: contain; cursor: default; box-shadow: 0 12px 48px rgba(0, 0, 0, .42); }
@@ -889,6 +980,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .channel-models-list { padding-top: 2px; }
 .channel-models-empty { color: var(--muted); font-size: 12px; }
 .table-empty { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.table-empty > svg { box-sizing: content-box; padding: 9px; color: var(--tone-lavender); background: linear-gradient(140deg, var(--tone-blue-soft), var(--tone-pink-soft)); border-radius: 50%; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; padding: 24px; place-items: center; background: rgba(0, 0, 0, .42); }
 .modal { display: grid; width: min(680px, 100%); max-height: min(860px, calc(100vh - 48px)); grid-template-rows: 58px minmax(0, 1fr) auto; overflow: hidden; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-xs); box-shadow: var(--shadow); }
@@ -1025,8 +1117,6 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .loading-screen, .loading-compact { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 12px; }
 .loading-screen { min-height: 70vh; }
 .loading-compact { min-height: 180px; }
-.spin { animation: spin 900ms linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- 视觉风格：黑白主色、无边框柔和卡片 ---- */
 .nav-button, .primary-button, .secondary-button, .icon-button, input, textarea, select,
@@ -1073,7 +1163,6 @@ label > span, .header-selects label > span { color: var(--ink-soft); font-weight
 .toast.success svg { color: #4ade80; }
 .toast.error svg { color: #fb7185; }
 .result-stage { background-color: var(--surface-soft); border-color: var(--line); border-radius: var(--radius-card); }
-.progress-track span { background: var(--accent); }
 .reference-icon { color: var(--accent); background: var(--accent-soft); border-radius: var(--radius-control); }
 .reference-add-tile { border-color: var(--line-strong); border-radius: var(--radius-control); }
 .reference-add-tile:hover { color: var(--accent); background: var(--accent-soft); border-color: var(--line-hover); }
@@ -1654,6 +1743,8 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .settings-segment { display: flex; flex-wrap: wrap; gap: 8px; }
 .settings-segment .secondary-button.is-on { color: var(--accent-dark); background: var(--accent-soft); border-color: var(--line-strong); }
 .modal-lead { margin: 0; color: var(--ink-soft); font-size: 13px; line-height: 1.65; }
+/* 删除聊天生成记录时的补充说明：对话里的图也会消失 */
+.modal-note { margin: 8px 0 0; padding: 8px 10px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; background: var(--surface); border-left: 2px solid var(--danger, #d9534f); border-radius: var(--radius-xs); }
 .diagnostic-entry.compact { border-color: var(--line); }
 .diagnostic-entry.compact header { background: var(--surface); }
 
@@ -1891,12 +1982,6 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .chat-reasoning[open] > summary::before { content: "\25BE  "; }
 .chat-reasoning.is-live > summary { color: var(--accent); }
 .chat-reasoning-body { margin-top: 6px; padding: 9px 11px; max-height: 220px; overflow-y: auto; color: var(--muted); line-height: 1.7; white-space: pre-wrap; background: var(--surface-soft); border-left: 2px solid var(--line-strong); border-radius: 0 var(--radius-card) var(--radius-card) 0; }
-.thinking-dots { display: inline-flex; gap: 3px; margin-left: 5px; vertical-align: middle; }
-.thinking-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: thinking-pulse 1.2s infinite ease-in-out; }
-.thinking-dots i:nth-child(2) { animation-delay: .16s; }
-.thinking-dots i:nth-child(3) { animation-delay: .32s; }
-@keyframes thinking-pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
-@media (prefers-reduced-motion: reduce) { .thinking-dots i { animation: none; } }
 
 /* ── 工具卡片 ──────────────────────────────────────────────────────────────── */
 
@@ -1998,11 +2083,12 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 /* 视频确认卡上的选图：哪几张、谁是首帧/尾帧/参考图，一眼可见 */
 .confirm-card-inputs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .confirm-card-input { display: flex; width: 92px; flex-direction: column; gap: 4px; }
-.confirm-card-input img {
+.confirm-card-input img, .confirm-card-video-icon {
   width: 92px; height: 92px; object-fit: cover;
   border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-soft);
 }
-.confirm-card-input span { font-size: 10.5px; color: var(--muted); text-align: center; }
+.confirm-card-video-icon { display: grid; place-items: center; color: var(--muted); }
+.confirm-card-input span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--muted); text-align: center; }
 .confirm-card-meta { margin-top: 10px; font-size: 11.5px; color: var(--muted); }
 /* 批量确认的那一行：「我这一次同意了多少钱」不能和旁边的说明文字一个色号 */
 .confirm-card-batch { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--accent); }
@@ -2128,7 +2214,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
    条件看的是侧栏内容宽度：拖到 224px 以下时，英文名放不下完整一行。 */
 @container (max-width: 224px) {
   .brand { gap: 5px; padding: 0 2px; font-size: 12.5px; letter-spacing: -.03em; }
-  .brand-mark { width: 18px; height: 18px; flex: 0 0 18px; }
+  .brand-mark { width: 24px; height: 24px; flex: 0 0 24px; }
   .brand-chevron { display: none; }
   .sidebar-head .sidebar-collapse { width: 20px; min-width: 20px; }
 }

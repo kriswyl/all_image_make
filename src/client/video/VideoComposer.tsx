@@ -1,7 +1,8 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, HTMLAttributes, ReactElement, ReactNode } from "react";
 import {
-  ArrowLeftRight, ChevronDown, ChevronLeft, ChevronRight, Film, ImagePlus, KeyRound, LoaderCircle, Maximize2, Minimize2, Music, Send, Upload, Wand2, X,
+  ArrowLeftRight, ChevronDown, ChevronLeft, ChevronRight, Film, ImagePlus, KeyRound, Maximize2, Minimize2, Music, Send, Upload, Wand2, X,
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { Channel } from "../../shared/types";
@@ -262,7 +263,7 @@ export function VideoComposer(props: VideoComposerProps) {
   const hasAudioSlot = Boolean(spec?.acceptsReferenceAudio);
   /** 参考视频/音频各能放几段：Seedance 按版本上限，万相/可灵各一段 */
   const mediaLimits = referenceMediaLimits(props.adapter, props.model, spec);
-  const canUploadVideo = Boolean(channel?.uploadEndpoint);
+  const canUploadVideo = referenceMediaLimits(props.adapter, props.model, spec, Boolean(channel?.uploadEndpoint?.trim())).videos > 0;
   const ratioValue = caps?.ratioField === "ratio" ? draft.ratio : draft.aspectRatio;
   const ratioLabel = ratioValue === "adaptive" ? "智能比例" : ratioValue;
   const resolutionLabel = draft.resolution ? draft.resolution.toUpperCase() : "—";
@@ -484,7 +485,7 @@ export function VideoComposer(props: VideoComposerProps) {
             {link}
             <button className="vstudio-slot" type="button" title={`添加${roleLabel(spec, index)}`}
               onClick={() => imageInputRef.current?.click()}>
-              {reading ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}
+              {reading ? <LoadingIndicator variant="dots" size={24} /> : <ImagePlus size={16} />}
               <span>{roleLabel(spec, index)}</span>
             </button>
           </div>,
@@ -558,7 +559,7 @@ export function VideoComposer(props: VideoComposerProps) {
           disabled={!canUploadVideo}
           onClick={() => videoInputRef.current?.click()}
         >
-          {reading ? <LoaderCircle className="spin" size={16} /> : <Film size={16} />}
+          {reading ? <LoadingIndicator variant="dots" size={24} /> : <Film size={16} />}
           <span>{canUploadVideo ? "参考视频" : "暂不支持上传"}</span>
         </button>,
       );
@@ -656,7 +657,7 @@ export function VideoComposer(props: VideoComposerProps) {
                   aria-label="添加参考内容"
                   onClick={(event) => openAssetPicker(event.currentTarget)}
                 >
-                  {reading ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}
+                  {reading ? <LoadingIndicator variant="dots" size={24} /> : <ImagePlus size={16} />}
                   <span>参考内容</span>
                 </button>
               ) : null}
@@ -828,7 +829,7 @@ export function VideoComposer(props: VideoComposerProps) {
             disabled={disabled || !draft.prompt.trim()}
             onClick={props.onGenerate}
           >
-            {submitting ? <LoaderCircle className="spin" size={16} /> : <Send size={15} />}
+            {submitting ? <LoadingIndicator variant="dots" size={24} /> : <Send size={15} />}
           </button>
         </div>
 

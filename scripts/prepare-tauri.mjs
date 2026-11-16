@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const projectDir = process.cwd();
@@ -194,12 +196,91 @@ fs.mkdirSync(binaryDir, { recursive: true });
 if (!["win32", "darwin"].includes(process.platform)) {
   throw new Error(`不支持的打包平台：${process.platform}`);
 }
-fs.copyFileSync(process.execPath, nodeTarget);
+
+/**
+ * sidecar 的 node 必须和**目标架构**一致，不能用构建机的 `process.execPath` 直接复制。
+ *
+ * 以前只有 Windows 一处要打包，复制 execPath 刚好等价。现在 macOS 要在 arm64 的
+ * GitHub runner 上交叉编译 Intel 包，复制过去的是一个 arm64 的 node，装到 Intel Mac
+ * 上会直接报 `bad CPU type in executable`——包能装上、但后端起不来，最难查的那种。
+ */
+function run(command, args) {
+  const result = spawnSync(command, args, { stdio: ["ignore", "inherit", "inherit"] });
+  if (result.error) throw new Error(`${command} 执行失败：${result.error.message}`);
+  if (result.status !== 0) throw new Error(`${command} 退出码 ${result.status}`);
+}
+
+/** `x86_64-apple-darwin` → { arch: "x64", platform: "darwin" } */
+function nodePlatformForTriple(triple) {
+  const [archPart, ...rest] = triple.split("-");
+  const vendorOs = rest.join("-");
+  const arch = archPart === "x86_64" ? "x64" : archPart === "aarch64" ? "arm64" : archPart;
+  const platform = vendorOs.includes("darwin")
+    ? "darwin"
+    : vendorOs.includes("windows")
+      ? "win32"
+      : vendorOs.includes("linux")
+        ? "linux"
+        : null;
+  return { arch, platform };
+}
+
+/**
+ * 下载官方 node 到本地缓存，给交叉编译用。
+ * 缓存按版本 + 平台 + 架构分目录，第二次构建不用再拉 50MB。
+ */
+function fetchOfficialNode({ arch, platform }) {
+  const version = process.version;
+  const distName = `node-${version}-${platform}-${arch}`;
+  const cacheDir = path.join(os.homedir(), ".cache", "ezcanvas-node", distName);
+  const cached = path.join(cacheDir, "node");
+  if (fs.existsSync(cached)) return cached;
+
+  const url = `https://nodejs.org/dist/${version}/${distName}.tar.gz`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ezcanvas-node-"));
+  const archive = path.join(tmpDir, `${distName}.tar.gz`);
+  try {
+    console.log(`为 ${targetTriple} 准备 sidecar：下载 ${distName}`);
+    run("curl", ["-fsSL", "--retry", "3", "--retry-delay", "2", url, "-o", archive]);
+    fs.mkdirSync(cacheDir, { recursive: true });
+    run("tar", ["-xzf", archive, "-C", cacheDir, "--strip-components", "2", `${distName}/bin/node`]);
+  } finally {
+    removeTree(tmpDir);
+  }
+  if (!fs.existsSync(cached)) throw new Error(`${distName} 解压后没有找到 bin/node`);
+  return cached;
+}
+
+const wanted = nodePlatformForTriple(targetTriple);
+if (targetTriple.startsWith("universal-")) {
+  throw new Error(
+    "universal-apple-darwin 需要把两种架构的 node 用 lipo 合成，当前脚本没实现；请分别打 aarch64 / x86_64 两个包。",
+  );
+}
+if (!wanted.platform) throw new Error(`看不懂的目标三元：${targetTriple}`);
+
+const explicitNode = process.env.TAURI_NODE_BINARY;
+let nodeSource;
+if (explicitNode) {
+  if (!fs.existsSync(explicitNode)) throw new Error(`TAURI_NODE_BINARY 指向的文件不存在：${explicitNode}`);
+  nodeSource = explicitNode;
+} else if (wanted.platform === process.platform && wanted.arch === process.arch) {
+  nodeSource = process.execPath;
+} else if (wanted.platform === "darwin") {
+  nodeSource = fetchOfficialNode(wanted);
+} else {
+  throw new Error(
+    `宿主 ${process.platform}/${process.arch} 无法为 ${targetTriple} 准备 node sidecar；请用 TAURI_NODE_BINARY 指定对应架构的 node。`,
+  );
+}
+
+fs.copyFileSync(nodeSource, nodeTarget);
 // macOS 要求 sidecar 二进制带可执行位，否则打进 .app 后无法启动
 if (process.platform !== "win32") fs.chmodSync(nodeTarget, 0o755);
 
 console.log(
   `Prepared Tauri server resources with ${productionPackages.size} production packages and ${path.basename(nodeTarget)}`,
 );
+console.log(`sidecar node：${wanted.platform}-${wanted.arch}（来源 ${nodeSource}）`);
 console.log(`服务端直接依赖：${serverDependencies.join(", ")}`);
 console.log(`最长相对路径：${longest} 字符（上限 ${MAX_RELATIVE_PATH}）`);

@@ -135,11 +135,6 @@ export function klingModesForModel(model: string | undefined): KlingVideoMode[] 
   return ["text-to-video", "first-frame", "first-last-frame", "motion-control"];
 }
 
-/** 对话里能用的模式：运动控制需要参考视频，工作台之外拿不到 */
-export function klingConversationModes(model: string | undefined): ConversationVideoMode[] {
-  return klingModesForModel(model).filter((mode): mode is ConversationVideoMode => mode !== "motion-control");
-}
-
 /** 各视频适配器的默认参数。视频工作台、对话工具和无限画布共用一份，用户不必重新学 */
 export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: string; audio: boolean }> = {
   "wan-video": { duration: 5, resolution: "720P", audio: true },
@@ -147,25 +142,6 @@ export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: stri
   "grok-video": { duration: 8, resolution: "720p", audio: false },
   "kling-video": { duration: 5, resolution: "720p", audio: false },
 };
-
-/** 每个适配器真正支持的模式。Grok 只有文生/图生（参考图） */
-export const VIDEO_MODES_BY_ADAPTER: Record<VideoAdapter, ConversationVideoMode[]> = {
-  "grok-video": ["text-to-video", "reference"],
-  "wan-video": ["text-to-video", "first-frame", "first-last-frame", "reference"],
-  "seedance-video": ["text-to-video", "first-frame", "first-last-frame", "reference"],
-  "kling-video": ["text-to-video", "first-frame", "first-last-frame", "reference"],
-};
-
-/**
- * 模式列表的唯一入口。
- *
- * 可灵的能力按模型分，适配器级别只知道「可灵」不够：给 turbo 规划一个参考图模式，
- * 提交时才会发现端点根本不认。模型未知时退回最保守的文生/首帧。
- */
-export function supportedVideoModes(adapterType: string, model?: string): ConversationVideoMode[] {
-  if (adapterType === "kling-video") return klingConversationModes(model);
-  return VIDEO_MODES_BY_ADAPTER[adapterType as VideoAdapter] ?? ["text-to-video"];
-}
 
 /** Grok 那边的「图生视频」不叫参考生视频，卡片上说人话 */
 export function videoModeLabel(mode: ConversationVideoMode, adapterType?: string) {

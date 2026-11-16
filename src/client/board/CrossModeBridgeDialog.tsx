@@ -6,9 +6,10 @@
  *
  * 只负责选目标 + 调接口；目标列表和结果都由服务端决定。
  */
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowRight, Image as ImageIcon, LayoutGrid, LoaderCircle, Plus, X } from "lucide-react";
+import { ArrowRight, Image as ImageIcon, LayoutGrid, Plus, X } from "lucide-react";
 import { api } from "../api";
 import type { BoardSummary } from "../../shared/board";
 import type { ConversationSummary } from "../../shared/agent-types";
@@ -153,7 +154,7 @@ export function CrossModeBridgeDialog({
 
         <div className="board-bridge-list">
           {loading ? (
-            <p className="board-bridge-empty"><LoaderCircle size={13} className="spin" />正在读取目标…</p>
+            <p className="board-bridge-empty"><LoadingIndicator variant="dots" size={24} />正在读取目标…</p>
           ) : null}
           {!loading && targets.map((target) => (
             <button
@@ -168,7 +169,7 @@ export function CrossModeBridgeDialog({
                 <strong>{target.title}</strong>
                 <em>{target.subtitle}</em>
               </span>
-              {busy === target.id ? <LoaderCircle size={13} className="spin" /> : <ArrowRight size={13} />}
+              {busy === target.id ? <LoadingIndicator variant="dots" size={24} /> : <ArrowRight size={13} />}
             </button>
           ))}
           {!loading && !targets.length ? (
@@ -181,7 +182,7 @@ export function CrossModeBridgeDialog({
         {mode === "to-board" ? (
           <footer className="board-bridge-foot">
             <button type="button" className="primary-button compact" disabled={Boolean(busy)} onClick={() => void createAndSend()}>
-              {busy === "__new__" ? <LoaderCircle size={12} className="spin" /> : <Plus size={12} />}
+              {busy === "__new__" ? <LoadingIndicator variant="dots" size={24} /> : <Plus size={12} />}
               新建无限画布并加入
             </button>
           </footer>

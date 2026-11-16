@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { clampScale, edgeClass, edgePath, nodesBounds, rectsIntersect } from "../src/client/board/board-geometry";
+import { clampScale, edgeClass, edgePath, fitBoardImageSize, nodesBounds, rectsIntersect } from "../src/client/board/board-geometry";
 import type { BoardNode } from "../src/shared/board";
 
 describe("画布几何计算", () => {
+  it("图片节点在现有占位内保持原始的横竖比例", () => {
+    const bounds = { width: 320, height: 320 };
+    expect(fitBoardImageSize(bounds, { width: 1920, height: 1080 })).toEqual({ width: 320, height: 180 });
+    expect(fitBoardImageSize(bounds, { width: 1080, height: 1920 })).toEqual({ width: 180, height: 320 });
+    expect(fitBoardImageSize(bounds, { width: 1024, height: 1024 })).toEqual(bounds);
+  });
+
   it("限制缩放并保持合法值", () => {
     expect(clampScale(0.001)).toBe(0.05);
     expect(clampScale(5)).toBe(3);

@@ -1,4 +1,5 @@
-import { Download, LoaderCircle, X } from "lucide-react";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { Download, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { assetRef } from "../../shared/agent-types";
@@ -98,7 +99,7 @@ export function AssetLightbox({
               disabled={!asset || downloading}
               title="下载到本地"
             >
-              {downloading ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}
+              {downloading ? <LoadingIndicator variant="dots" size={24} /> : <Download size={14} />}
               下载
             </button>
             <button type="button" className="icon-button compact" onClick={onClose} title="关闭">

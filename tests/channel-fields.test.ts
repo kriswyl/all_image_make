@@ -85,7 +85,8 @@ describe("能力清单从矩阵派生", () => {
     // 视频渠道的画幅字段名和音频支持都从能力表来
     const wan = lines.find((line) => line.startsWith("alias=wan-3.0-video"))!;
     expect(wan).toContain("画幅(ratio)=");
-    expect(wan).toContain("音频=✔");
+    expect(wan).toContain("输出音频=✔");
+    expect(wan).toContain("工作台参考音频≤1 段");
     const kling = lines.find((line) => line.startsWith("alias=kling-3.0"))!;
     expect(kling).toContain("画幅(aspectRatio)=");
   });

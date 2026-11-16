@@ -486,6 +486,7 @@ export class AgentService {
     return {
       db: this.db,
       runner: this.runner,
+      confirmed: options.confirmed,
       sessionKeys: this.sessionKeys,
       conversation: effective,
       aliases: buildCapabilityAliases(this.db.listChannels()),

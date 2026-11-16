@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download, ExternalLink, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, RefreshCw, X } from "lucide-react";
 import { APP_VERSION } from "../shared/app-config";
 import { isTauriRuntime } from "./api";
 import { copyTextToClipboard } from "./clipboard";
@@ -143,7 +144,7 @@ export function UpdateStatus() {
           {!desktop ? (
             <p className="update-note">网页版不支持自动更新，请使用桌面版。</p>
           ) : phase === "checking" ? (
-            <p className="update-note update-inline"><LoaderCircle size={14} className="spin" />正在检查新版本…</p>
+            <p className="update-note update-inline"><LoadingIndicator variant="dots" size={24} />正在检查新版本…</p>
           ) : phase === "downloading" ? (
             <div className="update-progress">
               <div className="update-progress-row">
@@ -156,7 +157,7 @@ export function UpdateStatus() {
               <p className="update-note">下载完成后才会停掉本地服务并安装。</p>
             </div>
           ) : phase === "installing" ? (
-            <p className="update-note update-inline"><LoaderCircle size={14} className="spin" />正在安装，应用即将自动重启…</p>
+            <p className="update-note update-inline"><LoadingIndicator variant="dots" size={24} />正在安装，应用即将自动重启…</p>
           ) : phase === "available" && info ? (
             <>
               <p className="update-version-line">
@@ -235,7 +236,7 @@ export function UpdateStatus() {
       >
         v{APP_VERSION}
         {hasUpdate ? <span className="update-dot" aria-label="有新版本" /> : null}
-        {busy ? <LoaderCircle size={11} className="spin" /> : null}
+        {busy ? <LoadingIndicator variant="dots" size={24} /> : null}
       </button>
     </div>
   );

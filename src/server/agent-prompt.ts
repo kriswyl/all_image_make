@@ -1,5 +1,6 @@
 import { MAX_SESSION_TASKS } from "./agent-constants.js";
 import { assetRef, type Conversation } from "../shared/agent-types.js";
+import { VIDEO_REFERENCE_ENTRY_GUIDANCE } from "./capabilities.js";
 
 /**
  * §7 系统提示词。
@@ -57,8 +58,9 @@ export function buildSystemPrompt(
     "- set_canvas — 把会话里的产物设为当前画布（可以一次设多张，整组替换）。args: {assetRef} 或 {assetRefs: [\"#xxxx\", ...]}，值用 #xxxx 形式的产物编号",
     "  **只有用户明确说「放到画布 / 设为参考」时才调用**；新图生成后不要主动把画布换成它。",
     "- optimize_prompt — 只优化提示词、不生成。args: {prompt(必填), target: \"image\"|\"video\"}",
-    "- generate_video — 生成视频。args: {prompt(必填), modelHint, imageRefs, mode, duration, resolution, audio, promptExtend}",
-    "  imageRefs 按顺序给：first-frame 要 1 张；first-last-frame 正好 2 张（先首帧、后尾帧）；reference 给 1~N 张参考图。",
+    "- generate_video — 生成视频。args: {prompt(必填), modelHint, imageRefs, videoRefs, mode, duration, resolution, audio, promptExtend}",
+    "  imageRefs 按顺序给：first-frame 要 1 张；first-last-frame 正好 2 张（先首帧、后尾帧）；reference 可用参考图、参考视频或两者组合。",
+    VIDEO_REFERENCE_ENTRY_GUIDANCE,
     "  mode 只填这四个英文词：text-to-video / first-frame / first-last-frame / reference。Grok 渠道只支持 text-to-video 和 reference（图生视频）。",
     "  单张图又没说方式时可以留空，系统按 first-frame；**两张及以上又没写 mode 会失败**——先 ask 用户要首尾帧还是参考图。",
     "  resolution 也只用 480P / 720P / 1080P 这三种写法，拿不准就别写。",

@@ -2,22 +2,22 @@
  * 语布的产品标。
  *
  * 母版是 `design` 里定稿的 ChatCanvas 图标（黑色 mark + 右下角的「画布」块），
- * 上面的 `brand-mark.png` 是从设计稿裁出来的透明底版本：白底去掉、四周留白收紧，
- * 22px 侧栏尺寸下仍然是清楚的。**不要再用文字/描边现画一个**——和 logo 母版会比不上。
+ * `public/brand-mark.png` 是从设计稿裁出来的透明底版本。
+ *
+ * 用 CSS 蒙版（mask）填 `--ink`：浅色主题是黑、深色主题是暖白，
+ * 和侧栏文字同色。品牌色只留给创作内容那一侧（示例作品、生成动画）。
+ * 换 Logo 只需要替换 png，不用重画任何矢量。
  *
  * 同一份图标的 App 版本（黑底圆角方块）在 `public/app-icon.png`，Tauri 的各尺寸图标
  * 由 `npx tauri icon` 从同一个源生成。
  */
-export function BrandMark({ size = 18 }: { size?: number }) {
+export function BrandMark({ size = 28 }: { size?: number }) {
   return (
-    <img
+    <span
       className="brand-mark-img"
-      src="/brand-mark.png"
-      alt=""
-      width={size}
-      height={size}
-      draggable={false}
-      decoding="async"
+      style={{ width: size, height: size }}
+      role="img"
+      aria-label="语布"
     />
   );
 }

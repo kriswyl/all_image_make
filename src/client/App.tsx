@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Eye, Film, FolderOpen, History, Image as ImageIcon,
-  ImagePlus, KeyRound, LayoutGrid, LoaderCircle, Mic, Minus, Moon, Music, Paintbrush, PanelLeft, PanelLeftClose, Pin, PinOff, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
+  ImagePlus, KeyRound, LayoutGrid, Mic, Minus, Moon, Music, Paintbrush, PanelLeft, PanelLeftClose, Pin, PinOff, Plug, Plus, RefreshCw, RotateCcw, Search, Server,
   Settings2, SlidersHorizontal, Sparkles, Square, SquarePen, Sun, Trash2, Upload, Wand2, X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -579,22 +579,34 @@ export function App() {
   async function confirmClear(request: NonNullable<typeof clearRequest>, keepFiles: boolean) {
     const removed = new Set(request.tasks.map((task) => task.id));
     const dropLocally = (current: Task[]) => current.filter((task) => !removed.has(task.id));
+    // 聊天生成的记录归对话所有：删的时候得把消息里的锚点、画布、分镜引用一起摘掉，
+    // 否则对话里会留下裂图。公共记录没有引用，照旧直删。
+    const detach = request.tasks.some((task) => task.historySource === "chat");
     try {
       if (request.mode === "task") {
-        await api.deleteTask(request.tasks[0].id, keepFiles);
+        await api.deleteTask(request.tasks[0].id, keepFiles, detach);
         setTasks(dropLocally);
-      } else if (request.mode === "selection") {
-        await api.deleteTasks(request.tasks.map((task) => task.id), keepFiles);
-        setTasks(dropLocally);
-      } else {
-        await api.clearTasks(request.scope, keepFiles);
+        if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
+        if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
+        showToast("success", "已删除该记录");
+        setClearRequest(null);
+        return;
+      }
+      const result = request.mode === "selection"
+        ? await api.deleteTasks(request.tasks.map((task) => task.id), keepFiles, detach)
+        : await api.clearTasks(request.scope, keepFiles).then((value) => ({ ...value, skipped: 0, skippedConversation: 0 }));
+      if (request.mode === "scope") {
         // 服务端按范围清的是全库记录，本地列表要重新拉一次才不会残留
         try { setTasks(await api.tasks()); } catch { setTasks(dropLocally); }
+      } else {
+        setTasks(dropLocally);
       }
       if (activeTaskId && removed.has(activeTaskId)) setActiveTaskId(null);
       if (activeVideoTaskId && removed.has(activeVideoTaskId)) setActiveVideoTaskId(null);
-      showToast("success", request.mode === "scope" ? "已清空生成历史"
-        : request.mode === "task" ? "已删除该记录" : `已删除 ${removed.size} 条记录`);
+      const skipped = "skipped" in result ? result.skipped : 0;
+      const main = request.mode === "scope" ? "已清空生成历史" : `已删除 ${result.deleted} 条记录`;
+      // 有被跳过的就把原因说清楚，否则用户会以为「点了没反应」
+      showToast("success", skipped ? `${main}，${skipped} 条因仍被分镜或对话引用已跳过` : main);
       setClearRequest(null);
     } catch (error) {
       showToast("error", error instanceof Error ? error.message : "删除失败");
@@ -688,7 +700,7 @@ export function App() {
                 },
               } : {})}
             >
-              <span className="brand-mark"><BrandMark size={18} /></span>
+              <span className="brand-mark"><BrandMark size={28} /></span>
               {/* 两行：英文主名在上，中文名「语布」压成小字在下。代价是侧栏高 10px */}
               <span className="brand-text">
                 <span className="brand-name">ChatCanvas</span>
@@ -989,6 +1001,7 @@ export function App() {
           mode={clearRequest.mode}
           count={clearRequest.count}
           label={clearRequest.label}
+          hasChatRecords={clearRequest.tasks.some((task) => task.historySource === "chat")}
           onClose={() => setClearRequest(null)}
           onConfirm={(keepFiles) => confirmClear(clearRequest, keepFiles)}
         />

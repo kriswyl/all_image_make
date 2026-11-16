@@ -30,7 +30,9 @@ export function ModelPicker({
   /** 对话页在底部，浮层向上开；生图 / 生视频页在顶部，浮层向下开 */
   menuPlacement = "up",
   className,
+  menuClassName,
   ariaLabel,
+  onOpen,
 }: {
   options: ModelOption[];
   value: string;
@@ -40,7 +42,9 @@ export function ModelPicker({
   placeholder?: string;
   menuPlacement?: "up" | "down";
   className?: string;
+  menuClassName?: string;
   ariaLabel?: string;
+  onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<{
@@ -105,7 +109,15 @@ export function ModelPicker({
   const current = options.find((item) => item.value === value);
 
   return (
-    <div className={`model-picker ${className ?? ""}`} ref={ref}>
+    <div className={`model-picker ${className ?? ""}`} ref={ref} onBlur={(event) => {
+      const next = event.relatedTarget;
+      if (open && next && !ref.current?.contains(next) && !menuRef.current?.contains(next)) setOpen(false);
+    }} onKeyDown={(event) => {
+      if (!open || event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus({ preventScroll: true });
+    }}>
       <button
         ref={triggerRef}
         type="button"
@@ -113,7 +125,11 @@ export function ModelPicker({
         disabled={disabled}
         aria-expanded={open}
         aria-haspopup="listbox"
-        onClick={() => setOpen((previous) => !previous)}
+        onClick={() => {
+          if (!open) onOpen?.();
+          setOpen(!open);
+        }}
+        aria-label={ariaLabel ? `${ariaLabel}：${current?.model ?? placeholder}` : undefined}
         title={current ? `${current.channelName} · ${current.model}` : placeholder}
       >
         {current ? <ModelLogo model={current.model} kind={kind} size={15} /> : null}
@@ -124,7 +140,7 @@ export function ModelPicker({
       {open && anchor ? createPortal(
         <div
           ref={menuRef}
-          className={`model-picker-menu is-portaled ${menuPlacement === "down" ? "is-down" : ""}`}
+          className={`model-picker-menu is-portaled ${menuPlacement === "down" ? "is-down" : ""} ${menuClassName ?? ""}`}
           role="listbox"
           aria-label={ariaLabel ?? "模型"}
           style={{
@@ -142,7 +158,7 @@ export function ModelPicker({
               role="option"
               aria-selected={item.value === value}
               className={`model-picker-option ${item.value === value ? "is-active" : ""}`}
-              onClick={() => { onChange(item.value); setOpen(false); }}
+              onClick={() => { onChange(item.value); setOpen(false); triggerRef.current?.focus({ preventScroll: true }); }}
             >
               <span className="model-picker-option-logo">
                 <ModelLogo model={item.model} kind={kind} size={16} />

@@ -13,7 +13,8 @@ import { channelKindOf } from "../shared/kinds.js";
 import { isMidjourneyActionModel } from "../shared/midjourney.js";
 import { OPENAI_SIZE_PRESETS } from "../shared/image-sizes.js";
 import { CHANNEL_FIELD_SUPPORT } from "../shared/channel-fields.js";
-import { VIDEO_CAPABILITIES, supportedVideoModes, videoModeLabel, type VideoAdapter } from "../shared/video-capabilities.js";
+import { VIDEO_CAPABILITIES, videoModeLabel, type VideoAdapter } from "../shared/video-capabilities.js";
+import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec } from "../shared/video-modes.js";
 import type { DbChannel } from "./db.js";
 
 export type CapabilityKind = TaskKind;
@@ -27,6 +28,7 @@ export interface CapabilityAlias {
   channelName: string;
   model: string;
   adapterType: AdapterType;
+  localVideoUploadConfigured?: boolean;
   /** 一行能力摘要 */
   traits: string;
 }
@@ -143,8 +145,8 @@ function imageTraits(adapterType: AdapterType): string {
   return parts.join("  ");
 }
 
-/** 视频渠道的能力摘要：时长 / 分辨率 / 模式 / 画幅 / 音频都从 VIDEO_CAPABILITIES 来 */
-function videoTraits(adapterType: AdapterType): string {
+/** 视频能力摘要从共享的视频模式和参数表派生。 */
+function videoTraits(adapterType: AdapterType, model: string, videoUploadConfigured: boolean): string {
   const capability = VIDEO_CAPABILITIES[adapterType as VideoAdapter];
   if (!capability) return "视频生成";
   const parts: string[] = [];
@@ -152,15 +154,23 @@ function videoTraits(adapterType: AdapterType): string {
     ? `${capability.durations.fixed}s`
     : `${capability.durations.min}-${capability.durations.max}s`);
   parts.push(capability.resolutions.join("|"));
-  const modes = supportedVideoModes(adapterType).map((mode) => videoModeLabel(mode, adapterType));
-  if (modes.length) parts.push(`模式=${modes.join("|")}`);
+  const modes = supportedVideoModes(adapterType, model).map((mode) => videoModeLabel(mode, adapterType));
+  if (modes.length) parts.push(`对话生成模式=${modes.join("|")}`);
   if (capability.aspectRatios.length) {
     const field = capability.ratioField === "ratio" ? "ratio" : "aspectRatio";
     parts.push(`画幅(${field})=${capability.aspectRatios.join("|")}`);
   }
-  if (capability.supportsAudio) parts.push("音频=✔");
+  if (capability.supportsAudio) parts.push("输出音频=✔");
   if (capability.supportsPromptExtend) parts.push("提示词扩展=✔");
-  parts.push(`参考图≤${capability.maxReferenceImages}`);
+  const imageLimit = maxImagesForMode(adapterType, model, "reference");
+  if (imageLimit) parts.push(`对话参考图≤${imageLimit}`);
+  const referenceSpec = videoModeSpec(adapterType, model, "reference");
+  const limits = referenceMediaLimits(adapterType, model, referenceSpec);
+  if (limits.videos) {
+    parts.push(`参考生视频：参考图≤${imageLimit} 张，参考视频≤${limits.videos} 段（对话 / 工作台 / 画布，${videoUploadConfigured ? "本地视频上传服务已配置" : "本地视频上传服务未配置，暂不可用"}）${limits.audios ? `，工作台参考音频≤${limits.audios} 段` : ""}`);
+  } else if (videoModeSpec(adapterType, model, "motion-control")) {
+    parts.push(`视频工作台·运动控制：角色图 + 一段参考视频（本地素材上传服务${videoUploadConfigured ? "已配置" : "未配置"}）`);
+  }
   const note = VIDEO_NOTES[adapterType];
   if (note) parts.push(note);
   return parts.join("  ");
@@ -182,10 +192,10 @@ export function likelySupportsVision(adapterType: AdapterType) {
   return adapterType === "gemini-content";
 }
 
-function traitsFor(adapterType: AdapterType, kind: CapabilityKind) {
-  if (kind === "video") return videoTraits(adapterType);
-  if (kind === "audio") return AUDIO_TRAITS[adapterType] ?? "音乐生成";
-  return imageTraits(adapterType) || "图片生成";
+function traitsFor(channel: DbChannel, model: string, kind: CapabilityKind) {
+  if (kind === "video") return videoTraits(channel.adapterType, model, Boolean(channel.uploadEndpoint?.trim()));
+  if (kind === "audio") return AUDIO_TRAITS[channel.adapterType] ?? "音乐生成";
+  return imageTraits(channel.adapterType) || "图片生成";
 }
 
 /**
@@ -209,7 +219,8 @@ export function buildCapabilityAliases(channels: DbChannel[]): CapabilityAlias[]
         && (model === "mj_edits" || isMidjourneyActionModel(model))) continue;
       entries.push({
         kind, channelId: channel.id, channelName: channel.name, model,
-        adapterType: channel.adapterType, traits: traitsFor(channel.adapterType, kind),
+        adapterType: channel.adapterType, traits: traitsFor(channel, model, kind),
+        ...(kind === "video" ? { localVideoUploadConfigured: Boolean(channel.uploadEndpoint?.trim()) } : {}),
       });
     }
   }
@@ -256,6 +267,11 @@ export function buildCapabilityManifest(aliases: CapabilityAlias[]): string {
   if (!audio.length) lines.push("（还没有配置音乐渠道，用户要音乐时如实说明）");
   return lines.join("\n");
 }
+
+export const VIDEO_REFERENCE_ENTRY_GUIDANCE = [
+  "万相和 Seedance 支持用原视频作参考，本地视频需要渠道配置素材上传服务；能用几段以所选模型清单为准。工作台可在「提示词生视频」添加视频；画布可连入视频节点。",
+  "开启创作工具时，用户明确要求参考视频生成，调用 generate_video，使用 mode=reference 和 videoRefs（真实素材 ID），明确要带的参考图另填 imageRefs。用户指向本轮唯一一段视频就选它；指代不明先问。工具显示确认卡之后才上传。渠道不可用时请用户选择或配置渠道，不改成纯文生或图生视频。参考音频请使用视频工作台。不能把视频附件索引说成已经看过的画面，也不要沿用历史中与能力清单冲突的说法。",
+].join("\n");
 
 /** 这次是靠什么挑中的模型，用来决定「要不要跟用户解释一句」 */
 export type AliasSource = "hint" | "default" | "fallback";

@@ -7,9 +7,10 @@
  *
  * 数据和保存没有另起一套：模型来自 `MODEL_GROUPS`，保存走 `api.saveChannel`。
  */
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ArrowRight, Check, ChevronRight, KeyRound, LoaderCircle, Sparkles,
+  ArrowLeft, ArrowRight, Check, ChevronRight, KeyRound, Sparkles,
 } from "lucide-react";
 import { api } from "../api";
 import { openExternal } from "../external";
@@ -759,7 +760,7 @@ export function ImmersiveOnboarding({
                             <button type="button" className="ink-link" onClick={() => copyPreviousKey(index)}>使用上一组的 Key</button>
                           ) : <span />}
                           <span className={`ink-config-state ${result?.status ?? ""}`}>
-                            {result?.status === "saving" ? <><LoaderCircle size={12} className="spin" />保存中</>
+                            {result?.status === "saving" ? <><LoadingIndicator variant="dots" size={24} />保存中</>
                               : result?.status === "done" ? <><Check size={12} />{result.message}</>
                               : result?.status === "skipped" ? <>{result.message}</>
                               : result?.status === "error" ? <>{result.message}</>
@@ -793,7 +794,7 @@ export function ImmersiveOnboarding({
                     disabled={saving || !rows.length}
                     onClick={() => void save()}
                   >
-                    {saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+                    {saving ? <LoadingIndicator variant="dots" size={24} /> : <Check size={14} />}
                     开始配置
                   </button>
                 </div>

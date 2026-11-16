@@ -4,8 +4,10 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "../src/client/api";
 import { useBoard } from "../src/client/board/useBoard";
+import { BoardCanvas } from "../src/client/board/BoardCanvas";
 import { useBoardDocument } from "../src/client/board/useBoardDocument";
-import { createEmptyBoardDoc, DEFAULT_BOARD_VIEWPORT, type BoardView } from "../src/shared/board";
+import { createEmptyBoardDoc, DEFAULT_BOARD_VIEWPORT, directUpstreamImages, type BoardView } from "../src/shared/board";
+import type { Asset, Task } from "../src/shared/types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -105,4 +107,113 @@ it.each(["导入模板", "恢复历史"] as const)("%s 的旧画布响应不会�
     expect(state.view?.id).toBe("b");
     expect(state.view?.version).toBe(1);
   } finally { act(() => root.unmount()); }
+});
+
+it("多图任务的前一张结果卡已删除时，剩余卡仍接收自己的图片", async () => {
+  const initial = board("a");
+  initial.doc.nodes = [{
+    id: "second", ref: "n2", type: "image", x: 420, y: 80, width: 240, height: 240,
+    title: "结果 2", createdAt: "", updatedAt: "", source: "generated", status: "loading",
+    assetId: null, taskId: "batch", resultIndex: 1,
+  }];
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  vi.spyOn(api, "task").mockResolvedValue({
+    id: "batch", status: "succeeded", assets: [
+      { id: "first-image", mimeType: "image/png" }, { id: "second-image", mimeType: "image/png" },
+    ],
+  } as Task);
+  vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 2, doc: input.doc }));
+  const root = createRoot(document.createElement("div"));
+  let state!: ReturnType<typeof useBoard>;
+  const toast = vi.fn();
+  function Harness() {
+    state = useBoard("a", toast);
+    return null;
+  }
+  try {
+    await act(async () => { root.render(<Harness />); });
+    expect(state.view?.doc.nodes[0]).toMatchObject({ id: "second", status: "succeeded", assetId: "second-image" });
+  } finally {
+    act(() => root.unmount());
+  }
+});
+
+it("生图配置节点汇总不同请求的结果，不会用单张失败覆盖成功图片", async () => {
+  const initial = board("a");
+  const base = { x: 0, y: 0, width: 240, height: 240, createdAt: "", updatedAt: "" };
+  initial.doc.nodes = [
+    { ...base, id: "config", ref: "n1", title: "批量", type: "config", mode: "image",
+      prompt: "测试", count: 2, useUpstreamText: true, status: "loading",
+      lastTaskId: "request-a", imageBatchResultIds: ["a", "b"] },
+    { ...base, id: "a", ref: "n2", title: "结果 1", type: "image", source: "generated",
+      status: "loading", assetId: null, taskId: "request-a", resultIndex: 0 },
+    { ...base, id: "b", ref: "n3", title: "结果 2", type: "image", source: "generated",
+      status: "loading", assetId: null, taskId: "request-b", resultIndex: 0 },
+  ];
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  vi.spyOn(api, "task").mockImplementation(async (id) => (id === "request-a"
+    ? { id, status: "failed", errorMessage: "渠道拒绝此张", assets: [] }
+    : { id, status: "succeeded", assets: [{ id: "second-image", mimeType: "image/png" }] }) as unknown as Task);
+  vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 2, doc: input.doc }));
+  const root = createRoot(document.createElement("div"));
+  const toast = vi.fn();
+  let state!: ReturnType<typeof useBoard>;
+  function Harness() { state = useBoard("a", toast); return null; }
+  try {
+    await act(async () => { root.render(<Harness />); });
+    expect(state.view?.doc.nodes).toMatchObject([
+      { status: "failed", error: expect.stringContaining("1 张失败") },
+      { status: "failed", error: "渠道拒绝此张", assetId: null },
+      { status: "succeeded", assetId: "second-image" },
+    ]);
+  } finally { act(() => root.unmount()); }
+});
+
+it("图组可展开并切换主图，收起后沿用原节点的下游连线", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  const initial = board("a");
+  const base = { y: 80, width: 240, height: 240, createdAt: "", updatedAt: "" };
+  initial.doc.nodes = [
+    { ...base, x: 0, id: "primary", ref: "n1", title: "主卡", type: "image", source: "generated",
+      status: "succeeded", assetId: "first", taskId: "task-first",
+      imageResultGroup: { memberIds: ["alternate"], expanded: false } },
+    { ...base, x: 280, id: "alternate", ref: "n2", title: "结果 2", type: "image", source: "generated",
+      status: "succeeded", assetId: "second", taskId: "task-second" },
+    { ...base, x: 310, id: "target", ref: "n3", title: "已有卡", type: "image",
+      source: "upload", status: "empty", assetId: null },
+  ];
+  initial.doc.edges = [{ id: "edge", source: "primary", target: "target", kind: "input", role: "reference" }];
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 2, doc: input.doc }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const toast = vi.fn();
+  const noop = () => {};
+  const assets = new Map(["first", "second"].map((id) => [id, { id, url: `/${id}.png`, fileName: `${id}.png`, mimeType: "image/png" } as Asset]));
+  let state!: ReturnType<typeof useBoard>;
+  function Harness() {
+    state = useBoard("a", toast);
+    return <BoardCanvas board={state} assets={assets} onPickImage={noop} onUploadMediaIntoNode={noop}
+      onUploadFiles={noop} onPreviewAsset={noop} onDeleteNode={noop} onCompareVersions={noop}
+      onExtractFrame={noop} renderNodeSettings={() => null} />;
+  }
+  try {
+    await act(async () => { root.render(<Harness />); });
+    expect(host.querySelector('[data-board-node-id="alternate"]')).toBeNull();
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="展开 2 张图片"]')!.click());
+    const alternate = host.querySelector<HTMLElement>('[data-board-node-id="alternate"]')!;
+    expect(parseInt(alternate.style.top)).toBeGreaterThan(320);
+    const promote = [...alternate.querySelectorAll("button")].find((button) => button.textContent === "设为主图")!;
+    act(() => promote.click());
+    expect(directUpstreamImages(state.view!.doc, "target")[0]).toMatchObject({ id: "primary", assetId: "second", taskId: "task-second" });
+    expect(state.view!.doc.nodes.find((node) => node.id === "alternate")).toMatchObject({ assetId: "first", taskId: "task-first" });
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="收起图片结果"]')!.click());
+    expect(host.querySelector('[data-board-node-id="alternate"]')).toBeNull();
+    expect(host.querySelector('[data-board-node-id="primary"] img')?.getAttribute("src")).toContain("/second.png");
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
 });

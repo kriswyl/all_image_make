@@ -258,6 +258,7 @@ export function PromptEditor(props: PromptEditorProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const composingRef = useRef(false);
   const lastTextRef = useRef(props.value);
+  const savedSelectionRef = useRef<{ text: string; start: number; end: number } | null>(null);
   const itemsRef = useRef(props.items);
   itemsRef.current = props.items;
   const changeRef = useRef(props.onChange);
@@ -283,9 +284,11 @@ export function PromptEditor(props: PromptEditorProps) {
   const itemsSignature = props.items.map((item) => `${item.label}:${item.previewUrl ?? ""}`).join("|");
   useEffect(() => {
     const element = editorRef.current;
-    if (!element || !element.querySelector(".vstudio-chip")) return;
+    if (!element || composingRef.current) return;
+    const text = readPromptText(element);
+    if (!element.querySelector(".vstudio-chip") && !tokenSpans(text, itemsRef.current).length) return;
     const offset = document.activeElement === element ? caretOffset(element) : null;
-    paint(readPromptText(element), offset);
+    paint(text, offset);
   }, [itemsSignature, paint]);
 
   useImperativeHandle(props.ref, () => ({
@@ -298,8 +301,10 @@ export function PromptEditor(props: PromptEditorProps) {
       const selection = window.getSelection();
       const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
       const inside = Boolean(range && element.contains(range!.startContainer));
-      const start = inside ? caretOffset(element) : text.length;
-      const end = inside && range ? caretOffset(element, range.endContainer, range.endOffset) : start;
+      const saved = savedSelectionRef.current;
+      const start = inside ? caretOffset(element) : saved?.text === text ? saved.start : text.length;
+      const end = inside && range ? caretOffset(element, range.endContainer, range.endOffset)
+        : saved?.text === text ? saved.end : start;
       // 光标前正好是刚敲的 @：替换掉它，别出现「@@图片1」
       const from = text.slice(0, start).endsWith("@") ? start - 1 : start;
       const token = `@${label}`;
@@ -354,7 +359,19 @@ export function PromptEditor(props: PromptEditorProps) {
       spellCheck={false}
       onInput={() => sync({ typed: true })}
       onFocus={() => props.onFocusChange?.(true)}
-      onBlur={() => props.onFocusChange?.(false)}
+      onBlur={() => {
+        const element = editorRef.current;
+        const selection = window.getSelection();
+        const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+        if (element && range && element.contains(range.startContainer) && element.contains(range.endContainer)) {
+          savedSelectionRef.current = {
+            text: readPromptText(element),
+            start: caretOffset(element, range.startContainer, range.startOffset),
+            end: caretOffset(element, range.endContainer, range.endOffset),
+          };
+        }
+        props.onFocusChange?.(false);
+      }}
       onCompositionStart={() => { composingRef.current = true; }}
       onCompositionEnd={() => { composingRef.current = false; sync(); }}
       onKeyDown={(event) => {

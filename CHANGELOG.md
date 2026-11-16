@@ -13,6 +13,53 @@
 
 ---
 
+## v2.3.9 — 2026-11-16
+
+### macOS：新增 Intel（x86_64）安装包
+
+- GitHub Release 现在同时产出 `ezcanvas_<版本>_aarch64.dmg` 与 `ezcanvas_<版本>_x64.dmg`。Intel Mac（含 2017 款 13" MacBook Pro / Ventura 13.7）可以直接安装，不再只有 Apple Silicon 能装。
+- CI：`build-macos` 改成 matrix（`aarch64-apple-darwin` / `x86_64-apple-darwin`），各自 `rustup target add`、独立 rust-cache key、按 target 取 `src-tauri/target/<triple>/release/bundle/dmg`。
+- `scripts/prepare-tauri.mjs`：node sidecar 不再无脑复制 `process.execPath`，改为按 `TAURI_ENV_TARGET_TRIPLE` 匹配架构。交叉编译时下载官方 `node-v<ver>-darwin-x64` 并缓存到 `~/.cache/ezcanvas-node`——否则 arm64 runner 会把 arm64 的 node 塞进 Intel 包，包能装、后端起不来。也可用 `TAURI_NODE_BINARY` 显式指定。
+- x64 的冒烟测试需要在 arm64 runner 上跑 Intel 二进制，CI 里加了 `softwareupdate --install-rosetta` 兜底。
+- 重打 dmg 的文件名不再写死 `aarch64`；publish 用 `pattern: macos-*-dmg` + `merge-multiple` 合并两个架构的产物。
+
+### 视觉：颜色只属于创作
+
+- 定位：**彩色是品牌特征，不是导航特征**。侧栏、工具栏、设置页保持黑白灰；颜色只出现在 Logo 与创作内容（示例作品、生成动画、进度条），形成「工具克制、内容多彩」的对比。
+- Logo 最终回到单色：蒙版填 `--ink`，浅色主题黑、深色主题暖白；尺寸 18/22px → 28px（窄侧栏 24px），与两行品牌名的高度更搭。
+- 新增柔和点缀色令牌（冰川蓝 `#9BC9F7`、薄荷绿 `#A8DDD4`、薰衣草紫 `#C9B8F2`、樱花粉 `#F5BDD1`、奶油橙 `#F6D6A6`）、`--brand-gradient` 与 `--spectrum-gradient`，深浅两套主题各一份。
+- 导航栏撤销彩色图标与彩色选中底，回到黑白灰。
+
+### 图片工作台
+
+- 空态换成 Cherry 式作品墙：标题「**下一幅精彩，由你创作。**」+ 五张错落倾斜的示例图，点任意一张把对应中文提示词填进下方输入框并聚焦（`public/starter/`，统一 3:4 / 宽 360px，五张约 195KB；05 浮世绘来自大都会博物馆 CC0）。
+- 「最近生成」从左栏移到右侧窄轨，结果区拿到整块横向空间。
+- 结果操作条（下载 / 复制 / 参考 / 重绘 / 诊断）改成浮在图片右侧的玻璃胶囊（半透明白底 + 12px 背景模糊），无图时退回图片下方横排，不压住进度与示例卡。
+- 删掉「生成结果」「最近生成」「暂无任务」三处标签与空态下方说明，列表直接以缩略图开始。
+
+### 生成动画与进度
+
+- 生成态换成 64×64 四色液态光斑（淡蓝 `#91D5EF` / 薄荷青 `#9EE3D6` / 薰衣草紫 `#C4B3F5` / 浅粉 `#F2BCD1`）：3.2s `ease-in-out` 呼吸（0.92–1.08）、9s 色斑缓慢平移换位、外圈柔光随呼吸明暗，`prefers-reduced-motion` 下全部静止。
+- **性能**：动画只动 `transform` / `opacity`，柔边交给静态 `box-shadow` 与静态模糊层。上一版把 `border-radius`、`background-position`、`filter: blur` 挂在一起逐帧改，逼着浏览器每帧重新栅格化 + 重新模糊，表现为一卡一卡；改后实测 189 帧 / 75.6fps，中位 13.3ms、p95 13.5ms。
+- 提交 / 排队阶段（还没有百分比）用灰轨里来回扫的彩带表达「在动」，拿到百分比才切成确定进度条 + 等宽数字，不伪造进度。
+- 图片工作台、视频记录详情、应用加载页三处统一；按钮内的小 spinner 保持中性灰。
+
+### 视频页
+
+- 「创作记录」空态改成电影感静帧：时间码 `00:00:00:00` + 一条两端淡出的刻度时间轴 + 一束五色光极慢扫过（9s 一轮）。不放任何示例视频，靠留白与字距表达「等一段影像」。
+
+### 素材管理
+
+- 清空 / 批量删除改成逐条判断：被分镜设定或对话引用的单独跳过，并提示「已删 X 条，Y 条被引用跳过」，不再「一条被引用就整批 409」。
+- 聊天生成的记录现在可以勾选与删除，删除时同步摘掉消息锚点、画布、分镜首尾帧 / 参考图、角色场景里的引用。
+- 新增「清理失效」：只清「渠道已删除 + 产物文件已丢失」的孤儿记录；有分镜设定引用的跳过。
+- 服务端：`batch-delete` 与 `DELETE /api/generations` 返回 `deleted / skipped / skippedConversation / skippedShared`；单条删除支持 `detach=1`；新增 `GET|DELETE /api/generations/stale`。
+
+### 其它
+
+- 加载指示器抽成 `ui/LoadingIndicator`，聊天 / 画布 / 视频页共用，替换散落的 `LoaderCircle className="spin"`。
+- 全量测试 131 文件 / 1007 项通过。
+
 ## v2.3.8 — 对话媒体与音频工作台
 
 - 对话输入框支持选择或拖入音频和视频，可单独发送。上传后的文件可以在对话中播放和下载。

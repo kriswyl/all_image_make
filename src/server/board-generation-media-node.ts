@@ -1,5 +1,7 @@
+import { resolveBoardMentions } from "../shared/board-mentions.js";
+import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { BOARD_LIMITS, composeConfigPrompt, directInputLinks, directUpstreamImages, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, composeConfigPrompt, directInputLinks, directUpstreamImages, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
 import { prepareImageBytes, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
@@ -10,13 +12,12 @@ import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import type { KeyStore } from "./key-store.js";
 import { boardView, requireBoard } from "./board-core.js";
 import { resolveBoardVideoSelection } from "./board-video-selection.js";
-import { now, appendBoardMediaInputs, saveGeneratedBoard, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
+import { now, appendBoardMediaInputs, placeImageResultGrid, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
 
 /**
  * 图片 / 视频 / 音频节点就地生成。
  *
- * 和配置节点不同：不新建结果卡片，任务完成后把素材回填到当前节点本身。
- * 这样「一张图 = 一个提示词 + 结果」，连线只保留真正有意义的上下游关系。
+ * 首个结果回填当前节点；批量生图的其余结果排在右侧。
  */
 export async function generateBoardMediaNode(input: {
   db: AppDatabase;
@@ -45,16 +46,20 @@ export async function generateBoardMediaNode(input: {
   let kind: "image" | "video" | "audio";
   let modelAlias: string;
   let referenceCount = 0;
+  let imageCount = 1;
+  let imageSlots: Awaited<ReturnType<typeof submitBoardImages>>["slots"] | undefined;
   let patch: Record<string, unknown> = { prompt, source: "generated" };
 
   if (node.type === "image") {
     const references: ReferenceImageUpload[] = [];
+    const referenceNodes: BoardNode[] = [];
     for (const upstream of directUpstreamImages(board.doc, node.id)) {
       if (!upstream.assetId) continue;
       const asset = db.getAsset(upstream.assetId);
       if (!asset) continue;
       const prepared = await prepareImageBytes(db, asset, REFERENCE_PROFILE);
       if (!prepared) continue;
+      referenceNodes.push(upstream);
       references.push({
         bytes: prepared.bytes,
         mimeType: prepared.mimeType,
@@ -71,6 +76,10 @@ export async function generateBoardMediaNode(input: {
     if (!resolution) throw new AppError("BOARD_NO_IMAGE_CHANNEL", "还没有可用的生图渠道，请先到「模型配置」添加", 400);
     const channel = db.getChannel(resolution.channelId);
     if (!channel || !channel.enabled) throw new AppError("BOARD_NO_IMAGE_CHANNEL", "解析到的生图渠道不存在或未启用", 400);
+    imageCount = overrides.count ?? node.count ?? 1;
+    if (board.doc.nodes.length + imageCount - 1 > BOARD_LIMITS.maxNodes) {
+      throw new AppError("BOARD_NODE_LIMIT", `这块画布最多容纳 ${BOARD_LIMITS.maxNodes} 个节点，请减少生成张数或腾出空间`, 400);
+    }
     const size = overrides.size ?? node.size;
     const imageSize = overrides.imageSize ?? node.imageSize;
     const quality = overrides.quality ?? node.quality;
@@ -81,11 +90,10 @@ export async function generateBoardMediaNode(input: {
     const background = overrides.background ?? node.background;
     const outputFormat = overrides.outputFormat ?? node.outputFormat;
     const moderation = overrides.moderation ?? node.moderation;
-    task = await runner.create({
+    const batch = await submitBoardImages(runner, {
       channelId: channel.id,
       model: resolution.model,
-      prompt,
-      count: 1,
+      prompt: resolveBoardMentions(prompt, referenceNodes, false),
       ...(size ? { size } : {}),
       ...(imageSize ? { imageSize } : {}),
       ...(quality ? { quality } : {}),
@@ -96,7 +104,9 @@ export async function generateBoardMediaNode(input: {
       ...(background ? { background } : {}),
       ...(outputFormat ? { outputFormat } : {}),
       ...(moderation ? { moderation } : {}),
-    }, references);
+    }, references, imageCount);
+    task = batch.firstTask;
+    imageSlots = batch.slots;
     kind = "image";
     modelAlias = resolution.alias;
     referenceCount = references.length;
@@ -104,6 +114,7 @@ export async function generateBoardMediaNode(input: {
       ...patch,
       model: resolution.alias,
       channelId: channel.id,
+      count: imageCount,
       ...(size ? { size } : {}),
       ...(imageSize ? { imageSize } : {}),
       ...(quality ? { quality } : {}),
@@ -133,6 +144,7 @@ export async function generateBoardMediaNode(input: {
       config: node,
       adapterType: channel.adapterType,
       model: resolution.model,
+      localVideoUploadConfigured: Boolean(channel.uploadEndpoint?.trim()),
       modeOverride: overrides.videoMode,
     });
     if (!resolved.selection) {
@@ -150,7 +162,10 @@ export async function generateBoardMediaNode(input: {
     const generation: GenerationInput = {
       channelId: channel.id,
       model: resolution.model,
-      prompt,
+      prompt: resolveBoardMentions(prompt, [
+        ...selection.inputs.map(({ node: source }) => source),
+        ...directInputLinks(board.doc, node.id).map(({ node: source }) => source).filter((source) => source.type === "video" || source.type === "audio"),
+      ]),
       duration,
       resolution: resolutionValue,
       audio,
@@ -199,11 +214,11 @@ export async function generateBoardMediaNode(input: {
       generation.klingVideoMode = "text-to-video";
       generation.aspectRatio = generation.aspectRatio ?? "16:9";
     }
-    const referenceVideoUpload = await appendBoardMediaInputs(db, channel, board.doc, node.id, generation);
-    task = await runner.create({ ...generation, referenceVideoUpload }, uploads);
+    const referenceVideoUploads = await appendBoardMediaInputs(db, channel, board.doc, node.id, generation);
+    task = await runner.create({ ...generation, referenceVideoUploads }, uploads);
     kind = "video";
     modelAlias = resolution.alias;
-    referenceCount = selection.inputs.length;
+    referenceCount = selection.inputs.length + referenceVideoUploads.length;
     patch = {
       ...patch,
       model: resolution.alias,
@@ -299,28 +314,57 @@ export async function generateBoardMediaNode(input: {
   }
 
   const at = now();
+  const extraImages: ImageBoardNode[] = [];
+  let nextRef = board.doc.nextRef;
+  if (node.type === "image" && imageCount > 1) {
+    const card = { width: node.width, height: node.height };
+    const positions = placeImageResultGrid(board.doc.nodes, node, imageCount - 1, card);
+    for (const [index, position] of positions.entries()) {
+      const allocated = allocateNodeRef({ nodes: [...board.doc.nodes, ...extraImages], nextRef });
+      nextRef = allocated.nextRef;
+      extraImages.push({
+        ...card, ...position, id: `node-${crypto.randomUUID()}`, ref: allocated.ref, type: "image",
+        title: `结果 ${index + 2}`, createdAt: at, updatedAt: at, assetId: null, source: "generated",
+        ...imageSlots![index + 1]!, prompt, useUpstreamText: false,
+      });
+    }
+  }
+  const resultNodeIds = [node.id, ...extraImages.map((image) => image.id)];
+  const assignments = imageSlots?.flatMap(({ taskId }, index) => taskId ? [{ taskId, resultNodeIds: [resultNodeIds[index]!] }] : []);
   const doc: BoardDoc = {
     ...board.doc,
-    nodes: board.doc.nodes.map((item) => item.id === node.id
-      ? {
+    nextRef,
+    nodes: [...board.doc.nodes.map((item): BoardNode => {
+      if (item.id === node.id) return {
         ...item,
         ...patch,
         status: "loading" as const,
         taskId: task.id,
-        updatedAt: at,
         error: undefined,
-      } as BoardNode
-      : item),
+        ...imageSlots?.[0],
+        ...(node.type === "image" ? {
+          imageResultGroup: extraImages.length ? { memberIds: extraImages.map((image) => image.id), expanded: false } : undefined,
+        } : {}),
+        updatedAt: at,
+      } as BoardNode;
+      // 某张备选图开始自己的新批次时，脱离旧组，避免组内再嵌套一组。
+      if (extraImages.length && item.type === "image" && item.imageResultGroup?.memberIds.includes(node.id)) {
+        const memberIds = item.imageResultGroup.memberIds.filter((id) => id !== node.id);
+        return { ...item, imageResultGroup: memberIds.length ? { ...item.imageResultGroup, memberIds } : undefined };
+      }
+      return item;
+    }), ...extraImages],
   };
   saveGeneratedBoard(db, runner, {
-    board, doc, source: node, taskId: task.id, resultNodeIds: [node.id], kind: kind,
+    board, doc, source: node, taskId: task.id, resultNodeIds, kind, assignments,
   });
 
   return {
     board: boardView(db, requireBoard(db, input.boardId)),
     task,
+    ...(assignments ? { taskIds: assignments.map((assignment) => assignment.taskId) } : {}),
     kind,
-    resultNodeIds: [node.id],
+    resultNodeIds,
     configNodeId: node.id,
     prompt,
     referenceCount,

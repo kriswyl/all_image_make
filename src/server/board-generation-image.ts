@@ -1,3 +1,4 @@
+import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
 import { allocateNodeRef, BOARD_LIMITS, directUpstreamImages, type BoardDoc, type BoardNode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
@@ -7,7 +8,7 @@ import { prepareImageBytes, REFERENCE_PROFILE } from "./vision.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
 import type { GenerationInput } from "../shared/types.js";
 import { boardView, requireBoard } from "./board-core.js";
-import { now, placeResultNode, saveGeneratedBoard, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
+import { now, placeImageResultGrid, placeResultNode, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
 
 export async function generateBoardImage(input: {
   db: AppDatabase;
@@ -19,22 +20,16 @@ export async function generateBoardImage(input: {
   overrides?: BoardGenerateOverrides;
 }): Promise<BoardGenerateResult> {
   const { db, runner, board, config, prompt } = input;
-  const count = Math.min(
-    BOARD_LIMITS.maxCount,
-    Math.max(1, Math.floor(Number(input.overrides?.count ?? config.count) || 1)),
-  );
-  if (board.doc.nodes.length + count > BOARD_LIMITS.maxNodes) {
-    throw new AppError("BOARD_NODE_LIMIT", `一块无限画布最多 ${BOARD_LIMITS.maxNodes} 个节点，请先删掉一些`, 400);
-  }
-
   // 直接上游图片按画布位置排序，最多 8 张；读不到字节的跳过，不让一张坏图带走整次生成
   const references: ReferenceImageUpload[] = [];
+  const referenceNodes: BoardNode[] = [];
   for (const node of directUpstreamImages(board.doc, config.id)) {
     if (!node.assetId) continue;
     const asset = db.getAsset(node.assetId);
     if (!asset) continue;
     const prepared = await prepareImageBytes(db, asset, REFERENCE_PROFILE);
     if (!prepared) continue;
+    referenceNodes.push(node);
     references.push({
       bytes: prepared.bytes,
       mimeType: prepared.mimeType,
@@ -54,6 +49,10 @@ export async function generateBoardImage(input: {
   if (!channel || !channel.enabled) {
     throw new AppError("BOARD_NO_IMAGE_CHANNEL", "解析到的生图渠道不存在或未启用", 400);
   }
+  const count = input.overrides?.count ?? config.count;
+  if (board.doc.nodes.length + count > BOARD_LIMITS.maxNodes || board.doc.edges.length + count > BOARD_LIMITS.maxEdges) {
+    throw new AppError("BOARD_NODE_LIMIT", "画布剩余节点或连线不足，请减少生成张数或腾出空间", 400);
+  }
 
   const size = input.overrides?.size ?? config.size;
   const imageSize = input.overrides?.imageSize ?? config.imageSize;
@@ -68,8 +67,7 @@ export async function generateBoardImage(input: {
   const generation: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
-    prompt,
-    count,
+    prompt: resolveBoardMentions(prompt, referenceNodes, false),
     ...(size ? { size } : {}),
     ...(imageSize ? { imageSize } : {}),
     ...(quality ? { quality } : {}),
@@ -82,47 +80,49 @@ export async function generateBoardImage(input: {
     ...(moderation ? { moderation } : {}),
   };
 
-  const task = await runner.create(generation, references);
+  const { firstTask: task, slots } = await submitBoardImages(runner, generation, references, count);
 
   const at = now();
   const resultNodes: ImageBoardNode[] = [];
+  const card = count === 1 ? { width: 300, height: 310 } : { width: 240, height: 240 };
+  const positions = count === 1
+    ? [placeResultNode(board.doc.nodes, card, config.x + config.width + 120, config.y)]
+    : placeImageResultGrid(board.doc.nodes, config, count, card);
   let nextRef = board.doc.nextRef;
   for (let index = 0; index < count; index += 1) {
     const allocated = allocateNodeRef({ nodes: [...board.doc.nodes, ...resultNodes], nextRef });
     nextRef = allocated.nextRef;
-    const position = placeResultNode(
-      [...board.doc.nodes, ...resultNodes],
-      { width: 300, height: 310 },
-      config.x + config.width + 120,
-      config.y,
-    );
+    const position = positions[index]!;
     resultNodes.push({
       id: `node-${crypto.randomUUID()}`,
       ref: allocated.ref,
       type: "image",
       x: position.x,
       y: position.y,
-      width: 300,
-      height: 310,
+      ...card,
       title: `结果 ${index + 1}`,
       createdAt: at,
       updatedAt: at,
       assetId: null,
       source: "generated",
-      status: "loading",
-      taskId: task.id,
+      ...slots[index]!,
       prompt,
       useUpstreamText: false,
     });
   }
 
   const resultNodeIds = resultNodes.map((node) => node.id);
+  if (resultNodes.length > 1) {
+    resultNodes[0]!.imageResultGroup = { memberIds: resultNodeIds.slice(1), expanded: false };
+  }
+  const assignments = resultNodes.flatMap((node) => node.taskId ? [{ taskId: node.taskId, resultNodeIds: [node.id] }] : []);
   const nodes: BoardNode[] = [
     ...board.doc.nodes.map((node) => node.id === config.id
       ? {
         ...node,
         status: "loading" as const,
         lastTaskId: task.id,
+        imageBatchResultIds: count > 1 ? resultNodeIds : undefined,
         model: resolution.alias,
         channelId: channel.id,
         updatedAt: at,
@@ -143,12 +143,13 @@ export async function generateBoardImage(input: {
   const doc: BoardDoc = { ...board.doc, nextRef, nodes, edges };
 
   saveGeneratedBoard(db, runner, {
-    board, doc, source: config, taskId: task.id, resultNodeIds, kind: "image",
+    board, doc, source: config, taskId: task.id, resultNodeIds, kind: "image", assignments,
   });
 
   return {
     board: boardView(db, requireBoard(db, input.boardId)),
     task,
+    taskIds: assignments.map((assignment) => assignment.taskId),
     kind: "image",
     resultNodeIds,
     configNodeId: config.id,

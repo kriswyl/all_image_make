@@ -11,6 +11,7 @@ import { imageOutputFormatSchema } from "../shared/image-formats.js";
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 import { applyStyleSuffix } from "../shared/style-presets.js";
 import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../shared/types.js";
+import { SEEDANCE_LIMITS } from "../shared/seedance-capabilities.js";
 import { resolveCanvasRefs } from "./agent-tools/assets.js";
 import { BOARD_TOOL_SCHEMAS, type BoardToolInput } from "./agent-tools/board-schema.js";
 import {
@@ -92,7 +93,8 @@ export const generateVideoSchema = z.object({
   resolution: z.string().trim().max(10).optional(),
   audio: z.coerce.boolean().optional(),
   promptExtend: z.coerce.boolean().optional(),
-  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(SEEDANCE_LIMITS["2.5"].maxImages).optional(),
+  videoRefs: z.array(z.string().trim().min(1).max(80)).max(SEEDANCE_LIMITS["2.5"].maxVideos).optional(),
   imageFrom: z.enum(["current", "none"]).optional(),
 });
 

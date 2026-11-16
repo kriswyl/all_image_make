@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, Check, LayoutGrid, LoaderCircle, Plus, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, LayoutGrid, Plus, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { confirmGeneration } from "../generation-confirm";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
@@ -171,7 +172,7 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
   return createPortal(<div className="story-review-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
     <section className="story-review" role="dialog" aria-modal="true" aria-label="分镜审阅">
       <header className="story-review-header"><div><strong>分镜审阅</strong><small>先核对和编辑，再选择镜头导入；不会自动生成素材。</small></div><button className="icon-button" aria-label="关闭" onClick={close} disabled={busy}><X size={18} /></button></header>
-      {!data ? <div className="story-review-loading">{error || <><LoaderCircle className="spin" size={18} /> 正在加载分镜…</>}</div> : <>
+      {!data ? <div className="story-review-loading">{error || <><LoadingIndicator variant="dots" size={24} /> 正在加载分镜…</>}</div> : <>
         <nav className="story-steps" aria-label="分镜制作步骤">
           {([ [1, "确认镜头", `${data.shots.length} 个镜头`], [2, "准备资产", `${[...data.characters, ...data.scenes, ...data.props].filter((item) => item.assetId).length}/${data.characters.length + data.scenes.length + data.props.length} 已有参考图`], [3, "合成提示词", `${data.shots.filter((item) => item.finalImagePrompt && item.finalVideoPrompt).length}/${data.shots.length} 已合成`] ] as const).map(([number, title, detail]) => <button type="button" key={number} className={step === number ? "active" : ""} onClick={() => setStep(number)} aria-current={step === number ? "step" : undefined}><b>{number}</b><span><strong>{title}</strong><small>{detail}</small></span></button>)}
         </nav>
@@ -245,7 +246,7 @@ export function StoryboardReview({ id, onClose, onToast, onImport }: {
           <div className="story-stage-intro"><div><h2>合成提示词</h2><p>按镜头信息拼合提示词，可逐镜编辑。修改镜头信息后，请重新合成对应镜头；不会自动覆盖手工修改。</p></div><button type="button" className="secondary-button" onClick={() => { if (data.shots.some((item) => item.finalImagePrompt || item.finalVideoPrompt) && !window.confirm("重新合成全部镜头会覆盖已编辑的最终提示词，继续？")) return; change({ ...data, shots: data.shots.map((item) => ({ ...item, finalImagePrompt: assembleStoryboardPrompt(item, "image"), finalVideoPrompt: assembleStoryboardPrompt(item, "video") })) }); }}>合成全部镜头</button></div>
           <div className="story-prompt-table"><table><thead><tr><th>镜号</th><th>时长</th><th>画面描述</th><th>景别 / 运镜</th><th>对白 / 音效</th><th>最终提示词</th></tr></thead><tbody>{data.shots.map((item, index) => <tr key={item.id}><td>{index + 1}</td><td>{item.duration}s</td><td>{item.prompt}</td><td>{item.shotSize || "—"}<br />{item.cameraMove || "—"}</td><td>{item.dialogue || "—"}<br />{item.soundEffect || ""}</td><td><button type="button" className="link-btn" onClick={() => { if ((item.finalImagePrompt || item.finalVideoPrompt) && !window.confirm("重新合成会覆盖该镜头已编辑的最终提示词，继续？")) return; changeShot(index, { finalImagePrompt: assembleStoryboardPrompt(item, "image"), finalVideoPrompt: assembleStoryboardPrompt(item, "video") }); }}>合成此镜</button><label>图片<textarea rows={3} maxLength={5000} placeholder="待合成" value={item.finalImagePrompt} onChange={(e) => changeShot(index, { finalImagePrompt: e.target.value })} /></label><label>视频<textarea rows={3} maxLength={5000} placeholder="待合成" value={item.finalVideoPrompt} onChange={(e) => changeShot(index, { finalVideoPrompt: e.target.value })} /></label></td></tr>)}</tbody></table></div>
         </main> : null}
-        <footer className="story-review-footer"><span>{error ? <span role="alert" className="story-review-error">{error}</span> : dirty ? "有未保存的修改" : "修改不会自动覆盖已导入的画布"}</span>{step > 1 ? <button type="button" className="secondary-button" onClick={() => setStep(step === 3 ? 2 : 1)}>上一步</button> : null}{step < 3 ? <button type="button" className="secondary-button" onClick={() => setStep(step === 1 ? 2 : 3)}>下一步</button> : null}<button type="button" className="secondary-button" disabled={busy} onClick={() => setPreviewOpen(true)}>粗剪预览 / 导出</button><button type="button" className="secondary-button" disabled={busy} onClick={() => void syncToCanvas()}>同步到画布</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => void persist(false)}><Check size={15} />保存</button><button type="button" className="primary-button" disabled={busy || !selected.size || selected.size > 30} onClick={() => void persist(true)}>{busy ? <LoaderCircle className="spin" size={15} /> : <LayoutGrid size={15} />}保存并导入所选镜头</button></footer>
+        <footer className="story-review-footer"><span>{error ? <span role="alert" className="story-review-error">{error}</span> : dirty ? "有未保存的修改" : "修改不会自动覆盖已导入的画布"}</span>{step > 1 ? <button type="button" className="secondary-button" onClick={() => setStep(step === 3 ? 2 : 1)}>上一步</button> : null}{step < 3 ? <button type="button" className="secondary-button" onClick={() => setStep(step === 1 ? 2 : 3)}>下一步</button> : null}<button type="button" className="secondary-button" disabled={busy} onClick={() => setPreviewOpen(true)}>粗剪预览 / 导出</button><button type="button" className="secondary-button" disabled={busy} onClick={() => void syncToCanvas()}>同步到画布</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => void persist(false)}><Check size={15} />保存</button><button type="button" className="primary-button" disabled={busy || !selected.size || selected.size > 30} onClick={() => void persist(true)}>{busy ? <LoadingIndicator variant="dots" size={24} /> : <LayoutGrid size={15} />}保存并导入所选镜头</button></footer>
       </>}
     </section>
     {generator && data && data[generator.kind][generator.index] ? <StoryboardAssetGenerator
@@ -287,7 +288,7 @@ function StoryboardReferencePicker({ onClose, onChoose }: { onClose: () => void;
       <div className="story-reference-grid">{items.map((asset) => <button key={asset.id} type="button" onClick={() => onChoose(asset)} title={asset.title || asset.fileName}><img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = api.assetUrl(asset.url); }} alt="" /><span>{asset.title || asset.fileName}</span></button>)}{!loading && !items.length && !error ? <p>没有找到图片，可先在素材管理或画布中上传。</p> : null}</div>
       {error ? <span className="story-review-error" role="alert">{error}</span> : null}
       {hasMore ? <button type="button" className="secondary-button" disabled={loading} onClick={() => void more()}>加载更多</button> : null}
-      {loading ? <span><LoaderCircle className="spin" size={14} /> 加载中…</span> : null}
+      {loading ? <span><LoadingIndicator variant="dots" size={24} /> 加载中…</span> : null}
     </section>
   </div>;
 }
@@ -386,7 +387,7 @@ function StoryboardAssetGenerator({ kind, item, style, onClose, onChoose }: {
       {error ? <p className="story-review-error" role="alert">{error}</p> : null}
       {task?.status === "succeeded" && !images.length ? <p className="story-review-error">任务已完成，但没有返回图片。</p> : null}
       {images.length ? <div className="story-generator-results">{images.map((asset) => <button type="button" key={asset.id} onClick={() => onChoose(asset)} title="使用这张图片"><img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = api.assetUrl(asset.url); }} alt="生成结果" /><span>使用这张图片</span></button>)}</div> : null}
-      <footer><button type="button" className="secondary-button" onClick={close}>关闭</button><button type="button" className="primary-button" disabled={loading || generating || !alias || !prompt.trim()} onClick={() => void submit()}>{generating ? <><LoaderCircle className="spin" size={15} /> 生成中</> : task ? "重新生成" : "生成参考图"}</button></footer>
+      <footer><button type="button" className="secondary-button" onClick={close}>关闭</button><button type="button" className="primary-button" disabled={loading || generating || !alias || !prompt.trim()} onClick={() => void submit()}>{generating ? <><LoadingIndicator variant="dots" size={24} /> 生成中</> : task ? "重新生成" : "生成参考图"}</button></footer>
     </section>
   </div>;
 }

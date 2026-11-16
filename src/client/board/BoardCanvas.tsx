@@ -5,15 +5,15 @@
  * P0 只建立 input 连线；result 连线留给 P1 的结果节点。
  */
 import {
-  useCallback, useEffect, useMemo, useRef, useState,
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from "react";
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import {
   AudioLines, ChevronDown, ChevronUp, ClipboardPaste, Copy, Image as ImageIcon, LayoutGrid, Map as MapIcon,
   Maximize2, Mic, Music2, Plus, SlidersHorizontal, Trash2, Type, Ungroup, Upload, Video, ZoomIn, ZoomOut,
 } from "lucide-react";
 import {
-  boardGroups, BOARD_LIMITS, directUpstreamImages, directUpstreamText,
+  boardGroups, BOARD_LIMITS,
   type BoardGroup, type BoardNode, type BoardNodeType,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
@@ -21,7 +21,7 @@ import type { UseBoardResult } from "./useBoard";
 import { BoardNodeView } from "./BoardNodeView";
 import { BoardMinimap } from "./BoardMinimap";
 import { useBoardMinimap } from "./useBoardMinimap";
-import { clampScale, edgePath, edgeClass, rectsIntersect, nodesBounds } from "./board-geometry";
+import { clampScale, edgePath, edgeClass, fitBoardImageSize, rectsIntersect, nodesBounds, type ImageDimensions } from "./board-geometry";
 
 interface PositionPatch {
   x?: number;
@@ -47,6 +47,7 @@ interface ResizeState {
   startY: number;
   origin: { x: number; y: number; width: number; height: number };
   last: { width: number; height: number };
+  lockAspectRatio: boolean;
 }
 
 interface PanState {
@@ -89,20 +90,24 @@ interface GroupDragState {
 }
 
 export function BoardCanvas({
-  board, assets, onPickImage, onUploadFiles, onPreviewAsset, onGenerate, onStopTask, onRetryTask,
+  board, assets, onPickImage, onUploadMediaIntoNode, onUploadFiles, onPreviewAsset, renderNodeSettings,
+  onDeleteNode, onCompareVersions, onExtractFrame,
 }: {
   board: UseBoardResult;
   assets: Map<string, Asset>;
   onPickImage: (nodeId: string | null) => void;
+  onUploadMediaIntoNode: (nodeId: string) => void;
   onUploadFiles: (files: File[], position: { x: number; y: number }) => void;
   onPreviewAsset: (asset: Asset) => void;
-  onGenerate: (nodeId: string) => void;
-  onStopTask: (taskId: string) => void;
-  onRetryTask: (taskId: string) => void;
+  renderNodeSettings: (node: BoardNode, locate: (nodeId: string) => void) => ReactNode;
+  onDeleteNode: (nodeId: string) => void;
+  onCompareVersions: (nodeId: string) => void;
+  onExtractFrame: (nodeId: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [localPositions, setLocalPositions] = useState<Record<string, PositionPatch>>({});
+  const [imageDimensions, setImageDimensions] = useState<Record<string, ImageDimensions>>({});
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [spacePressed, setSpacePressed] = useState(false);
@@ -111,6 +116,7 @@ export function BoardCanvas({
   const [connectMenu, setConnectMenu] = useState<{ x: number; y: number; worldX: number; worldY: number; sourceId: string; sourceType: BoardNode["type"] } | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [nodeDragging, setNodeDragging] = useState(false);
   const [minimapOpen, setMinimapOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -134,26 +140,81 @@ export function BoardCanvas({
   const view = board.view;
   const doc = view?.doc ?? null;
   const viewport = board.viewport;
+  const readImageDimensions = useCallback((assetId: string, width: number, height: number) => {
+    if (width <= 0 || height <= 0) return;
+    setImageDimensions((current) => current[assetId]?.width === width && current[assetId]?.height === height
+      ? current : { ...current, [assetId]: { width, height } });
+  }, []);
 
   const nodes = useMemo<BoardNode[]>(() => {
     if (!doc) return [];
     return doc.nodes.map((node) => {
       const patch = localPositions[node.id];
-      return patch ? { ...node, ...patch } as BoardNode : node;
+      const positioned = patch ? { ...node, ...patch } as BoardNode : node;
+      if (positioned.type !== "image" || !positioned.assetId) return positioned;
+      const dimensions = imageDimensions[positioned.assetId] ?? (positioned.naturalWidth && positioned.naturalHeight
+        ? { width: positioned.naturalWidth, height: positioned.naturalHeight } : null);
+      return dimensions ? { ...positioned, ...fitBoardImageSize(positioned, dimensions), naturalWidth: dimensions.width, naturalHeight: dimensions.height } : positioned;
     });
-  }, [doc, localPositions]);
+  }, [doc, imageDimensions, localPositions]);
 
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const groups = useMemo(() => (doc ? boardGroups(doc) : []), [doc]);
+  const imageResultOwners = useMemo(() => {
+    const owners = new Map<string, string>();
+    for (const node of nodes) {
+      if (node.type !== "image") continue;
+      for (const id of node.imageResultGroup?.memberIds ?? []) {
+        if (id !== node.id && nodeMap.get(id)?.type === "image") owners.set(id, node.id);
+      }
+    }
+    return owners;
+  }, [nodes, nodeMap]);
+  const hiddenImageResults = useMemo(() => {
+    const hidden = new Set<string>();
+    for (const [id, ownerId] of imageResultOwners) {
+      const owner = nodeMap.get(ownerId);
+      if (owner?.type === "image" && !owner.imageResultGroup?.expanded) hidden.add(id);
+    }
+    return hidden;
+  }, [nodeMap, imageResultOwners]);
   const collapsedNodeIds = useMemo(() => new Set(
-    groups.filter((group) => group.collapsed).flatMap((group) => group.nodeIds),
-  ), [groups]);
+    [...groups.filter((group) => group.collapsed).flatMap((group) => group.nodeIds), ...hiddenImageResults],
+  ), [groups, hiddenImageResults]);
   /** 折叠分组里的节点不参与渲染 / 框选 / 连线，但仍留在文档里 */
   const visibleNodes = useMemo(
     () => nodes.filter((node) => !collapsedNodeIds.has(node.id)),
     [collapsedNodeIds, nodes],
   );
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const settingsNode = board.selection.length === 1 && visibleNodeIds.has(board.selection[0])
+    ? nodeMap.get(board.selection[0])
+    : undefined;
+  const settingsTop = settingsNode ? viewport.y + (settingsNode.y + settingsNode.height) * viewport.scale + 12 : 0;
+  const settingsWidth = settingsNode
+    ? Math.min(settingsNode.type === "text" ? 440 : Math.max(640, settingsNode.width * viewport.scale + 160), 800, Math.max(0, size.width - 24))
+    : 0;
+  const settingsLeft = settingsNode
+    ? Math.max(12, Math.min(
+      viewport.x + (settingsNode.x + settingsNode.width / 2) * viewport.scale - settingsWidth / 2,
+      size.width - settingsWidth - 12,
+    ))
+    : 0;
+  const settingsKey = settingsNode && view ? `${view.id}:${settingsNode.id}` : null;
+  const revealedSettingsRef = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (!settingsKey) {
+      revealedSettingsRef.current = null;
+      return;
+    }
+    // 只在首次选中时腾出编辑空间；后续平移、缩放和拖动仍由用户控制。
+    if (!size.height || dragging || nodeDragging || revealedSettingsRef.current === settingsKey) return;
+    revealedSettingsRef.current = settingsKey;
+    const reserved = Math.min(224, size.height * 0.48);
+    const offset = Math.max(0, settingsTop + reserved + 12 - size.height);
+    if (offset > 0) board.setViewport({ ...viewport, y: viewport.y - offset });
+  }, [board, dragging, nodeDragging, settingsKey, settingsTop, size.height, viewport]);
   const groupBounds = useMemo(() => {
     const result = new Map<string, { x: number; y: number; width: number; height: number }>();
     for (const group of groups) {
@@ -177,7 +238,8 @@ export function BoardCanvas({
     () => Math.max(900, size.height, ...nodes.map((node) => node.y + node.height + 900)),
     [nodes, size.height],
   );
-  const { contentBounds, minimapBounds, minimapLayout } = useBoardMinimap(nodes, viewport, size);
+  const minimapNodes = useMemo(() => nodes.filter((node) => !hiddenImageResults.has(node.id)), [nodes, hiddenImageResults]);
+  const { contentBounds, minimapBounds, minimapLayout } = useBoardMinimap(minimapNodes, viewport, size);
 
   const fit = useCallback(() => {
     const element = containerRef.current;
@@ -216,8 +278,11 @@ export function BoardCanvas({
   useEffect(() => {
     if (!view || !size.width || !size.height) return;
     if (fittedBoardRef.current === view.id) return;
-    fittedBoardRef.current = view.id;
-    const frame = requestAnimationFrame(fit);
+    const frame = requestAnimationFrame(() => {
+      fittedBoardRef.current = view.id;
+      revealedSettingsRef.current = null;
+      fit();
+    });
     return () => cancelAnimationFrame(frame);
   }, [fit, size, view]);
 
@@ -241,6 +306,7 @@ export function BoardCanvas({
     const element = containerRef.current;
     if (!element) return;
     const onWheel = (event: WheelEvent) => {
+      if (event.target instanceof Element && event.target.closest(".board-node-settings")) return;
       event.preventDefault();
       const rect = element.getBoundingClientRect();
       const px = event.clientX - rect.left;
@@ -309,7 +375,9 @@ export function BoardCanvas({
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isEditable(event.target)) return;
+      if (event.defaultPrevented || isEditable(event.target)) return;
+      if (event.key !== "Escape" && event.target instanceof HTMLElement
+        && event.target.closest(".board-node-settings, .board-composer-popover, .vstudio-mention-panel, .board-video-node-menu, .model-picker-menu, .style-preset-dialog")) return;
       if (event.code === "Space") {
         event.preventDefault();
         spacePressedRef.current = true;
@@ -537,6 +605,7 @@ export function BoardCanvas({
       moved: false,
       last: new Map(origins),
     };
+    setNodeDragging(true);
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* 忽略 */ }
   };
 
@@ -567,6 +636,7 @@ export function BoardCanvas({
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
+    setNodeDragging(false);
     if (!drag.moved) return;
     board.moveNodes([...drag.last.entries()].map(([id, position]) => ({ id, ...position })));
     setLocalPositions((current) => {
@@ -647,6 +717,7 @@ export function BoardCanvas({
       startY: event.clientY,
       origin: { x: node.x, y: node.y, width: node.width, height: node.height },
       last: { width: node.width, height: node.height },
+      lockAspectRatio: node.type === "image" && Boolean(node.naturalWidth && node.naturalHeight),
     };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* 忽略 */ }
   };
@@ -654,8 +725,12 @@ export function BoardCanvas({
   const moveResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
     const resize = resizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    const width = Math.min(BOARD_LIMITS.maxNodeWidth, Math.max(BOARD_LIMITS.minNodeWidth, resize.origin.width + (event.clientX - resize.startX) / viewport.scale));
-    const height = Math.min(BOARD_LIMITS.maxNodeHeight, Math.max(BOARD_LIMITS.minNodeHeight, resize.origin.height + (event.clientY - resize.startY) / viewport.scale));
+    const dx = (event.clientX - resize.startX) / viewport.scale;
+    const dy = (event.clientY - resize.startY) / viewport.scale;
+    const { width: initialWidth, height: initialHeight } = resize.origin;
+    const scale = resize.lockAspectRatio ? 1 + (dx * initialWidth + dy * initialHeight) / (initialWidth ** 2 + initialHeight ** 2) : 1;
+    const width = Math.min(BOARD_LIMITS.maxNodeWidth, Math.max(BOARD_LIMITS.minNodeWidth, resize.lockAspectRatio ? initialWidth * scale : initialWidth + dx));
+    const height = Math.min(BOARD_LIMITS.maxNodeHeight, Math.max(BOARD_LIMITS.minNodeHeight, resize.lockAspectRatio ? initialHeight * scale : initialHeight + dy));
     resize.last = { width: Math.round(width), height: Math.round(height) };
     setLocalPositions((current) => ({ ...current, [resize.id]: resize.last }));
   };
@@ -667,7 +742,10 @@ export function BoardCanvas({
     const resize = resizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     resizeRef.current = null;
-    board.updateNode(resize.id, { width: resize.last.width, height: resize.last.height } as Partial<BoardNode>);
+    board.updateNode(resize.id, {
+      width: Math.max(BOARD_LIMITS.minNodeWidth, resize.last.width),
+      height: Math.max(BOARD_LIMITS.minNodeHeight, resize.last.height),
+    } as Partial<BoardNode>);
     setLocalPositions((current) => {
       const next = { ...current };
       delete next[resize.id];
@@ -882,16 +960,26 @@ export function BoardCanvas({
           const asset = (node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId
             ? assets.get(node.assetId) ?? null
             : null;
-          const upstream = node.type === "text"
-            ? { textCount: 0, imageCount: 0 }
-            : {
-              textCount: directUpstreamText(doc, node.id).length,
-              imageCount: directUpstreamImages(doc, node.id).length,
-            };
+          const resultGroup = node.type === "image" ? node.imageResultGroup : undefined;
+          const memberIds = resultGroup?.memberIds.filter((id) => imageResultOwners.get(id) === node.id) ?? [];
+          const ownerId = imageResultOwners.get(node.id);
+          const owner = ownerId ? nodeMap.get(ownerId) : undefined;
+          const imageResults = resultGroup && memberIds.length ? {
+            count: memberIds.length + 1,
+            expanded: resultGroup.expanded,
+            onToggle: () => {
+              if (resultGroup.expanded && board.selection.some((id) => memberIds.includes(id))) board.setSelection([node.id]);
+              board.setImageResultsExpanded(node.id, !resultGroup.expanded);
+            },
+          } : undefined;
+          const primaryChoice = node.type === "image" && owner?.type === "image" && owner.imageResultGroup?.expanded ? {
+            enabled: Boolean(asset) && node.status === "succeeded" && owner.status !== "loading",
+            onChoose: () => board.choosePrimaryImage(owner.id, node.id),
+          } : undefined;
           return (
             <article
               key={node.id}
-              className={`board-node is-${node.type} ${selected ? "is-selected" : ""}`}
+              className={`board-node is-${node.type} ${selected ? "is-selected" : ""}${imageResults && !imageResults.expanded ? " has-stacked-results" : ""}`}
               data-board-node
               data-board-node-id={node.id}
               data-board-node-kind={node.type}
@@ -911,25 +999,26 @@ export function BoardCanvas({
                 node={node}
                 asset={asset}
                 editing={editingTextId === node.id}
-                upstream={upstream}
+                imageResults={imageResults}
+                onImageLoad={readImageDimensions}
+                primaryChoice={primaryChoice}
                 onStartEdit={() => { board.setSelection([node.id]); setEditingTextId(node.id); }}
                 onCommitText={(text) => {
                   board.updateNode(node.id, { text } as Partial<BoardNode>);
                   setEditingTextId(null);
                 }}
                 onCancelEdit={() => setEditingTextId(null)}
-                onUpdateNode={(patch) => board.updateNode(node.id, patch)}
                 onPreview={onPreviewAsset}
                 onSelect={() => board.setSelection([node.id])}
                 onPickImage={onPickImage}
+                onUploadMediaIntoNode={onUploadMediaIntoNode}
                 onRemoveAsset={(nodeId) => {
                   const item = nodeMap.get(nodeId);
                   if (item?.type === "image") board.updateNode(nodeId, { assetId: null, status: "empty" } as Partial<BoardNode>);
                 }}
-                onDelete={(nodeId) => board.removeNodes([nodeId])}
-                onGenerate={onGenerate}
-                onStopTask={onStopTask}
-                onRetryTask={onRetryTask}
+                onDelete={onDeleteNode}
+                onCompareVersions={onCompareVersions}
+                onExtractFrame={onExtractFrame}
               />
 
               {node.type !== "config" ? (
@@ -1023,6 +1112,43 @@ export function BoardCanvas({
         ) : null}
       </div>
 
+      {settingsNode && settingsWidth > 0 ? (
+        <div
+          key={settingsKey}
+          className="board-node-settings"
+          style={{
+            left: settingsLeft,
+            top: settingsTop,
+            width: settingsWidth,
+            maxHeight: Math.max(150, Math.min(480, size.height - settingsTop - 12)),
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.stopPropagation()}
+          onDragOver={(event) => event.stopPropagation()}
+          onDrop={(event) => event.stopPropagation()}
+        >
+          {renderNodeSettings(settingsNode, (nodeId) => {
+            const source = nodeMap.get(nodeId);
+            if (!source) return;
+            const group = groups.find((item) => item.collapsed && item.nodeIds.includes(nodeId));
+            if (group) board.updateGroup(group.id, { collapsed: false });
+              const ownerId = imageResultOwners.get(nodeId);
+              const owner = ownerId ? nodeMap.get(ownerId) : undefined;
+              const expanded = owner?.type === "image" && owner.imageResultGroup && !owner.imageResultGroup.expanded
+                ? board.setImageResultsExpanded(owner.id, true) : undefined;
+              const target = expanded?.nodes.find((item) => item.id === nodeId) ?? source;
+            setSelectedEdgeId(null);
+            board.setViewport({
+              ...viewport,
+              x: size.width / 2 - (target.x + target.width / 2) * viewport.scale,
+              y: size.height * 0.36 - (target.y + target.height / 2) * viewport.scale,
+            });
+            board.setSelection([nodeId]);
+          })}
+        </div>
+      ) : null}
+
       {!nodes.length ? (
         <div className="board-empty">
           <SlidersHorizontal size={24} />
@@ -1031,7 +1157,7 @@ export function BoardCanvas({
         </div>
       ) : null}
 
-      {minimapOpen ? <BoardMinimap nodes={nodes} bounds={minimapBounds} layout={minimapLayout} viewport={viewport} size={size} onViewportChange={board.setViewport} /> : null}
+      {minimapOpen ? <BoardMinimap nodes={minimapNodes} bounds={minimapBounds} layout={minimapLayout} viewport={viewport} size={size} onViewportChange={board.setViewport} /> : null}
 
       {connectMenu ? (
         <div className="board-context-menu" style={{ left: connectMenu.x, top: connectMenu.y }} role="menu" aria-label="添加并连接节点" onPointerDown={(event) => event.stopPropagation()}>

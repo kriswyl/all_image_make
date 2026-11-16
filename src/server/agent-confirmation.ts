@@ -95,6 +95,15 @@ export class AgentConfirmationService {
     // 升级前就摆在那里的视频卡片没有 videoInputs / imageRefs：
     // 按卡片上当时显示的「主图当首帧」补回去，免得用户点确认时突然被要求重选
     const args = withConfirmedVideoSelection(merged, message.confirm);
+    const uploadTarget = message.confirm.videoUploadTarget;
+    if (uploadTarget && !nativeMedia) {
+      const channel = db.getChannel(uploadTarget.channelId);
+      const resolved = resolveAlias(buildCapabilityAliases(db.listChannels()), asString(args.modelHint), "video");
+      if (!channel?.enabled || channel.updatedAt !== uploadTarget.channelVersion
+        || resolved?.channelId !== channel.id || resolved.model !== message.confirm.model) {
+        throw new AppError("CONFIRMATION_STALE", "视频渠道配置已改变，请取消这张确认卡后重新发起请求。", 409);
+      }
+    }
     if (nativeMedia) this.validateNativeConfirmation(conversation, nativeMedia, [args]);
     if (!db.claimAgentConfirmation(message, decision, args)) throw new AppError("NOT_PENDING", "这条已经处理过了", 409);
     this.host.launchConfirmedTurn(conversationId, (controller) =>

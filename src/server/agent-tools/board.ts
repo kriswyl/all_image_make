@@ -78,8 +78,9 @@ export async function boardGenerateTool(ctx: ToolContext, args: BoardGenerateArg
       reason: "agent:generate",
       delta: buildBoardDelta(board.id, board.doc, result.board.doc, board.version, result.board.version),
     });
+    const taskIds = result.taskIds ?? (result.task ? [result.task.id] : []);
     const summary = result.task
-      ? `已提交：${args.nodeRef} 生成 ${refs.length} ${unit}，结果节点 ${refs.join("、")}；taskId=${result.task.id}。结果会由画布回填。`
+      ? `已提交：${args.nodeRef} 生成 ${refs.length} ${unit}，结果节点 ${refs.join("、")}；任务 ${taskIds.join("、")}。结果会由画布回填。`
       : `已生成：${args.nodeRef} 的 ${refs.length} 段文本已写入结果节点 ${refs.join("、")}。`;
     return okResult(
       summary,
@@ -88,6 +89,7 @@ export async function boardGenerateTool(ctx: ToolContext, args: BoardGenerateArg
         data: {
           nodeRef: args.nodeRef,
           ...(result.task ? { taskId: result.task.id } : {}),
+          ...(taskIds.length > 1 ? { taskIds } : {}),
           kind: result.kind,
           resultRefs: refs,
           resultNodeIds: result.resultNodeIds,

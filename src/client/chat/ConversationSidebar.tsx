@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { DEFAULT_CONVERSATION_TITLE, type ConversationSummary } from "../../shared/agent-types";
 
 export type SidebarConversation = ConversationSummary & { running: boolean };
@@ -137,7 +138,7 @@ export function ConversationSidebar({
                 onClick={() => { hideTip(); onSelect(item.id); }}
               >
                 <span className="sidebar-conv-title">{item.title || DEFAULT_CONVERSATION_TITLE}</span>
-                {item.running ? <LoaderCircle size={11} className="spin" /> : null}
+                {item.running ? <LoadingIndicator variant="dots" size={24} /> : null}
               </button>
             )}
             <button

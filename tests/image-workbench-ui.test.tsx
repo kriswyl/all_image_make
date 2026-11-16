@@ -6,6 +6,7 @@ import type { Asset, Channel, Task } from "../src/shared/types";
 import { api } from "../src/client/api";
 import type { InpaintMaskController, ReferenceController } from "../src/client/app-shared";
 import { GenerateView } from "../src/client/views/GenerateView";
+import { ImageResultWorkspace } from "../src/client/views/ImageResultWorkspace";
 import { readPromptText } from "../src/client/video/PromptEditor";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,6 +37,36 @@ function task(id: string, channel: Channel, assets: Asset[]): Task {
     errorCode: null, errorMessage: null, createdAt, startedAt: createdAt, finishedAt: createdAt,
   };
 }
+
+it("按实际任务状态切换加载动效，只有返回进度才显示百分比", () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const completed = task("image", imageChannel, [asset("result", "image")]);
+  const noop = () => undefined;
+  const references: ReferenceController = {
+    images: [], reading: false, select: noop, dropFiles: noop, remove: noop, clear: noop, addFromAsset: async () => {},
+  };
+  const render = (active: Task) => act(() => root.render(<ImageResultWorkspace task={active} tasks={[active]} references={references}
+    onTask={noop} onSelectTask={noop} onDiagnostics={noop} onToast={noop} />));
+  const stage = () => container.querySelector(".image-result-stage")!;
+  try {
+    render({ ...completed, status: "queued", progress: null, assets: [] });
+    expect(stage().querySelector(".loading-indicator--spectrum")).not.toBeNull();
+    expect(stage().textContent).toContain("排队中");
+    expect(stage().textContent).not.toContain("%");
+    render({ ...completed, status: "running", progress: 37, assets: [] });
+    expect(stage().querySelector(".loading-indicator--aurora")).not.toBeNull();
+    expect(stage().textContent).toContain("37%");
+    render({ ...completed, status: "failed", errorMessage: "上游失败", assets: [] });
+    expect(stage().querySelector(".loading-indicator")).toBeNull();
+    expect(stage().textContent).toContain("上游失败");
+    render(completed);
+    expect(stage().querySelector(".loading-indicator")).toBeNull();
+    expect(stage().querySelector("img")).not.toBeNull();
+  } finally {
+    act(() => root.unmount());
+  }
+});
 
 it("切历史与切本次候选互相独立，历史 MJ 操作跟随选中的任务", async () => {
   localStorage.setItem("vector-image:generation-draft:prompt", JSON.stringify("正在编辑的提示词"));

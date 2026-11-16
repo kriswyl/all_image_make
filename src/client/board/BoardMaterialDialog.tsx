@@ -7,7 +7,7 @@ import type { UseBoardResult } from "./useBoard";
 type AssetType = "all" | "image" | "video" | "audio";
 
 /** 画布素材选择与公共素材分页。 */
-export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch, setAssetSearch, assetType, setAssetType, setAssets, targetNodeId, onPreview, onClose, onToast }: {
+export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch, setAssetSearch, assetType, setAssetType, setAssets, targetNodeId, onUseReferenceImage, onPreview, onClose, onToast }: {
   board: UseBoardResult;
   currentId: string | null;
   boardAssets: Asset[];
@@ -17,6 +17,7 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
   setAssetType: Dispatch<SetStateAction<AssetType>>;
   setAssets: Dispatch<SetStateAction<Map<string, Asset>>>;
   targetNodeId: string | null;
+  onUseReferenceImage?: (asset: Asset) => Promise<boolean>;
   onPreview: (asset: Asset) => void;
   onClose: () => void;
   onToast: (kind: "success" | "error", message: string) => void;
@@ -31,7 +32,17 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
   const [uploadVersion, setUploadVersion] = useState(0);
 
   async function useAsset(asset: Asset) {
-    if (!currentId || !targetNodeId || busy) return;
+    if (!currentId || busy) return;
+    if (onUseReferenceImage) {
+      setBusy(true);
+      try {
+        if (await onUseReferenceImage(asset)) onClose();
+      } catch (error) {
+        onToast("error", error instanceof Error ? error.message : "添加引用失败");
+      } finally { setBusy(false); }
+      return;
+    }
+    if (!targetNodeId) return;
     const node = board.view?.doc.nodes.find((item) => item.id === targetNodeId);
     if (!node || (node.type !== "image" && node.type !== "video" && node.type !== "audio") || node.status === "loading") { onToast("error", "节点不存在或正在生成，请稍后再试"); return; }
     if (!asset.mimeType.startsWith(`${node.type}/`)) { onToast("error", "素材类型与节点不匹配"); return; }
@@ -53,13 +64,15 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
     const uploaded: Asset[] = [];
     try {
       for (const file of files) uploaded.push(await api.uploadBoardAsset(currentId, file));
-      onToast("success", `已上传 ${uploaded.length} 个文件到素材库`);
+      if (onUseReferenceImage && uploaded[0]) {
+        if (await onUseReferenceImage(uploaded[0])) onClose();
+      } else onToast("success", `已上传 ${uploaded.length} 个文件到素材库`);
     } catch (error) { onToast("error", `${uploaded.length ? `已上传 ${uploaded.length} 个；` : ""}${error instanceof Error ? error.message : "上传失败"}`); }
     finally {
       if (uploaded.length) {
         setAssets((items) => { const next = new Map(items); for (const asset of uploaded) next.set(asset.id, asset); return next; });
         setAssetSearch("");
-        if (!targetNodeId) setAssetType("all");
+        if (!targetNodeId && !onUseReferenceImage) setAssetType("all");
         setUploadVersion((value) => value + 1);
       }
       setBusy(false);
@@ -95,7 +108,7 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
         <aside className="board-material-dialog" role="dialog" aria-modal="true" aria-label="选择素材">
           <header className="board-asset-head">
             <div>
-              <strong>{targetNodeId ? "选择素材填入节点" : "选择素材"}</strong>
+              <strong>{onUseReferenceImage ? "添加引用图片" : targetNodeId ? "选择素材填入节点" : "选择素材"}</strong>
               <span>画布素材与公共素材</span>
             </div>
             <button type="button" className="icon-button compact" aria-label="关闭素材抽屉" onClick={() => onClose()}>
@@ -103,10 +116,10 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
             </button>
           </header>
           <div className="board-material-controls">
-            <input ref={uploadRef} type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/x-m4a,audio/webm" multiple className="file-input" onChange={(event) => { const files = [...(event.target.files ?? [])]; event.target.value = ""; if (files.length) void uploadFiles(files); }} />
-            <button type="button" className="secondary-button compact" disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={14} />上传图片、视频或音频</button>
+            <input ref={uploadRef} type="file" accept={onUseReferenceImage ? "image/png,image/jpeg,image/webp" : "image/png,image/jpeg,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/x-m4a,audio/webm"} multiple={!onUseReferenceImage} className="file-input" onChange={(event) => { const files = [...(event.target.files ?? [])]; event.target.value = ""; if (files.length) void uploadFiles(files); }} />
+            <button type="button" className="secondary-button compact" disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={14} />{onUseReferenceImage ? "上传本地图片" : "上传图片、视频或音频"}</button>
             <input aria-label="搜索素材" placeholder="搜索素材" value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} />
-            <div className="filter-tabs">{([['all', '全部'], ['image', '图片'], ['video', '视频'], ['audio', '音频']] as const).map(([type, label]) => <button type="button" key={type} className={assetType === type ? 'active' : ''} onClick={() => setAssetType(type)}>{label}</button>)}</div>
+            {!onUseReferenceImage && <div className="filter-tabs">{([['all', '全部'], ['image', '图片'], ['video', '视频'], ['audio', '音频']] as const).map(([type, label]) => <button type="button" key={type} className={assetType === type ? 'active' : ''} onClick={() => setAssetType(type)}>{label}</button>)}</div>}
           </div>
           <div className="board-asset-list board-material-grid">
             {boardAssets.filter((asset) => (assetType === "all" || asset.mimeType.startsWith(`${assetType}/`)) && `${asset.fileName} ${asset.title ?? ""}`.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => {
@@ -131,7 +144,7 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
                     <span>{video ? "视频" : audio ? "音频" : "图片"} · {(asset.byteSize / 1024).toFixed(0)} KB</span>
                   </div>
                   <div className="board-asset-actions">
-                    {targetNodeId ? <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void useAsset(asset)}>使用此素材</button> : (
+                    {targetNodeId || onUseReferenceImage ? <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void useAsset(asset)}>{onUseReferenceImage ? "添加引用" : "使用此素材"}</button> : (
                       <button
                         type="button"
                         className="secondary-button compact"
@@ -161,7 +174,7 @@ export function BoardMaterialDialog({ board, currentId, boardAssets, assetSearch
               <article key={asset.id} className="board-asset-card">
                 <button type="button" className="board-asset-thumb" title="预览" onClick={() => onPreview(asset)}>{asset.mimeType.startsWith("video/") ? <video src={`${api.assetUrl(asset.url)}#t=0.1`} muted preload="metadata" playsInline /> : asset.mimeType.startsWith("audio/") && !asset.thumbUrl ? <span className="board-asset-audio"><AudioLines size={32} /></span> : <img src={api.assetUrl(asset.thumbUrl ?? asset.url)} onError={(event) => { event.currentTarget.onerror = null; if (asset.mimeType.startsWith("image/")) event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</button>
                 <div className="board-asset-meta"><strong title={asset.fileName}>{asset.title || asset.fileName}</strong><span>{asset.mimeType.startsWith("video/") ? "视频" : asset.mimeType.startsWith("audio/") ? "音频" : "图片"}</span></div>
-                {targetNodeId ? <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void useAsset(asset)}>使用此素材</button> : <button type="button" className="secondary-button compact" onClick={() => {
+                {targetNodeId || onUseReferenceImage ? <button type="button" className="secondary-button compact" disabled={busy} onClick={() => void useAsset(asset)}>{onUseReferenceImage ? "添加引用" : "使用此素材"}</button> : <button type="button" className="secondary-button compact" onClick={() => {
                   if (!currentId) return;
                   void (async () => {
                     try {

@@ -280,7 +280,9 @@ export function registerCanvasRoutes(app: Express, db: AppDatabase, runner: Task
     if (!board) return res.status(404).json(fail("BOARD_NOT_FOUND", "画布不存在"));
     const node = board.doc.nodes.find((item) => item.id === nodeId);
     if (!node || (node.type !== "image" && node.type !== "video" && node.type !== "audio")) return res.status(404).json(fail("BOARD_NODE_NOT_FOUND", "素材节点不存在"));
-    const rows = db.listBoardTasksByBoard(boardId).filter((item) => item.resultNodeId === nodeId).reverse();
+    const rows = db.listBoardTasksByBoard(boardId)
+      .filter((item) => item.resultNodeId === nodeId || (node.type === "image" && item.taskId === node.taskId))
+      .reverse();
     const seen = new Set<string>();
     const tasks = rows.flatMap((row) => {
       if (seen.has(row.taskId)) return [];
@@ -288,7 +290,8 @@ export function registerCanvasRoutes(app: Express, db: AppDatabase, runner: Task
       const task = db.getTaskView(row.taskId);
       if (!task || task.status !== "succeeded") return [];
       const resultRows = db.listBoardTasksByTask(row.taskId).filter((entry) => entry.boardId === boardId);
-      const index = resultRows.findIndex((entry) => entry.resultNodeId === nodeId);
+      const assignedIndex = resultRows.findIndex((entry) => entry.resultNodeId === nodeId);
+      const index = node.type === "image" && row.taskId === node.taskId ? node.resultIndex ?? assignedIndex : assignedIndex;
       const asset = task.assets.filter((entry) => entry.mimeType.startsWith(`${node.type}/`))[index];
       return asset ? [{ ...task, assets: [asset] }] : [];
     }).slice(0, 50);

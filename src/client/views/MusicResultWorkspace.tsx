@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import {
-  Copy, Disc3, Download, Ellipsis, History, LoaderCircle, Maximize2,
+  Copy, Disc3, Download, Ellipsis, History, Maximize2,
   Music, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX,
 } from "lucide-react";
 import type { Asset, Task } from "../../shared/types";
@@ -8,7 +9,7 @@ import { isSunoSong, sunoResultLabel, sunoTrackInfo, type SunoSourceSelection } 
 import { api } from "../api";
 import type { Toast } from "../app-shared";
 import { copyTextToClipboard } from "../clipboard";
-import { formatTime, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
+import { formatTime, GenerationActivity, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
 import { MusicLyrics, MusicLyricsDialog } from "./MusicLyrics";
 
 type MusicResultProps = {
@@ -221,13 +222,15 @@ export function MusicResultWorkspace({ task, tasks, versionLabel, onDiagnostics,
 
         <div className="music-result-content">
           <div className="music-track-hero">
-            <MusicCover track={track} large />
+            {busy && task && !track ? <div className="music-workbench-cover">
+              <GenerationActivity status={task.status} size={72} />
+            </div> : <MusicCover track={track} large />}
             <div className="music-track-info">
               <div className="music-track-title">
                 <h3>{track ? title : emptyTitle}</h3>
                 <button type="button" className="icon-button music-download" aria-label="下载歌曲" title="下载歌曲"
                   disabled={!track || Boolean(downloadId)} onClick={() => { if (track) void download(track); }}>
-                  {downloadId && downloadId === track?.id ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+                  {downloadId && downloadId === track?.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={17} />}
                 </button>
               </div>
               {track ? <div className="music-track-meta">
@@ -250,8 +253,9 @@ export function MusicResultWorkspace({ task, tasks, versionLabel, onDiagnostics,
               </div>
               {busy && task ? (
                 <div className="music-task-note" role="status">
-                  <LoaderCircle className="spin" size={14} />
-                  {task.progress != null ? <progress value={task.progress} max={100} aria-label="生成进度" /> : <span>{statusLabels[task.status]}</span>}
+                  {track ? <LoadingIndicator variant="dots" size={24} /> : null}
+                  <span>{statusLabels[task.status]}</span>
+                  {task.progress != null ? <progress value={task.progress} max={100} aria-label="生成进度" /> : null}
                 </div>
               ) : null}
               {failed && task ? (

@@ -1,7 +1,7 @@
 import type {
   KlingVideoMode, SeedanceVideoMode, WanVideoMode,
 } from "./types.js";
-import { KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type VideoAdapter } from "./video-capabilities.js";
+import { KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type ConversationVideoMode, type VideoAdapter } from "./video-capabilities.js";
 import { seedanceLimits } from "./seedance-capabilities.js";
 
 /**
@@ -220,12 +220,20 @@ export function referenceMediaLimits(
   adapter: string | undefined,
   model: string,
   spec: VideoModeSpec | null,
+  localVideoUploadConfigured = true,
 ): { videos: number; audios: number } {
   if (!spec) return { videos: 0, audios: 0 };
   const seedance = adapter === "seedance-video" ? seedanceLimits(model) : null;
-  const videos = spec.acceptsReferenceVideo || spec.needsReferenceVideo ? (seedance?.maxVideos ?? 1) : 0;
+  const videos = localVideoUploadConfigured && (spec.acceptsReferenceVideo || spec.needsReferenceVideo)
+    ? (seedance?.maxVideos ?? 1) : 0;
   const audios = spec.acceptsReferenceAudio ? (seedance?.maxAudios ?? 1) : 0;
   return { videos, audios };
+}
+
+export function referenceVideoDurationRange(mode?: string, orientation?: string) {
+  return mode === "motion-control"
+    ? { min: 3, max: orientation === "image" ? 10 : 30 }
+    : { min: 1, max: 15 };
 }
 
 /**
@@ -235,20 +243,17 @@ export function referenceMediaLimits(
  * 免得用户放进去一张图却只能按首帧提交、还以为自己在用参考图。
  */
 function composePromptSpec(adapter: string, model: string): VideoModeSpec {
-  const caps = VIDEO_CAPABILITIES[adapter as VideoAdapter];
-  const kling = adapter === "kling-video";
-  const klingReference = kling && klingModesForModel(model).includes("reference");
-  const hasReference = !kling || klingReference;
-  const maxImages = kling
-    ? (klingReference ? caps.maxReferenceImages : 0)
-    : adapter === "seedance-video" ? seedanceLimits(model).maxImages : caps.maxReferenceImages;
-  const video = adapter === "wan-video" || adapter === "seedance-video";
-  const audio = adapter === "wan-video" || adapter === "seedance-video";
+  const reference = videoModeSpec(adapter, model, "reference");
+  const hasReference = adapter === "grok-video" || Boolean(reference);
+  const maxImages = adapter === "grok-video" ? VIDEO_CAPABILITIES[adapter].maxReferenceImages
+    : reference ? maxImagesForMode(adapter, model, reference.id) : 0;
+  const video = Boolean(reference?.acceptsReferenceVideo);
+  const audio = Boolean(reference?.acceptsReferenceAudio);
   return {
     id: "prompt",
     label: hasReference ? "提示词生视频" : "文生视频",
     hint: hasReference
-      ? `不传素材就是文生视频；上传参考图（最多 ${maxImages} 张）、参考视频或参考音频后，按参考生视频提交`
+      ? `不传素材就是文生视频；添加${[`参考图（最多 ${maxImages} 张）`, ...(video ? ["参考视频"] : []), ...(audio ? ["参考音频"] : [])].join(" / ")}后按参考生视频提交`
       : "仅凭提示词生成；要放首帧 / 尾帧请切到「首尾帧生视频」",
     imageSlots: hasReference ? ["reference_image"] : [],
     imageRepeatable: hasReference,
@@ -354,6 +359,12 @@ export function allVideoModes(adapter: string | undefined, model: string): Video
   return [];
 }
 
+/** 各创作入口共有的文字、首帧、首尾帧和参考模式。 */
+export function supportedVideoModes(adapter: string, model = ""): ConversationVideoMode[] {
+  if (adapter === "grok-video") return ["text-to-video", "reference"];
+  return allVideoModes(adapter, model).flatMap(({ id }) => id === "text-to-video" || id === "first-frame" || id === "first-last-frame" || id === "reference" ? [id] : []);
+}
+
 /**
  * 界面上真正列出来的模式：合并后的入口 + 确实需要独立入口的模式。
  *
@@ -430,7 +441,7 @@ export function videoModeField(adapter: string | undefined): VideoModeField | nu
 /** 该模式下最多能放几张图：可重复的参考图按渠道上限，其余按槽位数 */
 export function maxImagesForMode(adapter: string | undefined, model: string, mode: string | undefined): number {
   // Grok 没有模式表但有素材规格：别因为 studioModeSpec 找不到就给出 0 张额度
-  const spec = studioModeSpec(adapter, model, mode) ?? studioAssetSpec(adapter, model);
+  const spec = videoModeSpec(adapter, model, mode) ?? studioModeSpec(adapter, model, mode) ?? studioAssetSpec(adapter, model);
   if (!spec) return 0;
   if (!spec.imageRepeatable) return spec.imageSlots.length;
   if (adapter === "seedance-video") return seedanceLimits(model).maxImages;

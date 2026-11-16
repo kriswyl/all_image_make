@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { resolveBoardVideoSelection } from "../src/server/board";
 import type { BoardDoc, BoardNode, ConfigBoardNode } from "../src/shared/board";
+import { removeBoardMention, resolveBoardMentions } from "../src/shared/board-mentions";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -83,6 +84,14 @@ function videoDoc(input: {
 }
 
 describe("无限画布视频输入解析", () => {
+  it("将稳定的节点引用换算为本次实际提交顺序，不会因换位而指向别的素材", () => {
+    const { doc } = videoDoc({ images: [{ ref: "first" }, { ref: "second" }] });
+    const first = doc.nodes[2]!;
+    const second = doc.nodes[3]!;
+    const prompt = "主体用 @图片3，场景用 @图片4";
+    expect(resolveBoardMentions(prompt, [second, first])).toBe("主体用 @图片2，场景用 @图片1");
+    expect(removeBoardMention(prompt + " @图片30", first)).toBe("主体用 ，场景用 @图片4 @图片30");
+  });
   it("可灵连接角色图和视频时选择运动控制，并拒绝不支持的模型", () => {
     const { doc, config } = videoDoc({ images: [{ ref: "n3" }] });
     const video = nodeBase("n4", "video", { assetId: "video", source: "upload", status: "succeeded" });
@@ -153,6 +162,14 @@ async function mockWanVideo(): Promise<{ baseUrl: string; requests: Array<{ url?
         res.end(JSON.stringify({ url: "https://files.example.com/reference.mp4" }));
         return;
       }
+      if (req.url === "/api/v3/contents/generations/tasks" && req.method === "POST") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "seedance-1" }));
+        return;
+      }
+      if (req.url === "/api/v3/contents/generations/tasks/seedance-1") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "succeeded", content: { video_url: `${origin}/out.mp4` } }));
+        return;
+      }
       if (req.url === "/api/v1/services/aigc/video-generation/video-synthesis" && req.method === "POST") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ output: { task_id: "video-task-1", task_status: "PENDING" } }));
@@ -206,6 +223,41 @@ async function waitForTask(app: ReturnType<typeof createApp>["app"], taskId: str
 }
 
 describe("无限画布视频生成", () => {
+  it("Seedance 2.0 按共享上限校验并提交多个原视频", async () => {
+    const { app, context } = await tempApp();
+    const mock = await mockWanVideo();
+    context.db.saveChannel({
+      name: "Seedance", baseUrl: mock.baseUrl, adapterType: "seedance-video", authType: "none",
+      authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      uploadEndpoint: `${mock.baseUrl}/upload`, uploadHeaders: {}, models: ["sd-2.0-fast"],
+      allowPrivateNetwork: true, enabled: true,
+    });
+    const boardId = (await request(app).post("/api/boards").send({ title: "视频参考" }).expect(201)).body.data.id;
+    const bytes = Buffer.from("000000106674797069736f6d00000000", "hex");
+    const assetIds: string[] = [];
+    for (const name of ["first", "second"]) {
+      const uploaded = await request(app).post(`/api/boards/${boardId}/assets`)
+        .attach("file", bytes, { filename: `${name}.mp4`, contentType: "video/mp4" }).expect(201);
+      assetIds.push(uploaded.body.data.id);
+    }
+    const { doc, config } = videoDoc({ images: [] });
+    const sources = Array.from({ length: 4 }, (_, index) => nodeBase(`n${index + 3}`, "video", {
+      assetId: assetIds[index % assetIds.length], source: "upload", status: "succeeded",
+    }));
+    doc.nextRef = 7;
+    doc.nodes.push(...sources);
+    doc.edges.push(...sources.map((source) => ({ id: `edge-${source.id}`, source: source.id, target: config.id, kind: "input" as const })));
+    expect(resolveBoardVideoSelection({ doc, config, adapterType: "seedance-video", model: "sd-2.0-fast" }).error).toContain("3 个节点");
+    expect(resolveBoardVideoSelection({ doc, config, adapterType: "seedance-video", model: "sd-2.5" }).selection?.mode).toBe("reference");
+    doc.edges = doc.edges.slice(0, 3);
+    await request(app).put(`/api/boards/${boardId}`).send({ doc, baseVersion: 1 }).expect(200);
+    const generated = await request(app).post(`/api/boards/${boardId}/generate`).send({ nodeId: config.id }).expect(202);
+    expect((await waitForTask(app, generated.body.data.task.id)).status).toBe("succeeded");
+    expect(mock.requests.filter((item) => item.url === "/upload")).toHaveLength(2);
+    const submit = mock.requests.find((item) => item.url === "/api/v3/contents/generations/tasks");
+    expect(JSON.parse(submit!.body).content.filter((item: { role?: string }) => item.role === "reference_video")).toHaveLength(2);
+  });
+
   it("可灵画布视频与角色图组合成运动控制请求", async () => {
     const { app, context } = await tempApp();
     const mock = await mockWanVideo();

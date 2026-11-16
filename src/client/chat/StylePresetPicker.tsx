@@ -4,7 +4,7 @@
  * 分镜和画布都用它：下拉里选一个模板，弹窗里维护自定义模板。
  * 内置模板只读——用户改坏了没有恢复入口会很麻烦，想改就先复制一份。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
@@ -13,7 +13,7 @@ import type { StylePreset, StylePresetInput } from "../../shared/style-presets";
 const EMPTY: StylePresetInput = { name: "", description: "", prompt: "", negative: "" };
 
 export function StylePresetPicker({
-  value, valueName, onChange, onPresets, label = "风格模板", disabled = false, toast,
+  value, valueName, onChange, onPresets, label = "风格模板", disabled = false, toast, presentation = "select",
 }: {
   /** 当前选中的模板 id；空串 = 不套风格 */
   value: string;
@@ -25,16 +25,27 @@ export function StylePresetPicker({
   label?: string;
   disabled?: boolean;
   toast?: (kind: "success" | "error", message: string) => void;
+  presentation?: "select" | "buttons";
 }) {
   const [presets, setPresets] = useState<StylePreset[]>([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StylePreset | null>(null);
   const [form, setForm] = useState<StylePresetInput>(EMPTY);
   const [busy, setBusy] = useState(false);
+  const manageRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   const load = () => api.stylePresets().then((list) => { setPresets(list); onPresets?.(list); }).catch(() => undefined);
   const currentId = value || presets.find((item) => item.name === valueName)?.id || "";
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (open) closeRef.current?.focus({ preventScroll: true });
+  }, [open]);
+
+  const closeManager = () => {
+    setOpen(false);
+    manageRef.current?.focus({ preventScroll: true });
+  };
 
   const startEdit = (preset: StylePreset | null) => {
     setEditing(preset);
@@ -80,8 +91,18 @@ export function StylePresetPicker({
   };
 
   return (
-    <div className="style-preset-field">
-      <select
+    <div className={`style-preset-field${presentation === "buttons" ? " has-buttons" : ""}`}>
+      {presentation === "buttons" ? (
+        <div className="style-preset-choices" role="group" aria-label={label}>
+          <button type="button" disabled={disabled} aria-pressed={!currentId} onClick={() => onChange(null)}>不套风格</button>
+          {presets.map((preset) => (
+            <button key={preset.id} type="button" disabled={disabled} aria-pressed={preset.id === currentId}
+              title={preset.description || preset.name} onClick={() => onChange(preset)}>
+              {preset.name}
+            </button>
+          ))}
+        </div>
+      ) : <select
         aria-label={label}
         value={currentId}
         disabled={disabled}
@@ -89,17 +110,22 @@ export function StylePresetPicker({
       >
         <option value="">不套风格</option>
         {presets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </select>
-      <button type="button" className="style-preset-manage" disabled={disabled} onClick={() => { setOpen(true); startEdit(presets.find((item) => item.id === currentId) ?? null); }}>
+      </select>}
+      <button ref={manageRef} type="button" className="style-preset-manage" disabled={disabled} onClick={() => { setOpen(true); startEdit(presets.find((item) => item.id === currentId) ?? null); }}>
         管理
       </button>
 
       {open ? createPortal(
-        <div className="style-preset-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+        <div className="style-preset-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) closeManager(); }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            closeManager();
+          }}>
           <section className="style-preset-dialog" role="dialog" aria-modal="true" aria-label="风格模板">
             <header>
               <strong>风格模板</strong>
-              <button type="button" className="icon-button" aria-label="关闭" onClick={() => setOpen(false)}><X size={16} /></button>
+              <button ref={closeRef} type="button" className="icon-button" aria-label="关闭" onClick={closeManager}><X size={16} /></button>
             </header>
             <div className="style-preset-body">
               <div className="style-preset-list">

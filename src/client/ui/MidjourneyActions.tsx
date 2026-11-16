@@ -7,7 +7,7 @@
  *
  * 对话创作和图片生成共用这一份，避免两处样式/含义再次走偏。
  */
-import { LoaderCircle } from "lucide-react";
+import { LoadingIndicator } from "./LoadingIndicator";
 import {
   groupMidjourneyButtons, midjourneyActionTooltip, midjourneyButtonLabel,
   type MidjourneyButton,
@@ -33,7 +33,7 @@ export function MidjourneyActions({
   const content = (button: MidjourneyButton) => (
     <>
       {activeId === button.customId
-        ? <LoaderCircle className="spin" size={13} />
+        ? <LoadingIndicator variant="dots" size={24} />
         : button.emoji ? <span aria-hidden="true">{button.emoji}</span> : null}
       {midjourneyButtonLabel(button)}
     </>
@@ -61,7 +61,7 @@ export function MidjourneyActions({
             onClick={() => onAct(button)}
           >
             {/* 小键盘里只写 U1/V1，动作由左右两列区分，省出空间也更好对照原图 */}
-            {activeId === button.customId ? <LoaderCircle className="spin" size={13} /> : null}
+            {activeId === button.customId ? <LoadingIndicator variant="dots" size={24} /> : null}
             {kind === "upscale" ? "U" : "V"}{index}
           </button>
         ))}

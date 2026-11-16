@@ -65,6 +65,7 @@ export function usePanelDismiss(
   onClose: () => void,
   panelRef: RefObject<HTMLElement | null>,
   anchor: HTMLElement | null,
+  consumeEscape = false,
 ) {
   useEffect(() => {
     if (!open) return;
@@ -74,12 +75,16 @@ export function usePanelDismiss(
       if (panelRef.current?.contains(target) || anchor?.contains(target)) return;
       onClose();
     };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (consumeEscape) event.preventDefault();
+      onClose();
+    };
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open, onClose, panelRef, anchor]);
+  }, [open, onClose, panelRef, anchor, consumeEscape]);
 }

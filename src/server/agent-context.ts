@@ -26,6 +26,12 @@ export function collectTurnAttachmentIds(
   conversationId: string,
   userSeq: number,
 ): string[] {
+  return collectTurnAssetIds(db, conversationId, userSeq)
+    .filter((id) => { const asset = db.getAsset(id); return asset && isImageAsset(asset); })
+    .slice(0, MAX_CANVAS_IMAGES);
+}
+
+export function collectTurnAssetIds(db: AppDatabase, conversationId: string, userSeq: number): string[] {
   const messages = db.listMessages(conversationId).filter((message) => message.seq <= userSeq);
   const anchorIndex = messages.findIndex((message) => message.seq === userSeq);
   if (anchorIndex < 0 || messages[anchorIndex]!.role !== "user") return [];
@@ -45,8 +51,6 @@ export function collectTurnAttachmentIds(
   const ids: string[] = [];
   const push = (assetId: string | null | undefined) => {
     if (!assetId || ids.includes(assetId)) return;
-    const asset = db.getAsset(assetId);
-    if (!asset || !isImageAsset(asset)) return;
     ids.push(assetId);
   };
   for (const assetId of uploadIds) push(assetId);
@@ -54,7 +58,7 @@ export function collectTurnAttachmentIds(
   for (const ref of anchor.assetRefs ?? []) {
     push(resolveAssetRef(db, conversationId, ref)?.asset.id);
   }
-  return ids.slice(0, MAX_CANVAS_IMAGES);
+  return ids;
 }
 
 /**
@@ -141,12 +145,16 @@ export function renderDocumentContext(documents: StoredDocument[], plain = false
 }
 
 /** 一条历史消息 → 大脑上下文。返回 null 表示这条不进上下文（系统提示等） */
-export function toBrainMessage(message: ChatMessage): BrainMessage | null {
+export function toBrainMessage(message: ChatMessage, db?: Pick<AppDatabase, "getAsset">): BrainMessage | null {
   if (message.role === "system") return null;
   if (message.role === "user") {
     // 回放时也得让大脑知道这条消息当时带了哪几张图
     const refs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
-    const suffix = refs.length ? `\n[这条消息附带的图片：${refs.map(assetRef).join("、")}]` : "";
+    const suffix = refs.length ? `\n[这条消息附带的${db ? "素材" : "图片"}：${refs.map((id) => {
+      const mimeType = db?.getAsset(id)?.mimeType ?? "";
+      const kind = mimeType.startsWith("video/") ? "视频 " : mimeType.startsWith("audio/") ? "音频 " : "";
+      return kind + assetRef(id);
+    }).join("、")}]` : "";
     const frames = message.videoFrames;
     const roles = frames ? `\n[用户为本轮视频指定首帧 ${assetRef(frames.firstAssetId)}${frames.lastAssetId ? `，尾帧 ${assetRef(frames.lastAssetId)}` : ""}]` : "";
     return { role: "user", content: `${message.content ?? ""}${suffix}${roles}` };
@@ -179,9 +187,9 @@ export function toBrainMessage(message: ChatMessage): BrainMessage | null {
 }
 
 /** 普通聊天只回放可读事实，绝不回放工具协议。 */
-export function toPlainChatMessage(message: ChatMessage): BrainMessage | null {
+export function toPlainChatMessage(message: ChatMessage, db?: Pick<AppDatabase, "getAsset">): BrainMessage | null {
   if (message.role === "system") return null;
-  if (message.role === "user") return toBrainMessage(message);
+  if (message.role === "user") return toBrainMessage(message, db);
   if (message.role === "assistant") {
     if (message.confirm) return { role: "assistant", content: `[有一项操作等待用户确认：${message.content || message.toolName || "生成任务"}]` };
     if (message.toolName && !["reply", "ask"].includes(message.toolName)) {

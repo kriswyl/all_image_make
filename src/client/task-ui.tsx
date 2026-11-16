@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2 } from "lucide-react";
 import type { TaskStatus } from "../shared/types";
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 
 /**
  * 任务状态的展示基础件。
@@ -18,7 +19,7 @@ export const statusLabels: Record<TaskStatus, string> = {
 export function StatusBadge({ status }: { status: TaskStatus }) {
   return (
     <span className={`status-badge ${status}`}>
-      {!terminalStatuses.includes(status) ? <LoaderCircle className="spin" size={13} />
+      {!terminalStatuses.includes(status) ? <LoadingIndicator variant="dots" size={24} />
         : status === "succeeded" ? <CheckCircle2 size={13} />
           : <AlertCircle size={13} />}
       {statusLabels[status]}
@@ -27,7 +28,14 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
 }
 
 export function LoadingScreen({ compact = false }: { compact?: boolean }) {
-  return <div className={compact ? "loading-compact" : "loading-screen"}><LoaderCircle className="spin" size={24} /><span>加载中</span></div>;
+  return <div className={compact ? "loading-compact" : "loading-screen"} role="status">
+    <LoadingIndicator variant="spectrum" size={compact ? 80 : undefined} /><span>加载中</span>
+  </div>;
+}
+
+export function GenerationActivity({ status, visual = false, size }: { status: TaskStatus; visual?: boolean; size?: number }) {
+  if (terminalStatuses.includes(status)) return null;
+  return <LoadingIndicator variant={status === "running" ? visual ? "aurora" : "liquid" : "spectrum"} size={size} />;
 }
 
 export function formatTime(value: string) {

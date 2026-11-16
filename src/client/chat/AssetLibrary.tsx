@@ -5,7 +5,8 @@
  * 哪张被选成了首帧 / 尾帧。这里用网格 + 来源筛选 + 搜索来解决「找图」，
  * 底部动作直接改画布顺序——首帧就是画布第 1 张，尾帧是第 2 张，其余是参考图。
  */
-import { Eye, Image as ImageIcon, Layers, LoaderCircle, Search, Trash2, X } from "lucide-react";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { Eye, Image as ImageIcon, Layers, Search, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
@@ -369,7 +370,7 @@ export function AssetLibrary({
             <div className="modal-footer">
               <button type="button" className="secondary-button" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button>
               <button type="button" className="primary-button danger" disabled={deleting} onClick={() => void confirmDelete()}>
-                {deleting ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />}
+                {deleting ? <LoadingIndicator variant="dots" size={24} /> : <Trash2 size={16} />}
                 {deleting ? "删除中…" : "确认删除"}
               </button>
             </div>

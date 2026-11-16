@@ -33,7 +33,7 @@ export const BOARD_LIMITS = {
   maxUpstreamImages: 8,
   /** Agent 一次最多提交多少条 op */
   maxOpsPerBatch: 20,
-  /** 配置节点一次最多生成几张 */
+  /** 画布一次最多生成几张图片 */
   maxCount: 8,
   /** 节点尺寸范围 */
   minNodeWidth: 120,
@@ -156,6 +156,13 @@ export const imageNodeSchema = z.object({
   status: z.enum(BOARD_NODE_STATUSES).default("empty"),
   taskId: z.string().max(80).nullable().optional(),
   ...generationParamShape,
+  count: z.number().int().min(1).max(BOARD_LIMITS.maxCount).optional(),
+  /** 任务内结果序号；移动或删除其它结果卡时，仍能取到原来的输出。 */
+  resultIndex: z.number().int().min(0).max(BOARD_LIMITS.maxCount - 1).optional(),
+  imageResultGroup: z.object({
+    memberIds: z.array(nodeIdSchema).min(1).max(BOARD_LIMITS.maxCount - 1),
+    expanded: z.boolean().default(false),
+  }).optional(),
   naturalWidth: z.number().int().positive().optional(),
   naturalHeight: z.number().int().positive().optional(),
   error: z.string().max(2_000).optional(),
@@ -227,6 +234,7 @@ export const configNodeSchema = z.object({
   musicNegativeTags: z.string().max(1_000).optional(),
   status: z.enum(BOARD_NODE_STATUSES).default("idle"),
   lastTaskId: z.string().max(80).nullable().optional(),
+  imageBatchResultIds: z.array(nodeIdSchema).min(2).max(BOARD_LIMITS.maxCount).optional(),
   error: z.string().max(2_000).optional(),
 });
 

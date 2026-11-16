@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useRef, useState } from "react";
 import {
-  AudioLines, ChevronRight, KeyRound, List, LoaderCircle, Mic, Plus, Upload,
+  AudioLines, ChevronRight, KeyRound, List, Mic, Plus, Upload,
 } from "lucide-react";
 import { api } from "./api";
 import { useFileDrop } from "./useFileDrop";
@@ -258,7 +259,7 @@ export function SpeechGenerateView(props: {
             <div className="speech-submit">
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : null}
               <button className="primary-button" onClick={generate} disabled={submitting || !channel || !props.selectedModel || !text.trim()}>
-                {submitting ? <LoaderCircle className="spin" size={17} /> : <Mic size={17} />}
+                {submitting ? <LoadingIndicator variant="dots" size={24} /> : <Mic size={17} />}
                 {mode === "duo" ? "生成双人对话" : "生成配音"}
               </button>
             </div>

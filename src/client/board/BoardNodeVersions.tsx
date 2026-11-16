@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { LoaderCircle, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api } from "../api";
 import { formatTime } from "../task-ui";
 import type { Asset, Task } from "../../shared/types";
@@ -27,7 +28,7 @@ export function BoardNodeVersions({ boardId, nodeId, onClose, onApply }: { board
   }
   return createPortal(<div className="board-versions-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}><section className="board-versions-dialog" role="dialog" aria-modal="true" aria-label="节点生成版本对比">
     <header><div><strong>生成版本对比</strong><small>按此节点的生成任务显示；切换只替换素材，保留当前提示词和参数。</small></div><button type="button" className="icon-button" onClick={onClose} disabled={busy} aria-label="关闭"><X size={16} /></button></header>
-    {loading ? <p><LoaderCircle className="spin" size={16} /> 正在加载…</p> : tasks.length ? <div className="board-version-grid">{pane(left, setLeft)}{pane(Math.max(0, right), setRight)}</div> : <p>此节点还没有可对比的生成记录。上传的素材不会自动成为生成版本。</p>}
+    {loading ? <p><LoadingIndicator variant="dots" size={24} /> 正在加载…</p> : tasks.length ? <div className="board-version-grid">{pane(left, setLeft)}{pane(Math.max(0, right), setRight)}</div> : <p>此节点还没有可对比的生成记录。上传的素材不会自动成为生成版本。</p>}
     {error ? <p role="alert" className="story-review-error">{error}</p> : null}
   </section></div>, document.body);
 }

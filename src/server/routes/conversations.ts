@@ -22,6 +22,7 @@ import { ok, fail, asyncHandler, routeParam } from "./http.js";
 import type { Express, RequestHandler } from "express";
 import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../../shared/chat-media.js";
 import { mediaUploadExtension } from "../task-media.js";
+import { referenceVideoDuration } from "../reference-video.js";
 
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -128,13 +129,15 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
 
   /** §6 能力清单的原文。前端「这个会话能做什么」面板直接展示它，和大脑看到的是同一份 */
   app.get("/api/agent/capabilities", (_req, res) => {
+    const aliases = buildCapabilityAliases(db.listChannels());
     res.json(ok({
-      manifest: buildCapabilityManifest(buildCapabilityAliases(db.listChannels())),
-      aliases: buildCapabilityAliases(db.listChannels()).map((alias) => ({
+      manifest: buildCapabilityManifest(aliases),
+      aliases: aliases.map((alias) => ({
         alias: alias.alias, kind: alias.kind, model: alias.model,
         channelName: alias.channelName, channelId: alias.channelId,
         // 音乐和语音同属 audio，前端要靠适配器把两类分开
         adapterType: alias.adapterType,
+        ...(alias.localVideoUploadConfigured !== undefined ? { localVideoUploadConfigured: alias.localVideoUploadConfigured } : {}),
       })),
     }));
   });
@@ -406,6 +409,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
         asset: {
           id: crypto.randomUUID(), taskId, fileName, title, mimeType, byteSize: file.size,
           relativePath: fileName, baseDir, sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
+          ...(mimeType === "video/mp4" || mimeType === "video/quicktime" ? { duration: referenceVideoDuration(file.buffer) } : {}),
         },
       };
     });

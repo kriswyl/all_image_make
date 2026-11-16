@@ -15,7 +15,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BATCHABLE_TOOLS, extractPlanText, looksLikeIdentityDrift, parsePlan, resolveBatch } from "../src/server/agent";
-import { MAX_BATCH_CALLS, planCalls, type PlannedCall } from "../src/shared/agent-types";
+import { MAX_BATCH_CALLS, planCalls, type ConfirmPreview, type PlannedCall } from "../src/shared/agent-types";
 import { createApp } from "../src/server/app";
 import { executeChatDocumentTool, readWorkspaceFile } from "../src/server/chat-tools/documents";
 import { readPresentationProject } from "../src/server/presentation-project";
@@ -159,7 +159,7 @@ describe("resolveBatch：卡片上问几个，就只提交几个", () => {
 });
 
 /** 假中转站：同时演大脑和生图。返回的是「怎么把这次 e2e 搭起来」用得到的把手 */
-async function startMock(plansByCall: unknown[], options: { failPrompts?: string[]; disconnectPrompts?: string[]; native?: boolean; video?: boolean; rejectTools?: boolean } = {}) {
+async function startMock(plansByCall: unknown[], options: { failPrompts?: string[]; disconnectPrompts?: string[]; native?: boolean; video?: boolean; videoUpload?: boolean; rejectTools?: boolean } = {}) {
   const imagePrompts: string[] = [];
   const chatRequests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; tool_call_id?: string; content?: string }> }> = [];
   /** 每次产图请求：提示词 + 带了几张参考图。一致性批量靠它验证「第 2 张起真的带了基准图」 */
@@ -168,13 +168,20 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
   let maxInflight = 0;
   let chatCalls = 0;
   const videoRequests: unknown[] = [];
+  const videoUploads: Buffer[] = [];
   let videoReady = false;
 
   const mock = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     req.on("end", () => {
-      const body = Buffer.concat(chunks).toString("utf8");
+      const bytes = Buffer.concat(chunks);
+      const body = bytes.toString("utf8");
+      if (req.url === "/reference-upload") {
+        videoUploads.push(bytes);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ url: `https://files.example.com/original-${videoUploads.length}.mp4` }));
+        return;
+      }
       if (req.url === "/api/v3/contents/generations/tasks") {
         videoRequests.push(JSON.parse(body));
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ id: "video-1" }));
@@ -267,6 +274,7 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
     await request(app).post("/api/channels").send({
       name: "Video", baseUrl: base, adapterType: "seedance-video", authType: "none",
       authHeaderName: "", secretEnv: "", endpoint: "/api/v3/contents/generations/tasks",
+      ...(options.videoUpload ? { uploadEndpoint: `${base}/reference-upload` } : {}),
       models: ["sd-2.5"], allowPrivateNetwork: true, enabled: true,
     }).expect(201);
   }
@@ -284,7 +292,7 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
       context.agent.recoverStaleConversations();
     },
     imagePrompts, chatRequests,
-    imageRequests, videoRequests,
+    imageRequests, videoRequests, videoUploads,
     completeVideo: () => { videoReady = true; },
     getMaxInflight: () => maxInflight,
     getChatCalls: () => chatCalls,
@@ -295,7 +303,7 @@ type ToolRow = {
   id: string;
   role: string; content: string | null; toolName: string | null; toolArgs: Record<string, unknown> | null;
   toolResult: { ok: boolean; assetId?: string; data?: Record<string, unknown> } | null; assetId: string | null;
-  confirm: { reason: string; count?: number; model: string; message: string } | null;
+  confirm: ConfirmPreview | null;
 };
 type View = {
   status: string;
@@ -685,6 +693,80 @@ it.each(["正常完成", "期间发送新消息", "收尾前重启", "切换仅�
   const result = mock.chatRequests[1]?.messages.find(message => message.tool_call_id === "native-video-1");
   if (newMessage || changedScope) expect(result).toBeUndefined();
   else expect(JSON.parse(result?.content ?? "{}").assetIds).toHaveLength(1);
+}, 15_000);
+
+it.each(["native", "legacy", "cancel", "no upload", "too long", "changed channel"])("对话只上传确认卡列出的原视频（%s）", async (scenario) => {
+  const native = scenario !== "legacy";
+  const videoArgs = { prompt: "镜头沿用参考视频的动作", mode: "reference", videoRefs: [] as string[] };
+  const tool = { name: "generate_video", arguments: "" };
+  const mock = await startMock(native ? [
+    { content: "", tool_calls: [{ id: "native-reference-video", type: "function", function: tool }] },
+    { content: "已处理视频请求。" },
+  ] : [{ tool: "generate_video", args: videoArgs }, { tool: "reply", args: { text: "已处理视频请求。" } }],
+  { native, video: true, videoUpload: scenario !== "no upload" });
+  const base = `/api/conversations/${mock.conversationId}`;
+  await request(mock.app).patch(base).send(native
+    ? { toolScope: "all", videoConfirmPolicy: "never" }
+    : { videoConfirmPolicy: "never" }).expect(200);
+
+  const clip = (durationMs: number) => {
+    const data = Buffer.from("000000106674797069736f6d00000000000000246d6f6f760000001c6d7668640000000000000000000000000000000000000000", "hex");
+    data.writeUInt32BE(1000, 44);
+    data.writeUInt32BE(durationMs, 48);
+    return data;
+  };
+  const chosen = clip(scenario === "too long" ? 16000 : 4250);
+  const other = clip(5740);
+  const { mediaAssets } = (await request(mock.app).post(`${base}/media`)
+    .attach("files", chosen, { filename: "chosen.mp4", contentType: "video/mp4" })
+    .attach("files", other, { filename: "other.mp4", contentType: "video/mp4" }).expect(201)).body.data;
+  const chosenId = mediaAssets[0].asset.id as string;
+  videoArgs.videoRefs = [chosenId.slice(0, 8)];
+  tool.arguments = JSON.stringify(videoArgs);
+  await request(mock.app).post(`${base}/messages`).send({ text: "用 chosen.mp4 作为参考生成" }).expect(202);
+  expect(mock.videoRequests).toEqual([]);
+  if (scenario === "no upload" || scenario === "too long") {
+    await settle(mock.app, mock.conversationId, (item) => item.status === "idle");
+    expect(JSON.stringify(mock.chatRequests)).toContain(scenario === "no upload" ? "未配置素材上传服务" : "视频时长需为 1–15 秒");
+    expect(mock.videoUploads).toEqual([]);
+    return;
+  }
+  const awaiting = await settle(mock.app, mock.conversationId, (item) => item.status === "awaiting_confirmation");
+  const card = awaiting.messages.find((row) => row.confirm)!;
+  expect(card.toolArgs).toMatchObject({ mode: "reference", videoRefs: [chosenId] });
+  expect(card.confirm?.videoInputs).toEqual([{ assetId: chosenId, role: "reference_video", fileName: "chosen.mp4", duration: 4.25 }]);
+  const input = mock.chatRequests[0]!;
+  expect(input.tools?.some((item) => item.function.name === "generate_video") ?? !native).toBe(true);
+  expect(input.messages.some(({ content }) => typeof content === "string" && content.includes(chosenId) && content.includes('"attachedThisTurn":true'))).toBe(true);
+  expect(mock.videoUploads).toEqual([]);
+  expect(mock.videoRequests).toEqual([]);
+  if (scenario === "changed channel") {
+    const channel = mock.context.db.listChannels().find((item) => item.adapterType === "seedance-video")!;
+    mock.context.db.saveChannel({ ...channel, uploadEndpoint: `${channel.baseUrl}/new-upload` }, channel.id);
+    await request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve" }).expect(409);
+    expect(mock.videoUploads).toEqual([]);
+    expect(mock.videoRequests).toEqual([]);
+    return;
+  }
+  await request(mock.app).post(`${base}/confirm`).send({
+    messageId: card.id, decision: scenario === "cancel" ? "reject" : "approve",
+    args: { videoRefs: [mediaAssets[1].asset.id], duration: 6 },
+  }).expect(200);
+  if (scenario === "cancel") {
+    await settle(mock.app, mock.conversationId, (item) => item.status === "idle");
+    expect(mock.videoUploads).toEqual([]);
+    expect(mock.videoRequests).toEqual([]);
+    return;
+  }
+  mock.completeVideo();
+  await settle(mock.app, mock.conversationId, (item) => item.status === "idle" && item.messages.some((row) => row.toolName === "generate_video" && row.assetId));
+  expect(mock.videoUploads).toHaveLength(1);
+  expect(mock.videoUploads[0]!.includes(chosen)).toBe(true);
+  expect(mock.videoUploads[0]!.includes(other)).toBe(false);
+  expect(mock.videoRequests).toEqual([expect.objectContaining({
+    duration: 6,
+    content: expect.arrayContaining([{ type: "video_url", video_url: { url: "https://files.example.com/original-1.mp4" }, role: "reference_video" }]),
+  })]);
 }, 15_000);
 
 it("统一助手按渠道开启新会话，旧会话保留入口，仅对话不执行渠道返回的工具", async () => {

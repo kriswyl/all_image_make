@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Eraser, LoaderCircle, Paintbrush, RotateCcw, X } from "lucide-react";
+import { AlertCircle, Eraser, Paintbrush, RotateCcw, X } from "lucide-react";
 import { MAX_MASK_IMAGE_BYTES } from "../shared/types";
 
 /** 涂抹层的显示色：只影响界面，导出的蒙版只看 alpha */
@@ -284,14 +285,14 @@ export function MaskEditorDialog(props: {
               onPointerUp={finishStroke}
               onPointerCancel={finishStroke}
             />
-            {loading ? <span className="mask-stage-status"><LoaderCircle className="spin" size={18} />读取图片…</span> : null}
+            {loading ? <span className="mask-stage-status"><LoadingIndicator variant="dots" size={24} />读取图片…</span> : null}
           </div>
           {error ? <div className="form-error"><AlertCircle size={15} />{error}</div> : null}
         </div>
         <div className="modal-footer">
           <button type="button" className="secondary-button" onClick={props.onClose}>取消</button>
           <button type="button" className="primary-button" onClick={() => void apply()} disabled={loading || exporting}>
-            {exporting ? <LoaderCircle className="spin" size={16} /> : <Paintbrush size={16} />}应用蒙版
+            {exporting ? <LoadingIndicator variant="dots" size={24} /> : <Paintbrush size={16} />}应用蒙版
           </button>
         </div>
       </div>

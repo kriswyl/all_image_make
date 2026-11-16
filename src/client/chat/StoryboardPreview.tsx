@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Download, Film, LoaderCircle, Pause, Play, X } from "lucide-react";
+import { Download, Film, Pause, Play, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import type { StoryboardPreviewBoard, StoryboardProjectData } from "../../shared/storyboard-project";
 
@@ -90,13 +91,13 @@ export function StoryboardPreview({ id, data, onClose }: { id: string; data: Sto
 
   return createPortal(<div className="story-reference-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="story-preview-dialog" role="dialog" aria-modal="true" aria-label="分镜粗剪预览">
     <header><div><strong>分镜粗剪预览</strong><small>按镜头预估时长播放，供检查节奏；不是成片或精确混音。同画布重复导入时使用最新节点。</small></div><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={16} /></button></header>
-    {loading ? <p><LoaderCircle size={14} className="spin" /> 正在读取画布…</p> : <label>画布 <select value={boardId} onChange={(e) => { setPlaying(false); setBoardId(e.target.value); }}><option value="">仅预览分镜文字</option>{boards.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
+    {loading ? <p><LoadingIndicator variant="dots" size={24} /> 正在读取画布…</p> : <label>画布 <select value={boardId} onChange={(e) => { setPlaying(false); setBoardId(e.target.value); }}><option value="">仅预览分镜文字</option>{boards.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
     <div className="story-preview-stage" key={`${boardId}-${shot?.id}`}>{media?.video ? <video ref={mediaRef} src={api.assetUrl(media.video.url)} controls muted={Boolean(media.audio)} playsInline /> : media?.image ? <img src={api.assetUrl(media.image.url)} alt={`第 ${index + 1} 镜`} /> : <div>第 {index + 1} 镜尚无画面<br /><small>{shot?.prompt}</small></div>}
       {playing && media?.audio ? <audio src={api.assetUrl(media.audio.url)} autoPlay /> : null}</div>
     <div className="story-preview-details"><strong>第 {index + 1} / {data.shots.length} 镜 · {shot?.duration} 秒</strong><span>{shot?.dialogue || shot?.videoPrompt || shot?.prompt}</span></div>
     <div className="story-preview-strip">{data.shots.map((item, i) => { const frame = board?.shots.find((entry) => entry.shotId === item.id); return <button type="button" key={item.id} className={i === index ? "active" : ""} onClick={() => { setPlaying(false); setIndex(i); }}>{frame?.image ? <img src={api.assetUrl(frame.image.thumbUrl || frame.image.url)} alt="" /> : null}<span>第 {i + 1} 镜<br />{item.duration} 秒</span></button>; })}</div>
     {error ? <p role="alert" className="story-review-error">{error}</p> : null}
-    <footer><button type="button" className="secondary-button" onClick={() => { if (!playing && index === data.shots.length - 1) setIndex(0); setPlaying(!playing); }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button><span>总计 {data.shots.reduce((sum, item) => sum + item.duration, 0).toFixed(1)} 秒</span><button type="button" className="secondary-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表及素材清单</button><button type="button" className="secondary-button" disabled={exporting || !board} onClick={() => void exportDraft()}>{exporting ? <LoaderCircle size={15} className="spin" /> : <Film size={15} />}导出剪映草稿</button></footer>
+    <footer><button type="button" className="secondary-button" onClick={() => { if (!playing && index === data.shots.length - 1) setIndex(0); setPlaying(!playing); }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button><span>总计 {data.shots.reduce((sum, item) => sum + item.duration, 0).toFixed(1)} 秒</span><button type="button" className="secondary-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表及素材清单</button><button type="button" className="secondary-button" disabled={exporting || !board} onClick={() => void exportDraft()}>{exporting ? <LoadingIndicator variant="dots" size={24} /> : <Film size={15} />}导出剪映草稿</button></footer>
     {draftNote ? <p className="story-preview-note">{draftNote}</p> : null}
   </section></div>, document.body);
 }

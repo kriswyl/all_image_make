@@ -54,7 +54,7 @@ export function mergeConfirmArgs(
 }
 
 /**
- * 确认时把卡片上显示的选图结果写回参数。
+ * 确认时把卡片上显示的素材写回参数。
  *
  * 新卡片有 `videoInputs`，直接照抄；升级前的卡片只有 `referenceAssetId`，
  * 按「画布主图当首帧」补成 `imageRefs`，不要让老卡片点不下去。
@@ -63,9 +63,18 @@ export function withConfirmedVideoSelection(
   args: Record<string, unknown>,
   preview: ConfirmPreview | null,
 ): Record<string, unknown> {
-  if (!preview || (preview.reason !== "video_policy")) return args;
+  if (!preview || (preview.reason !== "video_policy" && !preview.videoUploadTarget)) return args;
   const hasRefs = Array.isArray(args.imageRefs) && args.imageRefs.length > 0;
   if (preview.videoInputs?.length) {
+    const videos = preview.videoInputs.filter((item) => item.role === "reference_video");
+    if (videos.length) {
+      return {
+        ...args,
+        mode: "reference",
+        imageRefs: preview.videoInputs.filter((item) => item.role !== "reference_video").map((item) => item.assetId),
+        videoRefs: videos.map((item) => item.assetId),
+      };
+    }
     if (hasRefs) return args;
     return {
       ...args,
@@ -104,9 +113,15 @@ export function buildConfirmPreview(
   const aliasResolution = resolveAlias(aliases, asString(args.modelHint), kind, defaultAlias);
   const channel = aliasResolution ? db.getChannel(aliasResolution.channelId) : null;
   const canvasImages = db.canvasImages(conversation);
-  // 视频卡片按**真正选中的那几张**渲染
+  // 视频卡片按实际提交的素材渲染。
   const videoInputs: ConfirmVideoInput[] | undefined = isVideo && selection
-    ? selection.assets.map((asset, index) => ({ assetId: asset.id, role: selection.roles[index]! }))
+    ? [
+      ...selection.assets.map((asset, index) => ({ assetId: asset.id, role: selection.roles[index]! })),
+      ...(selection.videos ?? []).map((asset) => ({
+        assetId: asset.id, role: "reference_video" as const, fileName: asset.title || asset.fileName,
+        ...(asset.duration != null ? { duration: asset.duration } : {}),
+      })),
+    ]
     : undefined;
   const imageUsesCanvas = !isVideo && !isMusic && Boolean(canvasImages[0]) && args.fromScratch !== true;
   const mode = isVideo && selection ? selection.mode : asString(args.mode);
@@ -146,6 +161,7 @@ export function buildConfirmPreview(
       };
     })() : {}),
     ...(videoInputs !== undefined ? { videoInputs } : {}),
+    ...(channel && selection?.videos?.length ? { videoUploadTarget: { channelId: channel.id, channelVersion: channel.updatedAt } } : {}),
     ...(videoInputs?.length
       ? { referenceAssetId: videoInputs[0]!.assetId, referenceCount: videoInputs.length }
       : imageUsesCanvas

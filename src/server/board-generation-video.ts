@@ -1,6 +1,7 @@
+import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, type BoardDoc, type BoardNode, type BoardVideoMode, type ConfigBoardNode, type VideoBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, directInputLinks, type BoardDoc, type BoardNode, type BoardVideoMode, type ConfigBoardNode, type VideoBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
 import { prepareImageBytes, videoInlineProfile } from "./vision.js";
@@ -58,6 +59,7 @@ export async function generateBoardVideo(input: {
     config,
     adapterType: channel.adapterType,
     model: resolution.model,
+    localVideoUploadConfigured: Boolean(channel.uploadEndpoint?.trim()),
     modeOverride: input.overrides?.videoMode,
   });
   if (!resolved.selection) {
@@ -69,7 +71,10 @@ export async function generateBoardVideo(input: {
   const generation: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
-    prompt: input.prompt,
+    prompt: resolveBoardMentions(input.prompt, [
+      ...selection.inputs.map(({ node }) => node),
+      ...directInputLinks(board.doc, config.id).map(({ node }) => node).filter((node) => node.type === "video" || node.type === "audio"),
+    ]),
     duration: input.overrides?.durationSeconds ?? config.durationSeconds ?? defaults.duration,
     resolution: input.overrides?.resolution ?? config.resolution ?? defaults.resolution,
     audio: input.overrides?.audio ?? config.audio ?? defaults.audio,
@@ -135,8 +140,8 @@ export async function generateBoardVideo(input: {
     generation.aspectRatio = generation.aspectRatio ?? "16:9";
   }
 
-  const referenceVideoUpload = await appendBoardMediaInputs(db, channel, board.doc, config.id, generation);
-  const task = await runner.create({ ...generation, referenceVideoUpload }, uploads);
+  const referenceVideoUploads = await appendBoardMediaInputs(db, channel, board.doc, config.id, generation);
+  const task = await runner.create({ ...generation, referenceVideoUploads }, uploads);
 
   const at = now();
   const allocated = allocateNodeRef(board.doc);
@@ -201,7 +206,7 @@ export async function generateBoardVideo(input: {
     resultNodeIds: [resultNode.id],
     configNodeId: config.id,
     prompt: input.prompt,
-    referenceCount: selection.inputs.length,
+    referenceCount: selection.inputs.length + referenceVideoUploads.length,
     modelAlias: resolution.alias,
   };
 }

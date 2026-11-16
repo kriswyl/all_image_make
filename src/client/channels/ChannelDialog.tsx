@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, LoaderCircle, Server, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Server, X } from "lucide-react";
 import { api } from "../api";
 import { VECTORENGINE_KEY_ENV, VECTORENGINE_KEY_PLACEHOLDER } from "../../shared/app-config";
 import { adapterDefaultEndpoint } from "../../shared/provider-presets";
@@ -56,7 +57,7 @@ export function ChannelDialog({ channel, onClose, onSaved }: { channel: Channel 
           <div className="toggle-row"><Toggle checked={form.enabled} onChange={(value) => update("enabled", value)} label="启用渠道" /><Toggle checked={form.allowPrivateNetwork} onChange={(value) => update("allowPrivateNetwork", value)} label="允许本地/内网地址" /></div>
           {saveError ? <div className="form-error" role="alert"><AlertCircle size={16} />{saveError}</div> : null}
         </div>
-        <div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}保存</button></div>
+        <div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? <LoadingIndicator variant="dots" size={24} /> : <CheckCircle2 size={17} />}保存</button></div>
       </form>
     </div>
   );

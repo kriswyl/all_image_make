@@ -41,6 +41,7 @@ export interface VideoMentionPanelProps {
   items: MentionItem[];
   /** 生图只使用图片时可省略媒体类型页签。 */
   imagesOnly?: boolean;
+  consumeEscape?: boolean;
   /** 当前模式下可上传的素材类型；没传就只显示列表 */
   uploads?: MentionUpload[];
   onUpload?: (kind: MentionUpload["kind"]) => void;
@@ -48,13 +49,13 @@ export interface VideoMentionPanelProps {
   onSelect: (label: string) => void;
 }
 
-export function VideoMentionPanel({ open, anchor, items, imagesOnly = false, uploads = [], onUpload, onClose, onSelect }: VideoMentionPanelProps) {
+export function VideoMentionPanel({ open, anchor, items, imagesOnly = false, consumeEscape = false, uploads = [], onUpload, onClose, onSelect }: VideoMentionPanelProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<Tab>("全部");
   // 跟着光标时左缘贴光标（面板朝右下展开）；挂在按钮上时右对齐，收进窗口
   const caretAnchored = Boolean(anchor && !("getBoundingClientRect" in anchor));
   const style = useAnchoredPanelStyle(open, anchor, 280, 400, caretAnchored ? "start" : "end");
-  usePanelDismiss(open, onClose, panelRef, anchor && "getBoundingClientRect" in anchor ? anchor : null);
+  usePanelDismiss(open, onClose, panelRef, anchor && "getBoundingClientRect" in anchor ? anchor : null, consumeEscape);
 
   // 每次打开都回到「全部」，不继承上一次的筛选
   useEffect(() => { if (open) setTab("全部"); }, [open]);
@@ -91,6 +92,7 @@ export function VideoMentionPanel({ open, anchor, items, imagesOnly = false, upl
               key={item.label}
               type="button"
               className="vstudio-mention-item"
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => onSelect(item.label)}
             >
               <span className="vstudio-mention-thumb">

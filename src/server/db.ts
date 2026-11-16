@@ -376,13 +376,32 @@ export class AppDatabase {
       this.db.prepare("DELETE FROM assets WHERE id = ?").run(assetId);
     }
 
-    const at = now();
     // 一个任务出了多张图时，消息原来锚在删掉的那张上；改锚到同任务剩下的图，
     // 否则「会话素材」会把同一任务的其余产物一起藏掉
     const fallbackRow = taskRemoved ? undefined : this.db.prepare(
       "SELECT id FROM assets WHERE task_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
     ).get(taskId) as DbRow | undefined;
     const fallbackAssetId = fallbackRow?.id == null ? null : String(fallbackRow.id);
+    this.detachAssetReferences(conversationId, assetId, taskId, taskRemoved, fallbackAssetId);
+    return { files, inputs, taskRemoved };
+  }
+
+  /**
+   * 把一张图从某个会话里的所有引用位置摘掉。
+   *
+   * 消息锚点、画布首尾帧、分镜首帧 / 尾帧 / 参考图、角色场景设定图、分镜任务指针，
+   * 任何一处漏了，界面就会去请求已经删掉的图，或者留下一个永远「生成中」的镜头。
+   * 素材库删图（deleteConversationAsset）和素材管理删聊天记录
+   * （detachTaskFromConversations）共用这一份逻辑。
+   */
+  private detachAssetReferences(
+    conversationId: string,
+    assetId: string,
+    taskId: string,
+    taskRemoved: boolean,
+    fallbackAssetId: string | null,
+  ) {
+    const at = now();
     // 消息：主图 / 附带图 / 工具结果里的 taskId 都要断干净，否则前端会去请求已删的缩略图
     const messages = this.db.prepare(
       "SELECT id, asset_id, asset_refs, task_id, tool_result_json FROM messages WHERE conversation_id = ?",
@@ -501,7 +520,76 @@ export class AppDatabase {
       "UPDATE conversations SET storyboard_reference_asset_id = NULL, storyboard_reference_mode = 'auto' WHERE id = ? AND storyboard_reference_asset_id = ?",
     ).run(conversationId, assetId);
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, conversationId);
-    return { files, inputs, taskRemoved };
+  }
+
+  /**
+   * 把一个任务从所有对话里摘干净，供「素材管理直接删聊天生成记录」用。
+   *
+   * 和 deleteConversationAsset 的区别：这边是整条任务走人（可能带多张产物），
+   * 而且要跨会话扫——同一张图可能被别的对话当参考图引用过。
+   * 摘完引用再删任务，界面不会留下裂图和永远「生成中」的镜头。
+   */
+  detachTaskFromConversations(taskId: string): string[] {
+    const assetIds = this.listAssets(taskId).map((asset) => asset.id);
+    const conversations = new Set<string>();
+    const collect = (rows: DbRow[], key: string) => {
+      for (const row of rows) if (row[key] != null) conversations.add(String(row[key]));
+    };
+
+    collect(this.db.prepare("SELECT DISTINCT conversation_id FROM messages WHERE task_id = ?").all(taskId) as DbRow[], "conversation_id");
+    collect(this.db.prepare(
+      "SELECT DISTINCT conversation_id FROM conversation_shots WHERE task_id = ? OR video_task_id = ? OR voice_task_id = ?",
+    ).all(taskId, taskId, taskId) as DbRow[], "conversation_id");
+    collect(this.db.prepare(
+      "SELECT DISTINCT conversation_id FROM conversation_characters WHERE task_id = ? UNION SELECT conversation_id FROM conversation_scenes WHERE task_id = ?",
+    ).all(taskId, taskId) as DbRow[], "conversation_id");
+    for (const assetId of assetIds) {
+      collect(this.db.prepare(
+        "SELECT DISTINCT conversation_id FROM messages WHERE asset_id = ? OR asset_refs LIKE ?",
+      ).all(assetId, `%${assetId}%`) as DbRow[], "conversation_id");
+      collect(this.db.prepare(
+        "SELECT id FROM conversations WHERE current_asset_id = ? OR storyboard_reference_asset_id = ? OR canvas_asset_ids LIKE ?",
+      ).all(assetId, assetId, `%${assetId}%`) as DbRow[], "id");
+      collect(this.db.prepare(
+        "SELECT DISTINCT conversation_id FROM conversation_shots WHERE first_frame_asset_id = ? OR last_frame_asset_id = ? OR reference_asset_ids LIKE ?",
+      ).all(assetId, assetId, `%${assetId}%`) as DbRow[], "conversation_id");
+      collect(this.db.prepare(
+        "SELECT DISTINCT conversation_id FROM conversation_characters WHERE asset_id = ? UNION SELECT conversation_id FROM conversation_scenes WHERE asset_id = ?",
+      ).all(assetId, assetId) as DbRow[], "conversation_id");
+    }
+
+    for (const conversationId of conversations) {
+      for (const assetId of assetIds) {
+        // taskRemoved=true：整条任务都没了，消息和分镜里的 taskId 指针也要断
+        this.detachAssetReferences(conversationId, assetId, taskId, true, null);
+      }
+    }
+    // 没有产物（失败任务）时上面一轮不会跑，消息里的 taskId 还得单独清
+    this.detachTaskIdFromMessages(taskId);
+    return [...conversations];
+  }
+
+  /** 消息里的 taskId / 工具结果里的 taskId 指向一个不存在的任务时，前端会一直等结果 */
+  private detachTaskIdFromMessages(taskId: string) {
+    const rows = this.db.prepare("SELECT id, tool_result_json FROM messages WHERE task_id = ?").all(taskId) as DbRow[];
+    const update = this.db.prepare("UPDATE messages SET task_id = ?, tool_result_json = ? WHERE id = ?");
+    for (const row of rows) {
+      const raw = row.tool_result_json == null ? null : String(row.tool_result_json);
+      let toolResultJson = raw;
+      if (raw) {
+        try {
+          const result = JSON.parse(raw) as Record<string, unknown>;
+          const data = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : null;
+          let changed = false;
+          if (result.taskId === taskId) { delete result.taskId; changed = true; }
+          if (data?.midjourneyTaskId === taskId) { delete data.midjourneyTaskId; changed = true; }
+          toolResultJson = changed ? JSON.stringify(result) : raw;
+        } catch {
+          // 非 JSON 的旧数据原样留着
+        }
+      }
+      update.run(null, toolResultJson, String(row.id));
+    }
   }
 
   /** 批量删除：清空历史走这条，避免前端逐条发请求 */

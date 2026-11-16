@@ -1238,18 +1238,97 @@ html[data-theme="dark"] .record-overlay.is-error { background: rgba(48, 20, 18, 
 
 /* ── 空状态 ──────────────────────────────────────────────────────────── */
 
+/* 不放示例视频：用一条空时间轴表达「等一段影像」。
+   时间码 + 刻度 + 一束极慢扫过的光，留白多、动效轻，克制但不像占位框 */
 .record-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 44px 16px;
-  border: 1px dashed var(--line-strong);
+  gap: 4px;
+  padding: 30px 20px 32px;
+  border: 1px solid var(--line);
   border-radius: var(--radius-panel);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(155, 201, 247, .07), transparent 62%),
+    var(--surface);
   color: var(--muted);
 }
-.record-empty strong { font-size: 13px; font-weight: 500; color: var(--ink-soft); }
-.record-empty span { font-size: 12px; }
+.record-empty-reel { display: grid; width: min(100%, 620px); margin-bottom: 18px; gap: 10px; }
+.record-empty-timecode {
+  justify-self: start;
+  color: var(--muted-soft);
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: .2em;
+}
+/* 时间码前面点一颗品牌渐变的小灯：静帧也有颜色，不像纯线框 */
+.record-empty-timecode::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 8px;
+  background: var(--brand-gradient);
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+.record-empty-timeline {
+  position: relative;
+  height: 14px;
+  /* 两端淡出：刻度不要硬碰边界，留一点呼吸 */
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+}
+.record-empty-timeline::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--line-strong);
+}
+.record-empty-ticks {
+  position: absolute;
+  inset-inline: 0;
+  top: calc(50% - 3px);
+  height: 6px;
+  background-image: repeating-linear-gradient(90deg, var(--line-strong) 0 1px, transparent 1px 28px);
+  opacity: .75;
+}
+/* 扫过的那一束光：宽度按轨道百分比走，translate 用自身宽度倍数，窗口缩放也不会跑偏 */
+.record-empty-sweep {
+  position: absolute;
+  top: calc(50% - 1.5px);
+  left: 0;
+  width: 26%;
+  height: 3px;
+  background: var(--spectrum-gradient);
+  border-radius: 2px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .10);
+  animation: record-sweep 9s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.record-empty-sweep::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  background: var(--ink);
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(155, 201, 247, .18);
+}
+@keyframes record-sweep {
+  0% { transform: translateX(-100%); opacity: 0; }
+  6% { opacity: 1; }
+  94% { opacity: 1; }
+  100% { transform: translateX(285%); opacity: 0; }
+}
+.record-empty strong { font-size: 13.5px; font-weight: 550; color: var(--ink); }
+.record-empty > span { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .record-empty-sweep { animation: none; transform: translateX(140%); opacity: .9; }
+}
 
 /* ── 记录菜单 ────────────────────────────────────────────────────────── */
 

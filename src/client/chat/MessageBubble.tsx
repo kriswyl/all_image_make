@@ -7,6 +7,7 @@ import type { ChatMessage } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
 import { api } from "../api";
 import { MindPptPreview } from "./MindPptPreview";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -269,7 +270,7 @@ export function StreamingBubble({ reasoning, content, plain = false }: { reasoni
     <div className="chat-row chat-row-assistant">
       {reasoning ? (
         <details className={`chat-reasoning ${content ? "" : "is-live"}`} open={!content}>
-          <summary>{content ? "思考过程" : <>思考中<span className="thinking-dots" aria-label="…"><i /><i /><i /></span></>}</summary>
+          <summary>{content ? "思考过程" : <>思考中 <LoadingIndicator variant="dots" size={42} /></>}</summary>
           <div ref={reasoningRef} className="chat-reasoning-body" onScroll={(event) => {
             const element = event.currentTarget;
             followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
@@ -283,8 +284,7 @@ export function StreamingBubble({ reasoning, content, plain = false }: { reasoni
         </div>
       ) : reasoning ? null : (
         <div className="chat-bubble chat-bubble-assistant">
-          <span className="chat-typing">正在思考…</span>
-          <span className="chat-caret" aria-hidden="true" />
+          <span className="chat-typing" role="status">等待回复 <LoadingIndicator variant="dots" size={42} /></span>
         </div>
       )}
     </div>

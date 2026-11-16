@@ -1,3 +1,4 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { ContextSummaryControl } from "../chat/ContextSummaryControl";
 /**
  * 无限画布的浮动 Agent。
@@ -8,7 +9,7 @@ import { ContextSummaryControl } from "../chat/ContextSummaryControl";
  * 面板可拖动、缩放、收起；位置和尺寸存进 boards.ui_state_json。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, LoaderCircle, Send, Square, X } from "lucide-react";
+import { Bot, Check, ChevronDown, Send, Square, X } from "lucide-react";
 import { api } from "../api";
 import { buildRows } from "../chat/rows";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "../chat/MessageBubble";
@@ -495,7 +496,7 @@ export function BoardAgentPanel({
             {running ? <span className="board-agent-running">工作中</span> : null}
           </div>
         </div>
-        {running || awaitingConfirmation ? <LoaderCircle size={13} className="spin board-agent-spin" /> : null}
+        {running ? <LoadingIndicator variant="dots" size={24} /> : null}
         <button
           type="button"
           className="board-agent-head-btn"
@@ -523,7 +524,7 @@ export function BoardAgentPanel({
 
       <div className="board-agent-thread" ref={threadRef}>
         {!view ? (
-          <div className="board-agent-empty"><LoaderCircle size={15} className="spin" />正在连接助手…</div>
+          <div className="board-agent-empty" role="status"><LoadingIndicator variant="spectrum" size={54} />正在连接助手…</div>
         ) : null}
         {view && !rows.length && !hasStream ? (
           <div className="board-agent-empty">
@@ -575,7 +576,7 @@ export function BoardAgentPanel({
         })}
 
         {hasStream ? <StreamingBubble reasoning={reasoning} content={draft} /> : null}
-        {batchProgress ? <div className="chat-note"><LoaderCircle className="spin" size={13} />{batchProgress}</div> : null}
+        {batchProgress ? <div className="chat-note"><LoadingIndicator variant="dots" size={24} />{batchProgress}</div> : null}
       </div>
 
       {view && !view.brainChannelId ? (

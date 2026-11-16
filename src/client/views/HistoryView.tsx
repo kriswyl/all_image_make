@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
-import { Download, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, LoaderCircle, Music, RefreshCw, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { Download, Eraser, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, Music, RefreshCw, Settings2, Trash2, Wand2, X } from "lucide-react";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "../board/CrossModeBridgeDialog";
 import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
@@ -102,7 +103,8 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const filteredAssets = filtered.flatMap((task) => task.assets.map((asset, index) => ({ task, asset, index })));
   const visibleAssets = filteredAssets.slice(0, visibleCount);
   const selectedTasks = records.filter((task) => selected.has(task.id));
-  const selectableRecords = visibleRecords.filter(task => task.historySource !== "chat");
+  // 聊天生成的记录也能勾选：删的时候会连带把对话里的引用摘掉（见 App.confirmClear）
+  const selectableRecords = visibleRecords;
   const allFilteredSelected = selectableRecords.length > 0 && selectableRecords.every(task => selected.has(task.id));
 
   // 列表刷新后，已经被删掉/过期的勾选要跟着清掉，否则「已选 N 条」和实际能删的对不上
@@ -149,6 +151,26 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
     }
   }
 
+  /**
+   * 清理失效记录：渠道早被删、产物文件也已经不在磁盘上的那些孤儿行。
+   *
+   * 先问条数再删，避免用户以为会清掉整个列表；服务端只挑「文件真的没了」的，
+   * 还能打开的记录一条都不动。
+   */
+  async function cleanStale() {
+    try {
+      const { count } = await api.staleTasks();
+      if (!count) { onToast("success", "没有失效记录"); return; }
+      if (!window.confirm(`发现 ${count} 条失效记录（渠道已删除、产物文件已丢失），清理后不可恢复。确定清理？`)) return;
+      const result = await api.cleanStaleTasks();
+      onToast("success", `已清理 ${result.deleted} 条失效记录`);
+      requestId.current++;
+      onRefresh();
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : "清理失效记录失败");
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-header">
@@ -163,6 +185,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             </div>
           ) : null}
           {mode === "records" ? <button className="secondary-button" title="清空对应类型的全部公共生成记录，不受搜索影响" onClick={() => void api.library().then((items) => onClear(filter, items.filter((task) => task.origin !== "upload" && (filter === "all" || taskKind(task, channels) === filter)))).catch((error) => onToast("error", error instanceof Error ? error.message : "加载记录失败"))}><Trash2 size={16} />清空记录</button> : null}
+          {mode === "records" ? <button className="secondary-button" title="清理「渠道已删除、产物文件也已丢失」的孤儿记录；还能显示的记录一条都不动" onClick={() => void cleanStale()}><Eraser size={16} />清理失效</button> : null}
           <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
           <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button>
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
@@ -182,7 +205,20 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         {visibleAssets.map(({task, asset, index}) => <div className="library-card-wrap" key={asset.id}><button type="button" className="library-card" onClick={() => { setPreviewIndex(index); setPreview(task); }}>
           <span className="library-card-media">{asset.mimeType.startsWith("video/") ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt="视频预览" /> : asset.mimeType.startsWith("audio/") ? asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" loading="lazy" /> : <Music size={32} /> : <img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</span>
           <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.historySource === "chat" ? "聊天生成" : task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
-        </button>{task.historySource !== "chat" ? <button type="button" className="library-card-delete" title="删除素材" aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
+        </button><button type="button" className="library-card-delete" title={task.historySource === "chat" ? "删除整条记录" : "删除素材"} aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
+          // 聊天生成的一张图归整条记录所有，单删图会被服务端拦下来（还被对话引用）；
+          // 这里按「删整条记录 + 摘掉对话引用」处理，确认文案要说清楚。
+          if (task.historySource === "chat") {
+            if (!window.confirm("这条素材来自对话，删除会移除整条生成记录，对话里对应的图也会一起消失。确定删除？")) return;
+            void api.deleteTask(task.id, false, true).then(() => {
+              requestId.current++;
+              setLoading(false);
+              setLibrary((items) => items.filter((item) => item.id !== task.id));
+              onRefresh();
+              onToast("success", "记录已删除");
+            }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除记录失败"));
+            return;
+          }
           if (!window.confirm("确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
           void api.deleteLibraryAsset(asset.id).then(() => {
             // 作废删除前开始的分页请求，避免旧结果把刚删掉的素材重新带回列表。
@@ -192,7 +228,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             onRefresh();
             onToast("success", "素材已删除");
           }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除素材失败"));
-        }}><Trash2 size={16} /></button> : null}</div>)}
+        }}><Trash2 size={16} /></button></div>)}
         {!loading && !filtered.some((task) => task.assets.length) && !loadError ? <div className="table-empty"><ImageIcon size={28} /><span>没有符合条件的素材</span></div> : null}
       </div> :
       <div className="data-table-wrap">
@@ -206,7 +242,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
             const first = task.assets[0];
             return (
               <tr key={task.id} className={selected.has(task.id) ? "selected" : ""}>
-                <td className="history-select">{task.historySource !== "chat" ? <input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /> : null}</td>
+                <td className="history-select"><input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleOne(task.id)} aria-label="勾选该记录" /></td>
                 <td>
                   <button type="button" className="history-thumb" title={task.assets.length ? "查看详情" : "暂无产物"} onClick={() => { if (task.assets.length) { setPreviewIndex(0); setPreview(task); } }}>
                     {first
@@ -226,7 +262,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
                 <td><StatusBadge status={task.status} /></td><td>{formatTime(task.createdAt)}</td>
                 <td><div className="table-actions">
                   <button className="icon-button" title="查看诊断" onClick={() => onDiagnostics(task)}><Eye size={16} /></button>
-                  {task.historySource !== "chat" ? <button className="icon-button danger" title="删除记录" onClick={() => onDelete(task)}><Trash2 size={16} /></button> : null}
+                  <button className="icon-button danger" title={task.historySource === "chat" ? "删除记录（对话里的这张图也会一起移除）" : "删除记录"} onClick={() => onDelete(task)}><Trash2 size={16} /></button>
                 </div></td>
               </tr>
             );
@@ -234,7 +270,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         </table>
         {!loading && !filteredRecords.length && !loadError ? <div className="table-empty"><History size={28} /><span>暂无生成记录</span></div> : null}
       </div>}
-      {loading ? <div className="table-empty"><LoaderCircle size={18} className="spin" /><span>加载中…</span></div> : null}
+      {loading ? <div className="table-empty" role="status"><LoadingIndicator variant="spectrum" /><span>加载中…</span></div> : null}
       {!loading && visibleCount < (mode === "assets" ? filteredAssets.length : filteredRecords.length) ? <button type="button" className="secondary-button" onClick={() => setVisibleCount((count) => count + 60)}>显示更多</button> : !loading && hasMore ? <button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button> : null}
       {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onUseMusicSource={onUseMusicSource} onToast={onToast} /> : null}
       {bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
@@ -298,7 +334,7 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
           <img src={api.assetUrl(asset.url)} alt="历史生成大图" />
         )}
         <div className="history-preview-bar">
-          <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}下载</button>
+          <button type="button" className="secondary-button" disabled={downloading} onClick={() => void download()}>{downloading ? <LoadingIndicator variant="dots" size={24} /> : <Download size={16} />}下载</button>
           {canUseMusicSource && onUseMusicSource ? (["cover", "mashup"] as const).map(mode => (
             <button key={mode} type="button" className="secondary-button" onClick={() => onUseMusicSource({ mode, task, asset })}>
               {mode === "cover" ? "翻唱" : "混音"}
@@ -332,10 +368,12 @@ function HistoryPreview({ task, initialIndex, channels, references, onClose, onS
  * 除了二次确认，还要问清楚磁盘上的图片视频删不删——以前是直接删，
  * 想留图的用户只能自己去素材目录翻。
  */
-export function ClearHistoryDialog({ mode, count, label, onClose, onConfirm }: {
+export function ClearHistoryDialog({ mode, count, label, hasChatRecords, onClose, onConfirm }: {
   mode: "task" | "selection" | "scope";
   count: number;
   label: string;
+  /** 选中里有聊天生成的记录：对话里的那张图会跟着消失，得先说清楚 */
+  hasChatRecords?: boolean;
   onClose: () => void;
   onConfirm: (keepFiles: boolean) => Promise<void>;
 }) {
@@ -360,6 +398,9 @@ export function ClearHistoryDialog({ mode, count, label, onClose, onConfirm }: {
         </div>
         <div className="modal-body">
           <p className="modal-lead">将删除 {count} 条{label}。删除记录不可恢复，请确认本地文件怎么处理。</p>
+          {hasChatRecords ? (
+            <p className="modal-note">其中包含聊天生成的记录：删除后，对话里对应的图片也会一起消失（消息、画布、分镜里的引用会同步摘掉）。</p>
+          ) : null}
           <div className="confirm-options" role="radiogroup" aria-label="本地文件处理方式">
             <label className={`confirm-option ${deleteFiles ? "selected" : ""}`}>
               <input type="radio" name="clear-files" checked={deleteFiles} onChange={() => setDeleteFiles(true)} />
@@ -380,7 +421,7 @@ export function ClearHistoryDialog({ mode, count, label, onClose, onConfirm }: {
         <div className="modal-footer">
           <button className="secondary-button" onClick={onClose} disabled={busy}>取消</button>
           <button className="primary-button danger" onClick={() => void confirm()} disabled={busy}>
-            {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+            {busy ? <LoadingIndicator variant="dots" size={24} /> : <Trash2 size={16} />}
             {scopeClear ? `清空 ${count} 条` : count === 1 ? "删除" : `删除 ${count} 条`}
           </button>
         </div>

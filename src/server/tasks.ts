@@ -169,16 +169,20 @@ export class TaskRunner {
     });
   }
 
-  async create({ referenceVideoUpload, referenceVideoUploads, referenceAudioUpload, referenceAudioUploads, ...input }: GenerationInput & {
+  async create({ referenceVideoUpload, referenceVideoUploads, referenceVideoUploadChannelVersion, referenceAudioUpload, referenceAudioUploads, ...input }: GenerationInput & {
     referenceVideoUpload?: ReferenceVideoUpload;
     /** 多段参考视频（Seedance）；单段入参仍然接受，画布与脚本还在用 */
     referenceVideoUploads?: ReferenceVideoUpload[];
+    referenceVideoUploadChannelVersion?: string;
     /** Seedance 参考音频；与参考视频一样，提交前才上传换 URL。 */
     referenceAudioUpload?: ReferenceMediaUpload;
     referenceAudioUploads?: ReferenceMediaUpload[];
   }, uploads: ReferenceImageUpload[] = [], maskUpload?: MaskImageUpload, libraryScope: "public" | "conversation" = "public", ownerConversationId?: string, agentOperationId?: string): Promise<Task> {
     const channel = this.db.getChannel(input.channelId);
     if (!channel || !channel.enabled) throw new AppError("CHANNEL_NOT_FOUND", "渠道不存在或未启用", 404);
+    if (referenceVideoUploadChannelVersion && channel.updatedAt !== referenceVideoUploadChannelVersion) {
+      throw new AppError("CONFIRMATION_STALE", "参考视频的渠道配置已改变，请重新发起并确认", 409);
+    }
     if (!channel.models.includes(input.model)) throw new AppError("MODEL_NOT_FOUND", "该模型不在渠道模型列表中", 400);
     const musicPromptOptional = channel.adapterType === "suno-music" && (input.musicMode === "sound" || input.musicMode === "mashup");
     if (!input.prompt.trim() && !musicPromptOptional) throw new AppError("INVALID_INPUT", "提示词不能为空", 400);
@@ -201,6 +205,7 @@ export class TaskRunner {
       videos: [...(referenceVideoUpload ? [referenceVideoUpload] : []), ...(referenceVideoUploads ?? [])],
       audios: [...(referenceAudioUpload ? [referenceAudioUpload] : []), ...(referenceAudioUploads ?? [])],
     });
+    if (referenceVideoUploadChannelVersion) stored.input.referenceVideoUploadChannelVersion = referenceVideoUploadChannelVersion;
     try {
       this.db.createTask({ id, channelId: channel.id, model: input.model, prompt: input.prompt, input: stored.input, libraryScope, ownerConversationId, agentOperationId });
     } catch (error) {
@@ -218,6 +223,9 @@ export class TaskRunner {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
       const stored = JSON.parse(task.inputJson) as StoredGenerationInput;
+      if (stored.referenceVideoUploadChannelVersion && channel.updatedAt !== stored.referenceVideoUploadChannelVersion) {
+        throw new AppError("CONFIRMATION_STALE", "参考视频的渠道配置已改变，请重新发起并确认", 409);
+      }
       const { input, videos: storedVideos, audios: storedAudios } = await this.inputFiles.restore(stored);
       const current = this.db.getTaskRow(taskId);
       if (!current || current.status === "cancelled") return;
@@ -250,7 +258,7 @@ export class TaskRunner {
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
       const result = await this.sendWithDiagnostic(taskId, prepared).catch(error => {
-        const hasExternalVideo = !stored.referenceVideo && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url"));
+        const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url"));
         if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
@@ -322,7 +330,9 @@ export class TaskRunner {
     const referenceAudioUploads = [];
     for (const file of storedAudios) referenceAudioUploads.push(await this.inputFiles.readReferenceAudio(file));
     const privateTask = task.libraryScope === "conversation" || (task.libraryScope === "legacy" && this.db.taskHasConversationReferences(task.id));
-    return this.create({ ...input, referenceVideoUploads, referenceAudioUploads }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
+    return this.create({
+      ...input, referenceVideoUploads, referenceAudioUploads, referenceVideoUploadChannelVersion: stored.referenceVideoUploadChannelVersion,
+    }, [], undefined, privateTask ? "conversation" : "public", task.ownerConversationId ?? undefined);
   }
 
   continuePolling(taskId: string): Task {

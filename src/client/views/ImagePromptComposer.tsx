@@ -1,6 +1,7 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ImagePlus, LoaderCircle, Maximize2, Minimize2, Paintbrush, X } from "lucide-react";
+import { ImagePlus, Maximize2, Minimize2, Paintbrush, X } from "lucide-react";
 import { MAX_REFERENCE_IMAGES } from "../../shared/types";
 import type { ReferenceController, ReferenceImageState } from "../app-shared";
 import { useFileDrop } from "../useFileDrop";
@@ -79,7 +80,7 @@ export function ImagePromptComposer({
           {!folded ? (
             <button type="button" className="image-reference-add" onClick={addImages} disabled={!canAdd}
               title="点击选择、拖入或 Ctrl+V 粘贴 · PNG / JPEG / WebP · 单张最大 20 MB">
-              {reading ? <LoaderCircle size={17} className="spin" /> : <ImagePlus size={17} />}
+              {reading ? <LoadingIndicator variant="dots" size={24} /> : <ImagePlus size={17} />}
               <span>{drop.active ? "松开添加" : "参考图"}</span>
             </button>
           ) : null}

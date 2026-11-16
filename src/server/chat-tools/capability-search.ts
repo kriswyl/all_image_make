@@ -49,6 +49,7 @@ export interface InitialToolContext {
   /** 这一轮用户原话；恢复轮传 null，由 checkpoint 的 activeTools 决定 */
   text: string | null;
   hasAttachments: boolean;
+  hasVideoAttachments?: boolean;
   hasDocuments: boolean;
   hasImages: boolean;
 }
@@ -65,7 +66,7 @@ export function initialToolGroups(context: InitialToolContext): Set<ChatToolGrou
   const text = context.text ?? "";
   if (context.hasDocuments || GROUP_HINTS.docs.test(text)) groups.add("docs");
   if (context.hasAttachments || context.hasImages || GROUP_HINTS.image.test(text)) groups.add("image");
-  if (GROUP_HINTS.video.test(text)) groups.add("video");
+  if (context.hasVideoAttachments || GROUP_HINTS.video.test(text)) groups.add("video");
   if (GROUP_HINTS.audio.test(text)) groups.add("audio");
   if (GROUP_HINTS.templates.test(text)) groups.add("templates");
   if (GROUP_HINTS.utility.test(text)) groups.add("utility");

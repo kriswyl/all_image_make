@@ -45,7 +45,7 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     const missing = links.filter((link) => (link.node.type === "image" || link.node.type === "video" || link.node.type === "audio") && !link.node.assetId);
     if (missing.length) errors.push(`上游素材未就绪：${missing.map((link) => link.node.ref).join("、")}`);
     const images = links.filter((link) => link.node.type === "image" && link.node.assetId);
-    if (images.length > BOARD_LIMITS.maxUpstreamImages) errors.push(`上游图片超过 ${BOARD_LIMITS.maxUpstreamImages} 张`);
+    if (kind === "image" && images.length > BOARD_LIMITS.maxUpstreamImages) errors.push(`上游图片超过 ${BOARD_LIMITS.maxUpstreamImages} 张`);
     if (kind === "audio" && links.some((link) => link.node.type !== "text")) errors.push("音频生成仅接受文本上游");
     const wanted = kind === "audio" ? node.audioKind === "music" ? "suno-music" : "gemini-tts" : "";
     const candidates = wanted ? aliases.filter((item) => item.adapterType === wanted) : aliases;
@@ -56,7 +56,7 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     const channel = resolved ? db.getChannel(resolved.channelId) : null;
     if (kind === "video" && resolved) {
       if (channel) {
-        const check = resolveBoardVideoSelection({ doc: board.doc, config: node, adapterType: channel.adapterType, model: resolved.model }); if (check.error) errors.push(check.error);
+        const check = resolveBoardVideoSelection({ doc: board.doc, config: node, adapterType: channel.adapterType, model: resolved.model, localVideoUploadConfigured: Boolean(channel.uploadEndpoint?.trim()) }); if (check.error) errors.push(check.error);
         const capability = VIDEO_CAPABILITIES[channel.adapterType as VideoAdapter];
         if (capability) {
           if (node.durationSeconds && (node.durationSeconds < capability.durations.min || node.durationSeconds > capability.durations.max || (capability.durations.fixed !== null && node.durationSeconds !== capability.durations.fixed))) errors.push(`视频时长不符合 ${capability.label} 的范围`);

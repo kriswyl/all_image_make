@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderCircle, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api } from "../api";
 import { historyReasonLabel, historyTime } from "./board-history";
 
@@ -69,7 +70,7 @@ export function BoardHistoryDrawer({
       </header>
       <div className="board-history-list">
         {historyLoading ? (
-          <p className="board-asset-empty"><LoaderCircle size={12} className="spin" />正在读取历史…</p>
+          <p className="board-asset-empty"><LoadingIndicator variant="dots" size={24} />正在读取历史…</p>
         ) : null}
         {!historyLoading && historyEntries.map((entry) => (
           <article key={entry.version} className={`board-history-row ${entry.current ? "is-current" : ""}`}>
@@ -88,7 +89,7 @@ export function BoardHistoryDrawer({
                 disabled={restoringVersion !== null}
                 onClick={() => void restoreHistory(entry.version)}
               >
-                {restoringVersion === entry.version ? <LoaderCircle size={11} className="spin" /> : null}
+                {restoringVersion === entry.version ? <LoadingIndicator variant="dots" size={24} /> : null}
                 恢复
               </button>
             )}

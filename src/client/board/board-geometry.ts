@@ -8,6 +8,13 @@ export function clampScale(value: number) {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
 }
 
+export interface ImageDimensions { width: number; height: number }
+
+export function fitBoardImageSize(bounds: ImageDimensions, image: ImageDimensions): ImageDimensions {
+  const scale = Math.min(bounds.width / image.width, bounds.height / image.height);
+  return { width: image.width * scale, height: image.height * scale };
+}
+
 export function edgePath(source: BoardNode, target: BoardNode): string {
   const sx = source.x + source.width;
   const sy = source.y + source.height / 2;

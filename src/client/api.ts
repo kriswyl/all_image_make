@@ -159,19 +159,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ customId, ...(label ? { label } : {}) }),
     }),
-  /** keepFiles：只删记录，磁盘上的图片视频留着 */
+  /** keepFiles：只删记录，磁盘上的图片视频留着；detach：聊天记录连带摘掉对话引用 */
   deleteLibraryAsset: (id: string) => request<{ deleted: boolean }>(`/api/assets/${id}`, { method: "DELETE" }),
-  deleteTask: (id: string, keepFiles = false) => request<{ deleted: true }>(`/api/generations/${id}${keepFiles ? "?keepFiles=1" : ""}`, { method: "DELETE" }),
+  deleteTask: (id: string, keepFiles = false, detach = false) => request<{ deleted: true }>(
+    `/api/generations/${id}?keepFiles=${keepFiles ? "1" : "0"}${detach ? "&detach=1" : ""}`,
+    { method: "DELETE" },
+  ),
   /** 一次请求清空一批记录，避免前端逐条 DELETE 排队 */
   clearTasks: (scope: ClearScope, keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
     `/api/generations?scope=${scope}&keepFiles=${keepFiles ? "1" : "0"}`,
     { method: "DELETE" },
   ),
   /** 只删勾选的那些记录：和清空历史同一个接口，用 ids 指定范围 */
-  deleteTasks: (ids: string[], keepFiles = false) => request<{ deleted: number; keepFiles: boolean }>(
+  deleteTasks: (ids: string[], keepFiles = false, detach = false) => request<{
+    deleted: number; skipped: number; skippedConversation: number; skippedShared: number; keepFiles: boolean;
+  }>(
     "/api/generations/batch-delete",
-    { method: "POST", body: JSON.stringify({ ids, keepFiles }) },
+    { method: "POST", body: JSON.stringify({ ids, keepFiles, detachConversation: detach }) },
   ),
+  /** 渠道已删 + 产物文件已丢失的孤儿记录条数 */
+  staleTasks: () => request<{ count: number }>("/api/generations/stale"),
+  /** 清掉这些孤儿记录（连悬空的对话引用一起摘） */
+  cleanStaleTasks: () => request<{ deleted: number; kept: number }>("/api/generations/stale", { method: "DELETE" }),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   settings: () => request<Settings>("/api/settings"),
   /** assetsDir 传空串表示恢复默认目录；默认模型 alias 传空串表示「不指定，用类目第一个」 */
@@ -220,6 +229,7 @@ export const api = {
       channelId: string;
       /** 音乐（suno-music）和语音（gemini-tts）同属 audio，靠它区分 */
       adapterType: string;
+      localVideoUploadConfigured?: boolean;
     }>;
   }>("/api/agent/capabilities"),
   /** 工作台的提示词润色：调用对话模型，只返回改写后的文本 */
@@ -480,6 +490,7 @@ export const api = {
   }) => request<{
     board: BoardView;
     task: Task | null;
+    taskIds?: string[];
     kind: "image" | "video" | "text" | "audio";
     resultNodeIds: string[];
     configNodeId: string;

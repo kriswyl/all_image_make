@@ -7,6 +7,7 @@ import { safeFileName } from "./security.js";
 import { validateReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
 import { audioExtension, extensionForMime, matchesImageSignature } from "./task-media.js";
 import { assertVideoModeRequest } from "./video-mode-guard.js";
+import { referenceMediaLimits, videoModeSpec } from "../shared/video-modes.js";
 
 interface StoredReferenceImage extends Omit<ReferenceImageInput, "base64"> {
   relativePath: string;
@@ -28,6 +29,8 @@ export interface StoredGenerationInput extends Omit<GenerationInput, "referenceI
   referenceVideo?: { relativePath: string; mimeType: string; fileName: string };
   /** Seedance 参考视频可以有多段（2.0 三段、2.5 十段） */
   referenceVideos?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
+  /** 对话确认时锁定的渠道配置版本。 */
+  referenceVideoUploadChannelVersion?: string;
   /** Seedance 参考音频：和图床视频一样先落盘，提交前再上传换公网地址。 */
   referenceAudio?: { relativePath: string; mimeType: string; fileName: string };
   referenceAudios?: Array<{ relativePath: string; mimeType: string; fileName: string }>;
@@ -86,13 +89,11 @@ export class TaskInputFiles {
     }
     if (videoUploads.length) {
       for (const upload of videoUploads) validateReferenceMedia(upload, "video");
-      const wanMode = input.wanVideoMode;
-      const wan = channel.adapterType === "wan-video" && (wanMode === "reference" || wanMode === "video-edit" || wanMode === "video-extend");
-      const kling = channel.adapterType === "kling-video" && input.klingVideoMode === "motion-control";
-      // Seedance 只有「参考生视频」模式接受参考视频；首帧/首尾帧是图片槽位，塞视频会被上游忽略。
-      const seedance = channel.adapterType === "seedance-video" && input.seedanceVideoMode === "reference";
-      if (!wan && !kling && !seedance) throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道或模式不支持本地参考视频", 400);
-      if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
+      const adapter = channel.adapterType;
+      const mode = adapter === "wan-video" ? input.wanVideoMode : adapter === "seedance-video" ? input.seedanceVideoMode : input.klingVideoMode;
+      const spec = videoModeSpec(adapter, input.model, mode);
+      if (!referenceMediaLimits(adapter, input.model, spec).videos) throw new AppError("REFERENCE_VIDEO_UNSUPPORTED", "当前渠道或模式不支持本地参考视频", 400);
+      if (!channel.uploadEndpoint?.trim()) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
       if (input.wanVideoMedia?.some((item) => item.type === "reference_video")
         || input.klingVideoMedia?.some((item) => item.type === "video")
         || input.seedanceVideoMedia?.some((item) => item.type === "video_url")) {
@@ -151,7 +152,7 @@ export class TaskInputFiles {
   }
 
   async restore(stored: StoredGenerationInput) {
-    const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, ...images } = stored;
+    const { referenceVideo, referenceVideos, referenceAudio, referenceAudios, referenceVideoUploadChannelVersion, ...images } = stored;
     const input = await this.hydrateInputImages(images);
     // 旧任务只有 referenceVideo / referenceAudio 单段字段，读的时候折算成数组
     const storedVideos = referenceVideos?.length ? referenceVideos : referenceVideo ? [referenceVideo] : [];

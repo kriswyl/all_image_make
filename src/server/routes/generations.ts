@@ -1,4 +1,6 @@
 import multer from "multer";
+import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { taskKindFor } from "../../shared/kinds.js";
 import { imageOutputFormatSchema, MAX_FRAME_COUNT, MAX_FRAME_DURATION_MS, MIN_FRAME_COUNT, MIN_FRAME_DURATION_MS } from "../../shared/image-formats.js";
@@ -180,6 +182,54 @@ const generationSchema = z.object({
   rawParameters: z.record(z.string(), z.unknown()).optional(),
 });
 
+/**
+ * 逐条判断一条记录能不能删，而不是一遇到引用就整批回滚。
+ *
+ * - 被分镜设定（storyboard project）当参考图的：跳过，得先去分镜里解绑
+ * - 被对话引用的（聊天生成的记录基本都是）：`detachConversation` 为真时先把
+ *   消息 / 画布 / 分镜里的引用摘干净再删，否则跳过
+ *
+ * 以前的实现是「有一条被引用就 409」，用户点清空会看到列表纹丝不动，
+ * 也说不清是哪一条挡住了。
+ */
+function runDeletion(db: AppDatabase, ids: string[], options: { keepFiles: boolean; detachConversation: boolean }) {
+  const removable: string[] = [];
+  const skippedConversation: string[] = [];
+  const skippedShared: string[] = [];
+  for (const id of ids) {
+    if (!db.getTaskRow(id)) continue;
+    if (db.taskHasStoryboardProjectReferences(id)) { skippedShared.push(id); continue; }
+    if (db.taskHasConversationReferences(id)) {
+      if (!options.detachConversation) { skippedConversation.push(id); continue; }
+      // 聊天记录在素材管理里被删时，对话那边也要跟着断开，否则留下裂图
+      db.detachTaskFromConversations(id);
+    }
+    for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
+    removable.push(id);
+  }
+  const removed = db.deleteTasks(removable, { keepFiles: options.keepFiles });
+  return { ...removed, skippedConversation, skippedShared };
+}
+
+/**
+ * 失效记录：渠道早被删掉，产物文件也已经不在磁盘上，界面只剩一张裂图。
+ *
+ * 严格限定「渠道已删 + 产物全丢（或压根没产物）」，不碰任何还能显示的记录；
+ * 被分镜设定引用的也跳过，交给人去解绑。
+ */
+function staleTaskIds(db: AppDatabase): string[] {
+  const channelIds = new Set(db.listChannels().map((channel) => channel.id));
+  return db.listAllTaskRows()
+    .filter((row) => row.origin === "generate")
+    .filter((row) => !channelIds.has(row.channelId))
+    .filter((row) => !db.taskHasStoryboardProjectReferences(row.id))
+    .filter((row) => {
+      const assets = db.listAssets(row.id);
+      return assets.length === 0 || assets.every((asset) => !fs.existsSync(path.resolve(asset.baseDir, asset.relativePath)));
+    })
+    .map((row) => row.id);
+}
+
 export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: TaskRunner, sessionKeys: KeyStore) {
   app.post("/api/generations/reference-video", referenceVideoUpload.single("file"), asyncHandler(async (req, res) => {
     if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到视频文件", 400);
@@ -264,14 +314,22 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
   });
 
   app.post("/api/generations/batch-delete", asyncHandler(async (req, res) => {
-    const input = z.object({ ids: z.array(z.string().min(1).max(80)).max(50000), keepFiles: z.boolean().default(false) }).parse(req.body);
+    const input = z.object({
+      ids: z.array(z.string().min(1).max(80)).max(50000),
+      keepFiles: z.boolean().default(false),
+      /** 素材管理里删聊天记录：连对话里的引用一起摘掉再删 */
+      detachConversation: z.boolean().default(false),
+    }).parse(req.body);
     const ids = [...new Set(input.ids)].filter((id) => db.getTaskRow(id));
-    if (ids.some((id) => db.taskHasStoryboardProjectReferences(id))) throw new AppError("ASSET_SHARED", "所选记录包含分镜设定正在使用的参考图，请先解除绑定。", 409);
-    if (ids.some((id) => db.taskHasConversationReferences(id))) throw new AppError("ASSET_SHARED", "所选记录中有素材仍被对话引用，请先解除引用后再删除。", 409);
-    for (const id of ids) for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
-    const removed = db.deleteTasks(ids, { keepFiles: input.keepFiles });
+    const removed = runDeletion(db, ids, { keepFiles: input.keepFiles, detachConversation: input.detachConversation });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
-    res.json(ok({ deleted: removed.deleted.length, keepFiles: input.keepFiles }));
+    res.json(ok({
+      deleted: removed.deleted.length,
+      skipped: removed.skippedConversation.length + removed.skippedShared.length,
+      skippedConversation: removed.skippedConversation.length,
+      skippedShared: removed.skippedShared.length,
+      keepFiles: input.keepFiles,
+    }));
   }));
 
   app.get("/api/generations", (req, res) => {
@@ -305,6 +363,22 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     req.on("close", close);
     req.on("error", close);
   });
+
+  /**
+   * 「清理失效记录」：渠道已删 + 产物文件已丢失的孤儿记录。
+   * 先让前端拿到条数做二次确认，再真正删。
+   */
+  app.get("/api/generations/stale", (_req, res) => {
+    res.json(ok({ count: staleTaskIds(db).length }));
+  });
+
+  app.delete("/api/generations/stale", asyncHandler(async (req, res) => {
+    const ids = staleTaskIds(db);
+    // 这些记录的图早就没了，对话里的引用只是悬空指针，摘掉不会丢任何东西
+    const removed = runDeletion(db, ids, { keepFiles: false, detachConversation: true });
+    await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
+    res.json(ok({ deleted: removed.deleted.length, kept: ids.length - removed.deleted.length }));
+  }));
 
   app.get("/api/generations/:id", (req, res) => {
     const task = db.getTaskView(routeParam(req.params.id));
@@ -381,13 +455,18 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     const id = routeParam(req.params.id);
     if (!db.getTaskRow(id)) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
     const keepFiles = req.query.keepFiles === "1";
+    // detach=1：素材管理里删聊天生成记录，连对话引用一起摘
+    const detach = req.query.detach === "1";
     if (db.taskHasStoryboardProjectReferences(id)) throw new AppError("ASSET_SHARED", "该记录包含分镜设定正在使用的参考图，请先解除绑定。", 409);
-    if (db.taskHasConversationReferences(id)) throw new AppError("ASSET_SHARED", "该记录仍被对话引用，请先解除引用，避免影响对话素材。", 409);
+    if (db.taskHasConversationReferences(id)) {
+      if (!detach) throw new AppError("ASSET_SHARED", "该记录仍被对话引用，请先解除引用，避免影响对话素材。", 409);
+      db.detachTaskFromConversations(id);
+    }
     // 无限画布节点也引用这份素材；先摘掉引用，再删任务和文件
     for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
     const removed = db.deleteTask(id, { keepFiles });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
-    res.json(ok({ deleted: true, keepFiles }));
+    res.json(ok({ deleted: true, keepFiles, detached: detach }));
   }));
 
   /**
@@ -401,6 +480,7 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
       ? req.query.scope
       : "all";
     const keepFiles = req.query.keepFiles === "1";
+    const detachConversation = req.query.detach === "1";
     const ids = String(req.query.ids ?? "").split(",").map((id) => id.trim()).filter(Boolean);
     let targets: string[];
     if (ids.length) {
@@ -411,13 +491,14 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
         .filter((row) => scope === "all" || db.taskKindRow(row, adapterByChannel) === scope)
         .map((row) => row.id);
     }
-    if (targets.some((id) => db.taskHasStoryboardProjectReferences(id))) throw new AppError("ASSET_SHARED", "所选记录包含分镜设定正在使用的参考图，请先解除绑定。", 409);
-    if (targets.some((id) => db.taskHasConversationReferences(id))) throw new AppError("ASSET_SHARED", "所选记录中有素材仍被对话引用，请先解除引用后再删除。", 409);
-    for (const id of targets) {
-      for (const asset of db.listAssets(id)) detachAssetFromBoards(db, asset.id);
-    }
-    const removed = db.deleteTasks(targets, { keepFiles });
+    const removed = runDeletion(db, targets, { keepFiles, detachConversation });
     await removeStoredFiles(removed.assets, removed.inputs, db.inputsDir);
-    res.json(ok({ deleted: removed.deleted.length, keepFiles }));
+    res.json(ok({
+      deleted: removed.deleted.length,
+      skipped: removed.skippedConversation.length + removed.skippedShared.length,
+      skippedConversation: removed.skippedConversation.length,
+      skippedShared: removed.skippedShared.length,
+      keepFiles,
+    }));
   }));
 }

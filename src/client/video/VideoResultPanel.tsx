@@ -2,13 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Eye, Film,
-  LoaderCircle,
   MoreHorizontal, Play, RotateCcw, SlidersHorizontal, Square, Trash2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { confirmGeneration } from "../generation-confirm";
 import { LazyVideoThumb } from "../LazyVideoThumb";
-import { statusLabels, terminalStatuses } from "../task-ui";
+import { GenerationActivity, statusLabels, terminalStatuses } from "../task-ui";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import type { Asset, Task } from "../../shared/types";
 import { snapshotSummaryLines } from "../../shared/video-snapshot";
 import { videoModeLabel } from "../../shared/video-modes";
@@ -346,7 +346,15 @@ export function VideoResultPanel({ task, tasks, hidden = false, onDiagnostics, o
           </div>
         ) : (
           <div className="record-empty">
-            <Film size={26} />
+            {/* 不放视频示例：用一条时间轴 + 时间码表达「等着被填满的胶片」，
+                动画只是极慢地扫过一束光，不做花哨效果 */}
+            <div className="record-empty-reel" aria-hidden="true">
+              <span className="record-empty-timecode">00:00:00:00</span>
+              <div className="record-empty-timeline">
+                <span className="record-empty-ticks" />
+                <span className="record-empty-sweep" />
+              </div>
+            </div>
             <strong>{tasks.length ? "这个状态下还没有视频" : "还没有创作记录"}</strong>
             <span>{tasks.length ? "换一个筛选看看" : "写下提示词，第一段视频就会出现在这里"}</span>
           </div>
@@ -380,7 +388,7 @@ export function VideoResultPanel({ task, tasks, hidden = false, onDiagnostics, o
           {menuTask.assets[0] ? (
             <button type="button" role="menuitem" disabled={downloadingAssetId === menuTask.assets[0].id}
               onClick={() => void download(menuTask.assets[0]!)}>
-              {downloadingAssetId === menuTask.assets[0].id ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}下载
+              {downloadingAssetId === menuTask.assets[0].id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={14} />}下载
             </button>
           ) : null}
           <button type="button" role="menuitem" onClick={() => void retry(menuTask)}>
@@ -446,13 +454,11 @@ function RecordCard(props: {
     <article className={`record-card ${props.active ? "is-active" : ""}`} role="listitem">
       <button type="button" className="record-thumb" onClick={props.onOpen} aria-label={`查看：${task.prompt || "未命名视频"}`}>
         {asset ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt={task.prompt} /> : <span className="record-thumb-empty"><Film size={20} /></span>}
-        <span className="record-play" aria-hidden="true">
-          {isRunning(task) ? <LoaderCircle className="spin" size={15} /> : <Play size={14} />}
-        </span>
+        {!isRunning(task) ? <span className="record-play" aria-hidden="true"><Play size={14} /></span> : null}
         {duration ? <span className="record-duration">{duration}</span> : null}
         {state.key === "running" ? (
           <span className="record-overlay">
-            <LoaderCircle className="spin" size={16} />
+            <GenerationActivity status={task.status} visual size={props.active ? 88 : 48} />
             <em>{task.progress != null ? `${Math.round(task.progress)}%` : state.label}</em>
           </span>
         ) : null}
@@ -534,11 +540,16 @@ function RecordDialog(props: {
 
         <div className={`record-dialog-stage ${state.key}`}>
           {state.key === "running" ? (
-            <div className="task-progress">
-              <LoaderCircle className="spin" size={28} />
+            <div className="task-progress" role="status">
+              <GenerationActivity status={task.status} visual />
               <strong>{state.label}</strong>
-              {task.progress != null ? <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div> : null}
-              <small>视频生成通常需要 1 到 10 分钟，可以先去写下一段</small>
+              {task.progress != null ? (
+                <div className="progress-line">
+                  <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div>
+                  <b>{Math.round(task.progress)}%</b>
+                </div>
+              ) : null}
+              {task.status === "running" ? <small>视频生成通常需要 1 到 10 分钟，可以先去写下一段</small> : null}
             </div>
           ) : asset ? (
             <video
@@ -588,7 +599,7 @@ function RecordDialog(props: {
         <footer className="record-dialog-actions">
           {asset ? (
             <button type="button" className="secondary-button" disabled={props.downloadingAssetId === asset.id} onClick={() => props.onDownload(asset)}>
-              {props.downloadingAssetId === asset.id ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}下载
+              {props.downloadingAssetId === asset.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={15} />}下载
             </button>
           ) : null}
           <button type="button" className="secondary-button" onClick={props.onRetry}>

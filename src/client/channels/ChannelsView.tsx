@@ -1,5 +1,6 @@
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, ChevronDown, LoaderCircle, Plus, QrCode, Server, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, ChevronDown, Plus, QrCode, Server, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { adapterLabels } from "../labels";
 import { channelKindOf, type Channel } from "../../shared/types";
@@ -116,7 +117,7 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
                   <td>
                     <span className={`channel-state ${channel.enabled ? "enabled" : ""}`}>{channel.enabled ? "启用" : "停用"}</span>
                   </td>
-                  <td><div className="table-actions"><button className="icon-button" title="测试连接" onClick={() => test(channel)} disabled={testing === channel.id}>{testing === channel.id ? <LoaderCircle className="spin" size={16} /> : <Activity size={16} />}</button><button className="icon-button" title="编辑渠道" onClick={() => onEdit(channel)}><Settings2 size={16} /></button><button className="icon-button danger" title="删除渠道" onClick={() => onDelete(channel)}><Trash2 size={16} /></button></div></td>
+                  <td><div className="table-actions"><button className="icon-button" title={testing === channel.id ? "正在测试连接" : "测试连接"} onClick={() => test(channel)} disabled={testing === channel.id}>{testing === channel.id ? <LoadingIndicator variant="spectrum" size={24} /> : <Activity size={16} />}</button><button className="icon-button" title="编辑渠道" onClick={() => onEdit(channel)}><Settings2 size={16} /></button><button className="icon-button danger" title="删除渠道" onClick={() => onDelete(channel)}><Trash2 size={16} /></button></div></td>
                 </tr>
                 {open ? (
                   <tr className="channel-models-row">

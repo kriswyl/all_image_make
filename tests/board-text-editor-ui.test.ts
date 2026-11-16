@@ -31,3 +31,30 @@ it("文本节点提供明确的编辑入口并能保存编辑后的内容", () =
   expect(commit).toHaveBeenCalledWith("修改后的文本");
   act(() => root.unmount()); container.remove();
 });
+
+it("图片节点显示原图分辨率，切换主图后更新分辨率", () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const onImageLoad = vi.fn();
+  const props = {
+    node: { id: "primary", ref: "n1", type: "image", title: "图片", naturalWidth: 1920, naturalHeight: 1080 },
+    asset: { id: "landscape", url: "/original.png", thumbUrl: "/thumb.jpg" },
+    editing: false, onImageLoad,
+  } as unknown as BoardNodeViewProps;
+  try {
+    act(() => root.render(React.createElement(BoardNodeView, props)));
+    const image = container.querySelector("img")!;
+    expect(image.src).toContain("/original.png");
+    Object.defineProperties(image, { naturalWidth: { value: 1920 }, naturalHeight: { value: 1080 } });
+    act(() => image.dispatchEvent(new Event("load")));
+    expect(onImageLoad).toHaveBeenCalledWith("landscape", 1920, 1080);
+    expect(container.querySelector(".board-image-resolution")?.textContent).toBe("1920 × 1080");
+    act(() => root.render(React.createElement(BoardNodeView, {
+      ...props, node: { ...props.node, naturalWidth: 1080, naturalHeight: 1920 } as BoardNodeViewProps["node"],
+      asset: { ...props.asset!, id: "portrait" },
+    })));
+    expect(container.querySelector(".board-image-resolution")?.textContent).toBe("1080 × 1920");
+  } finally {
+    act(() => root.unmount());
+  }
+});

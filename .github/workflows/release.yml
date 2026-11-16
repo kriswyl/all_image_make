@@ -22,10 +22,25 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
 
 jobs:
-  # ── macOS：仍然只出 dmg。这版不参与自动更新（ad-hoc 签名下自动替换
-  #    .app 会被 Gatekeeper 判成篡改），客户端只提示 + 跳下载页。
+  # ── macOS：两个架构各出一份 dmg（Intel Mac 装不了 arm64 包）。
+  #    这版不参与自动更新（ad-hoc 签名下自动替换 .app 会被 Gatekeeper 判成篡改），
+  #    客户端只提示 + 跳下载页。
   build-macos:
+    strategy:
+      # 一个架构失败不影响另一个：x64 的冒烟测试依赖 Rosetta，失败了也能拿到 arm64
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            dmg_arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
+            dmg_arch: x64
     runs-on: macos-latest
+    env:
+      TARGET: ${{ matrix.target }}
+      BUNDLE_DIR: src-tauri/target/${{ matrix.target }}/release/bundle/dmg
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,11 +55,16 @@ jobs:
           node-version: 24
           cache: npm
 
+      # 交叉编译 Intel 包需要额外装 x86_64 的 std，rustup 不会自带
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # 两个架构的编译产物不能共用一个缓存目录，否则会互相覆盖
+          key: ${{ matrix.target }}
 
       - name: Install dependencies
         run: npm ci
@@ -54,10 +74,18 @@ jobs:
       # 这版 macOS 不参与自动更新，因此显式关掉更新包产物：
       # 否则 createUpdaterArtifacts 会要求 macOS 构建也带 minisign 私钥，
       # 白白多出一份不会被使用的 .app.tar.gz。
-      - name: Build dmg
-        run: npx tauri build --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      # --target 会让 prepare-tauri.mjs 按目标架构准备 node sidecar（见 TAURI_ENV_TARGET_TRIPLE）。
+      - name: Build dmg (${{ matrix.arch }})
+        run: npx tauri build --target "$TARGET" --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
         env:
           APPLE_SIGNING_IDENTITY: "-"
+
+      # x64 的冒烟测试要在 arm64 runner 上跑 Intel 二进制，需要 Rosetta 2。
+      # GitHub 的 arm64 镜像默认装好了，这里只是兜底：装不上就跳过，不让它把
+      # arm64 的产物一起拖失败。
+      - name: Ensure Rosetta for x64 smoke test
+        if: matrix.arch == 'x64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license || echo "::warning::Rosetta 不可用，跳过 x64 冒烟测试"
 
       # 打印 .app/.dmg 实际布局，动态解析 .app 路径供后续步骤使用。
       # tauri v2 在 macOS 上把 sidecar 命名为不带 triple 的 node。
@@ -66,7 +94,7 @@ jobs:
       - name: Smoke test bundled backend (from dmg)
         run: |
           set -euo pipefail
-          DMG="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)"
+          DMG="$(find "$BUNDLE_DIR" -name '*.dmg' | head -1)"
           echo "dmg: $DMG"
           MOUNT="$(mktemp -d)"
           hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
@@ -87,6 +115,8 @@ jobs:
             NODE_BIN="$(find "$TEST_APP/Contents/MacOS" -name 'node*' -type f | head -1)"
           fi
           echo "node binary: $NODE_BIN"
+          echo "=== node arch ==="
+          file "$NODE_BIN"
           echo "=== node codesign flags ==="
           codesign -dvv "$NODE_BIN" 2>&1 | grep -E "Identifier=|CodeDirectory flags=" || true
           ENTITLEMENTS="$(codesign -d --entitlements :- "$NODE_BIN" 2>/dev/null || true)"
@@ -126,22 +156,22 @@ jobs:
           echo "SMOKE_FAILED: backend not healthy after 20s"
           exit 1
 
-      # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行
+      # 兜底重签后 .app 的签名已变，用它重打 dmg，保证上传的安装包可直接运行。
+      # 文件名必须按架构取：写死 aarch64 会让 x64 的包挂着一个错误的名字。
       - name: Repack dmg after re-sign
         if: env.RESIGNED == '1'
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          DMG_DIR="src-tauri/target/release/bundle/dmg"
-          rm -f "$DMG_DIR"/*.dmg
-          hdiutil create -volname "ezcanvas" -srcfolder "${FIXED_APP:?}" -ov -format UDZO "$DMG_DIR/ezcanvas_${VERSION}_aarch64.dmg"
-          ls -la "$DMG_DIR"
+          rm -f "$BUNDLE_DIR"/*.dmg
+          hdiutil create -volname "ezcanvas" -srcfolder "${FIXED_APP:?}" -ov -format UDZO "$BUNDLE_DIR/ezcanvas_${VERSION}_${{ matrix.dmg_arch }}.dmg"
+          ls -la "$BUNDLE_DIR"
 
       - name: Upload dmg artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64-dmg
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          name: macos-${{ matrix.arch }}-dmg
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   # ── Windows：安装版 + Tauri 更新包（.nsis.zip + .sig）。
@@ -220,10 +250,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # macOS 两个架构是两个 artifact，用 pattern 一起拉下来合并到一个目录，
+      # 否则 publish 里只会拿到最后上传的那一个。
       - uses: actions/download-artifact@v4
         with:
-          name: macos-arm64-dmg
+          pattern: macos-*-dmg
           path: dist/macos
+          merge-multiple: true
 
       - uses: actions/download-artifact@v4
         with:

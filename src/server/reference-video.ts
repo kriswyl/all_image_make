@@ -1,7 +1,10 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { assertSafeUrl, safeFileName } from "./security.js";
 import { AppError } from "./app-error.js";
 import { referenceMediaType } from "../shared/reference-media.js";
-import type { DbChannel } from "./db.js";
+import { referenceVideoDurationRange } from "../shared/video-modes.js";
+import type { AssetRow, DbChannel } from "./db.js";
 import type { KeyStore } from "./key-store.js";
 
 /** 参考素材：本地选中的视频或音频，上传后换成公网 URL 再进请求体。 */
@@ -65,6 +68,67 @@ export function validateReferenceMedia(file: ReferenceMediaUpload, kind: Referen
 
 export function validateReferenceVideo(file: ReferenceMediaUpload) {
   validateReferenceMedia(file, "video");
+}
+
+/** MP4 / MOV 的 mvhd 记录整段时长；跳过 mdat 等大块数据。 */
+export function referenceVideoDuration(buffer: Buffer): number | null {
+  function box(type: string, start: number, end: number): { start: number; end: number } | undefined {
+    let offset = start;
+    while (offset + 8 <= end) {
+      const size32 = buffer.readUInt32BE(offset);
+      const header = size32 === 1 ? 16 : 8;
+      if (offset + header > end) return;
+      const size = size32 === 1 ? Number(buffer.readBigUInt64BE(offset + 8)) : size32 || end - offset;
+      if (!Number.isSafeInteger(size) || size < header || size > end - offset) return;
+      if (buffer.toString("ascii", offset + 4, offset + 8) === type) return { start: offset + header, end: offset + size };
+      offset += size;
+    }
+  }
+  const movie = box("moov", 0, buffer.length);
+  if (!movie) return null;
+  const header = box("mvhd", movie.start, movie.end);
+  if (!header || header.start >= header.end) return null;
+  const version = buffer[header.start];
+  if (version !== 0 && version !== 1) return null;
+  const scaleOffset = header.start + (version === 1 ? 20 : 12);
+  if (scaleOffset + (version === 1 ? 12 : 8) > header.end) return null;
+  const scale = buffer.readUInt32BE(scaleOffset);
+  const duration = version === 1 ? Number(buffer.readBigUInt64BE(scaleOffset + 4)) : buffer.readUInt32BE(scaleOffset + 4);
+  if (!scale || !duration || duration === 0xffffffff || !Number.isSafeInteger(duration)) return null;
+  return duration / scale;
+}
+
+export function referenceVideoAssetError(asset: AssetRow, mode: string): string | undefined {
+  if (!asset.mimeType.startsWith("video/") || referenceMediaKindOf({ originalname: asset.fileName, mimetype: asset.mimeType }) !== "video") {
+    return "请选择 MP4 或 MOV 视频";
+  }
+  if (asset.byteSize > MAX_REFERENCE_VIDEO_BYTES) return "视频不能超过 100 MB";
+  const { min, max } = referenceVideoDurationRange(mode);
+  if (asset.duration != null && (asset.duration < min || asset.duration > max)) return `视频时长需为 ${min}–${max} 秒`;
+}
+
+export async function readReferenceVideoAsset(asset: AssetRow, mode: string): Promise<ReferenceVideoUpload> {
+  const issue = referenceVideoAssetError(asset, mode);
+  if (issue) throw new AppError("REFERENCE_VIDEO_INVALID", issue, 400);
+  const base = path.resolve(asset.baseDir);
+  const file = path.resolve(base, asset.relativePath);
+  const relative = path.relative(base, file);
+  if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
+    throw new AppError("REFERENCE_VIDEO_INVALID", "素材路径无效", 400);
+  }
+  const stat = await fs.lstat(file).catch(() => null);
+  if (!stat?.isFile()) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频文件不存在", 400);
+  if (stat.size > MAX_REFERENCE_VIDEO_BYTES) throw new AppError("REFERENCE_VIDEO_INVALID", "视频不能超过 100 MB", 400);
+  const mimetype = referenceMediaType({ name: asset.fileName, type: asset.mimeType })!.mime;
+  const originalname = asset.title && referenceMediaType({ name: asset.title, type: "" })?.mime === mimetype ? asset.title : asset.fileName;
+  const upload = { buffer: await fs.readFile(file), mimetype, originalname };
+  validateReferenceVideo(upload);
+  const duration = asset.duration ?? referenceVideoDuration(upload.buffer);
+  const { min, max } = referenceVideoDurationRange(mode);
+  if (duration != null && (duration < min || duration > max)) {
+    throw new AppError("REFERENCE_VIDEO_INVALID", `视频时长需为 ${min}–${max} 秒`, 400);
+  }
+  return upload;
 }
 
 /**

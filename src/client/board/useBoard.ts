@@ -13,12 +13,30 @@ import {
   type BoardGroup, type BoardNode, type BoardNodeType, type BoardView, type BoardViewport, type BoardVideoMode,
 } from "../../shared/board";
 import { applyStyleSuffix, stripStyleSuffix } from "../../shared/style-presets";
+import { promoteBoardImageResult, setBoardImageResultsExpanded } from "../../shared/board-image-results";
 import type { Asset, Task } from "../../shared/types";
 
 type Toast = (kind: "success" | "error", message: string) => void;
 
 function now() {
   return new Date().toISOString();
+}
+
+function syncImageBatchStatus(nodes: BoardNode[]): BoardNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  return nodes.map((node) => {
+    if (node.type !== "config" || node.mode !== "image" || !node.imageBatchResultIds) return node;
+    const images = node.imageBatchResultIds.map((id) => byId.get(id)).filter((item) => item?.type === "image");
+    const failed = images.filter((image) => image.status === "failed").length;
+    const cancelled = images.filter((image) => image.status === "cancelled").length;
+    const success = images.filter((image) => image.status === "succeeded").length;
+    const status = images.some((image) => image.status === "loading") ? "loading"
+      : failed ? "failed" : cancelled ? "cancelled" : success ? "succeeded" : "idle";
+    const error = failed || cancelled
+      ? [failed ? `${failed} 张失败` : "", cancelled ? `${cancelled} 张已停止` : "", "可在对应结果卡片上重试"].filter(Boolean).join("；")
+      : undefined;
+    return status === node.status && error === node.error ? node : { ...node, status, error, updatedAt: now() };
+  });
 }
 
 function newId(prefix: string): string {
@@ -81,9 +99,11 @@ export interface UseBoardResult {
   setSelection: (ids: string[]) => void;
   setViewport: (viewport: BoardViewport) => void;
   addNode: (type: BoardNodeType, position: { x: number; y: number }) => BoardNode | null;
-  addImageNode: (asset: Asset, position?: { x: number; y: number }, title?: string) => BoardNode | null;
+  addImageNode: (asset: Asset, position?: { x: number; y: number }, title?: string, referenceTargetId?: string) => BoardNode | null;
   updateNode: (nodeId: string, patch: Partial<BoardNode>) => void;
   updateNodeSilently: (nodeId: string, patch: Partial<BoardNode>) => void;
+  choosePrimaryImage: (primaryId: string, memberId: string) => void;
+  setImageResultsExpanded: (primaryId: string, expanded: boolean) => BoardDoc | undefined;
   /** 套用/清除风格模板；不传 nodeIds 就是整块画布。一次改完，不逐节点触发保存 */
   applyStyle: (style: { id: string; prompt: string } | null, nodeIds?: string[]) => void;
   removeNodes: (nodeIds: string[]) => void;
@@ -123,7 +143,7 @@ export interface UseBoardResult {
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
-  }) => Promise<{ taskId: string | null; kind: "image" | "video" | "text" | "audio"; resultNodeIds: string[] } | null>;
+  }) => Promise<{ taskId: string | null; taskIds?: string[]; kind: "image" | "video" | "text" | "audio"; resultNodeIds: string[] } | null>;
   cancelTask: (taskId: string) => Promise<void>;
   retryTask: (taskId: string) => Promise<void>;
   uploadAsset: (file: File, position?: { x: number; y: number }) => Promise<Asset | null>;
@@ -148,6 +168,7 @@ export function useBoard(
     applyLocal, updateLocalDocument, adoptSavedView, flush, ensureSaved,
   } = useBoardDocument(boardId, onToast);
   const reconcilingRef = useRef(false);
+  const submittingBoardsRef = useRef(new Set<string>());
 
   const addNode = useCallback((type: BoardNodeType, position: { x: number; y: number }) => {
     const current = viewRef.current;
@@ -166,7 +187,7 @@ export function useBoard(
     return node;
   }, [applyLocal]);
 
-  const addImageNode = useCallback((asset: Asset, position?: { x: number; y: number }, title?: string) => {
+  const addImageNode = useCallback((asset: Asset, position?: { x: number; y: number }, title?: string, referenceTargetId?: string) => {
     const current = viewRef.current;
     if (!current) return null;
     if (current.doc.nodes.length >= BOARD_LIMITS.maxNodes) {
@@ -188,7 +209,17 @@ export function useBoard(
       naturalWidth: undefined,
       naturalHeight: undefined,
     } as BoardNode;
-    applyLocal((doc) => ({ ...doc, nextRef, nodes: [...doc.nodes, node] }), "add:image");
+    const nextDoc = { ...current.doc, nextRef, nodes: [...current.doc.nodes, node] };
+    if (referenceTargetId) {
+      nextDoc.edges = [...nextDoc.edges, { id: newId("edge"), source: node.id, target: referenceTargetId, kind: "input" }];
+      try {
+        parseBoardDoc(nextDoc);
+      } catch (error) {
+        toastRef.current("error", error instanceof Error ? error.message : "无法添加引用");
+        return null;
+      }
+    }
+    applyLocal(() => nextDoc, referenceTargetId ? "add:image-reference" : "add:image");
     return node;
   }, [applyLocal]);
 
@@ -238,7 +269,12 @@ export function useBoard(
     if (!ids.size) return;
     applyLocal((doc) => ({
       ...doc,
-      nodes: doc.nodes.filter((node) => !ids.has(node.id)),
+      nodes: syncImageBatchStatus(doc.nodes.filter((node) => !ids.has(node.id)).map((node) => {
+        if (node.type !== "image" || !node.imageResultGroup) return node;
+        const memberIds = node.imageResultGroup.memberIds.filter((id) => !ids.has(id));
+        if (memberIds.length === node.imageResultGroup.memberIds.length) return node;
+        return { ...node, imageResultGroup: memberIds.length ? { ...node.imageResultGroup, memberIds } : undefined };
+      })),
       edges: doc.edges.filter((edge) => !ids.has(edge.source) && !ids.has(edge.target)),
       // 分组只剩空壳时一起删掉，避免留下指向已删节点的分组
       groups: boardGroups(doc)
@@ -247,6 +283,23 @@ export function useBoard(
     }), "delete", true);
     setSelection(selectionRef.current.filter((id) => !ids.has(id)));
   }, [applyLocal, setSelection]);
+
+  const choosePrimaryImage = useCallback((primaryId: string, memberId: string) => {
+    const current = viewRef.current?.doc;
+    if (!current) return;
+    const next = promoteBoardImageResult(current, primaryId, memberId);
+    if (next === current) return;
+    applyLocal(() => next, "image:primary", true);
+    setSelection([primaryId]);
+  }, [applyLocal, setSelection]);
+
+  const setImageResultsExpanded = useCallback((primaryId: string, expanded: boolean) => {
+    const current = viewRef.current?.doc;
+    if (!current) return undefined;
+    const next = setBoardImageResultsExpanded(current, primaryId, expanded);
+    if (next !== current) applyLocal(() => next, expanded ? "image:expand" : "image:collapse");
+    return next;
+  }, [applyLocal]);
 
   const createGroup = useCallback((nodeIds: string[], title?: string) => {
     const current = viewRef.current;
@@ -323,8 +376,9 @@ export function useBoard(
       let result: BoardNode = clone;
       if (clone.type === "image" || clone.type === "video") {
         result = { ...clone, taskId: undefined, status: clone.assetId ? "succeeded" : "empty", error: undefined } as BoardNode;
+        if (result.type === "image") result.imageResultGroup = undefined;
       } else if (clone.type === "config") {
-        result = { ...clone, lastTaskId: undefined, status: "idle", error: undefined } as BoardNode;
+        result = { ...clone, lastTaskId: undefined, imageBatchResultIds: undefined, status: "idle", error: undefined } as BoardNode;
       }
       allocatedNodes.push(result);
       return result;
@@ -541,26 +595,30 @@ export function useBoard(
     musicTags?: string;
     musicNegativeTags?: string;
   }) => {
-    if (!boardIdRef.current) return null;
-    await flush();
-    const current = viewRef.current;
-    if (!current) return null;
+    const boardId = boardIdRef.current;
+    if (!boardId || submittingBoardsRef.current.has(boardId)) return null;
+    submittingBoardsRef.current.add(boardId);
     try {
-      const result = await api.generateBoardNode(current.id, {
+      if (!await ensureSaved() || viewRef.current?.id !== boardId) return null;
+      const result = await api.generateBoardNode(boardId, {
         nodeId,
         ...(overrides ? { overrides } : {}),
       });
+      if (viewRef.current?.id !== boardId) return null;
       adoptSavedView(result.board, true);
       return {
         taskId: result.task?.id ?? null,
+        taskIds: result.taskIds,
         kind: result.kind,
         resultNodeIds: result.resultNodeIds,
       };
     } catch (error) {
       toastRef.current("error", error instanceof Error ? error.message : "提交生成失败");
       return null;
+    } finally {
+      submittingBoardsRef.current.delete(boardId);
     }
-  }, [flush, adoptSavedView]);
+  }, [ensureSaved, adoptSavedView]);
 
   /**
    * 轮询进行中的任务，把结果写回占位节点。
@@ -585,7 +643,11 @@ export function useBoard(
     reconcilingRef.current = true;
     try {
       const updates = new Map<string, Partial<BoardNode>>();
+      const expectedTasks = new Map<string, string>();
       for (const [taskId, nodes] of groups) {
+        for (const node of nodes) expectedTasks.set(node.id, taskId);
+        const config = current.doc.nodes.find((node) => node.type === "config" && !node.imageBatchResultIds && node.lastTaskId === taskId);
+        if (config) expectedTasks.set(config.id, taskId);
         let task: Task;
         try {
           task = await api.task(taskId);
@@ -594,7 +656,6 @@ export function useBoard(
             for (const node of nodes) {
               updates.set(node.id, { status: "cancelled", error: "任务记录不存在" } as Partial<BoardNode>);
             }
-            const config = current.doc.nodes.find((node) => node.type === "config" && node.lastTaskId === taskId);
             if (config) updates.set(config.id, { status: "cancelled", error: "任务记录不存在" } as Partial<BoardNode>);
           }
           continue;
@@ -607,9 +668,10 @@ export function useBoard(
         const outputs = task.assets.filter((asset) => asset.mimeType.startsWith(prefix));
         const kindLabel = resultType === "video" ? "视频" : resultType === "audio" ? "音频" : "图片";
         nodes.forEach((node, index) => {
-          if (task.status === "succeeded" && outputs[index]) {
+          const output = outputs[node.type === "image" ? node.resultIndex ?? index : index];
+          if (task.status === "succeeded" && output) {
             updates.set(node.id, {
-              assetId: outputs[index]!.id,
+              assetId: output.id,
               source: "generated",
               status: "succeeded",
               error: undefined,
@@ -622,15 +684,15 @@ export function useBoard(
             } as Partial<BoardNode>);
           }
         });
-        const config = current.doc.nodes.find((node) => node.type === "config" && node.lastTaskId === taskId);
         if (config) {
-          const ok = task.status === "succeeded" && outputs.length >= nodes.length;
+          const completed = nodes.filter((node, index) => outputs[node.type === "image" ? node.resultIndex ?? index : index]).length;
+          const ok = task.status === "succeeded" && completed === nodes.length;
           updates.set(config.id, {
             status: ok ? "succeeded" : task.status === "cancelled" ? "cancelled" : "failed",
             error: ok
               ? undefined
               : task.errorMessage ?? (task.status === "succeeded"
-                ? `上游只返回了 ${outputs.length}/${nodes.length} 个${kindLabel}`
+                ? `本批结果中有 ${nodes.length - completed} 个${kindLabel}未返回`
                 : "生成失败"),
           } as Partial<BoardNode>);
         }
@@ -638,9 +700,13 @@ export function useBoard(
       if (!updates.size || viewRef.current?.id !== boardId) return;
       applyLocal((doc) => ({
         ...doc,
-        nodes: doc.nodes.map((node) => updates.has(node.id)
-          ? { ...node, ...updates.get(node.id), updatedAt: now() } as BoardNode
-          : node),
+        nodes: syncImageBatchStatus(doc.nodes.map((node) => {
+          if (node.type === "text" || node.status !== "loading") return node;
+          const taskId = node.type === "config" ? node.lastTaskId : node.taskId;
+          return taskId === expectedTasks.get(node.id) && updates.has(node.id)
+            ? { ...node, ...updates.get(node.id), updatedAt: now() } as BoardNode
+            : node;
+        })),
       }), "generate:result", true);
     } finally {
       reconcilingRef.current = false;
@@ -666,22 +732,23 @@ export function useBoard(
   }, [loadingTaskKey, reconcileTasks]);
 
   const cancelTask = useCallback(async (taskId: string) => {
-    if (!boardIdRef.current) return;
+    const boardId = boardIdRef.current;
+    if (!boardId) return;
     try {
-      const task = await api.cancelBoardTask(boardIdRef.current, taskId);
+      const task = await api.cancelBoardTask(boardId, taskId);
       // 任务刚好已经成功：不要把它标成「已停止」，交给 reconcile 写回结果
-      if (task.status === "succeeded") return;
+      if (task.status === "succeeded" || viewRef.current?.id !== boardId) return;
       applyLocal((doc) => ({
         ...doc,
-        nodes: doc.nodes.map((node) => {
+        nodes: syncImageBatchStatus(doc.nodes.map((node) => {
           if ((node.type === "image" || node.type === "video" || node.type === "audio") && node.taskId === taskId) {
             return { ...node, status: "cancelled", error: "已停止", updatedAt: now() } as BoardNode;
           }
-          if (node.type === "config" && node.lastTaskId === taskId) {
+          if (node.type === "config" && !node.imageBatchResultIds && node.lastTaskId === taskId) {
             return { ...node, status: "cancelled", error: "已停止", updatedAt: now() } as BoardNode;
           }
           return node;
-        }),
+        })),
       }), "generate:cancel", true);
     } catch (error) {
       toastRef.current("error", error instanceof Error ? error.message : "停止失败");
@@ -689,14 +756,17 @@ export function useBoard(
   }, [applyLocal]);
 
   const retryTask = useCallback(async (taskId: string) => {
-    if (!boardIdRef.current) return;
+    const boardId = boardIdRef.current;
+    if (!boardId) return;
     try {
-      const result = await api.retryBoardTask(boardIdRef.current, taskId);
+      const result = await api.retryBoardTask(boardId, taskId);
+      if (viewRef.current?.id !== boardId) return;
       const resultIds = new Set(result.resultNodeIds);
       applyLocal((doc) => ({
         ...doc,
-        nodes: doc.nodes.map((node) => {
-          if (resultIds.has(node.id)) {
+        nodes: syncImageBatchStatus(doc.nodes.map((node) => {
+          if (node.type !== "config" && node.type !== "text" && node.taskId === taskId
+            && (resultIds.has(node.id) || (node.type === "image" && resultIds.size === 1))) {
             return {
               ...node,
               taskId: result.task.id,
@@ -706,7 +776,7 @@ export function useBoard(
               updatedAt: now(),
             } as BoardNode;
           }
-          if (node.type === "config" && node.lastTaskId === taskId) {
+          if (node.type === "config" && !node.imageBatchResultIds && node.lastTaskId === taskId) {
             return {
               ...node,
               lastTaskId: result.task.id,
@@ -716,7 +786,7 @@ export function useBoard(
             } as BoardNode;
           }
           return node;
-        }),
+        })),
       }), "generate:retry", true);
     } catch (error) {
       toastRef.current("error", error instanceof Error ? error.message : "重试失败");
@@ -796,6 +866,8 @@ export function useBoard(
     addImageNode,
     updateNode,
     updateNodeSilently,
+    choosePrimaryImage,
+    setImageResultsExpanded,
     applyStyle,
     removeNodes,
     duplicateNodes,
@@ -821,7 +893,7 @@ export function useBoard(
     ensureSaved,
   }), [
     view, loading, saving, retrying, selection, viewport,
-    reload, applyDelta, setSelection, setViewport, addNode, addImageNode, updateNode, updateNodeSilently,
+    reload, applyDelta, setSelection, setViewport, addNode, addImageNode, updateNode, updateNodeSilently, choosePrimaryImage, setImageResultsExpanded,
     removeNodes, duplicateNodes, autoLayout, moveNodes, addEdge, updateEdge, removeEdges,
     createGroup, updateGroup, ungroup, generate, cancelTask, retryTask,
     uploadAsset, removeAsset, rename, undo, redo, restoreVersion, importTemplate, flush, ensureSaved,

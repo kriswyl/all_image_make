@@ -36,6 +36,21 @@ html[data-theme="dark"] {
   --accent-soft: #2a2a2a;
   --accent-contrast: #0f0f0f;
 
+  /* 品牌点缀色在深底上换成浅一档的同一色相，底衬改成低透明度的同色 */
+  --tone-blue: #9bc9f7;
+  --tone-mint: #a8ddd4;
+  --tone-lavender: #c9b8f2;
+  --tone-pink: #f5bdd1;
+  --tone-cream: #f6d6a6;
+  --tone-blue-soft: rgba(155, 201, 247, .14);
+  --tone-mint-soft: rgba(168, 221, 212, .13);
+  --tone-lavender-soft: rgba(201, 184, 242, .15);
+  --tone-pink-soft: rgba(245, 189, 209, .13);
+  --tone-cream-soft: rgba(246, 214, 166, .13);
+  /* 深色下渐变压暗一点，别在深底上发白光 */
+  --brand-gradient: linear-gradient(135deg, #7fb3e6 0%, #8cc9c0 26%, #d9b87f 52%, #d99cb4 76%, #b0a0e0 100%);
+  --spectrum-gradient: linear-gradient(90deg, #6fa8dc, #79c2b6, #d8b276, #d991ab, #a794e0);
+
   /* 语义色提亮一档，深底上才不糊 */
   --coral: #ff7a6e;
   --coral-ink: #ffa198;
@@ -140,9 +155,37 @@ html[data-theme="dark"] .result-stage {
 }
 
 /* 半透明白色胶囊 / 角标：换成半透明黑，同时保持文字用主题色 */
-html[data-theme="dark"] .empty-result-icon,
 html[data-theme="dark"] .canvas-section-clear {
   background: rgba(255, 255, 255, .06);
+}
+/* 深底上把光斑的外圈柔光提一点，轮廓才不糊 */
+html[data-theme="dark"] .generating-glow {
+  background: radial-gradient(circle, rgba(158, 227, 214, .48), rgba(145, 213, 239, .24) 55%, rgba(145, 213, 239, 0) 74%);
+}
+
+/* 图片底部的结果操作条：深色下换成半透明深底，别在图片上糊一块白 */
+html[data-theme="dark"] .image-result-tools.is-overlay {
+  background: rgba(22, 22, 22, .78);
+  border-color: rgba(255, 255, 255, .1);
+}
+html[data-theme="dark"] .image-result-tools.is-overlay .secondary-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, .08);
+}
+
+/* 空态示例图在深色下要更重的投影，否则白底卡片像浮在空中 */
+html[data-theme="dark"] .starter-card img {
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .55);
+}
+
+/* 视频空态在深色下把顶部的微光压得更淡，只留一点点冷光 */
+html[data-theme="dark"] .record-empty {
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(155, 201, 247, .09), transparent 64%),
+    var(--surface);
+}
+/* 深底上给扫光加一点冷辉，浅底则靠描边和投影区分 */
+html[data-theme="dark"] .record-empty-sweep {
+  box-shadow: 0 0 14px rgba(155, 201, 247, .42);
 }
 html[data-theme="dark"] .asset-strip-origin,
 html[data-theme="dark"] .asset-library-origin,
@@ -175,8 +218,8 @@ html[data-theme="dark"] .channel-state.enabled::before { background: var(--ok); 
 /* 纸白底上的品牌 Logo 仍保留浅底，深色下压成暖白，避免一块纯白特别跳 */
 html[data-theme="dark"] .preset-icon.has-logo { background: #ededed; }
 
-/* 单色厂商 mark 和产品标都是黑色描边，深色下直接反色 */
-html[data-theme="dark"] .brand-mark-img { filter: invert(1); }
+/* 单色厂商 mark 是黑色描边，深色下直接反色。
+   产品标（.brand-mark-img）填的是 --ink，本身已随主题变化，不需要再反转 */
 html[data-theme="dark"] .model-logo.is-mono { filter: invert(1); }
 
 html[data-theme="dark"] .toast { border: 1px solid var(--line-strong); }

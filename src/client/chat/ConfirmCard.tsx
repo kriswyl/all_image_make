@@ -11,15 +11,16 @@ import { useState } from "react";
 import { api } from "../api";
 import { MUSIC_MODE_LABELS } from "../../shared/suno";
 import {
-  assetRef, type ChatMessage, type ConfirmPreview, type ConversationVideoRole, type GenerateVideoArgs,
+  assetRef, type ChatMessage, type ConfirmPreview, type ConfirmVideoInput, type GenerateVideoArgs,
 } from "../../shared/agent-types";
 import {
   VIDEO_CAPABILITIES, videoModeLabel, type ConversationVideoMode, type VideoAdapter,
 } from "../../shared/video-capabilities";
 
-function roleLabel(role: ConversationVideoRole) {
+function roleLabel(role: ConfirmVideoInput["role"]) {
   if (role === "first_frame") return "首帧";
   if (role === "last_frame") return "尾帧";
+  if (role === "reference_video") return "参考视频";
   return "参考图";
 }
 
@@ -200,7 +201,7 @@ export function ConfirmCard({
               <div className="confirm-card-inputs">
                 {preview.videoInputs.map((item, index) => (
                   <div className="confirm-card-input" key={`${item.assetId}-${index}`}>
-                    <img
+                    {item.role === "reference_video" ? <div className="confirm-card-video-icon"><Film size={22} aria-hidden="true" /></div> : <img
                       src={api.assetUrl(`/api/assets/${item.assetId}/thumb`)}
                       alt=""
                       onError={(event) => {
@@ -209,21 +210,21 @@ export function ConfirmCard({
                         image.dataset.fallback = "1";
                         image.src = api.assetUrl(`/api/assets/${item.assetId}/file`);
                       }}
-                    />
-                    <span>{roleLabel(item.role)} · {assetRef(item.assetId)}</span>
+                    />}
+                    <span title={item.fileName}>{item.fileName || assetRef(item.assetId)}</span>
+                    <span>{roleLabel(item.role)}{item.duration != null ? ` · ${Number(item.duration.toFixed(1))} 秒` : ""}</span>
                   </div>
                 ))}
               </div>
             ) : null}
+            {preview.videoUploadTarget ? <div className="confirm-card-meta">确认后，所选原视频会上传至渠道的素材服务，上传后可能通过公网链接访问。</div> : null}
             <div className="confirm-card-meta">
               {preview.mode
                 ? videoModeLabel(preview.mode as ConversationVideoMode, preview.adapterType)
                 : "按渠道默认"}
               {preview.videoInputs !== undefined
                 ? preview.videoInputs.length
-                  ? ` · 用 ${preview.videoInputs.length} 张图：${preview.videoInputs
-                    .map((item) => `${assetRef(item.assetId)}（${roleLabel(item.role)}）`)
-                    .join("、")}`
+                  ? ""
                   : " · 纯文生视频"
                 : preview.referenceAssetId
                   // 升级前的老卡片：当时的行为就是「画布主图当首帧」

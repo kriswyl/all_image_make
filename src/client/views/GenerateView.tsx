@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ChevronDown, ChevronRight,
-  KeyRound, LoaderCircle, Plus, Server, Settings2, Send,
+  KeyRound, Plus, Server, Settings2, Send,
 } from "lucide-react";
 import { api } from "../api";
 import { confirmGeneration } from "../generation-confirm";
@@ -23,6 +23,7 @@ import { ImageResultWorkspace } from "./ImageResultWorkspace";
 import { ImagePromptComposer, invalidImageMention, remapImageMentions } from "./ImagePromptComposer";
 import "./image-workbench.css";
 import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
+import { LoadingIndicator } from "../ui/LoadingIndicator";
 import type { Channel, Task } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
@@ -281,6 +282,11 @@ export function GenerateView(props: {
             onTask={props.onTask}
             onSelectTask={props.onSelectTask}
             onToast={props.onToast}
+            onStarterPrompt={(value) => {
+              setPrompt(value);
+              // 填完把光标送到输入框，用户可以直接改字，不用再点一次
+              requestAnimationFrame(() => document.querySelector<HTMLElement>(".image-composer .vstudio-input")?.focus());
+            }}
           />
           <section className="image-composer vstudio-composer" aria-label="图片创作">
             <ImagePromptComposer
@@ -439,9 +445,9 @@ export function GenerateView(props: {
               </details>
               <PromptPolishButton prompt={prompt} target="image" onPolished={setPrompt} onToast={props.onToast} disabled={submitting} />
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : null}
-              <button type="button" className="vstudio-send image-submit" aria-label="生成图片" title="生成图片"
+              <button type="button" className="vstudio-send image-submit" aria-label={submitting ? "正在提交图片生成" : "生成图片"} title="生成图片"
                 onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel || !prompt.trim()}>
-                {submitting ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}
+                {submitting ? <LoadingIndicator variant="dots" size={24} /> : <Send size={17} />}
               </button>
             </div>
           </section>

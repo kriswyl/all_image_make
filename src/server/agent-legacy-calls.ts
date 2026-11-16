@@ -1,11 +1,12 @@
 import {
-  GENERATION_TOOLS, type AgentPlan, type ConfirmPreview, type Conversation, type GenerateVideoArgs, type PlannedCall,
+  GENERATION_TOOLS, type AgentPlan, type ConfirmPreview, type Conversation, type PlannedCall,
 } from "../shared/agent-types.js";
 import { boardApplySchema, boardGenerateSchema } from "../shared/board-ops.js";
 import { buildConfirmPreview, shouldConfirm } from "./agent-confirm.js";
 import { MAX_SESSION_TASKS } from "./agent-constants.js";
 import { asString } from "./agent-plan.js";
 import { BOARD_TOOL_SCHEMAS } from "./agent-tools/board-schema.js";
+import { generateVideoSchema } from "./agent-tools.js";
 import type { ToolContext } from "./agent-tools/shared.js";
 import { resolveVideoSelection, type VideoSelection } from "./agent-tools/video.js";
 import { previewBoardOps } from "./board-agent.js";
@@ -117,6 +118,7 @@ export function previewLegacyConfirmation(
   // 选图失败时直接交给工具反馈原因，让模型提问或重新选图。
   if (videoSelection?.error || imageSelectionMissing) return null;
   const needsConfirm = overTaskLimit
+    || Boolean(videoSelection?.selection?.videos?.length)
     || (calls.length === 1 && shouldConfirm(calls[0]!.tool, isContinuation, conversation.videoConfirmPolicy));
   if (!needsConfirm) return null;
   return buildConfirmPreview(
@@ -145,6 +147,10 @@ export function materializeLegacyCall(
     const args: Record<string, unknown> = { ...call.args };
     if (selection.mode !== "text-to-video") args.mode = selection.mode;
     if (selection.assets.length) args.imageRefs = selection.assets.map((asset) => asset.id);
+    if (selection.videos?.length) {
+      args.videoRefs = selection.videos.map((asset) => asset.id);
+      args.modelHint = resolved.alias;
+    }
     return { tool: call.tool, args };
   }
   if ((call.tool === "edit_image" || call.tool === "generate_image") && turnAttachmentIds.length) {
@@ -164,14 +170,19 @@ function resolveVideoForCall(
   args: Record<string, unknown>,
   turnAttachmentIds: string[],
   defaultAliases: ReadDefaultAliases,
-): { selection?: VideoSelection; error?: string } {
+): { selection?: VideoSelection; error?: string; alias?: string } {
   const aliases = buildCapabilityAliases(db.listChannels());
   const resolution = resolveAlias(aliases, asString(args.modelHint), "video", defaultAliases().video);
   if (!resolution) return { error: "还没有可用的视频渠道，请先到「渠道配置」添加" };
   const channel = db.getChannel(resolution.channelId);
   if (!channel) return { error: "解析到的视频渠道不存在" };
-  return resolveVideoSelection(
-    db, conversation, args as unknown as GenerateVideoArgs, channel.adapterType, turnAttachmentIds,
-    resolution.model,
-  );
+  const parsed = generateVideoSchema.safeParse(args);
+  if (!parsed.success) return { error: "视频参数无效，请检查参考素材" };
+  if (parsed.data.videoRefs?.length && parsed.data.modelHint && resolution.usedFallback) {
+    return { error: "没有找到指定的视频模型，请确认要用哪个渠道和模型" };
+  }
+  return { ...resolveVideoSelection(
+    db, conversation, parsed.data, channel.adapterType, turnAttachmentIds,
+    resolution.model, Boolean(channel.uploadEndpoint?.trim()),
+  ), alias: resolution.alias };
 }

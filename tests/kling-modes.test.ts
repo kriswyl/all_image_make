@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   KLING_MODE_CAPABILITIES,
-  klingConversationModes,
   klingModesForModel,
-  supportedVideoModes,
 } from "../src/shared/video-capabilities.js";
+import { supportedVideoModes } from "../src/shared/video-modes.js";
 
 describe("可灵模型与模式", () => {
   it("能力按模型开放，不是所有模型都长一样", () => {
@@ -19,9 +18,9 @@ describe("可灵模型与模式", () => {
     ]);
   });
 
-  it("对话里不提供运动控制（拿不到参考视频）", () => {
-    expect(klingConversationModes("kling-3.0")).toEqual(["text-to-video", "first-frame", "first-last-frame"]);
-    expect(klingConversationModes("kling-3.0-omni")).toEqual([
+  it("通用生成模式不包含可灵专用运动控制", () => {
+    expect(supportedVideoModes("kling-video", "kling-3.0")).toEqual(["text-to-video", "first-frame", "first-last-frame"]);
+    expect(supportedVideoModes("kling-video", "kling-3.0-omni")).toEqual([
       "text-to-video", "first-frame", "first-last-frame", "reference",
     ]);
     expect(supportedVideoModes("kling-video", "kling-3.0-turbo")).toEqual([
