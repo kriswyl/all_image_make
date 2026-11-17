@@ -18,14 +18,15 @@ import { adapterLabels } from "../labels";
 import { ModelLogo, type ModelKind } from "../chat/ModelLogo";
 import type { Channel } from "../../shared/types";
 import {
-  MODEL_GROUPS, draftForGroup, duplicateFor, groupsForKind, recommendedModelFor,
+  MODEL_GROUPS, MODEL_GROUP_SECTIONS, draftForGroup, duplicateFor, groupsForKind, recommendedModelFor,
   type ModelGroup, type ModelGroupKind,
 } from "../../shared/model-catalog";
+import { ONE_KEY_PRESET, ONE_KEY_SECRET_ENV } from "../../shared/provider-presets";
 
 /** 和模型组的展示品类一一对应；音乐 / 语音虽然同属音频任务，引导里分两章讲 */
 type ChapterKind = ModelGroupKind;
 type Stage =
-  | "welcome" | "needs"
+  | "welcome" | "needs" | "onekey"
   | "chat-intro" | "chat-select"
   | "image-intro" | "image-select"
   | "video-intro" | "video-select"
@@ -200,6 +201,11 @@ export function ImmersiveOnboarding({
   const [saving, setSaving] = useState(false);
   const [results, setResults] = useState<Record<string, RowResult>>({});
   const [saved, setSaved] = useState<Channel[]>([]);
+  /** 一 key 模式：唯一密钥 + 要一起配的模型组（默认全选，就是「所有模型都能用」） */
+  const [oneKey, setOneKey] = useState("");
+  const [oneKeyGroups, setOneKeyGroups] = useState<string[]>(() => MODEL_GROUPS.map((group) => group.key));
+  const [oneKeySaving, setOneKeySaving] = useState(false);
+  const [oneKeyResults, setOneKeyResults] = useState<Record<string, RowResult>>({});
   const [inkBurst, setInkBurst] = useState<Array<{ id: number; x: number; y: number; dx: number; dy: number }>>([]);
 
   savedRef.current = saved;
@@ -264,6 +270,62 @@ export function ImmersiveOnboarding({
     || knownChannels.some((channel) => channel.secretEnv === row.state.secretEnv && channel.hasKey);
   const missingKeyRows = rows.filter((row) => !keyReady(row));
   const highlightKey = missingKeyRows[0]?.group.key ?? null;
+
+  /**
+   * 一 key 模式：一把密钥铺给每个模型组。
+   *
+   * 保存动作和逐章填 Key 完全一样（同一个 `api.saveChannel`，同样按同名/同站点覆盖），
+   * 区别只在「密钥只问一次、模型组一次选全」——中转站本来就是一个账号全模型通用。
+   */
+  async function saveOneKey() {
+    const key = oneKey.trim();
+    const groups = MODEL_GROUPS.filter((group) => oneKeyGroups.includes(group.key));
+    if (!groups.length) {
+      onToast("error", "至少留一类模型，不然没有可配的渠道");
+      return;
+    }
+    if (!key) {
+      onToast("error", "先把 API Key 填上");
+      return;
+    }
+    setOneKeySaving(true);
+    setOneKeyResults(Object.fromEntries(groups.map((group) => [group.key, { status: "saving" as const }])));
+    const savedNow: Channel[] = [];
+    try {
+      for (const group of groups) {
+        const draft = draftForGroup(group, [...group.unit.models], ONE_KEY_SECRET_ENV, key);
+        if (!draft) continue;
+        const duplicate = duplicateFor(draft, knownChannels);
+        try {
+          const channel = duplicate
+            ? await api.saveChannel(draft.input, duplicate.id)
+            : await api.saveChannel(draft.input);
+          savedNow.push(channel);
+          setOneKeyResults((current) => ({
+            ...current,
+            [group.key]: { status: "done", message: duplicate ? "已更新" : "已创建" },
+          }));
+        } catch (error) {
+          setOneKeyResults((current) => ({
+            ...current,
+            [group.key]: { status: "error", message: error instanceof Error ? error.message : "保存失败" },
+          }));
+        }
+      }
+      setSaved((current) => [
+        ...savedNow,
+        ...current.filter((channel) => !savedNow.some((item) => item.id === channel.id)),
+      ]);
+      if (savedNow.length === groups.length) {
+        onToast("success", `一把 Key 配好了 ${savedNow.length} 个渠道`);
+        go("finish", "forward");
+      } else {
+        onToast("error", `${groups.length - savedNow.length} 个渠道没保存成功，可以直接重试`);
+      }
+    } finally {
+      setOneKeySaving(false);
+    }
+  }
 
   function go(next: Stage, direction: "forward" | "back" = "forward") {
     if (transition) return;
@@ -480,7 +542,7 @@ export function ImmersiveOnboarding({
         />
       ))}
 
-      {stage !== "welcome" && stage !== "needs" && stage !== "finish" ? (
+      {stage !== "welcome" && stage !== "needs" && stage !== "onekey" && stage !== "finish" ? (
         <header className="ink-chrome">
           <div className="ink-brand">
             <span className="ink-mark">C</span>
@@ -512,6 +574,19 @@ export function ImmersiveOnboarding({
             >
               开启探索 <ArrowRight size={15} />
             </button>
+            {/* 一支密钥全模型通用的中转站，是最省事的入口：放在主按钮正下方，不藏在「高级」里 */}
+            <button
+              type="button"
+              className="ink-onekey-entry"
+              onClick={(event) => { burstInk(event); setOneKeyGroups(MODEL_GROUPS.map((group) => group.key)); go("onekey"); }}
+            >
+              <span className="ink-onekey-entry-mark">壹</span>
+              <span className="ink-onekey-entry-text">
+                <strong>一 Key 模式<em>最快</em></strong>
+                <span>一个密钥，{MODEL_GROUPS.length} 个渠道自动配好</span>
+              </span>
+              <span className="ink-onekey-entry-go">了解 <ArrowRight size={13} /></span>
+            </button>
             <div className="ink-vertical">一念起 · 万物生</div>
             <span className="ink-seal ink-welcome-seal">始</span>
             <div className="ink-welcome-advanced">
@@ -519,6 +594,106 @@ export function ImmersiveOnboarding({
               {onOpenCustom ? <button type="button" className="ink-link" onClick={() => leaveTo(onOpenCustom)}>自定义站点</button> : null}
             </div>
             <button type="button" className="ink-skip is-plain" onClick={skip}>跳过引导 →</button>
+          </section>
+        ) : null}
+
+        {stage === "onekey" ? (
+          <section className="ink-onekey">
+            <div className="ink-onekey-copy">
+              <span className="ink-kicker">ONE KEY MODE</span>
+              <h1>一 Key，全部点亮</h1>
+              <p className="ink-onekey-lede">
+                词元流墟的密钥全模型通用。
+                填一次，下面每一类模型各建一个渠道——
+                生图、视频、音乐、语音、对话都能直接用。
+              </p>
+              <label className="ink-onekey-field">
+                <span><KeyRound size={13} />API Key</span>
+                <input
+                  type="password"
+                  value={oneKey}
+                  autoFocus
+                  autoComplete="off"
+                  onChange={(event) => setOneKey(event.target.value)}
+                  placeholder={ONE_KEY_PRESET.keyHint ?? "粘贴你的 API Key"}
+                />
+              </label>
+              <button type="button" className="ink-key-link" onClick={() => void openExternal(TIANTOKEN_LOGIN_URL)}>
+                <KeyRound size={14} /><span>还没有 Key？</span><strong>去词元流墟获取</strong><ArrowRight size={13} />
+              </button>
+              <p className="ink-onekey-note">
+                密钥只保存在本机数据目录；也可以只配环境变量 <code>{ONE_KEY_SECRET_ENV}</code>，这里留空。
+              </p>
+            </div>
+
+            <div className="ink-onekey-list">
+              <header>
+                <strong>要一起配好的模型</strong>
+                <button
+                  type="button"
+                  className="ink-link"
+                  onClick={() => setOneKeyGroups(oneKeyGroups.length === MODEL_GROUPS.length
+                    ? []
+                    : MODEL_GROUPS.map((group) => group.key))}
+                >
+                  {oneKeyGroups.length === MODEL_GROUPS.length ? "全不选" : "全选"}
+                </button>
+              </header>
+              {MODEL_GROUP_SECTIONS.map((section) => {
+                const groups = groupsForKind(section.kind);
+                if (!groups.length) return null;
+                return (
+                  <div key={section.kind} className="ink-onekey-section">
+                    <span className="ink-onekey-section-label">{section.label}</span>
+                    {groups.map((group) => {
+                      const on = oneKeyGroups.includes(group.key);
+                      const result = oneKeyResults[group.key];
+                      return (
+                        <label key={group.key} className={`ink-onekey-row ${on ? "is-on" : ""}`}>
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => setOneKeyGroups((current) => current.includes(group.key)
+                              ? current.filter((item) => item !== group.key)
+                              : [...current, group.key])}
+                          />
+                          <span className="ink-onekey-row-main">
+                            <strong>{group.unit.label}</strong>
+                            <small>{adapterLabels[group.unit.adapterType]} · {group.unit.models.length} 个模型</small>
+                          </span>
+                          <span className={`ink-onekey-row-state ${result?.status ?? ""}`}>
+                            {result?.status === "saving" ? <LoadingIndicator variant="dots" size={20} />
+                              : result?.status === "done" ? <><Check size={12} />{result.message}</>
+                              : result?.status === "error" ? result.message
+                              : on ? "就绪" : "不配"}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+
+            <footer className="ink-onekey-foot">
+              <button type="button" className="ink-ghost" onClick={() => go("welcome", "back")} disabled={oneKeySaving}>
+                <ArrowLeft size={13} />上一步
+              </button>
+              <div>
+                <button type="button" className="ink-link" onClick={() => go("needs")}>慢慢选</button>
+                <button type="button" className="ink-link" onClick={skip} disabled={oneKeySaving}>跳过引导</button>
+                <button
+                  type="button"
+                  className="ink-primary"
+                  disabled={oneKeySaving || !oneKeyGroups.length || !oneKey.trim()}
+                  onClick={() => void saveOneKey()}
+                >
+                  {oneKeySaving ? <LoadingIndicator variant="dots" size={22} /> : <Check size={14} />}
+                  一键配置 {oneKeyGroups.length} 个渠道
+                </button>
+              </div>
+            </footer>
+            <span className="ink-seal ink-onekey-seal">钥</span>
           </section>
         ) : null}
 

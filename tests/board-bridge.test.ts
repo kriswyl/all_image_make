@@ -4,6 +4,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/server/app";
+import { MAX_CANVAS_IMAGES } from "../src/shared/types";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -95,7 +96,7 @@ describe("跨模式桥", () => {
     await request(app).post(`/api/boards/${target.id}/assets/private-asset/link`).expect(403);
   });
 
-  it("把无限画布图片追加到对话参考图组，去重并尊重 8 张上限", async () => {
+  it("把无限画布图片追加到对话参考图组，去重并遵循创作会话容量", async () => {
     const { app, context } = await tempApp();
     context.db.saveChannel({
       name: "Mock brain",
@@ -114,15 +115,15 @@ describe("跨模式桥", () => {
       title: "参考图组测试",
     }).expect(201)).body.data;
     const ids: string[] = [];
-    for (let index = 0; index < 9; index += 1) ids.push(await upload(app, board.id));
+    for (let index = 0; index < MAX_CANVAS_IMAGES + 1; index += 1) ids.push(await upload(app, board.id));
 
     const appended = await request(app)
       .post(`/api/conversations/${conversation.id}/canvas/append`)
       .send({ assetIds: ids })
       .expect(200);
-    expect(appended.body.data.added).toHaveLength(8);
+    expect(appended.body.data.added).toHaveLength(MAX_CANVAS_IMAGES);
     expect(appended.body.data.skipped).toBe(1);
-    expect(appended.body.data.canvasAssetIds).toHaveLength(8);
+    expect(appended.body.data.canvasAssetIds).toHaveLength(MAX_CANVAS_IMAGES);
 
     const again = await request(app)
       .post(`/api/conversations/${conversation.id}/canvas/append`)

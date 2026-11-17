@@ -20,10 +20,10 @@ import { createPortal } from "react-dom";
 import { ConversationSidebar } from "./chat/ConversationSidebar";
 import { clearCompletionBadge, notifyCompletion } from "./notifications";
 import { AssetLightbox } from "./chat/AssetLightbox";
-import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
+import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
 import type { Asset, Channel, DefaultModelGroup, TaskKind } from "../shared/types";
 import {
-  assetRef, usesPlainChat, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type ChatToolScope,
+  assetRef, conversationImageAttachmentLimit, usesPlainChat, videoConfirmPolicyLabels, VIDEO_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type ChatToolScope,
   type ChatMessage, type ChatVideoFrames, type ConversationStatus, type ConversationSummary,
   type ConversationView, type GenerateVideoArgs, type VideoConfirmPolicy,
 } from "../shared/agent-types";
@@ -105,6 +105,7 @@ export function ChatView({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [view, setView] = useState<ConversationView | null>(null);
   const plainChat = usesPlainChat(view);
+  const attachmentLimit = conversationImageAttachmentLimit(view);
   const unified = view?.toolScope != null;
   const [changingScope, setChangingScope] = useState(false);
   // 发送时要在同一次事件里读到「刚上传 / 刚并入」的画布，不等 React 下一次渲染
@@ -498,11 +499,11 @@ export function ChatView({
   }
 
   function toggleChatAsset(assetId: string) {
-    if (!chatAssetIds.includes(assetId) && chatAssetIds.length >= MAX_REFERENCE_IMAGES) {
-      toast("error", `一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+    if (!chatAssetIds.includes(assetId) && chatAssetIds.length >= attachmentLimit) {
+      toast("error", `一次最多 ${attachmentLimit} 张图片`);
       return;
     }
-    setChatAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : current.length >= MAX_REFERENCE_IMAGES ? current : [...current, assetId]);
+    setChatAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : current.length >= attachmentLimit ? current : [...current, assetId]);
     if (chatAssetIds.includes(assetId)) clearFrameFor(assetId);
   }
 
@@ -607,7 +608,8 @@ export function ChatView({
     // 先在本地挡住明显不合规的：让用户当场知道哪里不对，比发出去等一个 400 强
     const images = files.filter((file) => file.type.startsWith("image/"));
     if (!images.length) { toast("error", "只支持 PNG、JPEG 或 WebP 图片"); return null; }
-    if (images.length > MAX_REFERENCE_IMAGES) { toast("error", `一次最多上传 ${MAX_REFERENCE_IMAGES} 张`); return null; }
+    const limit = conversationImageAttachmentLimit(viewRef.current);
+    if (images.length > limit) { toast("error", `一次最多上传 ${limit} 张`); return null; }
     const oversized = images.find((file) => file.size > MAX_REFERENCE_IMAGE_BYTES);
     if (oversized) { toast("error", `${oversized.name} 超过 20 MB`); return null; }
 
@@ -618,7 +620,7 @@ export function ChatView({
       await reloadList();
       toast("ok", usesPlainChat(viewRef.current) ? `已上传 ${images.length} 张图片` : images.length > 1 ? `已上传 ${images.length} 张，已放入画布` : "已上传，已放入画布");
       // 返回新上传的产物 id：发送时要把它们一起写进这条消息
-      return next.canvasAssetIds;
+      return next.uploadedAssetIds ?? next.canvasAssetIds;
     } catch (error) {
       toastError(error);
       return null;
@@ -707,8 +709,10 @@ export function ChatView({
     const plain = usesPlainChat(viewRef.current);
     const previousCanvas = viewRef.current?.canvasAssetIds ?? [];
     const selectedForChat = [...new Set([...chatAssetIds, ...assetIds])];
-    if (plain && selectedForChat.length + images.length > MAX_REFERENCE_IMAGES) {
-      toast("error", `一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+    const limit = conversationImageAttachmentLimit(viewRef.current);
+    const existingRefs = plain ? selectedForChat : [...new Set([...(images.length ? [] : previousCanvas), ...assetIds])];
+    if (existingRefs.length + images.length > limit) {
+      toast("error", `一次最多 ${limit} 张图片`);
       return;
     }
     const uploadedIds = images.length ? await uploadImages(images) : [];
@@ -742,8 +746,7 @@ export function ChatView({
       return;
     }
     // 本地新传的、拖进来的既有产物、画布里已经挑好的，合并成「这一轮要带的图」
-    const base = viewRef.current?.canvasAssetIds ?? [];
-    const merged = [...new Set([...base, ...uploadedIds, ...assetIds])].slice(0, MAX_CANVAS_IMAGES);
+    const merged = [...new Set([...uploadedIds, ...existingRefs])];
     if (merged.length) await flushCanvas(merged);
     // 引用的是哪几张也记在这句话上：画布条默认收着，只留文字的话回头根本看不出指的是哪张
     await send(text, merged);
@@ -1144,6 +1147,7 @@ export function ChatView({
               onInterrupt={() => void interrupt()}
               onAssetAttached={(assetId) => plainChat ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
               plainAttachments={plainChat}
+              maxImageAttachments={attachmentLimit}
               videoFrames={view.toolScope === "all" ? chatVideoFrames ?? {} : undefined}
               onClearVideoFrames={() => setChatVideoFrames(null)}
               canvasItems={plainChat

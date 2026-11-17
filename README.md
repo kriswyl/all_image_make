@@ -4,7 +4,7 @@
 >
 > 本项目源码公开，但**未采用任何开源许可证**（All rights reserved）。你可以阅读、学习；如需二次开发、修改或分发，**请注明原作者 ChatCanvas / kriswyl，并附上本仓库链接**。未经授权不得用于商业售卖。
 
-当前源码版本为 `2.3.9`。Windows x64 安装包和 macOS Apple Silicon DMG 可从发布页下载。 [GitHub Releases](https://github.com/kriswyl/all_image_make/releases) · [Gitee 镜像](https://gitee.com/cqgsdx_0/chatcanvas-releases/releases)
+当前源码版本为 `2.4.0`。Windows x64 安装包和 macOS Apple Silicon DMG 可从发布页下载。 [GitHub Releases](https://github.com/kriswyl/all_image_make/releases) · [Gitee 镜像](https://gitee.com/cqgsdx_0/chatcanvas-releases/releases)
 
 ChatCanvas 是一个集成 **AI 助手、文档处理和无限画布** 的本地桌面客户端。使用自己配置的对话和生成渠道，在同一会话里制作 PPT、编辑表格，或生成图片、视频、音乐和配音。任务记录和生成文件保存在本机。
 
@@ -41,7 +41,7 @@ ChatCanvas 是一个集成 **AI 助手、文档处理和无限画布** 的本地
 - **Seedance 4 种**：文生视频、首帧生视频、首尾帧生视频、参考生视频
 - **Grok** 没有模式概念，只按「有没有参考图」区分
 
-万相参考视频和可灵运动控制支持本地 MP4/MOV。选中时可在本地预览，提交后才经已配置的渠道上传并取得临时地址，也可手动填写公网 URL。万相参考音频支持本地 MP3/M4A/AAC/WAV（不超过 15 秒、15 MB）转为 data URI，也可手动填写地址。内联素材合计限 15 MiB 字符，base64 会放大约三分之一。提交后进入异步轮询，完成后自动下载视频落盘，支持双击放大与历史回看。
+万相参考视频和可灵运动控制支持本地 MP4/MOV。选中时可在本地预览，提交后才经已配置的渠道上传并取得临时地址，也可手动填写公网 URL。万相参考音频支持本地 MP3/M4A/AAC/WAV（不超过 15 秒、15 MB）转为 data URI，也可手动填写地址。内联素材合计限 40 MiB 字符，base64 会放大约三分之一。提交后进入异步轮询，完成后自动下载视频落盘，支持双击放大与历史回看。
 
 视频等异步任务按上游状态调整查询间隔。应用重启或查询暂停后，可以沿用原任务 ID 继续查询。
 
@@ -195,7 +195,7 @@ npm run tauri:build:exe
 npm run tauri:package:portable
 ```
 
-输出文件名按 `package.json` 中的版本生成，例如 `artifacts/chatcanvas-v2.3.9-portable-win-x64.zip`。
+输出文件名按 `package.json` 中的版本生成，例如 `artifacts/chatcanvas-v2.4.0-portable-win-x64.zip`。
 
 桌面版 API 固定监听 `127.0.0.1:17892`。SQLite、参考图与生成产物默认保存在 `%APPDATA%/com.imagerelay.studio/data`，运行日志保存在 `%LOCALAPPDATA%/com.imagerelay.studio/logs`。生成产物（图片和视频）的目录可以在历史页改成任意位置，改完只影响之后生成的文件。
 
@@ -256,7 +256,9 @@ OpenAI 的 `style`、`response_format`、`stream` 等字段会按接口原名发
 
 ### 内联素材体积上限
 
-视频素材以 base64 data URI 内联发送。部分中转站对请求体有硬上限（实测约在 1–2 MB 之间），超限时只会返回含糊的 502 或连接层失败。客户端会把上传的图片压到长边 1280 的 JPEG 后再发送；服务端也会提前拦截超限的内联素材并给出明确报错，而不是让任务空等。公网 / `oss://` 地址不占请求体。
+视频素材以 base64 data URI 内联发送。客户端会把上传的图片压到长边 1280 的 JPEG 后再发送；服务端对**所有内联素材合计**设置 40 MiB 字符预算（base64 会放大约三分之一），超限时提前给出明确报错，而不是让任务空等。公网 / `oss://` 地址不占请求体。
+
+这个预算只是应用侧的自我保护阈值，不是中转站的硬上限：实测网关可接收 **50 MiB** 的请求体（50 MiB 通过、51 MiB 起 413），18.3 MiB 的内联请求端到端出图成功（详见 `MEDIA_UPLOAD_HANDOFF.md`）。保留它是为了在超限时立刻说清原因。
 
 ## 验证
 

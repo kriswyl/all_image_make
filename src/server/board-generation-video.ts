@@ -122,6 +122,9 @@ export async function generateBoardVideo(input: {
         generation.seedanceVideoMedia = media.map((item) => ({ type: "image_url", url: item.url, role: item.role }));
         generation.seedanceVideoMode = selection.mode as SeedanceVideoMode;
         if (selection.mode === "first-frame" || selection.mode === "first-last-frame") generation.ratio = "adaptive";
+      } else if (channel.adapterType === "minimax-video" && selection.mode !== "motion-control") {
+        generation.minimaxVideoMedia = media.map(({ role: type, url }) => ({ type, url }));
+        generation.minimaxVideoMode = selection.mode;
       } else if (channel.adapterType === "kling-video") {
         generation.klingVideoMedia = media.map((item) => ({ type: selection.mode === "motion-control" ? "image" : item.role as KlingMediaType, url: item.url }));
         generation.klingVideoMode = selection.mode;
@@ -133,6 +136,8 @@ export async function generateBoardVideo(input: {
     }
   } else if (channel.adapterType === "wan-video") {
     generation.wanVideoMode = "text-to-video";
+  } else if (channel.adapterType === "minimax-video" && selection.mode !== "motion-control") {
+    generation.minimaxVideoMode = selection.mode;
   } else if (channel.adapterType === "seedance-video") {
     generation.seedanceVideoMode = "text-to-video";
   } else if (channel.adapterType === "kling-video") {

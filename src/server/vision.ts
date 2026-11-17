@@ -5,8 +5,8 @@
  *
  * 1. **大脑看图**：当前画布缩到 512px JPEG，塞进 `image_url` content part（§11.2）
  * 2. **当参考图**：把画布产物喂给生图渠道做图生图，必要时重新编码避开体积上限
- * 3. **当首帧**：视频生成的内联素材总预算为 15 MiB 字符（`tasks.ts`），
- *    原图直接 base64 多半会撞线，必须先压
+ * 3. **当首帧**：视频生成的内联素材总预算为 40 MiB 字符（`shared/types.ts`），
+ *    原图直接 base64 仍可能撞线，必须先压
  *
  * 用 jimp 而不是客户端 canvas 回传：agent 的续跑是服务端驱动的，
  * 服务端要图时前端未必已经上传完，回传要额外一套请求 + 等待 + 超时协调（§11.3）。
@@ -17,7 +17,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Jimp, JimpMime } from "jimp";
-import { MAX_REFERENCE_IMAGE_BYTES } from "../shared/types.js";
+import { MAX_INLINE_MEDIA_CHARS, MAX_REFERENCE_IMAGE_BYTES } from "../shared/types.js";
 import type { BrainContentPart } from "./brain.js";
 import type { AppDatabase, AssetRow } from "./db.js";
 import { GIF_VISION_MAX_FRAMES, readGifAnimation } from "./media-frames.js";
@@ -83,18 +83,18 @@ export const VIDEO_FRAME_PROFILE: EncodeProfile = { maxEdge: 1280, maxBytes: MAX
 /**
  * 多张图一起进视频请求体时的预算。
  *
- * `MAX_INLINE_MEDIA_CHARS` 是**所有** data URI 合计的上限（tasks.ts，15 MiB 字符），
- * 而每张图 base64 后还会膨胀约 4/3。首尾帧 / 参考生视频一次要发 2~8 张，
- * 这里继续使用保守的图片预算，避免改变图片预处理质量与行为。
+ * `MAX_INLINE_MEDIA_CHARS` 是**所有** data URI 合计的上限（shared/types.ts，现 40 MiB 字符），
+ * 而每张图 base64 后还会膨胀约 4/3。首尾帧 / 参考生视频一次要发 2~8 张。
  *
- * 这里按张数把总预算均分，并在图多时主动缩画幅；宁可每张糊一点，
- * 也不能让整个任务在提交前就失败。
+ * 以前这里硬编码 1.4M（对应早已作废的 1.4MB 旧限制），多张图会被压到每张不足 100KB；
+ * 现在按真实预算均分，`maxBytes` 基本不再成为瓶颈，真正起作用的是下面的
+ * `maxEdge` 与 `quality`。分摊逻辑保留，是为了万一预算再被调低时仍然安全。
  */
 export function videoInlineProfile(count: number): EncodeProfile {
   const n = Math.max(1, count);
   if (n === 1) return VIDEO_FRAME_PROFILE;
   // 留 20% 余量给 JSON 结构、prompt 和其它字段；1.34 是 base64 的膨胀系数
-  const perImage = Math.floor((1_400_000 * 0.8) / n / 1.34);
+  const perImage = Math.floor((MAX_INLINE_MEDIA_CHARS * 0.8) / n / 1.34);
   return {
     maxEdge: n >= 5 ? 768 : n >= 3 ? 960 : 1100,
     maxBytes: Math.max(48 * 1024, perImage),

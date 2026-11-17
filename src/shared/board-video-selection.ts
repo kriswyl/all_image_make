@@ -1,7 +1,7 @@
 import { directInputLinks, type BoardDoc, type BoardEdgeRole, type BoardVideoMode, type ConfigBoardNode, type ImageBoardNode } from "./board.js";
 import { VIDEO_CAPABILITIES, videoModeLabel, type ConversationVideoMode, type VideoAdapter } from "./video-capabilities.js";
 import type { ConversationVideoRole } from "./agent-types.js";
-import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec } from "./video-modes.js";
+import { referenceMediaCombinationError, maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec } from "./video-modes.js";
 
 interface BoardVideoInput {
   node: ImageBoardNode;
@@ -66,12 +66,14 @@ export function resolveBoardVideoSelection(input: {
     if (videoSources.length && !limits.videos) return { error: "当前模型的参考生视频模式不支持参考视频" };
     if (videoSources.length && input.localVideoUploadConfigured === false) return { error: "当前渠道未配置素材上传服务" };
     if (videoSources.length > limits.videos) return { error: `参考视频最多连接 ${limits.videos} 个节点` };
-    if (audioSources.length && input.adapterType !== "wan-video") return { error: "画布的参考音频支持万相；使用 Seedance 参考音频请前往视频工作台" };
+    if (audioSources.length && input.adapterType !== "wan-video" && input.adapterType !== "minimax-video") return { error: "画布的参考音频支持万相与 MiniMax H3；使用 Seedance 参考音频请前往视频工作台" };
     if (audioSources.length > limits.audios) return { error: `参考音频最多连接 ${limits.audios} 个节点` };
     const requested = input.modeOverride ?? input.config.videoMode;
     if (requested && requested !== "reference") return { error: "连接音视频时请选择参考生视频模式，或改为自动" };
     const maxImages = maxImagesForMode(input.adapterType, model, "reference");
     if (withRole.length > maxImages) return { error: `参考图最多连接 ${maxImages} 个节点` };
+    const combinationError = referenceMediaCombinationError(limits, { images: withRole.length, videos: videoSources.length, audios: audioSources.length });
+    if (combinationError) return { error: combinationError };
     if (withRole.some((item) => item.role === "first_frame" || item.role === "last_frame")) return { error: "参考视频或音频与图片组合时，请将图片角色设为参考图或自动" };
     return { selection: { mode: "reference", inputs: withRole.map((item) => ({ ...item, role: "reference_image" })) } };
   }

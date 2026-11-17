@@ -343,6 +343,16 @@ function sunoResults(payload: unknown): AsyncResult[] {
 export const ASYNC_PROVIDER_SPECS: Partial<Record<AdapterType, AsyncProviderSpec>> = {
   "wan-video": videoSpec((id) => `/api/v1/tasks/${id}`),
   "grok-video": videoSpec((id) => `/v1/videos/${id}`),
+  "minimax-video": {
+    ...videoSpec((id) => `/v1/videos/${encodeURIComponent(id)}`),
+    extractResults: (payload) => {
+      const record = payload as { duration?: unknown; metadata?: { url?: unknown } } | null;
+      const url = record?.metadata?.url;
+      return typeof url === "string" && /^https?:\/\//i.test(url)
+        ? [{ kind: "video", url, duration: typeof record?.duration === "number" ? record.duration : undefined, strong: true }]
+        : [];
+    },
+  },
   "seedance-video": videoSpec((id) => `/api/v3/contents/generations/tasks/${id}`),
   "kling-video": {
     // 可灵的响应里 request_id 是请求追踪号，data.id 才是任务 id；不能走通用提取

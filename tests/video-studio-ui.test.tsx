@@ -18,6 +18,7 @@ vi.mock("../src/client/api", () => ({
     bootstrap: vi.fn(),
     polishPrompt: vi.fn(),
     generate: vi.fn(),
+    generateWithReferenceMedia: vi.fn(),
   },
 }));
 
@@ -66,6 +67,8 @@ const seedanceUploadChannel: Channel = { ...seedanceChannel, id: "seedance-uploa
 /** Grok 没有模式表，但应该照样有参考图上传入口 */
 const grokChannel: Channel = { ...baseChannel, id: "grok", name: "Grok", adapterType: "grok-video", models: ["grok-imagine-video"] };
 
+const minimaxChannel: Channel = { ...seedanceUploadChannel, id: "minimax", name: "MiniMax H3", adapterType: "minimax-video", models: ["MiniMax-H3"] };
+
 let root: Root | null = null;
 let container: HTMLDivElement;
 /** 最近一次 toast：很多校验只体现在提示文案上 */
@@ -80,10 +83,10 @@ function Harness(props: { channelId: string; model: string }) {
       : props.channelId === "kling-upload" ? klingUploadChannel
         : props.channelId === "seedance" ? seedanceChannel
           : props.channelId === "seedance-upload" ? seedanceUploadChannel
-            : props.channelId === "grok" ? grokChannel : baseChannel;
+            : props.channelId === "grok" ? grokChannel : props.channelId === "minimax" ? minimaxChannel : baseChannel;
   return (
     <VideoGenerateView
-      channels={[baseChannel, wanChannel, wanUploadChannel, klingUploadChannel, seedanceChannel, seedanceUploadChannel, grokChannel]}
+      channels={[baseChannel, wanChannel, wanUploadChannel, klingUploadChannel, seedanceChannel, seedanceUploadChannel, grokChannel, minimaxChannel]}
       selectedChannelId={props.channelId}
       selectedModel={props.model}
       activeTask={null}
@@ -719,6 +722,72 @@ it("Grok 也有参考内容上传入口：没有模式胶囊，但能选参考�
   await act(async () => { imageInput.dispatchEvent(new Event("change", { bubbles: true })); });
   expect(container.querySelectorAll(".vstudio-media-tile").length).toBe(1);
   expect(container.querySelector(".vstudio-media-tag")?.textContent).toBe("图片1");
+});
+
+it.each([
+  { mode: "text-to-video", frames: false, images: 0 },
+  { mode: "first-frame", frames: true, images: 1 },
+  { mode: "first-last-frame", frames: true, images: 2 },
+  { mode: "reference", frames: false, images: 3 },
+])("Seedance $mode 没有本地音视频时走 JSON", async ({ mode, frames, images }) => {
+  const generate = vi.mocked(api.generate).mockClear().mockResolvedValue({ id: "seedance-json" } as never);
+  const multipart = vi.mocked(api.generateWithReferenceMedia).mockClear();
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await render({ channelId: "seedance-upload", model: "sd-2.5" });
+    if (frames) await chooseMode("首尾帧生视频");
+    await typePrompt("保持画面稳定");
+    if (images) {
+      const picker = container.querySelector<HTMLInputElement>("input[type=file][accept^='image']")!;
+      const files = Array.from({ length: images }, (_, index) => new File(["image"], `ref-${index}.png`, { type: "image/png" }));
+      Object.defineProperty(picker, "files", { value: files, configurable: true });
+      await act(async () => { picker.dispatchEvent(new Event("change", { bubbles: true })); });
+    }
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button.vstudio-send")!.click();
+      await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    });
+    const [input, files] = generate.mock.calls[0]!;
+    expect(input.seedanceVideoMode).toBe(mode);
+    expect(input.seedanceVideoMedia ?? []).toHaveLength(images);
+    expect(files).toEqual([]);
+    expect(multipart).not.toHaveBeenCalled();
+  } finally {
+    confirm.mockRestore();
+  }
+});
+
+it("MiniMax H3 默认 768P，首尾帧按角色随 JSON 发送", async () => {
+  const generate = vi.mocked(api.generate).mockClear().mockResolvedValue({ id: "minimax-task" } as never);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await render({ channelId: "minimax", model: "MiniMax-H3" });
+    expect(container.querySelector(".vstudio-bar")?.textContent).toContain("768P");
+    await chooseMode("首尾帧生视频");
+    await typePrompt("保持画面稳定");
+    const picker = container.querySelector<HTMLInputElement>("input[type=file][accept^='image']")!;
+    Object.defineProperty(picker, "files", {
+      value: ["first", "last"].map((part) => new File([part], part + ".png", { type: "image/png" })),
+      configurable: true,
+    });
+    await act(async () => { picker.dispatchEvent(new Event("change", { bubbles: true })); });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button.vstudio-send")!.click();
+      await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    });
+    const [input, files] = generate.mock.calls[0]!;
+    expect(input).toMatchObject({
+      minimaxVideoMode: "first-last-frame", resolution: "768P", ratio: "adaptive",
+      minimaxVideoMedia: [
+        { type: "first_frame", url: expect.stringMatching(/^data:image\/png;base64,/) },
+        { type: "last_frame", url: expect.stringMatching(/^data:image\/png;base64,/) },
+      ],
+    });
+    expect(input.audio).toBeUndefined();
+    expect(files).toEqual([]);
+  } finally {
+    confirm.mockRestore();
+  }
 });
 
 it("Grok 提交时把参考图当通用 referenceImages 带上，不再报「没有可用的生成方式」", async () => {

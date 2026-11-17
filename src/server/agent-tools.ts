@@ -11,6 +11,7 @@ import { imageOutputFormatSchema } from "../shared/image-formats.js";
 import { storyboardProjectDataSchema } from "../shared/storyboard-project.js";
 import { applyStyleSuffix } from "../shared/style-presets.js";
 import { IMAGE_SIZE_VALUES, MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES } from "../shared/types.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
 import { SEEDANCE_LIMITS } from "../shared/seedance-capabilities.js";
 import { resolveCanvasRefs } from "./agent-tools/assets.js";
 import { BOARD_TOOL_SCHEMAS, type BoardToolInput } from "./agent-tools/board-schema.js";
@@ -20,7 +21,7 @@ import {
 } from "./agent-tools/board.js";
 import { generateMusic, generateSpeech } from "./agent-tools/audio.js";
 import { generateImage, MAX_EXTRA_REFERENCES } from "./agent-tools/image.js";
-import { describeError, failResult, okResult, type ToolContext, type ToolOutcome } from "./agent-tools/shared.js";
+import { describeError, failResult, looseBoolean, okResult, type ToolContext, type ToolOutcome } from "./agent-tools/shared.js";
 import { generateVideo } from "./agent-tools/video.js";
 import { callBrain, type BrainMessage } from "./brain.js";
 import { buildStoryboardTemplateInput, createCanvasTemplate } from "./canvas-template.js";
@@ -43,16 +44,16 @@ export const generateImageSchema = z.object({
   // 这里用 enum 而不是自由字符串：值和上游一样大小写敏感，写错等于没写。
   imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
   count: z.coerce.number().int().min(1).max(8).optional(),
-  fromScratch: z.coerce.boolean().optional(),
+  fromScratch: looseBoolean(),
   outputFormat: imageOutputFormatSchema.optional()
     .describe("输出格式。gif/svg 需要上游模型支持；gif 可用 frame_count / frame_duration_ms 控制帧数与每帧时长，是否多帧最终由模型决定，不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
-  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
 });
 
 export const editImageSchema = z.object({
   prompt: nonEmpty(20000),
   modelHint: z.string().trim().max(80).optional(),
-  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
+  imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
   extraReferences: z.array(z.string().trim().min(1).max(80)).max(MAX_EXTRA_REFERENCES).optional(),
   // 改图照样能定输出尺寸：改完的画面未必沿用原图的形状
   aspectRatio: z.string().trim().max(20).optional(),
@@ -63,7 +64,7 @@ export const editImageSchema = z.object({
 
 export const viewImagesSchema = z.object({
   // 不填 = 看整组当前画布。看图不生成、不花钱，所以上限就是画布上限
-  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
+  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_REFERENCE_IMAGES).optional(),
 });
 
 export const setCanvasSchema = z.object({
@@ -91,9 +92,10 @@ export const generateVideoSchema = z.object({
   mode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference", "video-edit", "video-extend"]).optional().catch(undefined),
   duration: z.coerce.number().int().min(1).max(30).optional(),
   resolution: z.string().trim().max(10).optional(),
-  audio: z.coerce.boolean().optional(),
-  promptExtend: z.coerce.boolean().optional(),
+  audio: looseBoolean(),
+  promptExtend: looseBoolean(),
   imageRefs: z.array(z.string().trim().min(1).max(80)).max(SEEDANCE_LIMITS["2.5"].maxImages).optional(),
+  audioRefs: z.array(z.string().trim().min(1).max(80)).max(3).optional(),
   videoRefs: z.array(z.string().trim().min(1).max(80)).max(SEEDANCE_LIMITS["2.5"].maxVideos).optional(),
   imageFrom: z.enum(["current", "none"]).optional(),
 });
@@ -104,11 +106,11 @@ export const generateMusicSchema = z.object({
   title: z.string().trim().max(80).optional(),
   tags: z.string().trim().max(1000).optional(),
   negativeTags: z.string().trim().max(1000).optional(),
-  instrumental: z.coerce.boolean().optional(),
+  instrumental: looseBoolean(),
   sourceAssetRefs: z.array(z.string().trim().min(1).max(80)).max(2).optional(),
   tempo: z.coerce.number().int().min(20).max(300).optional(),
   key: z.string().trim().max(10).optional(),
-  loop: z.coerce.boolean().optional(),
+  loop: looseBoolean(),
   modelHint: z.string().trim().max(80).optional(),
   version: z.string().trim().max(40).optional(),
   targetDuration: z.union([z.literal(45), z.literal(60)]).optional(),

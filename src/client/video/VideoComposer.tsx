@@ -264,7 +264,9 @@ export function VideoComposer(props: VideoComposerProps) {
   /** 参考视频/音频各能放几段：Seedance 按版本上限，万相/可灵各一段 */
   const mediaLimits = referenceMediaLimits(props.adapter, props.model, spec);
   const canUploadVideo = referenceMediaLimits(props.adapter, props.model, spec, Boolean(channel?.uploadEndpoint?.trim())).videos > 0;
-  const ratioValue = caps?.ratioField === "ratio" ? draft.ratio : draft.aspectRatio;
+  const minimaxTextOnly = props.adapter === "minimax-video" && spec?.id === "prompt" && !filled && !bucket.videos.length && !bucket.audios.length;
+  const selectedRatio = caps?.ratioField === "ratio" ? draft.ratio : draft.aspectRatio;
+  const ratioValue = minimaxTextOnly && selectedRatio === "adaptive" ? "16:9" : selectedRatio;
   const ratioLabel = ratioValue === "adaptive" ? "智能比例" : ratioValue;
   const resolutionLabel = draft.resolution ? draft.resolution.toUpperCase() : "—";
   const audioSupported = Boolean(caps?.supportsAudio);
@@ -425,7 +427,7 @@ export function VideoComposer(props: VideoComposerProps) {
       <input
         ref={audioInputRef}
         type="file"
-        accept="audio/mpeg,audio/mp4,audio/aac,audio/wav,.mp3,.m4a,.aac,.wav"
+        accept={props.adapter === "minimax-video" ? "audio/mpeg,audio/wav,.mp3,.wav" : "audio/mpeg,audio/mp4,audio/aac,audio/wav,.mp3,.m4a,.aac,.wav"}
         multiple={props.audioRoom > 1}
         disabled={disabled}
         className="vstudio-file-input"
@@ -711,7 +713,7 @@ export function VideoComposer(props: VideoComposerProps) {
               ref={editorRef}
               value={draft.prompt}
               items={mentionItems}
-              maxLength={20000}
+              maxLength={caps?.maxPromptLength ?? 20000}
               placeholder="描述视频内容，输入 @ 引用已上传的图片、视频或音频……"
               onChange={(next) => onDraftChange({ prompt: next })}
               onFocusChange={setPromptFocused}
@@ -861,6 +863,7 @@ export function VideoComposer(props: VideoComposerProps) {
             adapter={adapter}
             model={props.model}
             spec={spec}
+            concreteRatioOnly={minimaxTextOnly}
             caps={caps}
             draft={draft}
             onChange={onDraftChange}

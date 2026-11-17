@@ -16,6 +16,7 @@ import {
   type CanvasTemplate, type CanvasTemplateInput, type TemplateConfigInput,
 } from "../shared/canvas-template.js";
 import type { BoardView } from "../shared/board.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
 
 function now() {
   return new Date().toISOString();
@@ -798,7 +799,7 @@ export function buildStoryboardTemplateInput(source: {
         title: `第 ${shot.index} 镜 · ${shot.speaker?.trim() || "配音"}`, text: shot.dialogue.trim() });
     }
 
-    // 设定图作为参考图输入：角色 / 场景 / 道具都按名字解析，缺的现建；每镜最多 8 张
+    // 模板还没有选定图片模型，先按可接收的最大容量建连线。
     const charNames = shot.characters?.length
       ? shot.characters
       : (shot.character ?? "").split(/[、,，]/).map((name) => name.trim()).filter(Boolean);
@@ -815,8 +816,10 @@ export function buildStoryboardTemplateInput(source: {
       const tempId = ensureReference("prop", name);
       if (tempId) inputIds.add(tempId);
     }
-    if (inputIds.size > 8) throw new AppError("STORYBOARD_REFERENCE_LIMIT", `第 ${shot.index} 镜参考图超过 8 张，请减少角色、场景或道具。`, 400);
-    for (const tempId of [...inputIds].slice(0, 8)) {
+    if (inputIds.size > MAX_IMAGE_GENERATION_REFERENCES) {
+      throw new AppError("STORYBOARD_REFERENCE_LIMIT", `第 ${shot.index} 镜参考图超过 ${MAX_IMAGE_GENERATION_REFERENCES} 张，请减少角色、场景或道具。`, 400);
+    }
+    for (const tempId of inputIds) {
       edges.push({ from: tempId, to: configId, kind: "input", role: "reference" });
     }
 

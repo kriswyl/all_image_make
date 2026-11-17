@@ -1,7 +1,6 @@
 import type { KlingCharacterOrientation } from "./types.js";
-import { seedanceVersion } from "./seedance-capabilities.js";
 import { VIDEO_CAPABILITIES, type VideoAdapter } from "./video-capabilities.js";
-import { resolutionOptionsFor, studioModeSpec, type VideoModeSpec } from "./video-modes.js";
+import { resolutionOptionsFor, studioModeSpec, videoRatioIsAdaptive, type VideoModeSpec } from "./video-modes.js";
 import type { TaskInputSnapshot } from "./video-snapshot.js";
 
 /**
@@ -38,11 +37,12 @@ export function draftKey(adapter: string | undefined, mode: string | undefined):
 export function defaultVideoDraft(adapter: string | undefined, mode: string | undefined): VideoDraft {
   const caps = adapter && adapter in VIDEO_CAPABILITIES ? VIDEO_CAPABILITIES[adapter as VideoAdapter] : null;
   const resolutions = resolutionOptionsFor(adapter, mode);
+  const preferred = caps?.defaultResolution;
   return {
     prompt: "",
     negativePrompt: "",
     duration: caps?.durations.fixed ?? caps?.durations.default ?? 5,
-    resolution: resolutions[Math.min(1, resolutions.length - 1)] ?? "",
+    resolution: preferred && resolutions.includes(preferred) ? preferred : resolutions[Math.min(1, resolutions.length - 1)] ?? "",
     aspectRatio: caps?.ratioField === "aspectRatio" ? caps.aspectRatios[0] ?? "16:9" : "16:9",
     ratio: caps?.ratioField === "ratio" ? caps.aspectRatios[0] ?? "adaptive" : "adaptive",
     audio: true,
@@ -109,17 +109,16 @@ export function reconcileVideoDraft(
   // 分辨率：跟着模式走（运动控制只到 1080P）
   const resolutions = resolutionOptionsFor(adapter, mode);
   if (resolutions.length && !resolutions.includes(next.resolution)) {
-    next.resolution = resolutions[Math.min(1, resolutions.length - 1)];
+    next.resolution = defaultVideoDraft(adapter, mode).resolution;
     notices.push({ key: "resolution", message: `分辨率已调整为 ${next.resolution}` });
   }
 
   // 宽高比：字段名与档位都跟渠道走
   if (caps.ratioField === "ratio") {
-    const locked = adapter === "seedance-video" && seedanceVersion(model) === "2.5"
-      && (mode === "frames" || mode === "first-frame" || mode === "first-last-frame");
+    const locked = videoRatioIsAdaptive(adapter, model, mode);
     if (locked && next.ratio !== "adaptive") {
       next.ratio = "adaptive";
-      notices.push({ key: "ratio", message: "2.5 的首帧 / 首尾帧只接受自适应比例" });
+      notices.push({ key: "ratio", message: "首帧 / 首尾帧的宽高比随图片自适应" });
     } else if (!locked && !caps.aspectRatios.includes(next.ratio)) {
       next.ratio = caps.aspectRatios[0];
       notices.push({ key: "ratio", message: `宽高比已调整为 ${next.ratio}` });

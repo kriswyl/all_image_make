@@ -1,11 +1,30 @@
+import { MINIMAX_REFERENCE_LIMITS } from "../shared/video-capabilities.js";
+import { minimaxAudioDataUrl } from "./minimax-reference-audio.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppDatabase, BoardRecord, DbChannel } from "./db.js";
-import { directInputLinks, type BoardDoc, type BoardNode, type BoardView, type BoardVideoMode, type BoardAudioKind } from "../shared/board.js";
+import { directInputLinks, directUpstreamImages, type BoardDoc, type BoardNode, type BoardView, type BoardVideoMode, type BoardAudioKind } from "../shared/board.js";
+import { imageReferenceCountError } from "../shared/image-reference-limits.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
 import type { GenerationInput, Task } from "../shared/types.js";
+import { MAX_INLINE_MEDIA_CHARS } from "../shared/types.js";
 import { readReferenceVideoAsset, type ReferenceVideoUpload } from "./reference-video.js";
+import { prepareImageBytes, REFERENCE_PROFILE } from "./vision.js";
+
+export async function loadBoardImageReferences(db: AppDatabase, doc: BoardDoc, nodeId: string, adapter: string, model: string) {
+  const referenceNodes = directUpstreamImages(doc, nodeId);
+  const error = imageReferenceCountError(adapter, model, referenceNodes.length);
+  if (error) throw new AppError("REFERENCE_IMAGE_LIMIT", error, 400);
+  const references: ReferenceImageUpload[] = [];
+  for (const node of referenceNodes) {
+    const asset = node.assetId ? db.getAsset(node.assetId) : undefined;
+    const prepared = asset && await prepareImageBytes(db, asset, REFERENCE_PROFILE);
+    if (!prepared) throw new AppError("REFERENCE_IMAGE_MISSING", `无法读取参考图「${node.title || node.ref}」，请重新选择素材`, 400);
+    references.push(prepared);
+  }
+  return { references, referenceNodes };
+}
 
 export interface BoardGenerateResult {
   board: BoardView;
@@ -94,11 +113,23 @@ export async function appendBoardMediaInputs(db: AppDatabase, channel: DbChannel
     if (asset.duration && asset.duration > 15) throw new AppError("BOARD_ASSET_INVALID", "音频时长不能超过 15 秒", 400);
     return { asset, bytes: await fs.readFile(file) };
   };
-  if (audioNode?.type === "audio" && audioNode.assetId) {
+  if (channel.adapterType === "minimax-video") {
+    const media = generation.minimaxVideoMedia ?? [];
+    let audioDuration = 0;
+    for (const { node } of links) {
+      if (node.type !== "audio" || !node.assetId) continue;
+      const asset = db.getAsset(node.assetId);
+      if (!asset) throw new AppError("BOARD_ASSET_INVALID", "参考音频素材不存在", 400);
+      audioDuration += asset.duration ?? 0;
+      if (audioDuration > MINIMAX_REFERENCE_LIMITS.maxSecondsPerKind) throw new AppError("BOARD_ASSET_INVALID", "参考音频总时长不能超过 15 秒", 400);
+      media.push({ type: "audio", url: await minimaxAudioDataUrl(asset) });
+    }
+    generation.minimaxVideoMedia = media;
+  } else if (audioNode?.type === "audio" && audioNode.assetId) {
     const { asset, bytes } = await readAudioAsset(audioNode.assetId);
     if (!["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/wav", "audio/x-wav"].includes(asset.mimeType)) throw new AppError("BOARD_ASSET_INVALID", "参考音频仅支持 MP3、M4A、AAC 或 WAV", 400);
     const media = { type: "reference_audio" as const, url: `data:${asset.mimeType};base64,${bytes.toString("base64")}` };
-    if (media.url.length + (generation.wanVideoMedia ?? []).reduce((sum, item) => sum + (item.url.startsWith("data:") ? item.url.length : 0), 0) > 15 * 1024 * 1024) throw new AppError("BOARD_ASSET_INVALID", "音频和图片合计超过 15 MB 内联预算，请使用较小的素材", 400);
+    if (media.url.length + (generation.wanVideoMedia ?? []).reduce((sum, item) => sum + (item.url.startsWith("data:") ? item.url.length : 0), 0) > MAX_INLINE_MEDIA_CHARS) throw new AppError("BOARD_ASSET_INVALID", `音频和图片合计超过 ${MAX_INLINE_MEDIA_CHARS / 1024 / 1024} MB 内联预算，请使用较小的素材`, 400);
     generation.wanVideoMedia = [...(generation.wanVideoMedia ?? []), media];
     generation.wanVideoMode = "reference";
   }
@@ -110,12 +141,14 @@ export async function appendBoardMediaInputs(db: AppDatabase, channel: DbChannel
     if (channel.adapterType === "kling-video") {
       generation.klingVideoMode = "motion-control";
       generation.klingCharacterOrientation = "video";
+    } else if (channel.adapterType === "minimax-video") {
+      generation.minimaxVideoMode = "reference";
     } else if (channel.adapterType === "seedance-video") {
       generation.seedanceVideoMode = "reference";
     } else {
       generation.wanVideoMode = "reference";
     }
-    uploads.push(await readReferenceVideoAsset(asset, generation.klingVideoMode ?? "reference"));
+    uploads.push(await readReferenceVideoAsset(asset, generation.klingVideoMode ?? "reference", channel.adapterType));
   }
   return uploads;
 }

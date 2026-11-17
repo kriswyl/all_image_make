@@ -11,13 +11,13 @@ import { referenceMediaType } from "../shared/reference-media";
 import { optionalNumber, usePersistentState } from "./task-ui";
 import { VideoComposer, VideoComposerPlaceholder } from "./video/VideoComposer";
 import { VideoResultPanel } from "./video/VideoResultPanel";
-import { buildKlingMedia, buildSeedanceMedia, buildWanMedia, mediaDuration } from "./video/media-builders";
+import { buildKlingMedia, buildMinimaxMedia, buildSeedanceMedia, buildWanMedia, mediaDuration } from "./video/media-builders";
 import type { MediaBucketsController } from "./hooks/useMediaBuckets";
-import { VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
+import { MINIMAX_REFERENCE_LIMITS, VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
 import {
   applySnapshotToDraft, defaultVideoDraft, draftKey, reconcileVideoDraft, type VideoDraft,
 } from "../shared/video-draft";
-import { maxImagesForMode, referenceMediaLimits, referenceVideoDurationRange, resolveStudioMode, studioAssetSpec, studioModeForConcrete, videoModeLabel, videoModesFor } from "../shared/video-modes";
+import { referenceMediaCombinationError, maxImagesForMode, referenceMediaLimits, referenceVideoDurationRange, resolveStudioMode, studioAssetSpec, studioModeForConcrete, videoModeLabel, videoModesFor } from "../shared/video-modes";
 import type { Channel, GenerationInput, Task } from "../shared/types";
 
 type Toast = { kind: "success" | "error"; message: string };
@@ -120,11 +120,12 @@ export function VideoGenerateView(props: {
       if (!localVideoUploadConfigured) throw new Error("该渠道未配置上传服务，暂时无法上传参考视频");
       // 认类型交给扩展名（MIME 在有的机器上是空串），补上规范类型再往下传
       if (referenceMediaType(file)?.kind !== "video") throw new Error("请选择 MP4 或 MOV 视频");
-      if (file.size > 100 * 1024 * 1024) throw new Error("视频不能超过 100 MB");
+      const maxBytes = adapterType === "minimax-video" ? MINIMAX_REFERENCE_LIMITS.videoBytes : 100 * 1024 * 1024;
+      if (file.size > maxBytes) throw new Error(`视频不能超过 ${maxBytes / 1024 / 1024} MB`);
       setReadingVideo(true);
       const typed = withReferenceMediaType(file);
       const seconds = await mediaDuration(typed, "video");
-      const { min, max } = referenceVideoDurationRange(spec?.id, draft.orientation);
+      const { min, max } = referenceVideoDurationRange(spec?.id, draft.orientation, adapterType);
       if (seconds < min || seconds > max) throw new Error(`视频时长需为 ${min}–${max} 秒`);
       if (!props.media.addVideo(key, typed, seconds, mediaLimits.videos)) throw new Error("当前模式放不下这段参考视频");
       return true;
@@ -161,6 +162,7 @@ export function VideoGenerateView(props: {
       if (referenceMediaType(file)?.kind !== "audio") {
         throw new Error("请选择 MP3、M4A、AAC 或 WAV 音频");
       }
+      if (adapterType === "minimax-video" && !/\.(mp3|wav)$/i.test(file.name)) throw new Error("MiniMax H3 参考音频仅支持 MP3 或 WAV");
       if (file.size > 15 * 1024 * 1024) throw new Error("音频不能超过 15 MB");
       setReadingVideo(true);
       const typed = withReferenceMediaType(file);
@@ -168,6 +170,7 @@ export function VideoGenerateView(props: {
       if (duration > 15 || duration <= 0) throw new Error("音频时长需在 15 秒以内");
       // 上游 r2v 实测要求音频 ≥1.8 秒，低于这个值会直接 400。
       if (adapterType === "seedance-video" && duration < 1.8) throw new Error("参考音频需至少 1.8 秒");
+      if (adapterType === "minimax-video" && duration < MINIMAX_REFERENCE_LIMITS.minClipSeconds) throw new Error("参考音频需至少 2 秒");
       if (!props.media.addAudio(key, typed, duration, mediaLimits.audios)) throw new Error("当前模式放不下这段参考音频");
       return true;
     } catch (error) {
@@ -248,6 +251,7 @@ export function VideoGenerateView(props: {
     if (!channel || !caps) return props.onToast("error", "请先选择视频渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!draft.prompt.trim()) return props.onToast("error", "请输入提示词");
+    if (caps.maxPromptLength && Array.from(draft.prompt.trim()).length > caps.maxPromptLength) return props.onToast("error", `提示词最多 ${caps.maxPromptLength} 字`);
     // 合并入口提交前先落成上游真实模式：没素材=文生，有素材=参考，1/2 张图=首帧/首尾帧
     const resolved = resolveStudioMode(adapterType, props.selectedModel, spec?.id, {
       images: bucket.images.length, video: bucket.videos.length > 0, audio: bucket.audios.length > 0,
@@ -259,6 +263,14 @@ export function VideoGenerateView(props: {
     }
     if (!spec && bucket.images.length > caps.maxReferenceImages) {
       return props.onToast("error", `${caps.label} 参考图最多 ${caps.maxReferenceImages} 张`);
+    }
+    const combinationError = referenceMediaCombinationError(mediaLimits, {
+      images: bucket.images.length, videos: bucket.videos.length, audios: bucket.audios.length,
+    });
+    if (combinationError) return props.onToast("error", combinationError);
+    if (adapterType === "minimax-video") {
+      if (bucket.videos.reduce((sum, item) => sum + item.duration, 0) > MINIMAX_REFERENCE_LIMITS.maxSecondsPerKind) return props.onToast("error", "参考视频总时长不能超过 15 秒");
+      if (bucket.audios.reduce((sum, item) => sum + item.duration, 0) > MINIMAX_REFERENCE_LIMITS.maxSecondsPerKind) return props.onToast("error", "参考音频总时长不能超过 15 秒");
     }
     let rawParameters: Record<string, unknown>;
     try {
@@ -274,6 +286,7 @@ export function VideoGenerateView(props: {
       let wanVideoMedia: GenerationInput["wanVideoMedia"];
       let seedanceVideoMedia: GenerationInput["seedanceVideoMedia"];
       let klingVideoMedia: GenerationInput["klingVideoMedia"];
+      let minimaxVideoMedia: GenerationInput["minimaxVideoMedia"];
       const ctx = { spec: resolved.spec, bucket, draft, model: props.selectedModel, inlineAudio: seedanceInlineAudio };
       if (adapterType === "wan-video") {
         const built = await buildWanMedia(ctx);
@@ -287,6 +300,8 @@ export function VideoGenerateView(props: {
         const built = await buildKlingMedia(ctx);
         if (typeof built === "string") { props.onToast("error", built); return; }
         klingVideoMedia = built.length ? built : undefined;
+      } else if (adapterType === "minimax-video") {
+        minimaxVideoMedia = await buildMinimaxMedia(ctx);
       }
 
       const localVideos = bucket.videos.map((item) => item.file);
@@ -319,6 +334,8 @@ export function VideoGenerateView(props: {
         seedanceVideoMode: adapterType === "seedance-video" ? (resolved.mode as GenerationInput["seedanceVideoMode"]) : undefined,
         seedanceVideoMedia,
         klingVideoMedia,
+        minimaxVideoMedia,
+        minimaxVideoMode: adapterType === "minimax-video" ? resolved.mode as GenerationInput["minimaxVideoMode"] : undefined,
         klingVideoMode: adapterType === "kling-video" ? (resolved.mode as GenerationInput["klingVideoMode"]) : undefined,
         klingCharacterOrientation: spec?.id === "motion-control" ? draft.orientation : undefined,
         klingMultiShot: adapterType === "kling-video" ? draft.multiShot : undefined,
@@ -330,7 +347,7 @@ export function VideoGenerateView(props: {
       const genericImages = adapterType === "grok-video" || !spec
         ? bucket.images.map((item) => item.file)
         : [];
-      const task = adapterType === "seedance-video"
+      const task = (adapterType === "seedance-video" || adapterType === "minimax-video") && (uploadVideos.length || uploadAudios.length)
         ? await api.generateWithReferenceMedia(input, { videos: uploadVideos, audios: uploadAudios })
         : uploadVideos[0] ? await api.generateWithReferenceVideo(input, uploadVideos[0])
           : await api.generate(input, genericImages);

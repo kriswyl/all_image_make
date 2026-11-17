@@ -1,10 +1,9 @@
 import { useRef } from "react";
 import { createPortal } from "react-dom";
 import type { VideoCapability } from "../../shared/video-capabilities";
-import { seedanceVersion } from "../../shared/seedance-capabilities";
 import type { VideoDraft } from "../../shared/video-draft";
 import {
-  VIDEO_FORMAT_CHOICES, VIDEO_VARIANT_CHOICES, resolutionOptionsFor, supportsAudioFor, type VideoModeSpec,
+  VIDEO_FORMAT_CHOICES, VIDEO_VARIANT_CHOICES, resolutionOptionsFor, supportsAudioFor, videoRatioIsAdaptive, type VideoModeSpec,
 } from "../../shared/video-modes";
 import type { KlingCharacterOrientation } from "../../shared/types";
 import { useAnchoredPanelStyle, usePanelDismiss } from "./useAnchoredPanel";
@@ -25,6 +24,7 @@ export interface VideoParamsPanelProps {
   model: string;
   spec: VideoModeSpec | null;
   caps: VideoCapability;
+  concreteRatioOnly?: boolean;
   draft: VideoDraft;
   onChange: (patch: Partial<VideoDraft>) => void;
 }
@@ -49,12 +49,12 @@ export function VideoParamsPanel(props: VideoParamsPanelProps) {
   if (!open || !style) return null;
 
   const resolutions = resolutionOptionsFor(adapter, spec?.id);
-  const ratioValue = caps.ratioField === "ratio" ? draft.ratio : draft.aspectRatio;
+  const selectedRatio = caps.ratioField === "ratio" ? draft.ratio : draft.aspectRatio;
+  const ratioValue = props.concreteRatioOnly && selectedRatio === "adaptive" ? "16:9" : selectedRatio;
   const setRatio = (value: string) => {
     onChange(caps.ratioField === "ratio" ? { ratio: value } : { aspectRatio: value });
   };
-  const ratioLocked = adapter === "seedance-video" && seedanceVersion(model) === "2.5"
-    && (spec?.id === "frames" || spec?.id === "first-frame" || spec?.id === "first-last-frame");
+  const ratioLocked = videoRatioIsAdaptive(adapter, model, spec?.id);
   const smartDuration = caps.supportsSmartDuration && (spec?.durationEditable ?? true);
   const audioSupported = supportsAudioFor(adapter, spec?.id);
   const isMotion = spec?.id === "motion-control";
@@ -66,17 +66,17 @@ export function VideoParamsPanel(props: VideoParamsPanelProps) {
       <div className="vstudio-field">
         <span className="vstudio-field-label">视频比例</span>
         <div className="vstudio-segment is-wrap">
-          {caps.aspectRatios.map((value) => (
+          {caps.aspectRatios.filter((value) => !props.concreteRatioOnly || value !== "adaptive").map((value) => (
             <button
               key={value}
               type="button"
               className={ratioValue === value ? "is-active" : ""}
               disabled={ratioLocked && value !== "adaptive"}
-              title={ratioLocked && value !== "adaptive" ? "2.5 的首帧 / 首尾帧只接受自适应比例" : undefined}
+              title={ratioLocked && value !== "adaptive" ? "首帧 / 首尾帧的宽高比随图片自适应" : undefined}
               onClick={() => setRatio(value)}
             >
               <RatioGlyph value={value} />
-              {value === "adaptive" ? "智能" : value}
+              {value === "adaptive" ? (adapter === "minimax-video" ? "自适应" : "智能") : value}
             </button>
           ))}
         </div>
@@ -144,6 +144,7 @@ export function VideoParamsPanel(props: VideoParamsPanelProps) {
         </div>
       ) : null}
 
+      {caps.nativeAudio ? <p className="vstudio-field-hint">输出包含模型原生音频</p> : null}
       {audioSupported ? (
         <div className="vstudio-field">
           <span className="vstudio-field-label">输出声音</span>

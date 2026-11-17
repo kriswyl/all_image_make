@@ -2,10 +2,12 @@ import multer from "multer";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { MINIMAX_REFERENCE_LIMITS } from "../../shared/video-capabilities.js";
 import { taskKindFor } from "../../shared/kinds.js";
 import { imageOutputFormatSchema, MAX_FRAME_COUNT, MAX_FRAME_DURATION_MS, MIN_FRAME_COUNT, MIN_FRAME_DURATION_MS } from "../../shared/image-formats.js";
 import type { GenerationInput } from "../../shared/types.js";
-import { MAX_REFERENCE_IMAGES, MAX_VIDEO_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
+import { MAX_MEDIA_URL_CHARS, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
 import type { AppDatabase } from "../db.js";
 import type { KeyStore } from "../key-store.js";
 import { referenceMediaKindOf } from "../reference-video.js";
@@ -19,13 +21,10 @@ import type { Express } from "express";
 
 const MAX_REFERENCE_BASE64_CHARS = Math.ceil(MAX_REFERENCE_IMAGE_BYTES / 3) * 4;
 
-/** 单个 media URL 的上限：图片 data URI 按 20MB 原始体积 base64 后约 27M 字符 */
-const MAX_MEDIA_URL_CHARS = 28_000_000;
-
 const referenceUpload = multer({
   storage: multer.memoryStorage(),
-  // 8 张参考图 + 1 张局部重绘蒙版；payload 仍是唯一一个文本字段
-  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_REFERENCE_IMAGES + 1, fields: 1 },
+  // 解析阶段尚未选定模型，给所有已知图片模型留出容量及一个蒙版槽位。
+  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_IMAGE_GENERATION_REFERENCES + 1, fields: 1 },
   fileFilter: (_req, file, callback) => {
     if (file.fieldname === "mask") {
       return file.mimetype === "image/png"
@@ -46,7 +45,8 @@ const referenceUpload = multer({
  */
 const referenceMediaUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 16 * 1024 * 1024, files: 20, fields: 1 },
+  // 混合任务的 payload 仍可含内联图片。表单解析上限和任务的内联素材预算分别检查。
+  limits: { fileSize: 100 * 1024 * 1024 + 1, fieldSize: 64 * 1024 * 1024, files: 20, fields: 1 },
   fileFilter: (_req, file, callback) => referenceMediaKindOf(file)
     ? callback(null, true) : callback(new AppError("REFERENCE_MEDIA_INVALID", "仅支持 MP4 / MOV 视频与 MP3 / M4A / AAC / WAV 音频", 400)),
 });
@@ -70,7 +70,7 @@ const generationSchema = z.object({
     base64: z.string().min(4).max(MAX_REFERENCE_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/),
     mimeType: z.enum(referenceImageMimeTypes),
     fileName: z.string().trim().min(1).max(200),
-  })).max(MAX_VIDEO_REFERENCE_IMAGES).optional(),
+  })).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
   /**
    * 局部重绘蒙版（JSON 入口）。文件上传走 multipart 的 `mask` 字段；
    * 这里留着是为了 zod 不把 JSON 调用方的蒙版静默剥掉。mimeType 只认 PNG。
@@ -160,6 +160,11 @@ const generationSchema = z.object({
     speaker: z.string().trim().min(1).max(10),
     voice: z.string().trim().min(1).max(40),
   })).length(2).optional(),
+  minimaxVideoMode: z.enum(["text-to-video", "first-frame", "first-last-frame", "reference"]).optional(),
+  minimaxVideoMedia: z.array(z.object({
+    type: z.enum(["first_frame", "last_frame", "reference_image", "video", "audio"]),
+    url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
+  })).max(MINIMAX_REFERENCE_LIMITS.images + MINIMAX_REFERENCE_LIMITS.videos + MINIMAX_REFERENCE_LIMITS.audios).optional(),
   klingVideoMedia: z.array(z.object({
     type: z.enum(["first_frame", "last_frame", "reference_image", "image", "video"]),
     url: z.string().min(1).max(MAX_MEDIA_URL_CHARS),
@@ -197,7 +202,7 @@ function runDeletion(db: AppDatabase, ids: string[], options: { keepFiles: boole
   const skippedConversation: string[] = [];
   const skippedShared: string[] = [];
   for (const id of ids) {
-    if (!db.getTaskRow(id)) continue;
+    if (!db.hasTask(id)) continue;
     if (db.taskHasStoryboardProjectReferences(id)) { skippedShared.push(id); continue; }
     if (db.taskHasConversationReferences(id)) {
       if (!options.detachConversation) { skippedConversation.push(id); continue; }
@@ -219,8 +224,7 @@ function runDeletion(db: AppDatabase, ids: string[], options: { keepFiles: boole
  */
 function staleTaskIds(db: AppDatabase): string[] {
   const channelIds = new Set(db.listChannels().map((channel) => channel.id));
-  return db.listAllTaskRows()
-    .filter((row) => row.origin === "generate")
+  return db.listGenerationTaskKeys()
     .filter((row) => !channelIds.has(row.channelId))
     .filter((row) => !db.taskHasStoryboardProjectReferences(row.id))
     .filter((row) => {
@@ -253,11 +257,18 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
     const videos = files.video ?? [];
     const audios = files.audio ?? [];
-    if (!videos.length && !audios.length) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
+    // 兼容早期工作台把纯图任务也发到此处，图片在 payload 内。
+    const rawPayload = typeof req.body?.payload === "string" ? req.body.payload.trim() : "";
+    if (!rawPayload) {
+      if (!videos.length && !audios.length) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
+      throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400);
+    }
     let body: unknown;
-    try { body = JSON.parse(req.body.payload); }
+    try { body = JSON.parse(rawPayload); }
     catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
     const input = generationSchema.parse(body);
+    const inlineMedia = (input.seedanceVideoMedia?.length ?? 0) + (input.minimaxVideoMedia?.length ?? 0);
+    if (!videos.length && !audios.length && !inlineMedia) throw new AppError("UPLOAD_EMPTY", "没有收到参考素材", 400);
     const task = await runner.create({
       ...input,
       referenceVideoUploads: videos,
@@ -267,7 +278,7 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
   }));
 
   app.post("/api/generations", referenceUpload.fields([
-    { name: "referenceImages", maxCount: MAX_VIDEO_REFERENCE_IMAGES },
+    { name: "referenceImages", maxCount: MAX_IMAGE_GENERATION_REFERENCES },
     { name: "mask", maxCount: 1 },
   ]), asyncHandler(async (req, res) => {
       const files = Array.isArray(req.files) || !req.files ? {} : req.files as Record<string, Express.Multer.File[]>;
@@ -484,10 +495,10 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     const ids = String(req.query.ids ?? "").split(",").map((id) => id.trim()).filter(Boolean);
     let targets: string[];
     if (ids.length) {
-      targets = ids.filter((id) => db.getTaskRow(id));
+      targets = ids.filter((id) => db.hasTask(id));
     } else {
       const adapterByChannel = new Map(db.listChannels().map((channel) => [channel.id, String(channel.adapterType)]));
-      targets = db.listAllTaskRows()
+      targets = db.listGenerationTaskKeys()
         .filter((row) => scope === "all" || db.taskKindRow(row, adapterByChannel) === scope)
         .map((row) => row.id);
     }

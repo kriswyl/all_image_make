@@ -67,6 +67,7 @@ export const CHANNEL_FIELD_SUPPORT: Partial<Record<AdapterType, Partial<Record<G
     audio: "param", seed: "param", watermark: "param",
   },
   "kling-video": { aspectRatio: "param", duration: "param", resolution: "param", audio: "param", watermark: "param" },
+  "minimax-video": { ratio: "param", duration: "param", resolution: "param" },
   "grok-video": { aspectRatio: "param", duration: "param", resolution: "param" },
 };
 

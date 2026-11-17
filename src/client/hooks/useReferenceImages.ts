@@ -8,15 +8,18 @@ import {
   type ReferenceImageState,
   type Toast,
 } from "../app-shared";
-import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, type Asset } from "../../shared/types";
+import { MAX_REFERENCE_IMAGE_BYTES, type Asset } from "../../shared/types";
 
 /** 参考图状态提升到 App，切换视图时不被卸载清空，并可从生成结果/历史中追加 */
 export function useReferenceImages(
   onToast: (kind: Toast["kind"], message: string) => void,
-  maxImages: number = MAX_REFERENCE_IMAGES,
+  maxImages: number,
 ): ReferenceController {
   const [images, setImages] = useState<ReferenceImageState[]>([]);
   const [reading, setReading] = useState(false);
+  const currentImages = useRef<ReferenceImageState[]>([]);
+  const currentLimit = useRef(maxImages);
+  currentLimit.current = maxImages;
   const referenceUrls = useRef(new Set<string>());
 
   useEffect(() => () => {
@@ -26,8 +29,11 @@ export function useReferenceImages(
 
   function addFiles(files: File[]): boolean {
     if (!files.length) return false;
-    const remaining = maxImages - images.length;
-    if (files.length > remaining) { onToast("error", `参考图最多上传 ${maxImages} 张`); return false; }
+    const limit = currentLimit.current;
+    if (currentImages.current.length + files.length > limit) {
+      onToast("error", `参考图最多上传 ${limit} 张`);
+      return false;
+    }
     const prepared = files.map((file) => ({ file, mimeType: referenceImageMimeType(file) }));
     if (prepared.some((item) => !item.mimeType)) { onToast("error", "仅支持 PNG、JPEG 或 WebP 参考图"); return false; }
     if (files.some((file) => file.size > MAX_REFERENCE_IMAGE_BYTES)) { onToast("error", "单张参考图不能超过 20 MB"); return false; }
@@ -36,7 +42,8 @@ export function useReferenceImages(
       referenceUrls.current.add(previewUrl);
       return { file, previewUrl };
     });
-    setImages((current) => [...current, ...nextImages]);
+    currentImages.current = [...currentImages.current, ...nextImages];
+    setImages(currentImages.current);
     return true;
   }
 
@@ -60,19 +67,24 @@ export function useReferenceImages(
   function remove(previewUrl: string) {
     URL.revokeObjectURL(previewUrl);
     referenceUrls.current.delete(previewUrl);
-    setImages((current) => current.filter((item) => item.previewUrl !== previewUrl));
+    currentImages.current = currentImages.current.filter((item) => item.previewUrl !== previewUrl);
+    setImages(currentImages.current);
   }
 
   function clear() {
-    images.forEach((item) => {
+    currentImages.current.forEach((item) => {
       URL.revokeObjectURL(item.previewUrl);
       referenceUrls.current.delete(item.previewUrl);
     });
-    setImages([]);
+    currentImages.current = [];
+    setImages(currentImages.current);
   }
 
   async function addFromAsset(asset: Asset) {
-    if (images.length >= MAX_REFERENCE_IMAGES) { onToast("error", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`); return; }
+    if (currentImages.current.length >= currentLimit.current) {
+      onToast("error", `参考图最多上传 ${currentLimit.current} 张`);
+      return;
+    }
     setReading(true);
     try {
       const file = await api.assetAsFile(asset);

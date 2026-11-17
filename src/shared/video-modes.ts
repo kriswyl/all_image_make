@@ -1,8 +1,9 @@
 import type {
-  KlingVideoMode, SeedanceVideoMode, WanVideoMode,
+  MinimaxVideoMode, KlingVideoMode, SeedanceVideoMode, WanVideoMode,
 } from "./types.js";
-import { KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type ConversationVideoMode, type VideoAdapter } from "./video-capabilities.js";
-import { seedanceLimits } from "./seedance-capabilities.js";
+import { VIDEO_ADAPTER_TYPES } from "./kinds.js";
+import { MINIMAX_REFERENCE_LIMITS, KLING_MODE_CAPABILITIES, klingModesForModel, VIDEO_CAPABILITIES, type ConversationVideoMode, type VideoAdapter } from "./video-capabilities.js";
+import { seedanceLimits, seedanceVersion } from "./seedance-capabilities.js";
 
 /**
  * 视频工作台的「生成方式」真相。
@@ -34,8 +35,18 @@ export type StudioComposeMode = "prompt" | "frames";
 
 export type VideoStudioMode = WanVideoMode | SeedanceVideoMode | KlingVideoMode | StudioComposeMode;
 
-/** 视频模式在 GenerationInput 上的字段名，按渠道二选一 */
-export type VideoModeField = "wanVideoMode" | "seedanceVideoMode" | "klingVideoMode";
+const VIDEO_INPUT_FIELDS = {
+  "wan-video": { mode: "wanVideoMode", media: "wanVideoMedia" },
+  "seedance-video": { mode: "seedanceVideoMode", media: "seedanceVideoMedia" },
+  "kling-video": { mode: "klingVideoMode", media: "klingVideoMedia" },
+  "minimax-video": { mode: "minimaxVideoMode", media: "minimaxVideoMedia" },
+} as const satisfies Record<Exclude<VideoAdapter, "grok-video">, { mode: string; media: string }>;
+
+export type VideoModeField = typeof VIDEO_INPUT_FIELDS[keyof typeof VIDEO_INPUT_FIELDS]["mode"];
+
+export function videoInputFields(adapter: string | undefined) {
+  return isVideoAdapterType(adapter) && adapter !== "grok-video" ? VIDEO_INPUT_FIELDS[adapter] : null;
+}
 
 export interface VideoModeSpec {
   id: VideoStudioMode;
@@ -187,6 +198,13 @@ export const SEEDANCE_MODE_SPECS: Record<SeedanceVideoMode, VideoModeSpec> = {
   },
 };
 
+export const MINIMAX_MODE_SPECS: Record<MinimaxVideoMode, VideoModeSpec> = {
+  "text-to-video": SEEDANCE_MODE_SPECS["text-to-video"],
+  "first-frame": { ...SEEDANCE_MODE_SPECS["first-frame"], hint: "上传 1 张首帧图，视频比例随图片" },
+  "first-last-frame": { ...SEEDANCE_MODE_SPECS["first-last-frame"], hint: "第 1 张为首帧，第 2 张为尾帧；视频比例随图片" },
+  reference: { ...SEEDANCE_MODE_SPECS.reference, hint: "参考图、视频和音频可以组合。参考音频需搭配图片或视频。" },
+};
+
 export function klingModeSpec(mode: KlingVideoMode): VideoModeSpec {
   const cap = KLING_MODE_CAPABILITIES[mode];
   return {
@@ -221,16 +239,18 @@ export function referenceMediaLimits(
   model: string,
   spec: VideoModeSpec | null,
   localVideoUploadConfigured = true,
-): { videos: number; audios: number } {
+): { videos: number; audios: number; total?: number; audioNeedsVisual?: boolean } {
   if (!spec) return { videos: 0, audios: 0 };
   const seedance = adapter === "seedance-video" ? seedanceLimits(model) : null;
+  const minimax = adapter === "minimax-video" && spec.acceptsReferenceAudio ? MINIMAX_REFERENCE_LIMITS : null;
   const videos = localVideoUploadConfigured && (spec.acceptsReferenceVideo || spec.needsReferenceVideo)
-    ? (seedance?.maxVideos ?? 1) : 0;
-  const audios = spec.acceptsReferenceAudio ? (seedance?.maxAudios ?? 1) : 0;
-  return { videos, audios };
+    ? (seedance?.maxVideos ?? minimax?.videos ?? 1) : 0;
+  const audios = spec.acceptsReferenceAudio ? (seedance?.maxAudios ?? minimax?.audios ?? 1) : 0;
+  return { videos, audios, ...(minimax ? { total: minimax.total, audioNeedsVisual: true } : {}) };
 }
 
-export function referenceVideoDurationRange(mode?: string, orientation?: string) {
+export function referenceVideoDurationRange(mode?: string, orientation?: string, adapter?: string) {
+  if (adapter === "minimax-video") return { min: MINIMAX_REFERENCE_LIMITS.minClipSeconds, max: MINIMAX_REFERENCE_LIMITS.maxClipSeconds };
   return mode === "motion-control"
     ? { min: 3, max: orientation === "image" ? 10 : 30 }
     : { min: 1, max: 15 };
@@ -348,13 +368,14 @@ const SEEDANCE_MODE_ORDER: SeedanceVideoMode[] = [
 ];
 
 export function isVideoAdapterType(adapter: string | undefined): adapter is VideoAdapter {
-  return adapter === "grok-video" || adapter === "wan-video" || adapter === "seedance-video" || adapter === "kling-video";
+  return VIDEO_ADAPTER_TYPES.some((item) => item === adapter);
 }
 
 /** 该渠道 + 模型能做的全部模式，含不提供界面入口的（接口仍可用） */
 export function allVideoModes(adapter: string | undefined, model: string): VideoModeSpec[] {
   if (adapter === "wan-video") return [...WAN_MODE_ORDER, ...WAN_API_ONLY_MODES].map((mode) => WAN_MODE_SPECS[mode]);
   if (adapter === "seedance-video") return SEEDANCE_MODE_ORDER.map((mode) => SEEDANCE_MODE_SPECS[mode]);
+  if (adapter === "minimax-video") return Object.values(MINIMAX_MODE_SPECS);
   if (adapter === "kling-video") return klingModesForModel(model).map(klingModeSpec);
   return [];
 }
@@ -378,7 +399,7 @@ export function videoModesFor(adapter: string | undefined, model: string): Video
       WAN_MODE_SPECS["video-edit"], WAN_MODE_SPECS["video-extend"],
     ];
   }
-  if (adapter === "seedance-video") return [composePromptSpec(adapter, model), composeFramesSpec()];
+  if (adapter === "seedance-video" || adapter === "minimax-video") return [composePromptSpec(adapter, model), composeFramesSpec()];
   if (adapter === "kling-video") {
     const modes = [composePromptSpec(adapter, model), composeFramesSpec()];
     if (klingModesForModel(model).includes("motion-control")) modes.push(klingModeSpec("motion-control"));
@@ -432,10 +453,7 @@ export function videoModeLabel(mode: string | undefined): string | undefined {
 }
 
 export function videoModeField(adapter: string | undefined): VideoModeField | null {
-  if (adapter === "wan-video") return "wanVideoMode";
-  if (adapter === "seedance-video") return "seedanceVideoMode";
-  if (adapter === "kling-video") return "klingVideoMode";
-  return null;
+  return videoInputFields(adapter)?.mode ?? null;
 }
 
 /** 该模式下最多能放几张图：可重复的参考图按渠道上限，其余按槽位数 */
@@ -475,6 +493,29 @@ export function resolutionOptionsFor(adapter: string | undefined, mode: string |
   }
   if (adapter && isVideoAdapterType(adapter)) return VIDEO_CAPABILITIES[adapter].resolutions;
   return [];
+}
+
+export function resolveMinimaxMode(media: Array<{ type: string }> = [], videoUploads = 0): MinimaxVideoMode {
+  if (media.some((item) => item.type === "last_frame")) return "first-last-frame";
+  if (media.some((item) => item.type === "first_frame")) return "first-frame";
+  return media.length || videoUploads ? "reference" : "text-to-video";
+}
+
+export function referenceMediaCombinationError(
+  limits: ReturnType<typeof referenceMediaLimits>,
+  counts: { images: number; videos: number; audios: number },
+): string | undefined {
+  if (limits.total !== undefined && counts.images + counts.videos + counts.audios > limits.total) {
+    return `素材合计最多 ${limits.total} 份`;
+  }
+  if (limits.audioNeedsVisual && counts.audios && !counts.images && !counts.videos) {
+    return "MiniMax H3 的参考音频需搭配参考图片或视频";
+  }
+}
+
+export function videoRatioIsAdaptive(adapter: string | undefined, model: string, mode: string | undefined): boolean {
+  return (mode === "frames" || mode === "first-frame" || mode === "first-last-frame")
+    && (adapter === "minimax-video" || (adapter === "seedance-video" && seedanceVersion(model) === "2.5"));
 }
 
 export function supportsAudioFor(adapter: string | undefined, mode: string | undefined): boolean {

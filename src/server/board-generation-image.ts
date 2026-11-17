@@ -1,14 +1,13 @@
 import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, directUpstreamImages, type BoardDoc, type BoardNode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, type BoardDoc, type BoardNode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
-import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
-import { prepareImageBytes, REFERENCE_PROFILE } from "./vision.js";
+import type { TaskRunner } from "./tasks.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
 import type { GenerationInput } from "../shared/types.js";
 import { boardView, requireBoard } from "./board-core.js";
-import { now, placeImageResultGrid, placeResultNode, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
+import { loadBoardImageReferences, now, placeImageResultGrid, placeResultNode, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
 
 export async function generateBoardImage(input: {
   db: AppDatabase;
@@ -20,23 +19,6 @@ export async function generateBoardImage(input: {
   overrides?: BoardGenerateOverrides;
 }): Promise<BoardGenerateResult> {
   const { db, runner, board, config, prompt } = input;
-  // 直接上游图片按画布位置排序，最多 8 张；读不到字节的跳过，不让一张坏图带走整次生成
-  const references: ReferenceImageUpload[] = [];
-  const referenceNodes: BoardNode[] = [];
-  for (const node of directUpstreamImages(board.doc, config.id)) {
-    if (!node.assetId) continue;
-    const asset = db.getAsset(node.assetId);
-    if (!asset) continue;
-    const prepared = await prepareImageBytes(db, asset, REFERENCE_PROFILE);
-    if (!prepared) continue;
-    referenceNodes.push(node);
-    references.push({
-      bytes: prepared.bytes,
-      mimeType: prepared.mimeType,
-      fileName: prepared.fileName,
-    });
-  }
-
   const aliases = buildCapabilityAliases(db.listChannels());
   const resolution = resolveAlias(
     aliases,
@@ -49,6 +31,7 @@ export async function generateBoardImage(input: {
   if (!channel || !channel.enabled) {
     throw new AppError("BOARD_NO_IMAGE_CHANNEL", "解析到的生图渠道不存在或未启用", 400);
   }
+  const { references, referenceNodes } = await loadBoardImageReferences(db, board.doc, config.id, channel.adapterType, resolution.model);
   const count = input.overrides?.count ?? config.count;
   if (board.doc.nodes.length + count > BOARD_LIMITS.maxNodes || board.doc.edges.length + count > BOARD_LIMITS.maxEdges) {
     throw new AppError("BOARD_NODE_LIMIT", "画布剩余节点或连线不足，请减少生成张数或腾出空间", 400);

@@ -1,3 +1,5 @@
+import { VIDEO_DEFAULTS } from "../shared/video-capabilities.js";
+import { resolveMinimaxMode, videoRatioIsAdaptive } from "../shared/video-modes.js";
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
 import { modelSupportsNegativePrompt, normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
@@ -40,7 +42,7 @@ export interface VideoCandidate {
 }
 
 export class RemoteApiError extends Error {
-  constructor(public status: number, public payload: unknown, message = "中转接口返回错误") {
+  constructor(public status: number, public payload: unknown, message = "中转接口返回错误", public requestId?: string) {
     super(message);
   }
 }
@@ -106,19 +108,16 @@ function imageSummary(input: { base64: string; mimeType: string; fileName: strin
   return { fileName: input.fileName, mimeType: input.mimeType, byteSize: Buffer.byteLength(input.base64, "base64") };
 }
 
-function buildWanMedia(input: GenerationInput, references: NonNullable<GenerationInput["referenceImages"]>) {
+export function buildWanMedia(input: GenerationInput) {
   // 优先使用 wanVideoMedia（前端模式选择器构造的）
   if (input.wanVideoMedia?.length) {
     return input.wanVideoMedia;
   }
-  // 降级：兼容旧的 referenceImages（全部标记为 reference_image）
-  if (references.length) {
-    return references.map((ref) => ({
-      type: "reference_image" as const,
-      url: imageDataUrl(ref),
-    }));
-  }
-  return [];
+  // 兼容旧的 referenceImages（全部标记为 reference_image）。
+  return referenceImages(input).map((ref) => ({
+    type: "reference_image" as const,
+    url: imageDataUrl(ref),
+  }));
 }
 
 function appendFormValue(formData: FormData, key: string, value: unknown) {
@@ -296,7 +295,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     // 万相视频生成必须启用异步，否则会超时
     headers["X-DashScope-Async"] = "enable";
 
-    const media = buildWanMedia(input, references);
+    const media = buildWanMedia(input);
     // 文档要求：传入 file 或 link 素材时 prompt_extend 必须为 true
     const forcePromptExtend = media.some((item) => item.type === "file" || item.type === "link");
 
@@ -362,6 +361,31 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
       seed: input.seed,
       watermark: input.watermark,
       ...raw,
+    });
+  } else if (channel.adapterType === "minimax-video") {
+    const media = input.minimaxVideoMedia ?? [];
+    const mode = input.minimaxVideoMode ?? resolveMinimaxMode(media);
+    const defaults = VIDEO_DEFAULTS["minimax-video"]!;
+    const urls = (type: typeof media[number]["type"]) => media.filter((item) => item.type === type).map((item) => item.url);
+    const ratio = mode === "text-to-video"
+      ? (input.ratio && input.ratio !== "adaptive" ? input.ratio : "16:9")
+      : videoRatioIsAdaptive(channel.adapterType, input.model, mode) ? undefined : input.ratio;
+    const [images, videos, audios] = mode === "reference"
+      ? [urls("reference_image"), urls("video"), urls("audio")]
+      : [[], [], []];
+    body = compact({
+      model: input.model,
+      prompt: input.prompt,
+      duration: input.duration ?? defaults.duration,
+      images: images.length ? images : undefined,
+      metadata: compact({
+        resolution: input.resolution ?? defaults.resolution,
+        ratio,
+        videos: videos.length ? videos : undefined,
+        audios: audios.length ? audios : undefined,
+        first_frame: mode === "first-frame" || mode === "first-last-frame" ? urls("first_frame")[0] : undefined,
+        last_frame: mode === "first-last-frame" ? urls("last_frame")[0] : undefined,
+      }),
     });
   } else if (channel.adapterType === "kling-video") {
     const media = input.klingVideoMedia ?? [];
@@ -789,7 +813,7 @@ export function requestForDiagnostic(request: PreparedRequest) {
   };
 }
 
-export async function sendPreparedRequest(request: PreparedRequest) {
+export async function sendPreparedRequest(request: PreparedRequest, options: { checkErrorEnvelope?: boolean } = {}) {
   const started = Date.now();
   const response = await safeFetch(request.url, {
     method: request.method,
@@ -806,7 +830,12 @@ export async function sendPreparedRequest(request: PreparedRequest) {
     try { payload = text ? JSON.parse(text) : {}; } catch { payload = { text: text.slice(0, 50000) }; }
   }
   const durationMs = Date.now() - started;
-  if (!response.ok) throw new RemoteApiError(response.status, payload, extractErrorMessage(payload));
+  const error = objectRecord(payload).error;
+  const explicitError = typeof error === "string" ? Boolean(error.trim()) : Object.keys(objectRecord(error)).length > 0;
+  if (!response.ok || (options.checkErrorEnvelope && explicitError)) {
+    const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+    throw new RemoteApiError(response.status, payload, extractErrorMessage(payload), requestId?.slice(0, 256));
+  }
   return { payload, status: response.status, durationMs };
 }
 

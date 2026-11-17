@@ -24,6 +24,7 @@ import { ImagePromptComposer, invalidImageMention, remapImageMentions } from "./
 import "./image-workbench.css";
 import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
 import type { Channel, Task } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
@@ -131,6 +132,8 @@ export function GenerateView(props: {
   const readingImage = references.reading;
   const channel = props.channels.find((item) => item.id === props.selectedChannelId);
   const adapterType = channel?.adapterType;
+  const referenceLimit = imageReferenceLimit(adapterType, props.selectedModel);
+  const referenceError = imageReferenceCountError(adapterType, props.selectedModel, referenceImages.length);
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
   const isMidjourney = adapterType === "midjourney";
   const supportsNegativePrompt = modelSupportsNegativePrompt(props.selectedModel);
@@ -144,7 +147,8 @@ export function GenerateView(props: {
    * 是否真的支持 mask 由当前渠道的上游决定——同名模型在不同渠道背后可能行为不同，
    * 所以这里不按模型名预先禁用它。
    */
-  const maskAvailable = adapterType === "openai-images" && referenceImages.length === 1;
+  const maskAvailable = adapterType === "openai-images"
+    && referenceImages.length === imageReferenceLimit(adapterType, props.selectedModel, "mask").max;
   const activeMask = maskAvailable && props.inpaint.mask?.sourcePreviewUrl === referenceImages[0]?.previewUrl
     ? props.inpaint.mask : null;
   useEffect(() => { if (!maskAvailable) setMaskEditorOpen(false); }, [maskAvailable]);
@@ -179,7 +183,8 @@ export function GenerateView(props: {
     if (!channel) return props.onToast("error", "请先添加渠道");
     if (!props.selectedModel) return props.onToast("error", "请选择模型");
     if (!prompt.trim()) return props.onToast("error", "请输入提示词");
-    const missing = invalidImageMention(prompt, isMidjourney ? Math.min(1, referenceImages.length) : referenceImages.length);
+    if (referenceError) return props.onToast("error", referenceError);
+    const missing = invalidImageMention(prompt, referenceImages.length);
     if (missing) return props.onToast("error", "无法使用 " + missing + "，请移除它或重新引用可用的参考图");
     let requestedSize = size === "auto" ? undefined : size;
     if (size === "custom") {
@@ -294,7 +299,9 @@ export function GenerateView(props: {
               onChange={setPrompt}
               references={references}
               disabled={submitting}
-              midjourney={isMidjourney}
+              maxReferences={referenceLimit.max}
+              referenceError={referenceError}
+              defaultLimit={Boolean(channel) && referenceLimit.source === "default"}
               inpaint={maskAvailable ? {
                 maskApplied: Boolean(activeMask),
                 open: () => setMaskEditorOpen(true),
@@ -446,7 +453,7 @@ export function GenerateView(props: {
               <PromptPolishButton prompt={prompt} target="image" onPolished={setPrompt} onToast={props.onToast} disabled={submitting} />
               {channel && !channel.hasKey ? <button type="button" className="key-warning" onClick={() => props.onConfigureChannel(channel)}><KeyRound size={15} />填写密钥</button> : null}
               <button type="button" className="vstudio-send image-submit" aria-label={submitting ? "正在提交图片生成" : "生成图片"} title="生成图片"
-                onClick={generate} disabled={submitting || readingImage || !channel || !props.selectedModel || !prompt.trim()}>
+                onClick={generate} disabled={submitting || readingImage || Boolean(referenceError) || !channel || !props.selectedModel || !prompt.trim()}>
                 {submitting ? <LoadingIndicator variant="dots" size={24} /> : <Send size={17} />}
               </button>
             </div>

@@ -19,6 +19,8 @@ import {
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import { CHANNEL_FIELD_SUPPORT, unsupportedLabels } from "../../shared/channel-fields";
 import { IMAGE_OUTPUT_FORMATS, type ImageOutputFormat } from "../../shared/image-formats";
+import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
+import { matchModelAlias } from "../../shared/model-alias";
 import { CLAUSE_LABELS, readPromptClauses, replacePromptClause } from "../../shared/prompt-clauses";
 import type { AdapterType } from "../../shared/types";
 import type { Asset } from "../../shared/types";
@@ -29,7 +31,7 @@ import { api } from "../api";
 import { BoardComposerPopover } from "./BoardComposerPopover";
 import { BoardVideoReferences, type VideoReference } from "./BoardVideoReferences";
 import { resolveBoardVideoSelection } from "../../shared/board-video-selection";
-import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec } from "../../shared/video-modes";
+import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec, videoRatioIsAdaptive } from "../../shared/video-modes";
 import { boardMentionLabel, removeBoardMention } from "../../shared/board-mentions";
 import { PromptEditor, type PromptEditorHandle } from "../video/PromptEditor";
 import { VideoMentionPanel, type MentionItem } from "../video/VideoMentionPanel";
@@ -138,12 +140,9 @@ export function BoardInspector({
     : isAudio
       ? (audioKind === "music" ? defaultMusicAlias : defaultSpeechAlias)
       : defaultImageAlias;
-  const effectiveAlias = isGenerator
-    ? (aliasList.some((item) => item.alias === node.model)
-      ? node.model!
-      : defaultAlias || aliasList[0]?.alias || "")
-    : "";
-  const effectiveAliasInfo = aliasList.find((item) => item.alias === effectiveAlias) ?? null;
+  const effectiveAliasInfo = isGenerator
+    ? matchModelAlias(aliasList, node.model) ?? matchModelAlias(aliasList, defaultAlias) ?? aliasList[0] ?? null
+    : null;
   const sizeMode = effectiveAliasInfo?.adapterType === "gemini-content"
     ? "gemini"
     : effectiveAliasInfo?.adapterType === "midjourney"
@@ -175,6 +174,9 @@ export function BoardInspector({
   const generateBlocked = isGenerator && !isText && !aliasList.length;
   const effectivePrompt = isGenerator ? composeConfigPrompt(view.doc, node) : "";
   const isImage = mode === "image";
+  const imageReferencePolicy = imageReferenceLimit(effectiveAliasInfo?.adapterType, effectiveAliasInfo?.model);
+  const imageReferenceError = isImage && effectiveAliasInfo
+    ? imageReferenceCountError(effectiveAliasInfo.adapterType, effectiveAliasInfo.model, upstreamImages.length) : undefined;
   const imageCount = node.type === "image" || (node.type === "config" && isImage) ? node.count ?? 1 : 1;
   const imageBatchIds = node.type === "config" ? node.imageBatchResultIds : undefined;
   const runningBatchTasks = imageBatchIds ? view.doc.nodes.flatMap((item) =>
@@ -183,11 +185,17 @@ export function BoardInspector({
   const videoSelection = isGenerator && isVideo && effectiveAliasInfo
     ? resolveBoardVideoSelection({ doc: view.doc, config: node, adapterType: effectiveAliasInfo.adapterType, model: effectiveAliasInfo.model, localVideoUploadConfigured: effectiveAliasInfo.localVideoUploadConfigured })
     : undefined;
+  const referenceError = imageReferenceError ?? videoSelection?.error;
   const activeVideoMode = videoSelection?.selection?.mode ?? (isGenerator ? node.videoMode : undefined);
   const modeLabel = activeVideoMode === "motion-control" ? "运动控制"
     : activeVideoMode ? videoModeLabel(activeVideoMode, effectiveAliasInfo?.adapterType) : "自动识别";
+  const isMinimaxVideo = effectiveAliasInfo?.adapterType === "minimax-video";
+  const boardRatio = isGenerator ? node.aspectRatio ?? node.ratio : undefined;
+  const ratioFollowsFrame = isMinimaxVideo && videoRatioIsAdaptive(effectiveAliasInfo.adapterType, effectiveAliasInfo.model, activeVideoMode);
+  const needsConcreteRatio = isMinimaxVideo && activeVideoMode === "text-to-video";
+  const shownRatio = ratioFollowsFrame ? "adaptive" : needsConcreteRatio && (!boardRatio || boardRatio === "adaptive") ? "16:9" : boardRatio;
   const videoParameterValues = isGenerator && isVideo ? [
-    (node.aspectRatio ?? node.ratio) || "自动比例",
+    shownRatio === "adaptive" && isMinimaxVideo ? "自适应" : shownRatio || "自动比例",
     node.resolution ?? videoDefaults.resolution,
     `${node.durationSeconds ?? videoDefaults.duration} 秒`,
     ...(videoCapability?.supportsAudio ? [(node.audio ?? videoDefaults.audio) ? "有声" : "无声"] : []),
@@ -235,7 +243,7 @@ export function BoardInspector({
     if (source.type === "image") return isImage || isVideo;
     return isVideo && (source.type === "video"
       ? referenceLimits.videos > 0
-      : videoAdapter === "wan-video" && referenceLimits.audios > 0);
+      : (videoAdapter === "wan-video" || videoAdapter === "minimax-video") && referenceLimits.audios > 0);
   }) : [];
   const parameterLabel = !isGenerator || isText ? "参数"
     : isImage ? [
@@ -631,6 +639,7 @@ export function BoardInspector({
                           </select>
                         </label>
                       </div>
+                      {videoCapability?.nativeAudio ? <p className="board-inspector-hint">输出包含模型原生音频</p> : null}
                       {videoCapability?.supportsAudio ? (
                         <label className="board-config-check">
                           <input
@@ -668,7 +677,7 @@ export function BoardInspector({
                           );
                         })()}
                         <div className="board-inspector-grid">
-                          <label className="board-field">
+                          {!isMinimaxVideo ? <label className="board-field">
                             <span>随机种子（可选）</span>
                             <input
                               type="number"
@@ -679,41 +688,46 @@ export function BoardInspector({
                                 seed: event.target.value === "" ? undefined : Math.max(0, Math.floor(Number(event.target.value))),
                               } as Partial<BoardNode>)}
                             />
-                          </label>
+                          </label> : null}
                           <label className="board-field">
                             <span>画幅比例（可选）</span>
                             <select
                               // 只存 aspectRatio：万相 / Seedance 的 ratio 由适配器按渠道自动转，
                               // 界面不再需要记住「这个渠道用哪个字段名」
-                              value={(node.aspectRatio ?? node.ratio) ?? ""}
+                              value={shownRatio ?? ""}
+                              disabled={ratioFollowsFrame}
                               onChange={(event) => {
                                 const value = event.target.value || undefined;
                                 onUpdateNode(node.id, { aspectRatio: value, ratio: undefined } as Partial<BoardNode>);
                               }}
                             >
-                              <option value="">自动</option>
-                              {(videoCapability?.aspectRatios ?? []).map((value) => (
+                              {!ratioFollowsFrame && !needsConcreteRatio ? <option value="">自动</option> : null}
+                              {(videoCapability?.aspectRatios ?? []).filter((value) => (!ratioFollowsFrame || value === "adaptive") && (!needsConcreteRatio || value !== "adaptive")).map((value) => (
                                 <option key={value} value={value}>{value === "adaptive" ? "自适应" : value}</option>
                               ))}
                             </select>
                           </label>
                         </div>
-                        <label className="board-config-check">
-                          <input
-                            type="checkbox"
-                            checked={node.promptExtend ?? true}
-                            onChange={(event) => onUpdateNode(node.id, { promptExtend: event.target.checked } as Partial<BoardNode>)}
-                          />
-                          允许模型扩写提示词
-                        </label>
-                        <label className="board-config-check">
-                          <input
-                            type="checkbox"
-                            checked={node.watermark ?? false}
-                            onChange={(event) => onUpdateNode(node.id, { watermark: event.target.checked } as Partial<BoardNode>)}
-                          />
-                          生成水印
-                        </label>
+                        {!isMinimaxVideo ? (
+                          <>
+                            <label className="board-config-check">
+                              <input
+                                type="checkbox"
+                                checked={node.promptExtend ?? true}
+                                onChange={(event) => onUpdateNode(node.id, { promptExtend: event.target.checked } as Partial<BoardNode>)}
+                              />
+                              允许模型扩写提示词
+                            </label>
+                            <label className="board-config-check">
+                              <input
+                                type="checkbox"
+                                checked={node.watermark ?? false}
+                                onChange={(event) => onUpdateNode(node.id, { watermark: event.target.checked } as Partial<BoardNode>)}
+                              />
+                              生成水印
+                            </label>
+                          </>
+                        ) : null}
                       </details>
                     </>
                   ) : (
@@ -1004,7 +1018,10 @@ export function BoardInspector({
       <footer className="board-inspector-foot">
         {isGenerator ? (
           <>
-            {node.error || videoSelection?.error ? <p className="board-config-error" title={node.error || videoSelection?.error}>{node.error || videoSelection?.error}</p> : null}
+            {referenceError || node.error ? <p className="board-config-error" title={referenceError ?? node.error}>{referenceError ?? node.error}</p> : null}
+            {isImage && effectiveAliasInfo && <span className="board-inspector-label">
+              {imageReferencePolicy.source === "default" ? "参考图（应用默认）" : "参考图"} {upstreamImages.length}/{imageReferencePolicy.max}
+            </span>}
             <div className={`board-inspector-actions board-inspector-generate-actions${isVideo ? " vstudio-footer" : ""}`}>
               {!isConfig && !isVideo && <button ref={assetTriggerRef} type="button" className="board-composer-tool" aria-expanded={section === "assets" || (node.type === "image" && section === "references")} disabled={node.status === "loading"} onClick={() => {
                 if (node.type === "image" && section === "references") closeSection();
@@ -1078,12 +1095,12 @@ export function BoardInspector({
                 type="button"
                 className={isVideo ? "vstudio-send" : "board-composer-send"}
                 aria-label={generateLabel}
-                disabled={node.status === "loading" || generateBlocked || !effectivePrompt || Boolean(videoSelection?.error)}
+                disabled={node.status === "loading" || generateBlocked || !effectivePrompt || Boolean(referenceError)}
                 title={node.status === "loading"
                   ? "正在生成…"
                   : generateBlocked
                     ? (isAudio ? "还没有可用的音频渠道" : isVideo ? "还没有可用的视频渠道" : "还没有可用的生图渠道")
-                    : videoSelection?.error ?? (!effectivePrompt ? "先填写提示词，或启用拼接上游文本" : generateLabel)}
+                    : referenceError ?? (!effectivePrompt ? "先填写提示词，或启用拼接上游文本" : generateLabel)}
                 onClick={() => onGenerate(node.id)}
               >
                 {node.status === "loading" ? <LoadingIndicator variant="dots" size={24} /> : isVideo ? <Send size={15} /> : <ArrowUp size={18} />}

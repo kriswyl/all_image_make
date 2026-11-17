@@ -1,3 +1,5 @@
+import { VIDEO_MEDIA_FIELDS } from "./types.js";
+
 /**
  * 任务参数快照。
  *
@@ -19,6 +21,7 @@ export interface TaskMediaSummary {
   url?: string;
   /** 内联素材的原始字节数（base64 解码后） */
   inlineBytes?: number;
+  fileName?: string;
 }
 
 export interface TaskInputSnapshot {
@@ -31,6 +34,7 @@ export interface TaskInputSnapshot {
   aspectRatio?: string;
   ratio?: string;
   audio?: boolean;
+  nativeAudio?: boolean;
   promptExtend?: boolean;
   watermark?: boolean;
   seed?: number;
@@ -68,7 +72,10 @@ function summarizeMediaList(value: unknown): TaskMediaSummary[] {
     if (!type) continue;
     const raw = entry.url;
     const url = publicUrlOnly(raw);
-    const inlineBytes = typeof raw === "string" ? inlineBytesOf(raw) ?? undefined : undefined;
+    const inline = entry.inlineAudio ?? entry.inlineImage;
+    const inlineBytes = isRecord(inline) && typeof inline.byteSize === "number"
+      ? inline.byteSize
+      : typeof raw === "string" ? inlineBytesOf(raw) ?? undefined : undefined;
     const role = typeof entry.role === "string" ? entry.role : undefined;
     items.push({ type, ...(role ? { role } : {}), ...(url ? { url } : {}), ...(inlineBytes ? { inlineBytes } : {}) });
   }
@@ -80,13 +87,15 @@ function summarizeMediaList(value: unknown): TaskMediaSummary[] {
  */
 export function summarizeTaskInput(input: unknown): TaskInputSnapshot | null {
   if (!isRecord(input)) return null;
-  const mode = [input.wanVideoMode, input.seedanceVideoMode, input.klingVideoMode]
+  const mode = [input.wanVideoMode, input.seedanceVideoMode, input.klingVideoMode, input.minimaxVideoMode]
     .find((value): value is string => typeof value === "string" && Boolean(value));
-  const media = [
-    ...summarizeMediaList(input.wanVideoMedia),
-    ...summarizeMediaList(input.seedanceVideoMedia),
-    ...summarizeMediaList(input.klingVideoMedia),
-  ];
+  const media = VIDEO_MEDIA_FIELDS.flatMap((field) => summarizeMediaList(input[field]));
+  for (const [source, type] of [[input.referenceVideos, "reference_video"], [input.referenceAudios, "reference_audio"]] as const) {
+    if (!Array.isArray(source)) continue;
+    for (const file of source.slice(0, MAX_MEDIA_ITEMS)) {
+      if (isRecord(file) && typeof file.fileName === "string") media.push({ type, fileName: file.fileName });
+    }
+  }
   const referenceImages = Array.isArray(input.referenceImages)
     ? input.referenceImages
     : Array.isArray(input.referenceImage) ? [input.referenceImage] : [];
@@ -107,7 +116,8 @@ export function summarizeTaskInput(input: unknown): TaskInputSnapshot | null {
   if (typeof input.resolution === "string" && input.resolution) snapshot.resolution = input.resolution;
   if (typeof input.aspectRatio === "string" && input.aspectRatio) snapshot.aspectRatio = input.aspectRatio;
   if (typeof input.ratio === "string" && input.ratio) snapshot.ratio = input.ratio;
-  if (typeof input.audio === "boolean") snapshot.audio = input.audio;
+  if (typeof input.minimaxVideoMode === "string") snapshot.nativeAudio = true;
+  else if (typeof input.audio === "boolean") snapshot.audio = input.audio;
   if (typeof input.promptExtend === "boolean") snapshot.promptExtend = input.promptExtend;
   if (typeof input.watermark === "boolean") snapshot.watermark = input.watermark;
   if (typeof input.seed === "number") snapshot.seed = input.seed;
@@ -125,9 +135,13 @@ export function snapshotSummaryLines(snapshot: TaskInputSnapshot | null | undefi
   const ratio = snapshot.ratio ?? snapshot.aspectRatio;
   if (ratio) lines.push(`比例：${ratio === "adaptive" ? "自适应" : ratio}`);
   if (snapshot.duration != null) lines.push(`时长：${snapshot.duration === -1 ? "智能" : `${snapshot.duration} 秒`}`);
-  if (snapshot.audio != null) lines.push(`声音：${snapshot.audio ? "开" : "关"}`);
+  if (snapshot.nativeAudio) lines.push("声音：模型原生生成");
+  else if (snapshot.audio != null) lines.push(`声音：${snapshot.audio ? "开" : "关"}`);
   const videoCount = snapshot.media.filter((item) => /video/.test(item.type)).length;
-  if (snapshot.imageCount) lines.push(`参考图：${snapshot.imageCount} 张`);
+  const imageCount = snapshot.imageCount + snapshot.media.filter((item) => /image|frame/.test(item.type)).length;
+  const audioCount = snapshot.media.filter((item) => /audio/.test(item.type)).length;
+  if (imageCount) lines.push(`参考图：${imageCount} 张`);
   if (videoCount) lines.push(`参考视频：${videoCount} 段`);
+  if (audioCount) lines.push(`参考音频：${audioCount} 段`);
   return lines;
 }

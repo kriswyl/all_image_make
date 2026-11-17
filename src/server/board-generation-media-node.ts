@@ -1,10 +1,10 @@
 import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, composeConfigPrompt, directInputLinks, directUpstreamImages, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, composeConfigPrompt, directInputLinks, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
-import { prepareImageBytes, REFERENCE_PROFILE, videoInlineProfile } from "./vision.js";
+import { prepareImageBytes, videoInlineProfile } from "./vision.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
 import type { GenerationInput, KlingMediaType, SeedanceVideoMode, Task, VideoMediaType, WanVideoMode } from "../shared/types.js";
 import { VIDEO_CAPABILITIES, VIDEO_DEFAULTS, type VideoAdapter } from "../shared/video-capabilities.js";
@@ -12,7 +12,7 @@ import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../shared/tts.js";
 import type { KeyStore } from "./key-store.js";
 import { boardView, requireBoard } from "./board-core.js";
 import { resolveBoardVideoSelection } from "./board-video-selection.js";
-import { now, appendBoardMediaInputs, placeImageResultGrid, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
+import { now, appendBoardMediaInputs, loadBoardImageReferences, placeImageResultGrid, saveGeneratedBoard, submitBoardImages, type BoardGenerateOverrides, type BoardGenerateResult } from "./board-generation-shared.js";
 
 /**
  * 图片 / 视频 / 音频节点就地生成。
@@ -51,21 +51,6 @@ export async function generateBoardMediaNode(input: {
   let patch: Record<string, unknown> = { prompt, source: "generated" };
 
   if (node.type === "image") {
-    const references: ReferenceImageUpload[] = [];
-    const referenceNodes: BoardNode[] = [];
-    for (const upstream of directUpstreamImages(board.doc, node.id)) {
-      if (!upstream.assetId) continue;
-      const asset = db.getAsset(upstream.assetId);
-      if (!asset) continue;
-      const prepared = await prepareImageBytes(db, asset, REFERENCE_PROFILE);
-      if (!prepared) continue;
-      referenceNodes.push(upstream);
-      references.push({
-        bytes: prepared.bytes,
-        mimeType: prepared.mimeType,
-        fileName: prepared.fileName,
-      });
-    }
     const aliases = buildCapabilityAliases(db.listChannels());
     const resolution = resolveAlias(
       aliases,
@@ -76,6 +61,7 @@ export async function generateBoardMediaNode(input: {
     if (!resolution) throw new AppError("BOARD_NO_IMAGE_CHANNEL", "还没有可用的生图渠道，请先到「模型配置」添加", 400);
     const channel = db.getChannel(resolution.channelId);
     if (!channel || !channel.enabled) throw new AppError("BOARD_NO_IMAGE_CHANNEL", "解析到的生图渠道不存在或未启用", 400);
+    const { references, referenceNodes } = await loadBoardImageReferences(db, board.doc, node.id, channel.adapterType, resolution.model);
     imageCount = overrides.count ?? node.count ?? 1;
     if (board.doc.nodes.length + imageCount - 1 > BOARD_LIMITS.maxNodes) {
       throw new AppError("BOARD_NODE_LIMIT", `这块画布最多容纳 ${BOARD_LIMITS.maxNodes} 个节点，请减少生成张数或腾出空间`, 400);
@@ -197,6 +183,9 @@ export async function generateBoardMediaNode(input: {
           generation.seedanceVideoMedia = media.map((item) => ({ type: "image_url", url: item.url, role: item.role }));
           generation.seedanceVideoMode = selection.mode as SeedanceVideoMode;
           if (selection.mode === "first-frame" || selection.mode === "first-last-frame") generation.ratio = "adaptive";
+        } else if (channel.adapterType === "minimax-video" && selection.mode !== "motion-control") {
+          generation.minimaxVideoMedia = media.map(({ role: type, url }) => ({ type, url }));
+          generation.minimaxVideoMode = selection.mode;
         } else if (channel.adapterType === "kling-video") {
           generation.klingVideoMedia = media.map((item) => ({ type: selection.mode === "motion-control" ? "image" : item.role as KlingMediaType, url: item.url }));
           generation.klingVideoMode = selection.mode;
@@ -208,6 +197,8 @@ export async function generateBoardMediaNode(input: {
       }
     } else if (channel.adapterType === "wan-video") {
       generation.wanVideoMode = "text-to-video";
+    } else if (channel.adapterType === "minimax-video" && selection.mode !== "motion-control") {
+      generation.minimaxVideoMode = selection.mode;
     } else if (channel.adapterType === "seedance-video") {
       generation.seedanceVideoMode = "text-to-video";
     } else if (channel.adapterType === "kling-video") {

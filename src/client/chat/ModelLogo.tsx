@@ -45,6 +45,7 @@ const BRANDS: Brand[] = [
   { test: /glm|chatglm|zhipu|智谱/i, kind: "chat", logo: chatglmLogo, name: "智谱 GLM" },
   { test: /claude|anthropic|sonnet|opus|haiku/i, kind: "chat", logo: claudeLogo, name: "Anthropic Claude" },
   { test: /kimi|moonshot/i, kind: "chat", logo: kimiLogo, name: "Moonshot Kimi" },
+  { test: /minimax-h3/i, kind: "video", logo: minimaxLogo, name: "MiniMax" },
   { test: /minimax|abab/i, kind: "chat", logo: minimaxLogo, name: "MiniMax" },
   { test: /step[-_]?\d|stepfun|阶跃/i, kind: "chat", logo: stepfunLogo, name: "阶跃星辰" },
   { test: /hunyuan|混元/i, kind: "chat", logo: hunyuanLogo, name: "腾讯混元" },

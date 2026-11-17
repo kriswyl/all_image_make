@@ -6,6 +6,7 @@ import type { ParamNote } from "./agent-types.js";
 import type { MidjourneyMeta } from "./midjourney.js";
 import type { ImageOutputFormat } from "./image-formats.js";
 import { taskKindOf as taskKindOfFromKinds } from "./kinds.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "./image-reference-limits.js";
 
 export {
   AUDIO_ADAPTER_TYPES,
@@ -38,6 +39,7 @@ export type AdapterType =
   | "grok-video"
   | "seedance-video"
   | "kling-video"
+  | "minimax-video"
   | "suno-music"
   | "gemini-tts"
   | "midjourney"
@@ -133,6 +135,15 @@ export interface KlingMediaInput {
   url: string;
 }
 
+export type MinimaxVideoMode = SeedanceVideoMode;
+export type MinimaxMediaType = "first_frame" | "last_frame" | "reference_image" | "video" | "audio";
+export interface MinimaxMediaInput {
+  type: MinimaxMediaType;
+  url: string;
+}
+
+export const VIDEO_MEDIA_FIELDS = ["wanVideoMedia", "seedanceVideoMedia", "klingVideoMedia", "minimaxVideoMedia"] as const;
+
 /** 万相视频生成的 7 种模式 */
 export type WanVideoMode =
   | "text-to-video"           // 文生视频：仅 prompt
@@ -216,19 +227,8 @@ export type ImageSizeValue = (typeof IMAGE_SIZE_VALUES)[number];
 /** 用户没指定、大脑也没指定时的兜底。2K 是这类站点最稳的一档（1K 偏糊，4K 又慢又贵） */
 export const DEFAULT_IMAGE_SIZE: ImageSizeValue = "2K";
 
-/**
- * 用户自带图片的限额：生图工作台的参考图、对话框里的上传、服务端收到的请求，
- * 走的都是这一套。
- *
- * 同一个限制散成三份的后果不是「多写了几行」，而是**三个入口慢慢给出不同的规矩**——
- * 前端放行、后端拒收，用户只会觉得这功能坏了。所以这里只留一份。
- */
+/** 普通对话图片上下文和未使用专用素材字段的非生图请求的额度。 */
 export const MAX_REFERENCE_IMAGES = 8;
-/**
- * 视频页参考图上限单列：Seedance 2.5 允许 30 张，图片页仍按 8 张。
- * 以前两者共用同一个 hook，视频 UI 写 10 张却被 8 张拦住。
- */
-export const MAX_VIDEO_REFERENCE_IMAGES = 30;
 export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 /**
  * 局部重绘蒙版的上限，来自 OpenAI Images edit 的官方约束：
@@ -237,11 +237,30 @@ export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_MASK_IMAGE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
 
 /**
- * 画布最多放几张图。**和 `MAX_REFERENCE_IMAGES` 相等不是巧合，是同一笔账**：
- * 画布整组都会作为参考图发出去，8 张画布已经把单次请求的参考图预算吃光了。
- * 两个数写成一个是因为它们就该一起变；分头写死两个 8，早晚会有人只改一个。
+ * 单次请求里所有内联素材（`data:` base64）的合计上限，单位是**字符**。
+ *
+ * 这是应用侧的自我保护阈值，不是上游或网关的硬限制：2026-11-17 实测
+ * `api.tiantoken.com` 的 nginx `client_max_body_size` ≈ **50 MiB**（50 MiB 通过，
+ * 51 MiB 起 413，按 `Content-Length` 预判拒绝），而 18.3 MiB 的内联请求
+ * 端到端出图成功。取 40 MiB 是为了给 JSON 结构、提示词和多素材留 10 MiB 余量。
+ *
+ * 注意它**只管视频素材数组**（`VIDEO_MEDIA_FIELDS`）。生图参考图不走这里，
+ * 走的是按张计的 `MAX_REFERENCE_IMAGE_BYTES`。
  */
-export const MAX_CANVAS_IMAGES = MAX_REFERENCE_IMAGES;
+export const MAX_INLINE_MEDIA_CHARS = 40 * 1024 * 1024;
+
+/**
+ * 单条素材 URL 的长度上限（zod 层）。
+ *
+ * 刻意比总预算**大一截**：如果两者相等，一条刚好超预算的素材会先被 zod 拦下，
+ * 用户看到的是「输入数据无效」这种含糊报错；留出余量后请求能走到
+ * `TaskRunner.create()` 的内联预算检查，得到「内联素材合计约 X MB，超出 40 MB 预算」
+ * 这种能指导操作的提示。旧值 28,000,000 也是同理（比当时的 15 MiB 预算大）。
+ */
+export const MAX_MEDIA_URL_CHARS = MAX_INLINE_MEDIA_CHARS + 4 * 1024 * 1024;
+
+/** 创作会话画布的容量。提交时再按实际生成模型校验。 */
+export const MAX_CANVAS_IMAGES = MAX_IMAGE_GENERATION_REFERENCES;
 
 /**
  * 把字符串收成合法的 imageSize，认不出就返回 undefined。
@@ -313,6 +332,8 @@ export interface GenerationInput {
   seedanceVideoMedia?: SeedanceMediaInput[];
   /** 可灵视频媒体素材（仅 Kling 需要，替代 referenceImages） */
   klingVideoMedia?: KlingMediaInput[];
+  minimaxVideoMode?: MinimaxVideoMode;
+  minimaxVideoMedia?: MinimaxMediaInput[];
   /** 可灵生成方式（仅 Kling 需要） */
   klingVideoMode?: KlingVideoMode;
   /** 运动控制：角色朝向跟随图片还是参考视频 */

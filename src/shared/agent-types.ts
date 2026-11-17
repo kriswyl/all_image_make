@@ -5,7 +5,8 @@
  * 服务端内部还有一层 `agent-tools.ts` 的 zod schema，那是「校验大脑输入」用的，
  * 和这里是两件事——这里只管「已经落库的东西长什么样」。
  */
-import type { Asset } from "./types.js";
+import { MAX_REFERENCE_IMAGES, type Asset } from "./types.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "./image-reference-limits.js";
 import type { BoardDelta } from "./board.js";
 
 export type ConversationStatus =
@@ -37,6 +38,11 @@ export function usesPlainChat(conversation: Pick<Conversation, "kind" | "chatMod
 export function usesNativeCreativeTools(conversation: Conversation): boolean {
   return usesPlainChat(conversation) && !conversation.toolsUnsupported
     && (conversation.toolScope === "all" || conversation.toolScope == null && Boolean(conversation.nativeImagePilot));
+}
+
+export function conversationImageAttachmentLimit(conversation: Conversation | null | undefined) {
+  return conversation && (!usesPlainChat(conversation) || usesNativeCreativeTools(conversation))
+    ? MAX_IMAGE_GENERATION_REFERENCES : MAX_REFERENCE_IMAGES;
 }
 
 /** §13.2 视频确认策略 */
@@ -248,7 +254,7 @@ export interface EditImageArgs {
    * 画布多于一张又没指定时会失败并提示先 `view_images` / `ask`。
    */
   imageRefs?: string[];
-  /** 额外的参考图，用 #abcd 形式的产物引用；上限 8，和 MAX_REFERENCE_IMAGES 对齐 */
+  /** 额外参考图使用会话素材引用，并与选定底图一起按生成模型的额度校验。 */
   extraReferences?: string[];
   /** 改图同样能指定输出尺寸与宽高比——改完的画面未必沿用原图的形状 */
   aspectRatio?: string;
@@ -294,6 +300,7 @@ export interface GenerateVideoArgs {
   imageRefs?: string[];
   /** 原始会话视频素材 ID，按参考顺序排列，仅用于 reference 模式。 */
   videoRefs?: string[];
+  audioRefs?: string[];
   /**
    * 老参数：`none` = 纯文生视频；`current` = 用当前画布。
    * 新计划应当直接用 `imageRefs` 说清用哪张，别把「当前画布」当成默认目标。
@@ -304,6 +311,8 @@ export interface GenerateVideoArgs {
 export interface GenerateMusicArgs {
   /** 灵感模式是描述；自定义模式是歌词；翻唱/混音/音效等模式按各自语义 */
   prompt?: string;
+  /** 大脑对自定义歌词的另一种叫法，等价于 prompt（两个都有时以 prompt 为准） */
+  lyrics?: string;
   mode?: "inspiration" | "custom" | "cover" | "mashup" | "sound" | "playlist" | "sample";
   /** 歌名，最多 80 字 */
   title?: string;
@@ -430,7 +439,7 @@ export interface ChatVideoFrames {
 /** 确认卡上要展示的「哪几张图、各自什么角色」 */
 export interface ConfirmVideoInput {
   assetId: string;
-  role: ConversationVideoRole | "reference_video";
+  role: ConversationVideoRole | "reference_video" | "reference_audio";
   fileName?: string;
   duration?: number;
 }

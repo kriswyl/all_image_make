@@ -29,8 +29,6 @@ export const BOARD_LIMITS = {
   maxTitleChars: 80,
   /** 历史快照上限 */
   maxHistory: 50,
-  /** 配置节点最多带几张参考图（和现有 MAX_REFERENCE_IMAGES 对齐） */
-  maxUpstreamImages: 8,
   /** Agent 一次最多提交多少条 op */
   maxOpsPerBatch: 20,
   /** 画布一次最多生成几张图片 */
@@ -502,8 +500,7 @@ export function directUpstreamText(doc: Pick<BoardDoc, "nodes" | "edges">, confi
 
 export function directUpstreamImages(doc: Pick<BoardDoc, "nodes" | "edges">, configNodeId: string): ImageBoardNode[] {
   return directUpstream(doc, configNodeId)
-    .filter((node): node is ImageBoardNode => node.type === "image" && Boolean(node.assetId))
-    .slice(0, BOARD_LIMITS.maxUpstreamImages);
+    .filter((node): node is ImageBoardNode => node.type === "image" && Boolean(node.assetId));
 }
 
 /**

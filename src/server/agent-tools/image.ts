@@ -1,16 +1,16 @@
 import { assetRef, type Conversation, type EditImageArgs, type GenerateImageArgs } from "../../shared/agent-types.js";
 import { midjourneyUsableButtons } from "../../shared/midjourney.js";
-import { MAX_REFERENCE_IMAGES, type GenerationInput } from "../../shared/types.js";
+import type { GenerationInput } from "../../shared/types.js";
+import { imageReferenceCountError, MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
 import { describeAliasChoice, resolveAlias } from "../capabilities.js";
 import type { AppDatabase, AssetRow } from "../db.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "../diagnose.js";
 import { AppError, type ReferenceImageUpload } from "../tasks.js";
 import { prepareImageBytes, REFERENCE_PROFILE } from "../vision.js";
-import { attachmentAssets, resolveAssetRef, resolveImageRefs } from "./assets.js";
+import { attachmentAssets, resolveImageRefs } from "./assets.js";
 import { describeError, failResult, MEDIA_TASK_TIMEOUT_MS, okResult, type ToolContext, type ToolOutcome } from "./shared.js";
 
-/** §16：`extraReferences` 上限和现有 MAX_REFERENCE_IMAGES 对齐 */
-export const MAX_EXTRA_REFERENCES = 8;
+export const MAX_EXTRA_REFERENCES = MAX_IMAGE_GENERATION_REFERENCES;
 /** 图片任务单次等待上限。图片是同步请求，正常几十秒；超过就该报错而不是一直挂着 */
 export const IMAGE_TASK_TIMEOUT_MS = MEDIA_TASK_TIMEOUT_MS;
 /** 等任务进入终态时再多给一点余量，让 TaskRunner 自己的超时先触发 */
@@ -70,7 +70,6 @@ export async function generateImage(
   }
 
   const uploads: ReferenceImageUpload[] = [];
-  const notes: string[] = [];
 
   /**
    * 用哪几张图：显式 `imageRefs` → 本条消息附带的图 → 画布只有一张。
@@ -85,45 +84,21 @@ export async function generateImage(
     return failResult(selected.error, "IMAGE_SELECTION_INVALID");
   }
 
-  const references: AssetRow[] = [];
-  if (isEdit) references.push(...selected.assets);
-  else if (args.fromScratch !== true) references.push(...selected.assets);
-  if (isEdit && !references.length) {
+  if (isEdit && !selected.assets.length) {
     return failResult("现在没有可改的图。请先用 generate_image 画一张，或让用户上传/指定一张图", "NO_CANVAS");
   }
-  // 显式选中的图必须全部可用：少一张就是在改另一组图
-  const requiredCount = references.length;
-
   const extraRefs = isEdit ? args.extraReferences ?? [] : [];
-  if (ctx.strictSubmission && extraRefs.length) {
-    const extras = resolveImageRefs(ctx.db, ctx.conversation.id, extraRefs);
-    if (extras.error) return failResult(extras.error, "IMAGE_SELECTION_INVALID");
-  }
-  for (const ref of extraRefs.slice(0, MAX_EXTRA_REFERENCES)) {
-    const found = resolveAssetRef(ctx.db, ctx.conversation.id, ref);
-    if (!found) { notes.push(`额外参考图 ${ref} 找不到，已跳过`); continue; }
-    if (!found.asset.mimeType.startsWith("image/")) { notes.push(`${ref} 不是图片，已跳过`); continue; }
-    // 去重要在限额**之前**判：大脑把已经选中的那张又写进 extraReferences 是常有的事
-    if (references.some((item) => item.id === found.asset.id)) continue;
-    if (references.length >= MAX_REFERENCE_IMAGES) {
-      notes.push(`参考图已满 ${MAX_REFERENCE_IMAGES} 张，${ref} 已跳过`);
-      continue;
-    }
-    references.push(found.asset);
-  }
+  const extras = resolveImageRefs(ctx.db, ctx.conversation.id, extraRefs);
+  if (extras.error) return failResult(extras.error, "IMAGE_SELECTION_INVALID");
+  const chosenAssets = !isEdit && args.fromScratch === true ? [] : [...selected.assets, ...extras.assets];
+  const references = [...new Map(chosenAssets.map((item) => [item.id, item])).values()];
 
-  if (channel.adapterType === "midjourney" && references.length > 1) {
-    notes.push("Midjourney 图生图只使用第 1 张参考图");
-  }
-  for (const [index, reference] of references.entries()) {
+  const referenceError = imageReferenceCountError(channel.adapterType, resolution.model, references.length);
+  if (referenceError) return failResult(referenceError, "REFERENCE_IMAGE_LIMIT");
+  for (const reference of references) {
     const prepared = await prepareImageBytes(ctx.db, reference, REFERENCE_PROFILE);
     if (!prepared) {
-      // 选中/画布里的图坏了就硬失败；额外参考图坏了可以跳过，它本来只是补充
-      if (index < requiredCount || ctx.strictSubmission) {
-        return failResult(`${assetRef(reference.id)} 读取失败，没法按你选的这组图生成；可以换一张或重新上传`, "REFERENCE_IMAGE_MISSING");
-      }
-      notes.push(`额外参考图 ${assetRef(reference.id)} 读取失败，已跳过`);
-      continue;
+      return failResult(`${assetRef(reference.id)} 读取失败，没法按你选的这组图生成；可以换一张或重新上传`, "REFERENCE_IMAGE_MISSING");
     }
     uploads.push({ bytes: prepared.bytes, mimeType: prepared.mimeType, fileName: prepared.fileName });
   }
@@ -215,7 +190,6 @@ export async function generateImage(
         task.assets.length > 1 ? `，共 ${task.assets.length} 张` : "",
         "，已放进素材库（不会自动占用画布）。",
         salvageNote ? `${salvageNote}。` : "",
-        notes.length ? `注意：${notes.join("；")}` : "",
       ].join("");
       // MJ 的四宫格结果带 U/V/R 按钮；塞进卡片 data，用户能在对话里直接继续操作
       const midjourneyButtons = midjourneyUsableButtons(task.remoteMeta?.midjourney?.buttons ?? []);

@@ -1,5 +1,5 @@
 import type { VideoDraft } from "../../shared/video-draft";
-import type { KlingMediaInput, SeedanceMediaInput, SeedanceMediaRole, VideoMediaInput } from "../../shared/types";
+import type { MinimaxMediaInput, KlingMediaInput, SeedanceMediaInput, SeedanceMediaRole, VideoMediaInput } from "../../shared/types";
 import { validateSeedanceMedia } from "../../shared/seedance-capabilities";
 import type { VideoModeSpec } from "../../shared/video-modes";
 import type { MediaBucket } from "../hooks/useMediaBuckets";
@@ -92,6 +92,21 @@ export async function buildKlingMedia({ spec, bucket, draft }: MediaBuildContext
     if (draft.orientation === "image" && bucket.videos.some((item) => item.duration > 10)) {
       return "角色朝向选「图片」时视频需 ≤10 秒";
     }
+  }
+  return media;
+}
+
+export async function buildMinimaxMedia({ spec, bucket }: MediaBuildContext): Promise<MinimaxMediaInput[]> {
+  const media: MinimaxMediaInput[] = [];
+  for (const [index, item] of bucket.images.entries()) {
+    const type = spec.imageSlots[spec.imageRepeatable ? 0 : index];
+    if (type !== "first_frame" && type !== "last_frame" && type !== "reference_image") {
+      throw new Error(`${spec.label}最多接受 ${spec.imageSlots.length} 张图片`);
+    }
+    media.push({ type, url: await fileToVideoDataUrl(item.file) });
+  }
+  if (spec.acceptsReferenceAudio) {
+    for (const { file } of bucket.audios) media.push({ type: "audio", url: await fileToDataUrl(file) });
   }
   return media;
 }

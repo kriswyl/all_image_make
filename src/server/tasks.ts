@@ -1,5 +1,9 @@
+import { resolveMinimaxMode, videoRatioIsAdaptive } from "../shared/video-modes.js";
+import { normalizeAspectFields } from "../shared/channel-fields.js";
+import { VIDEO_DEFAULTS } from "../shared/video-capabilities.js";
 import crypto from "node:crypto";
-import { DEFAULT_IMAGE_SIZE, normalizeImageSize } from "../shared/types.js";
+import { DEFAULT_IMAGE_SIZE, MAX_INLINE_MEDIA_CHARS, normalizeImageSize, VIDEO_MEDIA_FIELDS } from "../shared/types.js";
+import { isImageAdapter } from "../shared/kinds.js";
 import type { GenerationInput, Task } from "../shared/types.js";
 import type { SunoTaskMeta } from "../shared/suno.js";
 import type { AppDatabase, DbChannel } from "./db.js";
@@ -8,6 +12,7 @@ import {
   RemoteApiError,
   applyAuth,
   buildGenerationRequest,
+  buildWanMedia,
   requestForDiagnostic,
   sendPreparedRequest,
 } from "./adapters.js";
@@ -32,8 +37,12 @@ export { audioExtension, audioExtensionForMime, extensionForMime, matchesImageSi
 
 export { AppError } from "./app-error.js";
 
-/** 应用侧 15 MiB 字符预算，base64 约放大 4/3，原始素材约 11.25 MiB；不是上游硬限制。 */
-const MAX_INLINE_MEDIA_CHARS = 15 * 1024 * 1024;
+/**
+ * 应用侧内联素材预算（40 MiB 字符，见 `shared/types.ts`）。
+ *
+ * base64 约放大 4/3，所以约等于 30 MiB 原始素材。网关实测能收 50 MiB，
+ * 因此这不是上游硬限制，只是「超限时立刻说清原因」的自我阈值。
+ */
 
 /** 轮询节奏可被环境变量覆盖，测试里用短间隔跑完整个提交流程 */
 const POLL_DELAY_OVERRIDE_MS = (() => {
@@ -189,11 +198,23 @@ export class TaskRunner {
     if (input.prompt.length > 20000) throw new AppError("INVALID_INPUT", "提示词不能超过 20000 个字符", 400);
     const rawSize = JSON.stringify(input.rawParameters ?? {}).length;
     if (rawSize > 65536) throw new AppError("INVALID_INPUT", "高级参数不能超过 64 KB", 400);
+    if (channel.adapterType === "minimax-video") {
+      const mode = input.minimaxVideoMode ?? resolveMinimaxMode(input.minimaxVideoMedia,
+        (referenceVideoUpload ? 1 : 0) + (referenceVideoUploads?.length ?? 0));
+      const defaults = VIDEO_DEFAULTS["minimax-video"]!;
+      input.minimaxVideoMode = mode;
+      input.resolution ??= defaults.resolution;
+      input.duration ??= defaults.duration;
+      input.ratio = normalizeAspectFields(channel.adapterType, input).ratio;
+      if (videoRatioIsAdaptive(channel.adapterType, input.model, mode)) input.ratio = "adaptive";
+      if (mode === "text-to-video" && (!input.ratio || input.ratio === "adaptive")) input.ratio = "16:9";
+      input.audio = undefined;
+    }
     const inlineMediaChars = inlineMediaSize(input);
     if (inlineMediaChars > MAX_INLINE_MEDIA_CHARS) {
       throw new AppError(
         "INVALID_INPUT",
-        `内联素材合计约 ${(inlineMediaChars / 1024 / 1024).toFixed(1)} MB，超出 15 MB 预算，请使用更小的素材或公网地址`,
+        `内联素材合计约 ${(inlineMediaChars / 1024 / 1024).toFixed(1)} MB，超出 ${MAX_INLINE_MEDIA_CHARS / 1024 / 1024} MB 预算，请使用更小的素材或公网地址`,
         400,
       );
     }
@@ -238,7 +259,9 @@ export class TaskRunner {
         if (channel.adapterType === "kling-video") {
           input.klingVideoMedia = [...(input.klingVideoMedia ?? []), { type: "video", url }];
         } else if (channel.adapterType === "wan-video") {
-          input.wanVideoMedia = [...(input.wanVideoMedia ?? []), { type: "reference_video", url }];
+          input.wanVideoMedia = [...buildWanMedia(input), { type: "reference_video", url }];
+        } else if (channel.adapterType === "minimax-video") {
+          input.minimaxVideoMedia = [...(input.minimaxVideoMedia ?? []), { type: "video", url }];
         } else if (channel.adapterType === "seedance-video") {
           input.seedanceVideoMedia = [...(input.seedanceVideoMedia ?? []), { type: "video_url", url, role: "reference_video" }];
         } else {
@@ -257,8 +280,8 @@ export class TaskRunner {
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
-      const result = await this.sendWithDiagnostic(taskId, prepared).catch(error => {
-        const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url"));
+      const result = await this.sendWithDiagnostic(taskId, prepared, isImageAdapter(channel.adapterType)).catch(error => {
+        const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url") || input.minimaxVideoMedia?.some(item => item.type === "video"));
         if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
@@ -393,14 +416,19 @@ export class TaskRunner {
     this.updateTask(taskId, { status: "failed", errorCode: code, errorMessage: message, finishedAt: new Date().toISOString() });
   }
 
-  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>) {
+  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>, checkErrorEnvelope = false) {
     try {
-      const result = await sendPreparedRequest(prepared);
+      const result = await sendPreparedRequest(prepared, { checkErrorEnvelope });
       this.db.insertDiagnostic({ taskId, request: redact(requestForDiagnostic(prepared)), response: redact(truncatePayload(result.payload)), httpStatus: result.status, durationMs: result.durationMs });
       return result;
     } catch (error) {
       if (error instanceof RemoteApiError) {
-        this.db.insertDiagnostic({ taskId, request: redact(requestForDiagnostic(prepared)), response: redact(truncatePayload(error.payload)), httpStatus: error.status });
+        this.db.insertDiagnostic({
+          taskId,
+          request: redact({ ...requestForDiagnostic(prepared), ...(error.requestId ? { upstreamRequestId: error.requestId } : {}) }),
+          response: redact(truncatePayload(error.payload)),
+          httpStatus: error.status,
+        });
       }
       throw error;
     }
@@ -702,8 +730,8 @@ function truncatePayload(payload: unknown) {
 
 /** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */
 function inlineMediaSize(input: GenerationInput) {
-  const media = [...(input.wanVideoMedia ?? []), ...(input.seedanceVideoMedia ?? []), ...(input.klingVideoMedia ?? [])];
-  return media.reduce((total, item) => (item.url.startsWith("data:") ? total + item.url.length : total), 0);
+  return VIDEO_MEDIA_FIELDS.flatMap<{ url: string }>((field) => input[field] ?? [])
+    .reduce((total, item) => (/^data:/i.test(item.url) ? total + item.url.length : total), 0);
 }
 
 export function normalizeError(error: unknown) {

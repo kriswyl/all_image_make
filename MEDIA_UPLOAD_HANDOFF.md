@@ -33,6 +33,8 @@
 | 图床 HEAD 404，GET 正常 | 不要用 HEAD 做可用性校验；客户端和上游都应按 GET 处理                                                        |
 | 万相接受 base64 音频     | 1 秒 WAV data URI（约 21K 字符）提交 `reference_audio`，任务 `completed`，输出 mp4 带音频轨               |
 | 中转站网关能收大 body      | 无效模型探测：1 / 2 / 3 / 4 / 6 / 8 / 10 / 12 / 16 / 20 MB 都返回正常 JSON，没有 413/502               |
+| 网关 body 硬顶（2026-11-17 复测） | `POST /v1/video/generations`：1/8/16/24/32/48/**50 MiB** 全部正常返回 JSON；**51 MiB 起 413**（`Request Entity Too Large`，770ms 就按 `Content-Length` 拒），52/56/64 MiB 同样 413。即 nginx `client_max_body_size` ≈ 50 MiB |
+| 18.3 MiB 内联能端到端跑通（2026-11-17） | 生图走 gemini-content 的 JSON 内联（`inlineData.data` 纯 base64）：2000×2400、13.7 MB PNG → 请求体 18.3 MiB → **HTTP 200 并返回 380KB JPEG**。纯噪声图同样 200，但模型回 `IMAGE_RECITATION` 且**不计费** |
 | `1.4MB` 是应用自己的常量   | `tasks.ts:36`，来自 2026-10-12 的旧经验（1MB 过、2MB 掐断），不是官方硬限制                                  |
 | 万相官方素材上限           | 图片 20MB、参考音频 15MB、参考视频 100MB                                                            |
 | 当前万相渠道可能临时不可用      | 测试期间 `wan3.0-video` 返回 `get_channel_failed`（可用渠道不存在），与 body 大小无关                        |
@@ -42,6 +44,17 @@
 - 视频走图床 URL（base64 视频体积太大，不现实）。
 - 音频走 base64（图床不收音频，但中转站/上游接受 data URI）。
 - 15MB 预算只是应用侧的安全阈值，不是上游限制；保留它是为了在超限时给出明确错误，而不是等 502。
+
+> **2026-11-17 更新（后续变更，覆盖上文数值）**
+>
+> - 网关 body 硬顶实测为 **50 MiB**：1/8/16/24/32/48/50 MiB 全部正常返回 JSON，
+>   **51 MiB 起 413**（`Request Entity Too Large`，770ms 按 `Content-Length` 预判）。
+> - 内联预算已从 15 MiB 提到 **40 MiB 字符**（`shared/types.ts` 的
+>   `MAX_INLINE_MEDIA_CHARS`），单条素材 URL 上限同步改为 `MAX_INLINE_MEDIA_CHARS + 4 MiB`
+>   （刻意比总预算大一截，否则超预算的单条素材会先被 zod 拦住、只能看到「输入数据无效」）。
+> - 18.3 MiB 请求体的内联生图请求**端到端成功出图**（gemini-3.1-flash-lite-image）。
+> - 本文其余小节记录的是 2026-10-29 那次调整的原始过程，涉及 15MB 的数值请以上面这条和
+>   代码里的常量为准。
 
 ---
 

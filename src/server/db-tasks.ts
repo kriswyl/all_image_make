@@ -5,6 +5,8 @@ import { summarizeTaskInput } from "../shared/video-snapshot.js";
 import { auditParameters } from "./diagnose.js";
 import type { AssetRepository } from "./db-assets.js";
 import { now, parseJson, type DbRow } from "./db-row.js";
+import { collectInlineVideoImagePaths } from "./task-video-images.js";
+import type { StoredGenerationInput } from "./task-input-files.js";
 
 /**
  * `generate` = 走 runner 的真实生成；`upload` = 用户在对话框里自己传的图（需求.md 问题 4）。
@@ -44,6 +46,7 @@ export type CreateTaskInput = {
 };
 
 export type TaskPatch = Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remotePollAfter" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>;
+export type TaskKey = Pick<TaskRow, "id" | "channelId">;
 
 export type InsertDiagnosticInput = { taskId: string; request: unknown; response: unknown; httpStatus?: number | null; durationMs?: number | null };
 
@@ -56,7 +59,7 @@ export class TaskRepository {
   ) {}
 
   /** 任务品类：和前后端共用同一份规则，避免「历史页和清空接口各判各的」 */
-  taskKindRow(row: TaskRow, adapterByChannel: Map<string, string>): TaskKind {
+  taskKindRow(row: TaskKey, adapterByChannel: Map<string, string>): TaskKind {
     return taskKindFor(
       adapterByChannel.get(row.channelId),
       this.assets.listAssets(row.id).map((asset) => asset.mimeType),
@@ -78,6 +81,10 @@ export class TaskRepository {
   getTaskRow(id: string): TaskRow | null {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as DbRow | undefined;
     return row ? this.taskFromRow(row) : null;
+  }
+
+  hasTask(id: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM tasks WHERE id = ?").get(id));
   }
 
   taskHasConversationReferences(taskId: string): boolean {
@@ -104,10 +111,10 @@ export class TaskRepository {
     return rows.map((row) => this.taskFromRow(row));
   }
 
-  /** 清空历史要把整个表过一遍，不受列表分页限制。上传素材不算历史，跟着会话一起走 */
-  listAllTaskRows(): TaskRow[] {
-    const rows = this.db.prepare("SELECT * FROM tasks WHERE origin = 'generate' ORDER BY created_at DESC").all() as DbRow[];
-    return rows.map((row) => this.taskFromRow(row));
+  /** 清理候选只需要任务和渠道 ID，旧任务的内联素材按需读取。 */
+  listGenerationTaskKeys(): TaskKey[] {
+    const rows = this.db.prepare("SELECT id, channel_id FROM tasks WHERE origin = 'generate' ORDER BY created_at DESC").all() as DbRow[];
+    return rows.map((row) => ({ id: String(row.id), channelId: String(row.channel_id) }));
   }
 
   updateTask(id: string, patch: TaskPatch) {
@@ -235,37 +242,33 @@ export class TaskRepository {
   collectInputImagePaths(id: string): string[] {
     const row = this.db.prepare("SELECT input_json FROM tasks WHERE id = ?").get(id) as DbRow | undefined;
     if (!row) return [];
-    const input = parseJson<{
-      referenceImages?: Array<{ relativePath?: string }>;
-      referenceImage?: { relativePath?: string };
-      maskImage?: { relativePath?: string };
-      referenceVideo?: { relativePath?: string };
-      referenceVideos?: Array<{ relativePath?: string }>;
-      referenceAudio?: { relativePath?: string };
-      referenceAudios?: Array<{ relativePath?: string }>;
-    }>(row.input_json, {});
-    const stored = input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
+    const input = parseJson<Partial<StoredGenerationInput>>(row.input_json, {});
+    const stored: Array<{ relativePath: string }> = input.referenceImages?.length
+      ? [...input.referenceImages] : input.referenceImage ? [input.referenceImage] : [];
     // 局部重绘蒙版和参考图一样落在 inputs/，删任务时要一起收走
     if (input.maskImage) stored.push(input.maskImage);
     if (input.referenceVideo) stored.push(input.referenceVideo);
     if (input.referenceAudio) stored.push(input.referenceAudio);
     stored.push(...(input.referenceVideos ?? []), ...(input.referenceAudios ?? []));
-    return [...new Set(stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string"))];
+    const paths = stored.map((item) => item?.relativePath).filter((value): value is string => typeof value === "string");
+    return [...new Set([...paths, ...collectInlineVideoImagePaths(input)])];
   }
 
   private taskView(task: TaskRow): Task {
+    const input = parseJson<Record<string, unknown>>(task.inputJson, {});
+    const effectiveParameters = parseJson<Record<string, unknown> | null>(task.effectiveJson, null);
     // 工作台也要「看得见」（需求.md 问题 1 D）：核对用的是任务自己落库的两份原料——
     // input_json 是请求时写的，effective_json 是**发送前**就存下的脱敏请求体。
     // 适配器认不出来（渠道已删除、上传素材的空 channel_id）就不硬猜，如实不给这一项。
     const parameterNotes = task.channelAdapterType
-      ? auditParameters(task.channelAdapterType, parseJson<Record<string, unknown>>(task.inputJson, {}), parseJson<Record<string, unknown> | null>(task.effectiveJson, null))
+      ? auditParameters(task.channelAdapterType, input, effectiveParameters)
       : [];
     return {
       id: task.id, origin: task.origin, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
-      status: task.status, progress: task.progress, effectiveParameters: parseJson(task.effectiveJson, null),
+      status: task.status, progress: task.progress, effectiveParameters,
       // 脱敏参数快照：界面展示「本次参数」与「复用参数」都用它，原始 input 里的
       // base64 图片不会跟着列表一起回传。
-      inputParameters: summarizeTaskInput(parseJson<Record<string, unknown>>(task.inputJson, {})),
+      inputParameters: summarizeTaskInput(input),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
       ...(task.remoteMeta ? { remoteMeta: parseJson<NonNullable<Task["remoteMeta"]>>(task.remoteMeta, {}) } : {}),

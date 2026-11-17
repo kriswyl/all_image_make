@@ -13,6 +13,68 @@
 
 ---
 
+## v2.4.0 — 2026-11-17
+
+### 视频生成 · MiniMax H3
+
+- 新增「词元流墟-MiniMax视频」渠道预设。视频工作台、无限画布和对话支持文生、首帧、首尾帧和多模态参考。默认 768P，可选 2K，时长为 4–15 秒，输出包含模型原生音频。
+- 参考模式支持最多 9 张图、3 段视频和 3 段音频，合计最多 12 份。参考音频需搭配图片或视频。首帧和尾帧按各自角色提交。
+- 修正词元流墟 `POST /v1/video/generations` 的参考素材字段。参考图保留在顶层 `images`，参考视频和音频分别放在 `metadata.videos` 和 `metadata.audios`。工作台、画布、对话和重试共用这套请求格式。
+- 模拟中转已验证请求体、上传、轮询、下载和重试。新请求格式的真实参考效果仍待上游出片验证。
+
+### 图片工作台
+
+- 参考图采用与视频工作台一致的叠放样式。悬停后向右展开，鼠标移出时收起。展开时左右箭头始终可见，到达首页或末页时对应按钮置灰。右侧翻页和清空按钮紧跟最后一张图。
+- 提示词框默认最小高度调整为 160px。展开后在常规窗口中增至 240px，较矮的窗口按可用高度调整。
+
+### 参考素材校验与任务存储
+
+- 统一图片工作台、画布、对话和服务端的生图参考图额度。已识别的 GPT Image 2 系列支持 16 张，已识别的 Gemini 图像模型支持 14 张，其他模型默认 8 张。当前 Midjourney 参考图和局部重绘入口各支持 1 张。切换模型时保留已选图片并提示超限。
+- Grok 视频的 JSON 和文件上传统一执行 7 张参考图上限。Seedance、万相和可灵仍按各自模型与模式的额度校验。
+- 新任务的视频内联参考图和 MiniMax H3 内联参考音频单独存为文件。任务重试会恢复原素材与角色，兼容旧记录。建档失败和删除任务时回收对应输入文件。
+- 修正对话附件上传后的素材 ID 对应关系，以及异步任务过早结束时对话仍停在等待状态的问题。
+
+### 一 Key 模式：一个密钥自动配好全部渠道
+
+- 新用户最大的门槛是「配渠道」：12 个模型组逐组填环境变量和密钥，新手教程里要翻好几屏。现在中转站的现实是「一个账号一个密钥、全模型通用」，所以新增**一 Key 模式**：只填一个 Key，12 个渠道（生图 / 视频 / 音乐 / 语音 / 对话）全部自动建好。
+- 两个显眼入口：
+  - **新手教程欢迎页**：开启探索按钮下方新增「一 Key 模式（推荐）——一个密钥，12 个渠道自动配好」横条，直达专属配置页（`一 Key，全部点亮`：左侧一个密钥输入框 + 「还没 Key？去获取」链接，右侧 12 组模型清单可勾选，底部一键配好）。
+  - **添加渠道向导首屏**：站点卡片之上置顶「一 Key 全开 · 推荐」大卡，点进去第二步只有一个共用 API Key 输入框，模型组按类分组展示、可增删模型，确认页 12 个渠道逐一测试。
+- 实现：`provider-presets.ts` 新增 `ONE_KEY_PRESET`（`singleKey` + `sharedSecretEnv`），把 12 个单元的 `secretEnv` 统一收敛到 `TIANTOKEN_API_KEY`，渠道名改为「词元流墟 · <模型类>」；`buildChannelDrafts` 支持共享密钥时所有草稿共用同一个 Key。刻意**不**把该预设放进 `PROVIDER_PRESETS`，否则站点卡片会按组重复出现、引导里的模型气泡也会翻倍。
+- 密钥落盘兼容：一 Key 模式的 12 个草稿统一携带 `secretEnv: TIANTOKEN_API_KEY`，服务端已有的 `process.env[secretEnv]` 兜底路径原样生效——只配环境变量不填 Key 也能用。按单元配过旧密钥（`TIANTOKEN_GPT_API_KEY` 等）的老渠道不受影响，与一 Key 渠道并存互不覆盖。
+- 测试：新增 `tests/one-key-mode.test.ts`（预设结构、共享密钥、草稿生成）与 `tests/one-key-ui.test.tsx`（向导三步走查：入口卡片、单 Key 输入、确认清单）。
+
+### 对话里生音乐不再因为「参数多一个字段」整轮失败
+
+- 现象：聊天里说「写一首歌」，卡片直接回「音乐参数无效，请检查模式、歌词和源歌曲」，可参数一个都不缺。
+- 根因在 `chat-tools/native-audio.ts`：它把父 schema 的 `mode` / `instrumental` / `loop` **重声明**了一遍再 `.strict()`，等于把 `generateMusicSchema` 上留的容错全部覆盖：`mode` 的 `.catch(undefined)`（大脑偶尔写枚举外的词）没了，布尔字段的宽松解析没了，多一个字段直接整轮校验失败。对话里生音乐走的正是这条原生工具路径。
+- 顺带查出更危险的一处：`z.coerce.boolean()` 走的是 `Boolean(value)`，而 `Boolean("false") === true`。大脑把 `instrumental` 写成字符串 `"false"` 时，用户会拿到一首**纯音乐**，而且全程不报错。新增 `looseBoolean()`（`agent-tools/shared.ts`）替换全部 5 处 `z.coerce.boolean()`：只认 `true/false`、`1/0`、`yes/no`、`是/否`，认不出来原样交给 `z.boolean()` 报错让大脑改。
+- 聊天侧音乐参数改成「只做加法」：新增 `lyrics` 字段（大脑常按工作台叫法把自定义歌词写进这里，语义等同 `prompt`），`prepareMusicInput` 在 `prompt` 为空时回退到 `lyrics`；不再 `.strict()`，未知字段直接丢弃。
+- 同类收口：`native-video` 里重声明的 `audio` / `promptExtend` 删掉（保留父 schema 的 `looseBoolean`），收窄后的 `mode` 补回 `.catch(undefined)`；`native-image` 里重声明的 `fromScratch` 删掉；三条原生工具路径都不再 `.strict()`。
+- 校验失败时的报错带上字段信息（`describeZodIssues`）：从「音乐参数无效」变成「音乐参数无效（title: Too big…）」，大脑一次就能改对，用户不用多等一个来回。
+- 测试：新增 `tests/native-audio-params.test.ts`（13 项），钉住「枚举外 mode / 字符串布尔 / 自造字段仍能走到确认卡」「只给 lyrics 也能用上」「真错误要指向具体字段」，并实测 `Boolean("false")` 这个坑。
+
+### 内联素材预算 15 MiB → 40 MiB（按网关实测硬顶重算）
+
+- 先量了网关：用不存在的模型名探测 `POST /v1/video/generations`（不建任务、不计费），**1 / 8 / 16 / 24 / 32 / 48 / 50 MiB 全部正常返回 JSON，51 MiB 起 413**，770ms 就按 `Content-Length` 预判拒绝 → nginx `client_max_body_size ≈ 50 MiB`。旧文档里「请求体上限 1~2MB」是 2026-10-12 的过期结论，早已不成立。
+- `MAX_INLINE_MEDIA_CHARS` 从 15 MiB 提到 **40 MiB 字符**（≈30 MB 原始二进制），距硬顶留 10 MiB 给 JSON 结构、提示词与多素材。常量从 `tasks.ts` 收进 `shared/types.ts`，`tasks.ts` / `routes/generations.ts` / `vision.ts` / `board-generation-shared.ts` 共用一份，报错文案里的数字也改成由常量算出，不再写死。
+- 单条素材 URL 上限 `MAX_MEDIA_URL_CHARS` 由 `28_000_000` 改为 `MAX_INLINE_MEDIA_CHARS + 4 MiB`：**刻意比总预算大一截**。若两者相等，一条刚好超预算的素材会先被 zod 拦下，用户只看到「输入数据无效」；留余量后才会走到内联预算检查，得到「内联素材合计约 X MB，超出 40 MB 预算」这种能指导操作的提示。
+- `vision.ts` 的 `videoInlineProfile()` 原来硬编码 `1_400_000` 分摊多图预算（注释却写 15 MiB，代码与注释互相打架），现在跟随真实预算。副作用是多图不再被压到每张不足 100KB，实际起作用的是 `maxEdge` 与 `quality`。
+- 实测验证：13.7 MB PNG（2000×2400）以 base64 内联，请求体 18.3 MiB，走 gemini-content 的 `inlineData` 路径 **200 并成功出图**；纯噪声图同样 200 但模型回 `IMAGE_RECITATION` 且不计费。
+- 明确边界：这个预算**只管视频素材数组**（`VIDEO_MEDIA_FIELDS`）。生图参考图不走它，仍按 `MAX_REFERENCE_IMAGE_BYTES`（20 MiB/张）单独限制。
+- 按官方文档核对了 MiniMax H3 的两个易错参数，写进 README 与交接文档：`resolution` 官方只有 `768P` / `2K` 两档，且 **2K 是 `H3-Regenerate-2K` 的二次重生成**（把 768P 结果连同原始 context 再喂回模型，更慢更贵，实测出片域名也与 768P 不同），所以默认档必须显式钉在 768P；`generate_audio` **不是官方参数**（音频是模型原生输出，32 kHz 立体声，与画面同一次生成），中转收到该字段会静默忽略，因此界面不做假的静音开关。
+- 新增 `MINIMAX_HANDOFF.md`：把 MiniMax H3 的协议、参数实测矩阵、官方口径、踩坑与接入清单固化下来，避免下次再从"抄豆包模板"的中转文档推断行为。
+- 文档同步：README、VIDEO_HANDOFF 第 8 条（旧 1~2MB 结论标为作废并附新表）、AGENT_PLAN、EXPANSION_PLAN、MEDIA_UPLOAD_HANDOFF（加「2026-11-17 更新」覆盖段）。
+- 测试：`app.test.ts` 与 `seedance-reference-media.test.ts` 里两处预算断言改为 40 MiB，并保留「超预算时报错文案含 40 MB」的校验。
+
+### 视频：Seedance 纯图参考不再被空校验拦下
+
+- Seedance 工作台的纯文字和纯参考图任务改走 `POST /api/generations` 的 JSON 入口。有本地音视频文件需要上传时走 multipart。首帧、尾帧和参考图继续存放在 `seedanceVideoMedia` 中并保留各自的 `role`。旧版 multipart 请求中的内联参考图也能通过素材检查。
+- multipart 的 `payload` 单字段上限从 16 MiB 调到 64 MiB。视频内联素材仍受独立的总量预算约束。
+- 新增 `LIMIT_FIELD_VALUE` 的错误映射：现在返回 413 `PAYLOAD_TOO_LARGE`「提交内容过大：参考素材太多或单张太大」，不再落到兜底文案「参考图最多上传 8 张」（明明是内容太大，却把人往图太多上带）。映射抽成 `multerErrorResponse()`，可按 code 单测。
+- 无素材 / 连 payload 都没带，仍然返回 400 `UPLOAD_EMPTY`；payload 非法则返回 `INVALID_INPUT`（顺序变化，语义更准）。
+- 测试：新增 `tests/upload-error-mapping.test.ts`（3 项）+ `seedance-reference-media` 补 4 项纯图用例，覆盖「纯图建任务且图片以 data URL 进 content、不走图床」「2.0 同样可用」「空素材仍拒绝」。
+
 ## v2.3.9 — 2026-11-16
 
 ### macOS：新增 Intel（x86_64）安装包

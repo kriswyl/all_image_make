@@ -115,6 +115,9 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
       .catch((error) => host.reportTurnFailure(conversation.id, error));
     return;
   }
+  // 旧版工具还在落库并切换到 waiting_task 时，保留 pending 供该轮结束后补查。
+  // 先写成终态会使补查找不到这条消息，错过后续会话状态更新。
+  if (!continued && host.hasActiveTurn(conversation.id)) return;
   db.updateMessage(pending.id, {
     content: summary, toolResult: result, status: ok ? "ok" : "error",
     ...(produced ? { assetId: produced.id } : {}),
@@ -129,7 +132,6 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
 
   // 画布只跟着图片走：视频/音乐做完了，画布仍是那张原图
   if (conversation.status !== "waiting_task") return;
-  if (host.hasActiveTurn(conversation.id)) return;
 
   if (event.task.errorCode === "SUBMISSION_UNKNOWN" || usesPlainChat(conversation)) {
     db.setConversationStatus(conversation.id, "idle", { touch: false });

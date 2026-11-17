@@ -33,6 +33,7 @@ describe("provider presets", () => {
       "tiantoken-grok-video",
       "tiantoken-seedance",
       "tiantoken-kling-video",
+      "tiantoken-minimax-video",
       "tiantoken-suno",
       "tiantoken-gemini-tts",
       "tiantoken-chat",
@@ -59,6 +60,17 @@ describe("provider presets", () => {
     const grokVideo = findProviderPreset("tiantoken-grok-video")!;
     expect(grokVideo.baseUrl).toBe("https://api.tiantoken.com");
     expect(grokVideo.units.map((unit) => unit.adapterType)).toEqual(["grok-video"]);
+  });
+
+  it("configures MiniMax H3 with the relay generation and upload endpoints", () => {
+    const preset = findProviderPreset("tiantoken-minimax-video")!;
+    const [draft] = buildChannelDrafts(preset, [selectionFor(preset, "minimax-video")]);
+    expect(draft?.input).toMatchObject({
+      adapterType: "minimax-video", models: ["MiniMax-H3"],
+      baseUrl: "https://api.tiantoken.com", endpoint: "/v1/video/generations",
+      secretEnv: "TIANTOKEN_MINIMAX_VIDEO_API_KEY",
+      uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload", uploadHeaders: { "New-Api-User": "1" },
+    });
   });
 
   it("adds the Gemini TTS unit with the three requested models", () => {

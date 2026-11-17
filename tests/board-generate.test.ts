@@ -26,7 +26,7 @@ async function tempApp() {
   return created;
 }
 
-async function mockImageServer(delayMs = 0, onRequest?: (count: number) => boolean) {
+async function mockImageServer(delayMs = 0, onRequest?: (count: number) => boolean, onEdit?: (body: Buffer) => string) {
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk) => chunks.push(chunk));
@@ -37,6 +37,11 @@ async function mockImageServer(delayMs = 0, onRequest?: (count: number) => boole
         return;
       }
       setTimeout(() => {
+        if (req.url?.includes("/images/edits") && onEdit) {
+          res.writeHead(422, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: onEdit(Buffer.concat(chunks)) } }));
+          return;
+        }
         if (onRequest && !onRequest(Number(JSON.parse(Buffer.concat(chunks).toString()).n))) {
           res.writeHead(422, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: { message: "该张生成失败" } }));
@@ -53,7 +58,7 @@ async function mockImageServer(delayMs = 0, onRequest?: (count: number) => boole
   return `http://127.0.0.1:${port}`;
 }
 
-function addMockChannel(db: AppContext["db"], baseUrl: string) {
+function addMockChannel(db: AppContext["db"], baseUrl: string, models = ["mock-image"]) {
   return db.saveChannel({
     name: "Mock image",
     baseUrl,
@@ -62,7 +67,7 @@ function addMockChannel(db: AppContext["db"], baseUrl: string) {
     authHeaderName: "",
     secretEnv: "",
     endpoint: "",
-    models: ["mock-image"],
+    models,
     allowPrivateNetwork: true,
     enabled: true,
   });
@@ -114,6 +119,45 @@ async function waitForTask(app: ReturnType<typeof createApp>["app"], taskId: str
 }
 
 describe("无限画布配置节点生成", () => {
+  it("配置节点和图片节点按同一模型额度发送参考图，失败保留连线及渠道原因", async () => {
+    const { app, context } = await tempApp();
+    const imageCount = 16;
+    const providerHits: number[] = [];
+    const providerMessage = "渠道最多接收 5 张参考图";
+    const url = await mockImageServer(0, undefined, (body) => {
+      providerHits.push([...body.toString().matchAll(/name="image\[\]"/g)].length);
+      return providerMessage;
+    });
+    addMockChannel(context.db, url, ["mock-image", "gpt-image-2"]);
+    const { board, config, doc } = await createBoardWithText(app, { model: "gpt-image-2" });
+    const uploaded = await request(app).post(`/api/boards/${board.id}/assets`)
+      .attach("file", Buffer.from(pngBase64, "base64"), "reference.png").expect(201);
+    const inputs = Array.from({ length: imageCount }, (_, index) => nodeBase(`n${index + 3}`, "image", {
+      assetId: uploaded.body.data.id, source: "upload", status: "succeeded", x: index * 20,
+    }));
+    const target = nodeBase("n19", "image", { assetId: null, source: "generated", status: "empty", prompt: "图片节点", model: "gpt-image-2" });
+    const inputEdges = [config, target].flatMap((node) => inputs.map((source) => ({
+      id: `ref-${source.id}-${node.id}`, source: source.id, target: node.id, kind: "input" as const,
+    })));
+    await request(app).put(`/api/boards/${board.id}`).send({
+      doc: { ...doc, nextRef: 20, nodes: [...doc.nodes, ...inputs, target], edges: [...doc.edges, ...inputEdges] },
+      baseVersion: board.version,
+    }).expect(200);
+
+    const generate = (node: BoardNode, model?: string) => request(app).post(`/api/boards/${board.id}/generate`)
+      .send({ nodeId: node.id, ...(model ? { overrides: { model } } : {}) });
+    const rejected = await generate(config, "mock-image").expect(400);
+    expect(rejected.body.error.code).toBe("REFERENCE_IMAGE_LIMIT");
+    for (const node of [config, target]) {
+      const generated = (await generate(node).expect(202)).body.data;
+      expect(generated.referenceCount).toBe(imageCount);
+      expect(await waitForTask(app, generated.task.id)).toMatchObject({ status: "failed", errorMessage: providerMessage });
+    }
+    expect(providerHits).toEqual([imageCount, imageCount]);
+    const saved = (await request(app).get(`/api/boards/${board.id}`).expect(200)).body.data;
+    expect(saved.doc.edges.filter((edge: { id: string }) => edge.id.startsWith("ref-"))).toHaveLength(imageCount * 2);
+  }, 15000);
+
   it("保存结果占位文档失败时取消任务并保留原画布版本", async () => {
     const { app, context } = await tempApp();
     addMockChannel(context.db, await mockImageServer());

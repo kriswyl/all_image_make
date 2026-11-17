@@ -20,7 +20,7 @@ function makeChannel(overrides: Partial<Channel>): Channel {
 }
 
 describe("model catalog", () => {
-  it("从模板派生出三类模型组，不再包含向量引擎", () => {
+  it("从模板派生出各类模型组，不再包含向量引擎", () => {
     expect(MODEL_GROUPS.map((group) => group.key)).toEqual([
       "tiantoken-gpt:gpt",
       "tiantoken-gpt-c:gpt-c",
@@ -30,13 +30,14 @@ describe("model catalog", () => {
       "tiantoken-grok-video:grok-video",
       "tiantoken-seedance:seedance-video",
       "tiantoken-kling-video:kling-video",
+      "tiantoken-minimax-video:minimax-video",
       "tiantoken-suno:suno-music",
       "tiantoken-gemini-tts:gemini-tts",
       "tiantoken-chat:chat",
     ]);
     expect(MODEL_GROUPS.every((group) => !group.key.startsWith("vectorengine"))).toBe(true);
     expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(4);
-    expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(4);
+    expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(5);
     // 音乐和语音不再合并在「音频」里：Suno 一节、Gemini TTS 一节
     expect(MODEL_GROUPS.filter((group) => group.kind === "music")).toHaveLength(1);
     expect(MODEL_GROUPS.filter((group) => group.kind === "speech")).toHaveLength(1);

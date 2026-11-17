@@ -66,6 +66,7 @@ export function Composer({
   canvasItems = [],
   imageVisionWarning,
   plainAttachments = false,
+  maxImageAttachments = MAX_REFERENCE_IMAGES,
   videoFrames,
   onClearVideoFrames,
   onPreviewCanvas,
@@ -96,6 +97,7 @@ export function Composer({
   canvasItems?: CanvasTrayItem[];
   imageVisionWarning?: string;
   plainAttachments?: boolean;
+  maxImageAttachments?: number;
   videoFrames?: Partial<ChatVideoFrames>;
   onClearVideoFrames?: () => void;
   onPreviewCanvas?: (assetId: string) => void;
@@ -134,8 +136,8 @@ export function Composer({
     if (!files.length && !attachedAssets.length) return;
     const currentImages = pending.filter((item) => item.kind === "image").length;
     const currentDocuments = pending.filter((item) => item.kind === "document").length;
-    if (currentImages + images.length + (plainAttachments ? canvasItems.length + attachedAssets.length : 0) > MAX_REFERENCE_IMAGES) {
-      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+    if (currentImages + images.length + (plainAttachments ? canvasItems.length + attachedAssets.length : 0) > maxImageAttachments) {
+      setReject(`一次最多 ${maxImageAttachments} 张图片`);
       return;
     }
     if (currentDocuments + documents.length > MAX_DOCUMENTS_PER_MESSAGE) {
@@ -176,8 +178,8 @@ export function Composer({
   function submit() {
     const value = text.trim();
     if ((!value && !hasMedia) || blocked) return;
-    if (plainAttachments && canvasItems.length + pending.filter((item) => item.kind === "image").length > MAX_REFERENCE_IMAGES) {
-      setReject(`一次最多 ${MAX_REFERENCE_IMAGES} 张图片`);
+    if (plainAttachments && canvasItems.length + pending.filter((item) => item.kind === "image").length > maxImageAttachments) {
+      setReject(`一次最多 ${maxImageAttachments} 张图片`);
       return;
     }
     const files = pending.map((item) => item.file);

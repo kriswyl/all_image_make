@@ -67,12 +67,14 @@ export function withConfirmedVideoSelection(
   const hasRefs = Array.isArray(args.imageRefs) && args.imageRefs.length > 0;
   if (preview.videoInputs?.length) {
     const videos = preview.videoInputs.filter((item) => item.role === "reference_video");
-    if (videos.length) {
+    const audios = preview.videoInputs.filter((item) => item.role === "reference_audio");
+    if (videos.length || audios.length) {
       return {
         ...args,
         mode: "reference",
-        imageRefs: preview.videoInputs.filter((item) => item.role !== "reference_video").map((item) => item.assetId),
+        imageRefs: preview.videoInputs.filter((item) => item.role !== "reference_video" && item.role !== "reference_audio").map((item) => item.assetId),
         videoRefs: videos.map((item) => item.assetId),
+        ...(audios.length ? { audioRefs: audios.map((item) => item.assetId) } : {}),
       };
     }
     if (hasRefs) return args;
@@ -121,6 +123,10 @@ export function buildConfirmPreview(
         assetId: asset.id, role: "reference_video" as const, fileName: asset.title || asset.fileName,
         ...(asset.duration != null ? { duration: asset.duration } : {}),
       })),
+      ...(selection.audios ?? []).map((asset) => ({
+        assetId: asset.id, role: "reference_audio" as const, fileName: asset.title || asset.fileName,
+        ...(asset.duration != null ? { duration: asset.duration } : {}),
+      })),
     ]
     : undefined;
   const imageUsesCanvas = !isVideo && !isMusic && Boolean(canvasImages[0]) && args.fromScratch !== true;
@@ -135,7 +141,7 @@ export function buildConfirmPreview(
     ...(mode ? { mode } : {}),
     ...(asNumber(args.duration) !== undefined ? { duration: asNumber(args.duration) } : {}),
     ...(asString(args.resolution) ? { resolution: asString(args.resolution) } : {}),
-    ...(asBool(args.audio) !== undefined ? { audio: asBool(args.audio) } : {}),
+    ...(channel?.adapterType !== "minimax-video" && asBool(args.audio) !== undefined ? { audio: asBool(args.audio) } : {}),
     ...(asBool(args.promptExtend) !== undefined ? { promptExtend: asBool(args.promptExtend) } : {}),
     ...(isMusic ? (() => {
       const known = ["inspiration", "custom", "cover", "mashup", "sound", "playlist", "sample"] as const;

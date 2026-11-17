@@ -7,7 +7,7 @@
 import type { BrainMessage } from "./brain.js";
 import { resolveAssetRef } from "./agent-tools.js";
 import type { AppDatabase, StoredDocument } from "./db.js";
-import { isImageAsset, MAX_CANVAS_IMAGES } from "../shared/types.js";
+import { isImageAsset } from "../shared/types.js";
 import { assetRef, planCalls, type ChatMessage } from "../shared/agent-types.js";
 
 export interface BuiltContext {
@@ -26,16 +26,23 @@ export function collectTurnAttachmentIds(
   conversationId: string,
   userSeq: number,
 ): string[] {
-  return collectTurnAssetIds(db, conversationId, userSeq)
-    .filter((id) => { const asset = db.getAsset(id); return asset && isImageAsset(asset); })
-    .slice(0, MAX_CANVAS_IMAGES);
+  return collectTurnAssetIds(db, conversationId, userSeq, { preferDeclared: true }).filter((id) => {
+    const asset = db.getAsset(id);
+    return Boolean(asset && isImageAsset(asset));
+  });
 }
 
-export function collectTurnAssetIds(db: AppDatabase, conversationId: string, userSeq: number): string[] {
+export function collectTurnAssetIds(db: AppDatabase, conversationId: string, userSeq: number, options: { preferDeclared?: boolean } = {}): string[] {
   const messages = db.listMessages(conversationId).filter((message) => message.seq <= userSeq);
   const anchorIndex = messages.findIndex((message) => message.seq === userSeq);
   if (anchorIndex < 0 || messages[anchorIndex]!.role !== "user") return [];
   const anchor = messages[anchorIndex]!;
+  if (options.preferDeclared && anchor.assetRefs?.length) {
+    return [...new Set(anchor.assetRefs.flatMap((ref) => {
+      const asset = resolveAssetRef(db, conversationId, ref)?.asset;
+      return asset ? [asset.id] : [];
+    }))];
+  }
 
   const uploadIds: string[] = [];
   for (let index = anchorIndex - 1; index >= 0; index -= 1) {

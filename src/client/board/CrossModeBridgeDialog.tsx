@@ -13,6 +13,7 @@ import { ArrowRight, Image as ImageIcon, LayoutGrid, Plus, X } from "lucide-reac
 import { api } from "../api";
 import type { BoardSummary } from "../../shared/board";
 import type { ConversationSummary } from "../../shared/agent-types";
+import { MAX_CANVAS_IMAGES } from "../../shared/types";
 
 export interface BridgeAssetItem {
   assetId: string;
@@ -112,7 +113,7 @@ export function CrossModeBridgeDialog({
     setBusy(target.id);
     try {
       const result = await api.appendConversationCanvas(target.id, items.map((item) => item.assetId));
-      const skipped = result.skipped ? `，跳过 ${result.skipped} 张（重复或超过 8 张上限）` : "";
+      const skipped = result.skipped ? `，跳过 ${result.skipped} 张（重复或超过 ${MAX_CANVAS_IMAGES} 张上限）` : "";
       onToast("success", `已加入《${target.title}》的参考图组：${result.added.length} 张${skipped}`);
       onDone?.(target.id);
       onClose();
@@ -126,7 +127,7 @@ export function CrossModeBridgeDialog({
   const title = mode === "to-board" ? "加入无限画布" : "加入参考图组";
   const hint = mode === "to-board"
     ? "将素材作为节点加入无限画布，并保留标题和提示词。"
-    : "会把选中的图片追加到对话的参考图组，最多 8 张。";
+    : `会把选中的图片追加到对话的参考图组，最多 ${MAX_CANVAS_IMAGES} 张。`;
 
   return createPortal(
     <div className="board-bridge-overlay" role="presentation" onClick={() => { if (!busy) onClose(); }}>

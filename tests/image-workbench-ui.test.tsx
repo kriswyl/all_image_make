@@ -7,7 +7,10 @@ import { api } from "../src/client/api";
 import type { InpaintMaskController, ReferenceController } from "../src/client/app-shared";
 import { GenerateView } from "../src/client/views/GenerateView";
 import { ImageResultWorkspace } from "../src/client/views/ImageResultWorkspace";
+import { useReferenceImages } from "../src/client/hooks/useReferenceImages";
+import { imageReferenceLimit } from "../src/shared/image-reference-limits";
 import { readPromptText } from "../src/client/video/PromptEditor";
+import { ImagePromptComposer } from "../src/client/views/ImagePromptComposer";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -25,6 +28,101 @@ const imageChannel: Channel = {
   createdAt, updatedAt: createdAt,
 };
 const mjChannel: Channel = { ...imageChannel, id: "mj", name: "Midjourney", adapterType: "midjourney", models: ["mj_imagine"] };
+
+it("参考图展开后按可用宽度翻页，提示词框单独展开和收起", async () => {
+  const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(460);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const noop = () => {};
+  const images = Array.from({ length: 7 }, (_, index) => ({
+    file: new File(["image"], `ref-${index + 1}.png`),
+    previewUrl: `blob:reference-${index + 1}`,
+  }));
+  const click = (selector: string) => act(() => { container.querySelector<HTMLButtonElement>(selector)!.click(); });
+  try {
+    await act(async () => root.render(<ImagePromptComposer value="" onChange={noop} disabled={false} maxReferences={16}
+      references={{ images, reading: false, select: noop, dropFiles: noop, remove: noop, clear: noop, addFromAsset: async () => {} }} />));
+    const strip = container.querySelector(".image-reference-strip")!;
+    const stack = strip.querySelector(".image-reference-tiles")!;
+    const tags = () => Array.from(stack.querySelectorAll(".vstudio-media-tag"), node => node.textContent);
+    expect(tags()).toEqual(["图片5", "图片6", "图片7"]);
+    await act(async () => {
+      stack.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(tags()).toEqual(["图片1", "图片2", "图片3"]);
+    click('[aria-label="下一页参考图"]');
+    expect(tags()).toEqual(["图片4", "图片5", "图片6"]);
+    click('[aria-label="下一页参考图"]');
+    expect(tags()).toEqual(["图片7"]);
+    expect(strip.querySelector('[aria-label="下一页参考图"]')?.getAttribute("aria-disabled")).toBe("true");
+    click('[aria-label="上一页参考图"]');
+    expect(tags()).toEqual(["图片4", "图片5", "图片6"]);
+    width.mockReturnValue(900);
+    await act(async () => { window.dispatchEvent(new Event("resize")); });
+    expect(tags()).toHaveLength(7);
+    for (const label of ["上一页参考图", "下一页参考图"]) {
+      expect(strip.querySelector(`[aria-label="${label}"]`)?.getAttribute("aria-disabled")).toBe("true");
+    }
+    await act(async () => {
+      strip.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(tags()).toEqual(["图片5", "图片6", "图片7"]);
+    expect(strip.querySelector(".vstudio-asset-more")).toBeNull();
+
+    const prompt = container.querySelector(".image-prompt-block")!;
+    expect(prompt.classList.contains("is-expanded")).toBe(false);
+    click('[aria-label="展开输入框"]');
+    expect(prompt.classList.contains("is-expanded")).toBe(true);
+    click('[aria-label="收起输入框"]');
+    expect(prompt.classList.contains("is-expanded")).toBe(false);
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    width.mockRestore();
+  }
+});
+
+it("工作台切换模型后显示真实额度并保留已选参考图", async () => {
+  const gpt = { ...imageChannel, models: ["gpt-image-2"] };
+  const gemini: Channel = { ...imageChannel, id: "gemini", adapterType: "gemini-content", models: ["gemini-3-pro-image"] };
+  const noop = () => {};
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  Object.defineProperty(URL, "createObjectURL", { configurable: true, value: (file: File) => "blob:" + file.name });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: noop });
+  let references: ReferenceController;
+  function Harness({ channel }: { channel: Channel }) {
+    references = useReferenceImages(noop, imageReferenceLimit(channel.adapterType, channel.models[0]).max);
+    return <GenerateView channels={[gpt, gemini, mjChannel]} selectedChannelId={channel.id} selectedModel={channel.models[0]!}
+      tasks={[]} activeTask={null} references={references} inpaint={{ mask: null, apply: noop, clear: noop }}
+      onChannelChange={noop} onModelChange={noop} onTask={noop} onSelectTask={noop}
+      onAddChannel={noop} onConfigureChannel={noop} onToast={noop} onDiagnostics={noop} />;
+  }
+  localStorage.setItem("vector-image:generation-draft:prompt", JSON.stringify("合并参考图"));
+  try {
+    await act(async () => root.render(<Harness channel={gpt} />));
+    await act(async () => references.dropFiles(Array.from({ length: 16 }, (_, index) => new File(["image"], `ref-${index}.png`, { type: "image/png" }))));
+    expect(container.querySelector('[aria-label="参考图 16/16"]')).not.toBeNull();
+    expect(container.querySelector<HTMLButtonElement>(".image-submit")?.disabled).toBe(false);
+    await act(async () => root.render(<Harness channel={gemini} />));
+    expect(container.querySelector('[aria-label="参考图 16/14"]')).not.toBeNull();
+    expect(container.querySelector<HTMLButtonElement>(".image-submit")?.disabled).toBe(true);
+    expect(container.querySelector(".image-reference-note")?.textContent).toContain("当前 16 张");
+    await act(async () => root.render(<Harness channel={mjChannel} />));
+    expect(container.querySelector('[aria-label="参考图 16/1"]')).not.toBeNull();
+    await act(async () => root.render(<Harness channel={gpt} />));
+    expect(container.querySelector<HTMLButtonElement>(".image-submit")?.disabled).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    if (originalCreate) Object.defineProperty(URL, "createObjectURL", originalCreate);
+    else Reflect.deleteProperty(URL, "createObjectURL");
+    if (originalRevoke) Object.defineProperty(URL, "revokeObjectURL", originalRevoke);
+    else Reflect.deleteProperty(URL, "revokeObjectURL");
+  }
+});
 
 function asset(id: string, taskId: string): Asset {
   return { id, taskId, fileName: id + ".png", mimeType: "image/png", url: "/assets/" + id, byteSize: 10, createdAt };

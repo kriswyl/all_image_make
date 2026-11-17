@@ -147,10 +147,9 @@ export function materializeLegacyCall(
     const args: Record<string, unknown> = { ...call.args };
     if (selection.mode !== "text-to-video") args.mode = selection.mode;
     if (selection.assets.length) args.imageRefs = selection.assets.map((asset) => asset.id);
-    if (selection.videos?.length) {
-      args.videoRefs = selection.videos.map((asset) => asset.id);
-      args.modelHint = resolved.alias;
-    }
+    if (selection.videos?.length) args.videoRefs = selection.videos.map((asset) => asset.id);
+    if (selection.audios?.length) args.audioRefs = selection.audios.map((asset) => asset.id);
+    if (selection.videos?.length || selection.audios?.length) args.modelHint = resolved.alias;
     return { tool: call.tool, args };
   }
   if ((call.tool === "edit_image" || call.tool === "generate_image") && turnAttachmentIds.length) {
@@ -178,7 +177,7 @@ function resolveVideoForCall(
   if (!channel) return { error: "解析到的视频渠道不存在" };
   const parsed = generateVideoSchema.safeParse(args);
   if (!parsed.success) return { error: "视频参数无效，请检查参考素材" };
-  if (parsed.data.videoRefs?.length && parsed.data.modelHint && resolution.usedFallback) {
+  if ((parsed.data.videoRefs?.length || parsed.data.audioRefs?.length) && parsed.data.modelHint && resolution.usedFallback) {
     return { error: "没有找到指定的视频模型，请确认要用哪个渠道和模型" };
   }
   return { ...resolveVideoSelection(

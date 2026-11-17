@@ -507,8 +507,8 @@ export function BoardWorkspace({
           const asset = item.assetId ? assets.get(item.assetId) : undefined;
           if (!asset) throw new Error(`节点 ${item.ref} 没有可用素材`);
           const duration = await readMediaDuration(asset.url, item.type);
-          const { min, max } = item.type === "audio" ? { min: 0, max: 15 }
-            : referenceVideoDurationRange(alias?.adapterType === "kling-video" ? "motion-control" : "reference");
+          const { min, max } = item.type === "audio" && alias?.adapterType !== "minimax-video" ? { min: 0, max: 15 }
+            : referenceVideoDurationRange(alias?.adapterType === "kling-video" ? "motion-control" : "reference", undefined, alias?.adapterType);
           if (duration <= 0 || duration < min || duration > max) throw new Error(`节点 ${item.ref} 的${item.type === "audio" ? "音频" : "视频"}时长须为 ${min}–${max} 秒`);
         }
       } catch (error) { onToast("error", error instanceof Error ? error.message : "读取素材失败"); return; }

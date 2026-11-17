@@ -1,3 +1,4 @@
+import { VIDEO_ADAPTER_TYPES } from "../../shared/kinds.js";
 import { z } from "zod";
 import type { ChannelInput } from "../../shared/types.js";
 import { IMAGE_SIZE_VALUES } from "../../shared/types.js";
@@ -16,7 +17,7 @@ import { publicChannel, readGeminiImageSize, resolveChannelKey } from "./channel
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
 import type { Express } from "express";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", "wan-video", "grok-video", "seedance-video", "kling-video", "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
+const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", ...VIDEO_ADAPTER_TYPES, "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 

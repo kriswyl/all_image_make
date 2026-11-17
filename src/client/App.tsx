@@ -29,7 +29,8 @@ import { UpdateStatus } from "./UpdateStatus";
 import { VideoGenerateView } from "./VideoGenerateView";
 import { ImmersiveOnboarding } from "./onboarding/ImmersiveOnboarding";
 import { LoadingScreen, StatusBadge, formatTime, optionalNumber, statusLabels, terminalStatuses, usePersistentState } from "./task-ui";
-import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
+import { IMAGE_SIZE_VALUES, MAX_REFERENCE_IMAGE_BYTES, isImageAdapter, isVideoAdapter, taskKind } from "../shared/types";
+import { imageReferenceLimit } from "../shared/image-reference-limits";
 import type { Asset, Channel, ClearScope, Diagnostic, ImageSizeValue, Task, TaskStatus } from "../shared/types";
 import type { SunoSourceSelection } from "../shared/suno";
 import type { InpaintMaskController, ReferenceController, Toast, View } from "./app-shared";
@@ -341,7 +342,8 @@ export function App() {
   const latestTaskActivity = latestActivity(tasks);
   const historyUnread = latestTaskActivity > historySeenAt;
   // 参考图状态在 App 层持有，切换视图不丢失（修复切换界面参考图消失）
-  const references = useReferenceImages(showToast);
+  const generateChannel = imageChannels.find((channel) => channel.id === selectedChannelId);
+  const references = useReferenceImages(showToast, imageReferenceLimit(generateChannel?.adapterType, selectedModel).max);
   /** 视频页单独一份参考图状态：Seedance 2.5 的上限远高于图片页 */
   // 视频页按「渠道:模式」分桶存素材：切模式不再清空已上传的图片/视频
   const videoMedia = useMediaBuckets(showToast);
@@ -349,8 +351,8 @@ export function App() {
    * 局部重绘只对 openai-images（gpt / gpt-c）且恰好一张参考图生效。
    * 底图一变（删除、替换、加第二张、换渠道），`maskSourceUrl` 就变，旧蒙版自动作废。
    */
-  const generateChannel = imageChannels.find((channel) => channel.id === selectedChannelId);
-  const maskSourceUrl = generateChannel?.adapterType === "openai-images" && references.images.length === 1
+  const maskSourceUrl = generateChannel?.adapterType === "openai-images"
+    && references.images.length === imageReferenceLimit(generateChannel.adapterType, selectedModel, "mask").max
     ? references.images[0].previewUrl
     : null;
   const inpaint = useInpaintMask(maskSourceUrl);

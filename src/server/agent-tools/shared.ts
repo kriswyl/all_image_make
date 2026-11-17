@@ -1,3 +1,4 @@
+import { z, type ZodError } from "zod";
 import type { AgentStreamEvent, Conversation, ToolResult } from "../../shared/agent-types.js";
 import type { CapabilityAlias } from "../capabilities.js";
 import type { AppDatabase } from "../db.js";
@@ -5,6 +6,24 @@ import type { KeyStore } from "../key-store.js";
 import { AppError, type TaskRunner } from "../tasks.js";
 
 export const MEDIA_TASK_TIMEOUT_MS = 300_000;
+
+/**
+ * 布尔参数的宽容解析：字符串 `"false"` 必须解析成 false。
+ *
+ * `z.coerce.boolean()` 不能用，它走的是 `Boolean(value)`，而 `Boolean("false") === true`。
+ * 大脑把 instrumental 写成 `"false"` 时，用户会拿到一首纯音乐，而且全程不报错——
+ * 这种「静默反着来」比直接报错难查得多。这里只认明确的真/假写法，
+ * 认不出来的原样交给 `z.boolean()` 报错，让大脑改。
+ */
+export function looseBoolean() {
+  return z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const text = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y", "是", "开"].includes(text)) return true;
+    if (["false", "0", "no", "n", "否", "关"].includes(text)) return false;
+    return value;
+  }, z.boolean().optional());
+}
 
 export interface ToolContext {
   db: AppDatabase;
@@ -60,4 +79,17 @@ export function failResult(summary: string, error: string): ToolOutcome {
 export function describeError(error: unknown) {
   if (error instanceof AppError) return `${error.message}（${error.code}）`;
   return error instanceof Error ? error.message : "未知错误";
+}
+
+/**
+ * 参数校验失败时回灌给大脑的细节。
+ *
+ * 只回一句「参数无效」时，模型只能瞎猜着重试；带上出错字段它才能改对——
+ * 用户等的是一个来回，不是两个。
+ */
+export function describeZodIssues(error: ZodError, limit = 3) {
+  return error.issues
+    .slice(0, limit)
+    .map((issue) => `${issue.path.join(".") || "参数"}: ${issue.message}`)
+    .join("；");
 }

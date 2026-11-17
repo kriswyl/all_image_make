@@ -2,9 +2,11 @@ import { z } from "zod";
 import type { ConfirmPreview, Conversation } from "../../shared/agent-types.js";
 import { assetRef } from "../../shared/agent-types.js";
 import { MAX_REFERENCE_IMAGES } from "../../shared/types.js";
+import { imageReferenceCountError } from "../../shared/image-reference-limits.js";
 import type { BrainToolSpec } from "../brain.js";
 import type { AppDatabase } from "../db.js";
 import { editImageSchema, generateImageSchema, resolveImageRefs } from "../agent-tools.js";
+import { describeZodIssues } from "../agent-tools/shared.js";
 import { buildCapabilityAliases, resolveAlias } from "../capabilities.js";
 import type { NativeTurnCheckpoint } from "./checkpoint.js";
 import { isVisionBlocked } from "../agent-vision.js";
@@ -13,16 +15,20 @@ import { assetVisionParts } from "../vision.js";
 import type { BrainContentPart } from "../brain.js";
 import type { ChatToolResult, PreparedToolConfirmation } from "./registry.js";
 
+/**
+ * 只做加法：count / consistency 是原生流程特有的字段，其余沿用 generateImageSchema。
+ * 不要在这里重声明父 schema 已有的字段（fromScratch 之类）——那会把父 schema 的
+ * 容错覆盖掉，大脑把布尔写成 "true" 这类小事会让整轮调用失败。
+ */
 const generationSchema = generateImageSchema.extend({
   count: z.number().int().min(1).max(8).optional(),
-  fromScratch: z.boolean().optional(),
   /** 同一人物/画风的一批图：显式标注后由服务端先出基准图再并行改 */
   consistency: z.enum(["character", "style"]).optional(),
-}).strict();
+});
 
 const editingSchema = editImageSchema.extend({
   imageRefs: editImageSchema.shape.imageRefs.unwrap().length(1).optional(),
-}).strict();
+});
 
 export const nativeImageSpecs: Record<"generate_image" | "edit_image", BrainToolSpec> = {
   generate_image: {
@@ -120,7 +126,7 @@ export function prepareNativeImage(db: AppDatabase, conversation: Conversation, 
   try { input = JSON.parse(raw); } catch { return { error: "生图参数不是有效 JSON" } as const; }
   const editing = tool === "edit_image";
   const parsed = (editing ? editingSchema : generationSchema).safeParse(input);
-  if (!parsed.success) return { error: "图片工具参数无效，请检查提示词、数量和参考图；改图每次只接受一张底图。" } as const;
+  if (!parsed.success) return { error: `图片工具参数无效（${describeZodIssues(parsed.error)}），请检查提示词、数量和参考图；改图每次只接受一张底图。` } as const;
   const args = parsed.data;
   const count = "count" in args ? args.count ?? 1 : 1;
   const fromScratch = "fromScratch" in args && args.fromScratch;
@@ -137,8 +143,8 @@ export function prepareNativeImage(db: AppDatabase, conversation: Conversation, 
   const extras = resolveNativeImageRefs(db, conversation.id, requestedExtras);
   if (extras.error) return { error: extras.error } as const;
   const extraReferences = [...new Set(extras.assets.map(asset => asset.id))].filter(id => !imageRefs.includes(id));
-  if (imageRefs.length + extraReferences.length > MAX_REFERENCE_IMAGES) return { error: `底图与额外参考图合计最多 ${MAX_REFERENCE_IMAGES} 张，请缩小范围。` } as const;
-  if (channel.adapterType === "midjourney" && imageRefs.length + extraReferences.length > 1) return { error: "此渠道只使用一张参考图，请明确指定" } as const;
+  const referenceError = imageReferenceCountError(channel.adapterType, resolution.model, imageRefs.length + extraReferences.length);
+  if (referenceError) return { error: referenceError } as const;
   const prompt = conversation.verbatimPrompt ? db.lastUserText(conversation.id) ?? args.prompt : args.prompt;
   const size = ["size" in args ? args.size : undefined, args.aspectRatio, args.imageSize].filter(Boolean).join(" / ");
   const references = editing

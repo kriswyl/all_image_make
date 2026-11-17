@@ -2,10 +2,7 @@
  * 画布 = 一组图。
  *
  * 这里钉的是**多张画布真的出去了**，而不只是库里存了个数组：
- * 改图时整组进参考图、生视频只吃主图一张、总张数封顶在 8。
- *
- * 最后那条同时修掉一个既有错：改图原来发 画布 1 + extraReferences 最多 8 = 9 张，
- * 而落库上限是 8，整个任务会被 `REFERENCE_IMAGE_LIMIT` 直接拒掉——静默烧掉一次调用。
+ * 改图时整组进参考图，生成模型决定参考图张数。
  */
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -50,7 +47,7 @@ async function startMock(plan: unknown | unknown[]) {
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     req.on("end", () => {
       const raw = Buffer.concat(chunks);
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.setHeader("Content-Type", "application/json");
       if (req.url?.includes("/chat/completions")) {
         chatBodies.push(raw.toString("utf8"));
         // 有剧本就按轮次走，用完一律收尾——否则大脑会一直要图
@@ -70,6 +67,16 @@ async function startMock(plan: unknown | unknown[]) {
         return;
       }
       imageHits.push({ url: req.url ?? "", raw });
+      if (raw.includes("reference-limit-rejected")) {
+        res.setHeader("x-request-id", "fixture-request");
+        res.end(JSON.stringify({ error: { code: "too_many_images", message: "渠道最多接收 5 张参考图" } }));
+        return;
+      }
+      if (req.url?.includes(":generateContent")) {
+        const result = Buffer.concat([pngBytes, Buffer.alloc(48)]).toString("base64");
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { data: result, mimeType: "image/png" } }] } }] }));
+        return;
+      }
       res.end(JSON.stringify({ data: [{ b64_json: pngBase64 }] }));
     });
   });
@@ -91,7 +98,7 @@ async function startMock(plan: unknown | unknown[]) {
   await request(app).post("/api/channels").send({
     name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
     authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
-    models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    models: ["mock-image", "gpt-image-2.6-sunburst-c"], allowPrivateNetwork: true, enabled: true,
   }).expect(201);
   await request(app).post("/api/channels").send({
     name: "Video", baseUrl: base, adapterType: "wan-video", authType: "none",
@@ -112,6 +119,66 @@ async function uploadImages(app: ReturnType<typeof createApp>["app"], conversati
   const body = (await call.expect(201)).body.data as { canvasAssetIds: string[] };
   return body.canvasAssetIds;
 }
+
+it("图片生成 API 按模型校验 multipart 和 JSON，渠道报错保留原文，重试恢复整组参考图", async () => {
+  const { app, context, imageHits } = await startMock([]);
+  const gpt = context.db.listChannels().find((channel) => channel.adapterType === "openai-images")!;
+  const gemini = context.db.saveChannel({
+    name: "Gemini", baseUrl: gpt.baseUrl, adapterType: "gemini-content", authType: "none",
+    authHeaderName: "", secretEnv: "", endpoint: "/v1beta/models/{model}:generateContent",
+    models: ["gemini-nano-banana-2.1"], enabled: true, allowPrivateNetwork: true,
+  });
+  let gptRequest = request(app).post("/api/generations").field("payload", JSON.stringify({
+    channelId: gpt.id, model: "gpt-image-2.6-sunburst-c", prompt: "reference-limit-rejected",
+  }));
+  for (let index = 0; index < 16; index += 1) gptRequest = gptRequest.attach("referenceImages", pngBytes, `gpt-${index}.png`);
+  const gptResponse = await gptRequest.expect(202);
+  const gptTask = await context.runner.waitFor(gptResponse.body.data.id, { timeoutMs: 5000 });
+  expect(gptTask).toMatchObject({ status: "failed", errorMessage: "渠道最多接收 5 张参考图" });
+  expect(countPngParts(imageHits[0]!.raw)).toBe(16);
+  const diagnostic = await request(app).get(`/api/generations/${gptTask.id}/diagnostics`).expect(200);
+  expect(JSON.stringify(diagnostic.body.data)).toContain("fixture-request");
+  expect(JSON.stringify(diagnostic.body.data)).toContain("too_many_images");
+  const retry = await request(app).post(`/api/generations/${gptTask.id}/retry`).expect(202);
+  await context.runner.waitFor(retry.body.data.id, { timeoutMs: 5000 });
+  const imageNames = (raw: Buffer) => [...raw.toString().matchAll(/filename="([^"]+)"/g)].map((match) => match[1]);
+  expect(imageNames(imageHits[1]!.raw)).toEqual(imageNames(imageHits[0]!.raw));
+  expect(countPngParts(imageHits[1]!.raw)).toBe(16);
+
+  const sendGemini = (count: number) => request(app).post("/api/generations").send({
+    channelId: gemini.id, model: gemini.models[0], prompt: "合成",
+    referenceImages: Array.from({ length: count }, (_, index) => ({
+      base64: pngBase64, fileName: `gemini-${index}.png`, mimeType: "image/png",
+    })),
+  });
+  const geminiResponse = await sendGemini(14).expect(202);
+  expect((await context.runner.waitFor(geminiResponse.body.data.id, { timeoutMs: 5000 })).status).toBe("succeeded");
+  expect(JSON.parse(imageHits[2]!.raw.toString()).contents[0].parts.filter((part: { inlineData?: unknown }) => part.inlineData)).toHaveLength(14);
+  const over = await sendGemini(15).expect(400);
+  expect(over.body.error).toMatchObject({ code: "REFERENCE_IMAGE_LIMIT", message: expect.stringContaining("14 张") });
+  let tooMany = request(app).post("/api/generations").field("payload", JSON.stringify({
+    channelId: gpt.id, model: gpt.models[1], prompt: "合成",
+  }));
+  for (let index = 0; index < 17; index += 1) tooMany = tooMany.attach("referenceImages", pngBytes, `too-many-${index}.png`);
+  expect((await tooMany.expect(400)).body.error.message).toContain("16 张");
+  expect(imageHits).toHaveLength(3);
+}, 15000);
+
+it("创作对话透传全部 16 张已上传图片，并保留渠道失败原因", async () => {
+  const mock = await startMock([
+    { tool: "generate_image", args: { prompt: "reference-limit-rejected", modelHint: "gpt-image-2.6-sunburst-c" }, say: "开始。" },
+    { tool: "reply", args: { text: "已结束。" }, say: "已结束。" },
+  ]);
+  const route = `/api/conversations/${mock.conversationId}`;
+  const uploaded = await uploadImages(mock.app, mock.conversationId, 16);
+  expect(uploaded).toHaveLength(16);
+  await request(mock.app).post(route + "/messages").send({ text: "参考上传的所有图片", assetRefs: uploaded }).expect(202);
+  await settle(mock.app, mock.conversationId);
+  expect(mock.imageHits).toHaveLength(1);
+  expect(countPngParts(mock.imageHits[0]!.raw)).toBe(16);
+  const history = mock.context.db.listMessages(mock.conversationId);
+  expect(history.some((message) => message.toolResult?.summary.includes("渠道最多接收 5 张参考图"))).toBe(true);
+});
 
 /**
  * 直接调 `set_canvas`，不绕对话。
@@ -346,14 +413,13 @@ describe("画布一组图，真的整组发出去", () => {
     ]);
   });
 
-  it("参考图总量封顶 8：画布 8 张 + 额外 2 张时，多的被丢掉并说出来", async () => {
-    // 这条同时钉住今天那个既有错——不封顶的话 9 张会让 persistInputImages 直接把任务拒掉
+  it("底图和重复的额外参考图先去重，再按未知模型的默认额度提交", async () => {
     const mock = await startMock({
       tool: "edit_image",
       args: { prompt: "合成", extraReferences: ["last", "last"] },
       say: "合成。",
     });
-    await uploadImages(mock.app, mock.conversationId, MAX_CANVAS_IMAGES);
+    await uploadImages(mock.app, mock.conversationId, MAX_REFERENCE_IMAGES);
 
     await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "把这些合成一张" }).expect(202);
     await settle(mock.app, mock.conversationId);

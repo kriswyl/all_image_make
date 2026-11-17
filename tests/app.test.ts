@@ -263,30 +263,30 @@ describe("generation API", () => {
       allowPrivateNetwork: false, enabled: true, apiKey: "sk-test",
     }).expect(201);
 
-    // 超出应用侧 15 MiB 内联素材字符预算。
+    // 超出应用侧 40 MiB 内联素材字符预算。
     const response = await request(app).post("/api/generations").send({
       channelId: channelResponse.body.data.id,
       model: "sd-2.5",
       prompt: "test video",
       seedanceVideoMode: "first-frame",
       seedanceVideoMedia: [
-        { type: "image_url", url: `data:image/png;base64,${"A".repeat(15 * 1024 * 1024)}`, role: "first_frame" },
+        { type: "image_url", url: `data:image/png;base64,${"A".repeat(40 * 1024 * 1024)}`, role: "first_frame" },
       ],
     }).expect(400);
 
     expect(response.body.error.code).toBe("INVALID_INPUT");
     expect(String(response.body.error.message)).toContain("内联素材");
-    expect(String(response.body.error.message)).toContain("15 MB");
+    expect(String(response.body.error.message)).toContain("40 MB");
   });
 
-  it("accepts inline audio exactly at the 15 MiB budget", async () => {
+  it("accepts inline audio exactly at the 40 MiB budget", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-inline-limit-"));
     const { context } = createApp({ dataDir });
     cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
     const channel = context.db.saveChannel({ name: "wan", baseUrl: "https://example.com", adapterType: "wan-video", authType: "none", authHeaderName: "", secretEnv: "", endpoint: "", models: ["wan"], allowPrivateNetwork: false, enabled: true });
     vi.spyOn(context.runner, "run").mockResolvedValue(undefined);
     const prefix = "data:audio/wav;base64,";
-    const audio = prefix + "A".repeat(15 * 1024 * 1024 - prefix.length);
+    const audio = prefix + "A".repeat(40 * 1024 * 1024 - prefix.length);
     const task = await context.runner.create({ channelId: channel.id, model: "wan", prompt: "test", wanVideoMode: "reference", wanVideoMedia: [{ type: "reference_audio", url: audio }] });
     expect(task.id).toBeTruthy();
     await expect(context.runner.create({ channelId: channel.id, model: "wan", prompt: "test", wanVideoMode: "reference", wanVideoMedia: [{ type: "reference_audio", url: audio + "A" }] })).rejects.toMatchObject({ code: "INVALID_INPUT" });

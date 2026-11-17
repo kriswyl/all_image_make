@@ -697,3 +697,180 @@
     transition-duration: .001ms !important;
   }
 }
+
+/* ── 一 Key 模式 ─────────────────────────────────────────────────────────
+ * 中转站是一个账号全模型通用，所以「填一次」应该是最短的一条路。
+ * 视觉上沿用纸白 + 墨线，只借品牌色的那一小条当引子，不当装饰铺开。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/* 欢迎页入口：放在主按钮正下方，比「按站点模板配置」那些链接重一个量级 */
+.ink-onekey-entry {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  width: min(520px, 86vw);
+  margin-top: 6px;
+  padding: 13px 16px 13px 19px;
+  overflow: hidden;
+  text-align: left;
+  background: #fff;
+  border: 1px solid rgba(36, 39, 36, .16);
+  border-radius: 14px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(36, 39, 36, .04), 0 14px 34px rgba(36, 39, 36, .07);
+  transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease;
+}
+.ink-onekey-entry::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  bottom: 11px;
+  width: 2.5px;
+  border-radius: 0 3px 3px 0;
+  background-image: var(--spectrum-gradient);
+  opacity: .9;
+}
+.ink-onekey-entry:hover {
+  transform: translateY(-2px);
+  border-color: rgba(36, 39, 36, .3);
+  box-shadow: 0 2px 4px rgba(36, 39, 36, .05), 0 20px 44px rgba(36, 39, 36, .11);
+}
+.ink-onekey-entry-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: #fff;
+  background: var(--seal);
+  border-radius: 5px;
+  font-family: var(--brush);
+  font-size: 17px;
+  line-height: 1;
+  transform: rotate(-2deg);
+}
+.ink-onekey-entry-text { display: grid; gap: 3px; min-width: 0; }
+.ink-onekey-entry-text strong { display: flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 700; letter-spacing: .01em; }
+.ink-onekey-entry-text strong em {
+  padding: 1px 6px;
+  color: var(--ink-soft);
+  background: rgba(60, 66, 62, .08);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-style: normal;
+  font-weight: 650;
+}
+.ink-onekey-entry-text > span { color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.ink-onekey-entry-go { display: inline-flex; align-items: center; gap: 3px; color: var(--ink); font-size: 11px; font-weight: 650; white-space: nowrap; }
+
+/* 一 Key 页：左边写清楚、右边勾模型 */
+.ink-onekey {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  align-content: center;
+  align-items: center;
+  gap: clamp(24px, 4vw, 56px);
+  padding: clamp(40px, 7vh, 84px) clamp(28px, 6vw, 92px) 104px;
+}
+.ink-onekey-copy { display: grid; gap: 13px; max-width: 460px; }
+.ink-onekey-copy h1 {
+  margin: 0;
+  font-family: var(--brush);
+  font-size: clamp(34px, 3.6vw, 52px);
+  font-weight: 400;
+  line-height: 1.16;
+  letter-spacing: -.01em;
+}
+.ink-onekey-lede { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 2; }
+.ink-onekey-field { display: grid; gap: 7px; }
+.ink-onekey-field > span { display: flex; align-items: center; gap: 5px; color: var(--ink-soft); font-size: 11px; font-weight: 650; letter-spacing: .08em; }
+.ink-onekey-field input {
+  width: 100%;
+  height: 46px;
+  padding: 0 14px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid rgba(36, 39, 36, .4);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  letter-spacing: .3px;
+  outline: none;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+.ink-onekey-field input:focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(36, 39, 36, .08); }
+.ink-onekey-note { margin: 0; color: var(--faint); font-size: 10.5px; line-height: 1.7; }
+.ink-onekey-note code { color: var(--ink-soft); font-family: "Cascadia Code", Consolas, monospace; }
+
+.ink-onekey-list {
+  display: grid;
+  gap: 2px;
+  max-height: min(58vh, 520px);
+  padding: 14px 16px 12px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid rgba(36, 39, 36, .14);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(36, 39, 36, .03), 0 18px 40px rgba(36, 39, 36, .06);
+}
+.ink-onekey-list > header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+.ink-onekey-list > header strong { font-size: 12px; font-weight: 700; }
+.ink-onekey-section { display: grid; gap: 1px; padding: 7px 0 5px; border-top: 1px dashed rgba(36, 39, 36, .1); }
+.ink-onekey-section:first-of-type { border-top: 0; }
+.ink-onekey-section-label { color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .16em; }
+.ink-onekey-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 6px 6px 2px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .18s ease;
+}
+.ink-onekey-row:hover { background: rgba(36, 39, 36, .035); }
+.ink-onekey-row input { width: 15px; height: 15px; accent-color: var(--ink); cursor: pointer; }
+.ink-onekey-row-main { display: grid; gap: 1px; min-width: 0; }
+.ink-onekey-row-main strong { font-size: 12px; font-weight: 620; }
+.ink-onekey-row.is-on .ink-onekey-row-main strong { font-weight: 700; }
+.ink-onekey-row-main small { color: var(--muted); font-size: 10px; }
+.ink-onekey-row-state { color: var(--faint); font-size: 10px; white-space: nowrap; }
+.ink-onekey-row-state.done { color: var(--ink-soft); }
+.ink-onekey-row-state.error { color: #a8473c; }
+
+.ink-onekey-foot {
+  position: absolute;
+  left: clamp(28px, 6vw, 92px);
+  right: clamp(28px, 6vw, 92px);
+  bottom: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ink-onekey-foot > div { display: flex; align-items: center; gap: 14px; }
+.ink-onekey-seal { position: absolute; right: 8.1%; bottom: 108px; opacity: .9; }
+
+@media (max-width: 980px) {
+  .ink-onekey {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    align-content: start;
+    overflow: auto;
+    padding: 40px 24px 100px;
+  }
+  .ink-onekey-copy { max-width: none; }
+  .ink-onekey-copy h1 { font-size: 32px; }
+  .ink-onekey-list { max-height: none; }
+  .ink-onekey-seal { display: none; }
+}
+@media (max-width: 640px) {
+  .ink-onekey-entry { width: 100%; grid-template-columns: auto minmax(0, 1fr); }
+  .ink-onekey-entry-go { display: none; }
+  .ink-onekey-foot { left: 20px; right: 20px; bottom: 20px; flex-wrap: wrap; }
+  .ink-onekey-foot > div { flex-wrap: wrap; }
+}

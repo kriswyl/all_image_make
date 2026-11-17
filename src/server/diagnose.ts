@@ -58,6 +58,10 @@ const VIDEO_MAPS: Partial<Record<AdapterType, ParamMapEntry[]>> = {
     { param: "resolution", label: "分辨率", path: ["resolution"] },
     { param: "duration", label: "时长", path: ["duration"] },
   ],
+  "minimax-video": [
+    { param: "resolution", label: "分辨率", path: ["metadata", "resolution"] },
+    { param: "duration", label: "时长", path: ["duration"] },
+  ],
   "grok-video": [
     { param: "resolution", label: "分辨率", path: ["resolution"] },
     { param: "duration", label: "时长", path: ["duration"] },

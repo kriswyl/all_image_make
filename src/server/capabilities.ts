@@ -12,6 +12,8 @@ import type { AdapterType, TaskKind } from "../shared/types.js";
 import { channelKindOf } from "../shared/kinds.js";
 import { isMidjourneyActionModel } from "../shared/midjourney.js";
 import { OPENAI_SIZE_PRESETS } from "../shared/image-sizes.js";
+import { imageReferenceLimit } from "../shared/image-reference-limits.js";
+import { matchModelAlias } from "../shared/model-alias.js";
 import { CHANNEL_FIELD_SUPPORT } from "../shared/channel-fields.js";
 import { VIDEO_CAPABILITIES, videoModeLabel, type VideoAdapter } from "../shared/video-capabilities.js";
 import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec } from "../shared/video-modes.js";
@@ -113,7 +115,7 @@ const IMAGE_ASPECTS: Partial<Record<AdapterType, readonly string[]>> = {
 
 /** 参数之外、只能手写的部分（是不是吃图、结果形态这类） */
 const IMAGE_NOTES: Partial<Record<AdapterType, string>> = {
-  "openai-images": "图生图=✔  支持多张参考图",
+  "openai-images": "图生图=✔",
   "openai-chat-image": "图生图=✔",
   "gemini-content": "图生图=✔",
   "generic-json": "图生图=✔",
@@ -131,9 +133,11 @@ const VIDEO_NOTES: Partial<Record<string, string>> = {
  * 以前整行是手写字符串，矩阵改了这边忘了改，就会出现「助手说的和代码做的不一致」——
  * 尺寸只有三种那次就是这么来的。现在只有"支不支持"这一个事实源头。
  */
-function imageTraits(adapterType: AdapterType): string {
+function imageTraits(adapterType: AdapterType, model: string): string {
   const support = CHANNEL_FIELD_SUPPORT[adapterType] ?? {};
   const parts: string[] = [];
+  const references = imageReferenceLimit(adapterType, model);
+  parts.push(`参考图≤${references.max} 张${references.source === "default" ? "（应用默认）" : references.source === "channel-alias" ? "（按对应型号提交，实际由渠道决定）" : ""}`);
   if (support.size) parts.push(`尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」`);
   if (support.imageSize) parts.push("尺寸(imageSize)=1K|2K|4K");
   const aspects = IMAGE_ASPECTS[adapterType];
@@ -160,6 +164,7 @@ function videoTraits(adapterType: AdapterType, model: string, videoUploadConfigu
     const field = capability.ratioField === "ratio" ? "ratio" : "aspectRatio";
     parts.push(`画幅(${field})=${capability.aspectRatios.join("|")}`);
   }
+  if (capability.nativeAudio) parts.push("输出包含模型原生音频");
   if (capability.supportsAudio) parts.push("输出音频=✔");
   if (capability.supportsPromptExtend) parts.push("提示词扩展=✔");
   const imageLimit = maxImagesForMode(adapterType, model, "reference");
@@ -167,10 +172,12 @@ function videoTraits(adapterType: AdapterType, model: string, videoUploadConfigu
   const referenceSpec = videoModeSpec(adapterType, model, "reference");
   const limits = referenceMediaLimits(adapterType, model, referenceSpec);
   if (limits.videos) {
-    parts.push(`参考生视频：参考图≤${imageLimit} 张，参考视频≤${limits.videos} 段（对话 / 工作台 / 画布，${videoUploadConfigured ? "本地视频上传服务已配置" : "本地视频上传服务未配置，暂不可用"}）${limits.audios ? `，工作台参考音频≤${limits.audios} 段` : ""}`);
+    parts.push(`参考生视频：参考图≤${imageLimit} 张，参考视频≤${limits.videos} 段（对话 / 工作台 / 画布，${videoUploadConfigured ? "本地视频上传服务已配置" : "本地视频上传服务未配置，暂不可用"}）${limits.audios ? `，${limits.audioNeedsVisual ? "对话 / 工作台 / 画布" : "工作台"}参考音频≤${limits.audios} 段` : ""}`);
   } else if (videoModeSpec(adapterType, model, "motion-control")) {
     parts.push(`视频工作台·运动控制：角色图 + 一段参考视频（本地素材上传服务${videoUploadConfigured ? "已配置" : "未配置"}）`);
   }
+  if (limits.total) parts.push(`素材合计≤${limits.total} 份`);
+  if (limits.audioNeedsVisual) parts.push("参考音频需搭配参考图或视频。对话工具参数为 audioRefs");
   const note = VIDEO_NOTES[adapterType];
   if (note) parts.push(note);
   return parts.join("  ");
@@ -195,7 +202,7 @@ export function likelySupportsVision(adapterType: AdapterType) {
 function traitsFor(channel: DbChannel, model: string, kind: CapabilityKind) {
   if (kind === "video") return videoTraits(channel.adapterType, model, Boolean(channel.uploadEndpoint?.trim()));
   if (kind === "audio") return AUDIO_TRAITS[channel.adapterType] ?? "音乐生成";
-  return imageTraits(channel.adapterType) || "图片生成";
+  return imageTraits(channel.adapterType, model);
 }
 
 /**
@@ -270,7 +277,7 @@ export function buildCapabilityManifest(aliases: CapabilityAlias[]): string {
 
 export const VIDEO_REFERENCE_ENTRY_GUIDANCE = [
   "万相和 Seedance 支持用原视频作参考，本地视频需要渠道配置素材上传服务；能用几段以所选模型清单为准。工作台可在「提示词生视频」添加视频；画布可连入视频节点。",
-  "开启创作工具时，用户明确要求参考视频生成，调用 generate_video，使用 mode=reference 和 videoRefs（真实素材 ID），明确要带的参考图另填 imageRefs。用户指向本轮唯一一段视频就选它；指代不明先问。工具显示确认卡之后才上传。渠道不可用时请用户选择或配置渠道，不改成纯文生或图生视频。参考音频请使用视频工作台。不能把视频附件索引说成已经看过的画面，也不要沿用历史中与能力清单冲突的说法。",
+  "开启创作工具时，用户明确要求参考视频生成，调用 generate_video，使用 mode=reference 和 videoRefs（真实素材 ID），明确要带的参考图另填 imageRefs。用户指向本轮唯一一段视频就选它；指代不明先问。工具显示确认卡之后才上传。渠道不可用时请用户选择或配置渠道，不改成纯文生或图生视频。MiniMax H3 的参考音频使用 audioRefs，需搭配参考图或视频；其他模型的参考音频请使用视频工作台。不能把视频附件索引说成已经看过的画面，也不要沿用历史中与能力清单冲突的说法。",
 ].join("\n");
 
 /** 这次是靠什么挑中的模型，用来决定「要不要跟用户解释一句」 */
@@ -297,18 +304,6 @@ export interface AliasResolution {
  * 3. 去掉末尾序号后缀（老别名 seedance-1/2/3 还留在用户设置和旧记录里）
  * 4. 子串包含，最后连真实模型 ID 一起找
  */
-function loose(value: string) {
-  return value.toLowerCase().replace(/[\s\-_.]/g, "");
-}
-
-function matchAlias(candidates: CapabilityAlias[], normalized: string) {
-  const looseWant = loose(normalized);
-  return candidates.find((item) => item.alias === normalized)
-    ?? candidates.find((item) => loose(item.alias) === looseWant)
-    ?? candidates.find((item) => item.alias.replace(/-\d+$/, "") === normalized.replace(/-\d+$/, ""))
-    ?? candidates.find((item) => loose(item.alias).includes(looseWant) || loose(item.model).includes(looseWant));
-}
-
 /**
  * alias → `{channelId, model}`。优先级 **大脑指定的 → 你设的默认 → 类目第一个**。
  *
@@ -327,15 +322,14 @@ export function resolveAlias(
   const candidates = aliasesFor(aliases, kind);
   if (!candidates.length) return null;
 
-  const normalized = hint?.trim().toLowerCase();
-  const hit = normalized ? matchAlias(candidates, normalized) : undefined;
+  const hit = matchModelAlias(candidates, hint);
   if (hit) {
     return { alias: hit.alias, channelId: hit.channelId, model: hit.model, usedFallback: false, source: "hint" };
   }
 
   const wanted = preferred?.trim();
   if (wanted) {
-    const chosen = matchAlias(candidates, wanted.toLowerCase());
+    const chosen = matchModelAlias(candidates, wanted);
     if (chosen) {
       return { alias: chosen.alias, channelId: chosen.channelId, model: chosen.model, usedFallback: true, source: "default" };
     }

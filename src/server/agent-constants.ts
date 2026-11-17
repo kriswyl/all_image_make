@@ -1,4 +1,4 @@
-import { MAX_CANVAS_IMAGES } from "../shared/types.js";
+import { MAX_REFERENCE_IMAGES } from "../shared/types.js";
 
 /** 一轮用户消息里最多让大脑思考几次。默认 10 次，画布线程可用 boardMaxRounds 单独调 */
 export const MAX_ROUNDS = 10;
@@ -14,5 +14,5 @@ export const MAX_PARSE_RETRY = 1;
  * 「先看画布 → 选图 → 发现看漏了再看一张」。
  */
 export const MAX_VISION_READS_PER_ROUND = 3;
-/** 一次 view_images 最多附几张缩略图。和画布上限一致 */
-export const MAX_VISION_IMAGES = MAX_CANVAS_IMAGES;
+/** 单次视觉上下文的缩略图预算。 */
+export const MAX_VISION_IMAGES = MAX_REFERENCE_IMAGES;

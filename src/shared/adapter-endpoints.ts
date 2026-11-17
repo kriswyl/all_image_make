@@ -17,6 +17,7 @@ export function defaultEndpointFor(adapterType: AdapterType): string {
     case "midjourney": return "/mj/submit/imagine";
     case "wan-video": return "/api/v1/services/aigc/video-generation/video-synthesis";
     case "grok-video": return "/v1/videos/generations";
+    case "minimax-video": return "/v1/video/generations";
     case "seedance-video": return "/api/v3/contents/generations/tasks";
     case "kling-video": return "/text-to-video/{model}";
     case "suno-music": return "/api/queue/makeAiMusic";

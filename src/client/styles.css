@@ -1051,6 +1051,64 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .preset-tag { padding: 2px 7px; color: var(--ink-soft); background: rgba(0, 0, 0, .08); border-radius: var(--radius-control); font-size: 9.5px; font-weight: 650; }
 .preset-custom { background: var(--surface); border-style: dashed; }
 
+/*
+ * 一 Key 全开：向导首屏的头等入口。
+ *
+ * 十几张「按模型分组」的卡片会让只有一个密钥的人先去找自己属于哪一张。
+ * 这块卡片的唯一任务是让人一眼看到「只填一次就行」：尺寸压过下面的卡片、
+ * 左侧一条品牌色条（颜色只出现在这里，不当导航用），标题里带一个「推荐」。
+ */
+.onekey-hero-wrap { display: grid; margin-bottom: 2px; }
+.onekey-hero {
+  position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 15px; width: 100%; padding: 17px 19px 17px 22px;
+  text-align: left; cursor: pointer; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card);
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+.onekey-hero::before {
+  content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px;
+  background-image: var(--spectrum-gradient); border-radius: 0 3px 3px 0;
+  opacity: .85; transition: opacity 160ms ease;
+}
+.onekey-hero:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0, 0, 0, .06), 0 22px 48px rgba(0, 0, 0, .10); }
+.onekey-hero:hover::before, .onekey-hero.is-selected::before { opacity: 1; }
+.onekey-hero.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow-card); }
+.onekey-hero-icon {
+  display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 44px;
+  color: var(--ink); background: linear-gradient(140deg, var(--tone-blue-soft), var(--tone-pink-soft));
+  border: 1px solid var(--line); border-radius: 13px;
+}
+.onekey-hero-text { display: grid; gap: 5px; min-width: 0; }
+.onekey-hero-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 750; letter-spacing: .2px; }
+.onekey-hero-title em {
+  display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
+  color: var(--ink-soft); background: var(--surface-soft); border: 1px solid var(--line);
+  border-radius: 999px; font-size: 10px; font-style: normal; font-weight: 650;
+}
+.onekey-hero-desc { color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.onekey-hero-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 1px; }
+.onekey-hero-tags span { padding: 2px 7px; color: var(--muted); background: var(--surface-soft); border-radius: var(--radius-control); font-size: 9.5px; font-weight: 620; }
+.onekey-hero-side { display: grid; justify-items: end; gap: 7px; flex: 0 0 auto; }
+.onekey-hero-url { color: var(--muted); font: 10.5px "Cascadia Code", Consolas, monospace; }
+.onekey-hero-go { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); font-size: 11.5px; font-weight: 650; }
+
+/* 一 key 模式只问一次密钥：这块要比逐单元的密钥框更早被看到 */
+.onekey-key-panel {
+  display: grid; gap: 11px; padding: 15px 16px;
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent); border-radius: var(--radius-card);
+}
+.onekey-key-head { display: flex; align-items: flex-start; gap: 10px; }
+.onekey-key-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; color: var(--ink-soft); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 9px; }
+.onekey-key-head strong { display: block; font-size: 13px; font-weight: 720; }
+.onekey-key-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.onekey-key-input { height: 42px; font-size: 14px; letter-spacing: .3px; }
+.onekey-key-hint { color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.onekey-key-hint code { color: var(--ink-soft); }
+.unit-card.is-onekey .unit-detail { padding-bottom: 2px; }
+
 .unit-card, .key-card { display: grid; gap: 11px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); transition: border-color 140ms ease, box-shadow 140ms ease; }
 .unit-card:has(input:checked) { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .unit-card.muted { background: var(--surface-soft); opacity: .68; }

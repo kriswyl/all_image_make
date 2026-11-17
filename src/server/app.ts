@@ -8,7 +8,7 @@ import multer from "multer";
 import { getWpsPreviewJobs } from "./wps-preview.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
-import { MAX_REFERENCE_IMAGES } from "../shared/types.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
 import { AppDatabase } from "./db.js";
 import { KeyStore } from "./key-store.js";
 import { TaskRunner, normalizeError } from "./tasks.js";
@@ -28,6 +28,45 @@ export interface AppContext {
   sessionKeys: KeyStore;
   runner: TaskRunner;
   agent: AgentService;
+}
+
+/**
+ * 把 multer 的上传错误翻成给人看的 400/413。
+ *
+ * 单独抽出来是为了能单测：`LIMIT_FIELD_VALUE`（某个表单字段超长）以前没有分支，
+ * 会落到最后的兜底文案「参考图最多上传 8 张」——明明是「提交内容太大」，
+ * 却把人往「图太多」上带。
+ */
+export function multerErrorResponse(error: multer.MulterError, reqPath: string): { status: number; code: string; message: string } {
+  if (/^\/api\/conversations\/[^/]+\/media\/?$/.test(reqPath)) {
+    const message = error.code === "LIMIT_FILE_SIZE" ? `单个音视频文件不能超过 ${MAX_CHAT_MEDIA_MB} MB` : `一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`;
+    return { status: 400, code: "CHAT_MEDIA_UPLOAD_LIMIT", message };
+  }
+  // 表单字段（如 reference-media 的 payload）超长：里面装的是 base64 内联素材
+  if (error.code === "LIMIT_FIELD_VALUE") {
+    return { status: 413, code: "PAYLOAD_TOO_LARGE", message: "提交内容过大：参考素材（图片 / 视频 / 音频）太多或单张太大，请精简后重试" };
+  }
+  if (error.code === "LIMIT_FIELD_KEY") {
+    return { status: 400, code: "INVALID_INPUT", message: "表单字段名过长" };
+  }
+  // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
+  if (error.code === "LIMIT_FILE_SIZE") {
+    if (/\/api\/conversations\/[^/]+\/(?:documents\/upload|mind-documents)$/.test(reqPath)) {
+      return { status: 400, code: "DOCUMENT_TOO_LARGE", message: "文档不能超过 10 MB" };
+    }
+    const message = /^\/api\/boards\/[^/]+\/assets$/.test(reqPath) || reqPath === "/api/uploads/reference-video" || reqPath === "/api/generations/reference-video" || reqPath === "/api/generations/reference-media" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
+    return { status: 400, code: "INVALID_REFERENCE_IMAGES", message };
+  }
+  if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {
+    return { status: 400, code: "INVALID_MASK", message: "蒙版最多上传 1 张" };
+  }
+  if (error.code === "LIMIT_FILE_COUNT") {
+    return { status: 400, code: "INVALID_REFERENCE_IMAGES", message: "上传的图片数量超出限制" };
+  }
+  if (error.code === "LIMIT_UNEXPECTED_FILE" && (error.field === "referenceImages" || error.field === "images")) {
+    return { status: 400, code: "INVALID_REFERENCE_IMAGES", message: `上传入口最多接收 ${MAX_IMAGE_GENERATION_REFERENCES} 张参考图` };
+  }
+  return { status: 400, code: "INVALID_REFERENCE_IMAGES", message: "参考图上传参数无效" };
 }
 
 export function createApp(options: { dataDir?: string } = {}) {
@@ -143,25 +182,8 @@ export function createApp(options: { dataDir?: string } = {}) {
   app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = crypto.randomUUID();
     if (error instanceof multer.MulterError) {
-      if (/^\/api\/conversations\/[^/]+\/media\/?$/.test(req.path)) {
-        const message = error.code === "LIMIT_FILE_SIZE" ? `单个音视频文件不能超过 ${MAX_CHAT_MEDIA_MB} MB` : `一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`;
-        return res.status(400).json(fail("CHAT_MEDIA_UPLOAD_LIMIT", message, requestId));
-      }
-      // .fields() 之后 field 会告诉我们是哪一路文件超限，别把蒙版的错误说成「参考图最多 8 张」
-      if (error.code === "LIMIT_FILE_SIZE") {
-        if (/\/api\/conversations\/[^/]+\/(?:documents\/upload|mind-documents)$/.test(req.path)) {
-          return res.status(400).json(fail("DOCUMENT_TOO_LARGE", "文档不能超过 10 MB", requestId));
-        }
-        const message = /^\/api\/boards\/[^/]+\/assets$/.test(req.path) || req.path === "/api/uploads/reference-video" || req.path === "/api/generations/reference-video" || req.path === "/api/generations/reference-media" ? "素材文件不能超过 100 MB" : error.field === "mask" ? "蒙版不能超过 20 MB" : "单张参考图不能超过 20 MB";
-        return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", message, requestId));
-      }
-      if (error.code === "LIMIT_UNEXPECTED_FILE" && error.field === "mask") {
-        return res.status(400).json(fail("INVALID_MASK", "蒙版最多上传 1 张", requestId));
-      }
-      if (error.code === "LIMIT_FILE_COUNT") {
-        return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", "上传的图片数量超出限制", requestId));
-      }
-      return res.status(400).json(fail("INVALID_REFERENCE_IMAGES", `参考图最多上传 ${MAX_REFERENCE_IMAGES} 张`, requestId));
+      const mapped = multerErrorResponse(error, req.path);
+      return res.status(mapped.status).json(fail(mapped.code, mapped.message, requestId));
     }
     if (error instanceof z.ZodError) {
       return res.status(400).json(fail("INVALID_INPUT", "输入数据无效", requestId, error.issues));

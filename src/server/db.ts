@@ -16,7 +16,7 @@ import {
   type SaveStoryboardMigrationInput, type StoryboardSettings, type StoryboardShotPatch,
 } from "./db-storyboards.js";
 import { AssetRepository, type AssetRow, type InsertAssetInput, type StoredFileRef } from "./db-assets.js";
-import { TaskRepository, type CreateTaskInput, type InsertDiagnosticInput, type LibraryTaskQuery, type TaskOrigin, type TaskPatch, type TaskRow } from "./db-tasks.js";
+import { TaskRepository, type CreateTaskInput, type InsertDiagnosticInput, type LibraryTaskQuery, type TaskKey, type TaskOrigin, type TaskPatch, type TaskRow } from "./db-tasks.js";
 import { canvasIdsFromRow, now, parseJson, stringArrayFromJson, type DbRow } from "./db-row.js";
 import { ConversationRepository, type CreateConversationInput } from "./db-conversations.js";
 import { ConversationMessageRepository, type AppendMessageInput, type MessagePatch } from "./db-conversation-messages.js";
@@ -332,7 +332,7 @@ export class AppDatabase {
     assets.push(...assetRows
       .filter((asset) => asset.thumbPath)
       .map((asset) => ({ baseDir: this.thumbsDir, relativePath: asset.thumbPath })));
-    const inputs = this.tasks.collectInputImagePaths(id);
+    const inputs = options.keepFiles ? [] : this.tasks.collectInputImagePaths(id);
     this.db.prepare("DELETE FROM diagnostics WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM assets WHERE task_id = ?").run(id);
     this.db.prepare("DELETE FROM board_tasks WHERE task_id = ?").run(id);
@@ -598,7 +598,7 @@ export class AppDatabase {
     const inputs: string[] = [];
     const deleted: string[] = [];
     for (const id of ids) {
-      if (!this.getTaskRow(id)) continue;
+      if (!this.hasTask(id)) continue;
       const removed = this.deleteTask(id, options);
       assets.push(...removed.assets);
       inputs.push(...removed.inputs);
@@ -608,7 +608,7 @@ export class AppDatabase {
   }
 
   /** 任务品类：和前后端共用同一份规则，避免「历史页和清空接口各判各的」 */
-  taskKindRow(row: TaskRow, adapterByChannel: Map<string, string>): TaskKind {
+  taskKindRow(row: TaskKey, adapterByChannel: Map<string, string>): TaskKind {
     return this.tasks.taskKindRow(row, adapterByChannel);
   }
 
@@ -625,6 +625,10 @@ export class AppDatabase {
     return this.tasks.getTaskRow(id);
   }
 
+  hasTask(id: string): boolean {
+    return this.tasks.hasTask(id);
+  }
+
   taskHasConversationReferences(taskId: string): boolean {
     return this.tasks.taskHasConversationReferences(taskId);
   }
@@ -637,9 +641,8 @@ export class AppDatabase {
     return this.tasks.listTaskRows(limit);
   }
 
-  /** 清空历史要把整个表过一遍，不受列表分页限制。上传素材不算历史，跟着会话一起走 */
-  listAllTaskRows(): TaskRow[] {
-    return this.tasks.listAllTaskRows();
+  listGenerationTaskKeys(): TaskKey[] {
+    return this.tasks.listGenerationTaskKeys();
   }
 
   updateTask(id: string, patch: TaskPatch) {

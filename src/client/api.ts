@@ -268,13 +268,12 @@ export const api = {
    * 往对话里传图（需求.md 问题 4）。
    *
    * 走 multipart：图片本来就该按字节传，base64 塞进 JSON 只会让请求体再膨大三分之一。
-   * 返回的是传完之后的整份会话视图——服务端顺手把新图设成了当前画布，
-   * 前端直接拿它刷新即可，不用自己再补一次请求。
+   * 返回会话视图和这次上传的图片 ID。创作附件可以只属于本轮消息。
    */
   uploadConversationImages: (id: string, files: File[]) => {
     const form = new FormData();
     for (const file of files) form.append("images", file, file.name);
-    return request<ConversationView>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
+    return request<ConversationView & { uploadedAssetIds?: string[] }>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
   },
   uploadConversationMedia: (id: string, files: File[]) => {
     const form = new FormData();

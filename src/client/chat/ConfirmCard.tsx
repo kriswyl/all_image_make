@@ -21,6 +21,7 @@ function roleLabel(role: ConfirmVideoInput["role"]) {
   if (role === "first_frame") return "首帧";
   if (role === "last_frame") return "尾帧";
   if (role === "reference_video") return "参考视频";
+  if (role === "reference_audio") return "参考音频";
   return "参考图";
 }
 
@@ -184,6 +185,7 @@ export function ConfirmCard({
                 )}
               </label>
               {/* 渠道不认的开关直接不出现：给 Grok 摆一个「带音频」，勾了也是白勾 */}
+              {caps?.nativeAudio ? <span className="confirm-card-meta">输出包含模型原生音频</span> : null}
               {!caps || caps.supportsAudio ? (
                 <label className="confirm-check">
                   <input type="checkbox" checked={audio} onChange={(event) => setAudio(event.target.checked)} disabled={busy} />
@@ -201,7 +203,7 @@ export function ConfirmCard({
               <div className="confirm-card-inputs">
                 {preview.videoInputs.map((item, index) => (
                   <div className="confirm-card-input" key={`${item.assetId}-${index}`}>
-                    {item.role === "reference_video" ? <div className="confirm-card-video-icon"><Film size={22} aria-hidden="true" /></div> : <img
+                    {item.role === "reference_video" ? <div className="confirm-card-video-icon"><Film size={22} aria-hidden="true" /></div> : item.role === "reference_audio" ? <div className="confirm-card-video-icon"><Music size={22} aria-hidden="true" /></div> : <img
                       src={api.assetUrl(`/api/assets/${item.assetId}/thumb`)}
                       alt=""
                       onError={(event) => {

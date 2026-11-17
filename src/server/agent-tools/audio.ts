@@ -30,7 +30,9 @@ export function prepareMusicInput(ctx: AudioPreparationContext, args: GenerateMu
     ?? (args.sourceAssetRefs?.length
       ? (args.sourceAssetRefs.length >= 2 ? "mashup" : "cover")
       : args.tags?.trim() || args.title?.trim() ? "custom" : "inspiration");
-  let prompt = (ctx.verbatimPrompt ?? args.prompt ?? "").trim();
+  // 大脑有时按工作台的叫法把歌词写进 lyrics：和 prompt 二选一，空串也当没填
+  const textPart = (ctx.verbatimPrompt ?? (args.prompt?.trim() || args.lyrics?.trim() || ""));
+  let prompt = textPart.trim();
   const instrumental = mode === "sound" ? true : args.instrumental ?? false;
 
   if (mode !== "sound" && mode !== "mashup" && mode !== "cover" && !prompt) {

@@ -13,7 +13,7 @@ export type ChannelKind = "image" | "video" | "audio" | "chat";
 export type TaskKind = "image" | "video" | "audio";
 
 /** 视频适配器集合：渠道筛选、历史分类都以此为准 */
-export const VIDEO_ADAPTER_TYPES = ["wan-video", "grok-video", "seedance-video", "kling-video"] as const;
+export const VIDEO_ADAPTER_TYPES = ["wan-video", "grok-video", "seedance-video", "kling-video", "minimax-video"] as const;
 export type VideoAdapterType = (typeof VIDEO_ADAPTER_TYPES)[number];
 
 /** 音频适配器集合：音乐生成 + 配音/旁白 */

@@ -159,7 +159,7 @@ describe("resolveBatch：卡片上问几个，就只提交几个", () => {
 });
 
 /** 假中转站：同时演大脑和生图。返回的是「怎么把这次 e2e 搭起来」用得到的把手 */
-async function startMock(plansByCall: unknown[], options: { failPrompts?: string[]; disconnectPrompts?: string[]; native?: boolean; video?: boolean; videoUpload?: boolean; rejectTools?: boolean } = {}) {
+async function startMock(plansByCall: unknown[], options: { failPrompts?: string[]; disconnectPrompts?: string[]; native?: boolean; video?: boolean; videoUpload?: boolean; rejectTools?: boolean; imageModel?: string } = {}) {
   const imagePrompts: string[] = [];
   const chatRequests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; tool_call_id?: string; content?: string }> }> = [];
   /** 每次产图请求：提示词 + 带了几张参考图。一致性批量靠它验证「第 2 张起真的带了基准图」 */
@@ -268,7 +268,7 @@ async function startMock(plansByCall: unknown[], options: { failPrompts?: string
   await request(app).post("/api/channels").send({
     name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
     authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
-    models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+    models: [options.imageModel ?? "mock-image"], allowPrivateNetwork: true, enabled: true,
   }).expect(201);
   if (options.video) {
     await request(app).post("/api/channels").send({
@@ -545,22 +545,25 @@ describe("批量并行，端到端", () => {
   });
 });
 
-it("普通聊天原生生图保存本轮参考图，确认一次后回填原调用", async () => {
+it("原生生图保存本轮 16 张参考图，重启后仍完整提交并回填原调用", async () => {
   const mock = await startMock([
     { content: "", tool_calls: [{ id: "native-image-1", type: "function", function: { name: "generate_image", arguments: JSON.stringify({ prompt: "参考上传图片生成海报", count: 1 }) } }] },
     { content: "海报已生成。" },
-  ], { native: true });
+  ], { native: true, imageModel: "gpt-image-2" });
   const base = `/api/conversations/${mock.conversationId}`;
   await request(mock.app).patch(base).send({ chatMode: "chat", nativeImagePilot: true, visionEnabled: false, imageConfirmPolicy: "always" }).expect(200);
-  const upload = (await request(mock.app).post(`${base}/uploads`).attach("images", Buffer.from(pngBase64, "base64"), "reference.png").expect(201)).body.data;
+  let staged = request(mock.app).post(`${base}/uploads`);
+  for (let index = 0; index < 16; index += 1) staged = staged.attach("images", Buffer.from(pngBase64, "base64"), `reference-${index}.png`);
+  const upload = (await staged.expect(201)).body.data;
   expect(upload.canvasAssetIds).toEqual([]);
-  const refId = upload.sessionImages[0].asset.id;
-  await request(mock.app).post(`${base}/messages`).send({ text: "参考这张图，生成一张海报", assetRefs: [refId] }).expect(202);
+  const refIds = upload.uploadedAssetIds;
+  expect(refIds).toHaveLength(16);
+  await request(mock.app).post(`${base}/messages`).send({ text: "参考这些图，生成一张海报", assetRefs: refIds }).expect(202);
   const waiting = await settle(mock.app, mock.conversationId, item => item.status === "awaiting_confirmation");
   const card = waiting.messages.find(row => row.confirm)!;
   const snapshot = mock.context.db.getNativeMediaConfirmation(card.id);
   expect(snapshot?.callId).toBe("native-image-1");
-  expect(mock.context.db.getMessage(card.id)?.toolArgs?.imageRefs).toEqual([refId]);
+  expect(mock.context.db.getMessage(card.id)?.toolArgs?.imageRefs).toEqual(refIds);
   expect(mock.chatRequests[0]?.tools?.some(tool => tool.function.name === "generate_image")).toBe(true);
   // 看图关闭时不挂 view_images，避免生成后多出一条「无法查看图片」的失败卡
   expect(mock.chatRequests[0]?.tools?.some(tool => tool.function.name === "view_images")).toBe(false);
@@ -570,7 +573,7 @@ it("普通聊天原生生图保存本轮参考图，确认一次后回填原调�
     request(mock.app).post(`${base}/confirm`).send({ messageId: card.id, decision: "approve" })));
   expect(decisions.map(response => response.status).sort()).toEqual([200, 409]);
   await settle(mock.app, mock.conversationId, item => item.status === "idle" && item.messages.some(row => row.content === "海报已生成。"));
-  expect(mock.imageRequests).toEqual([{ prompt: "参考上传图片生成海报", references: 1 }]);
+  expect(mock.imageRequests).toEqual([{ prompt: "参考上传图片生成海报", references: 16 }]);
   const response = mock.chatRequests.at(-1)?.messages.find(message => message.tool_call_id === "native-image-1");
   expect(JSON.parse(response?.content ?? "{}").assetIds).toHaveLength(1);
 });

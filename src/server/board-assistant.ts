@@ -1,4 +1,5 @@
-import { BOARD_LIMITS, composeConfigPrompt, directInputLinks, type BoardNode } from "../shared/board.js";
+import { composeConfigPrompt, directInputLinks, directUpstreamImages, type BoardNode } from "../shared/board.js";
+import { imageReferenceCountError } from "../shared/image-reference-limits.js";
 import type { AppDatabase, BoardRecord } from "./db.js";
 import { unsupportedLabels } from "../shared/channel-fields.js";
 import { resolveAlias, type CapabilityAlias } from "./capabilities.js";
@@ -44,8 +45,6 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     if ((node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId) warnings.push("生成会替换当前节点素材，旧素材保留在历史中");
     const missing = links.filter((link) => (link.node.type === "image" || link.node.type === "video" || link.node.type === "audio") && !link.node.assetId);
     if (missing.length) errors.push(`上游素材未就绪：${missing.map((link) => link.node.ref).join("、")}`);
-    const images = links.filter((link) => link.node.type === "image" && link.node.assetId);
-    if (kind === "image" && images.length > BOARD_LIMITS.maxUpstreamImages) errors.push(`上游图片超过 ${BOARD_LIMITS.maxUpstreamImages} 张`);
     if (kind === "audio" && links.some((link) => link.node.type !== "text")) errors.push("音频生成仅接受文本上游");
     const wanted = kind === "audio" ? node.audioKind === "music" ? "suno-music" : "gemini-tts" : "";
     const candidates = wanted ? aliases.filter((item) => item.adapterType === wanted) : aliases;
@@ -54,6 +53,10 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     if (kind !== "text" && !resolved) errors.push("没有可用的对应模型");
     if (kind === "video" && links.some((link) => link.node.type === "video" && link.node.assetId)) warnings.push("参考视频会上传至渠道配置的图床，可能可通过公网访问");
     const channel = resolved ? db.getChannel(resolved.channelId) : null;
+    if (kind === "image" && channel && resolved) {
+      const error = imageReferenceCountError(channel.adapterType, resolved.model, directUpstreamImages(board.doc, node.id).length);
+      if (error) errors.push(error);
+    }
     if (kind === "video" && resolved) {
       if (channel) {
         const check = resolveBoardVideoSelection({ doc: board.doc, config: node, adapterType: channel.adapterType, model: resolved.model, localVideoUploadConfigured: Boolean(channel.uploadEndpoint?.trim()) }); if (check.error) errors.push(check.error);

@@ -275,10 +275,12 @@ describe("无限画布视频生成", () => {
     expect(input.klingVideoMode).toBe("motion-control");
     expect(input.referenceVideos[0]).toMatchObject({ mimeType: "video/mp4" });
     expect(input.klingVideoMedia.some((item: { type: string }) => item.type === "video")).toBe(false);
-    expect(input.klingVideoMedia.some((item: { type: string; url: string }) => item.type === "image" && item.url.startsWith("data:image/"))).toBe(true);
+    expect(input.klingVideoMedia).toContainEqual(expect.objectContaining({
+      type: "image", inlineImage: expect.objectContaining({ mimeType: expect.stringMatching(/^image\//) }),
+    }));
     await waitForTask(app, result.body.data.task.id);
     const submit = mock.requests.find((item) => item.url !== "/upload" && item.body.includes("https://files.example.com/reference.mp4"));
-    expect(submit).toBeDefined();
+    expect(submit?.body).toContain("data:image/");
   });
   for (const targetType of ["config", "video"] as const) it(`${targetType} 节点从连线读取视频和音频并提交万相`, async () => {
     const { app, context } = await tempApp();

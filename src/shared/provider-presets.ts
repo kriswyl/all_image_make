@@ -20,6 +20,13 @@ export interface ChannelUnitPreset {
   /** 该单元默认的密钥环境变量名 */
   secretEnv: string;
   models: string[];
+  /**
+   * 这个单元自己的图床。中转站按模型系列分开配置时（视频站一套、生图站一套），
+   * 合并成「一 key 全开」之后仍然各走各的图床，所以图床要能跟着单元走。
+   * 缺省时回落到站点级 `uploadEndpoint`。
+   */
+  uploadEndpoint?: string;
+  uploadHeaders?: Record<string, string>;
 }
 
 export interface ProviderPreset {
@@ -31,6 +38,15 @@ export interface ProviderPreset {
   uploadHeaders?: Record<string, string>;
   /** 站点品牌图标（public/ 下的路径）；没有就退回通用 Server 图标 */
   logo?: string;
+  /**
+   * 一 key 模式：整站只填一个密钥，下面所有单元共用它。
+   *
+   * 中转站真正的形态是「一个账号一个密钥、全模型通用」，按单元分别要密钥只是
+   * 「同一个站卖好几张卡」的特例。向导见到这个标记时只渲染一个输入框。
+   */
+  singleKey?: boolean;
+  /** 一 key 模式下所有渠道共用的环境变量名（也解释成「同一条兜底密钥」） */
+  sharedSecretEnv?: string;
   units: ChannelUnitPreset[];
 }
 
@@ -233,6 +249,26 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     ],
   },
   {
+    id: "tiantoken-minimax-video",
+    label: "词元流墟-MiniMax视频",
+    baseUrl: "https://api.tiantoken.com",
+    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    uploadHeaders: { "New-Api-User": "1" },
+    logo: "/logo-tiantoken.svg",
+    units: [
+      {
+        id: "minimax-video",
+        label: "MiniMax 视频",
+        description: "MiniMax H3，支持文生、首帧、首尾帧及图片、视频和音频参考",
+        adapterType: "minimax-video",
+        authType: "bearer",
+        channelName: "{provider}",
+        secretEnv: "TIANTOKEN_MINIMAX_VIDEO_API_KEY",
+        models: ["MiniMax-H3"],
+      },
+    ],
+  },
+  {
     id: "tiantoken-suno",
     label: "词元流墟-音乐",
     baseUrl: "https://api.tiantoken.com",
@@ -289,7 +325,54 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 ];
 
 export function findProviderPreset(id: string): ProviderPreset | undefined {
+  if (id === ONE_KEY_PRESET.id) return ONE_KEY_PRESET;
   return PROVIDER_PRESETS.find((preset) => preset.id === id);
+}
+
+/** 一 key 模式下拉通全部模型的站点与密钥名 */
+export const ONE_KEY_PRESET_ID = "tiantoken-onekey";
+export const ONE_KEY_SECRET_ENV = "TIANTOKEN_API_KEY";
+
+/**
+ * 「一 Key 全开」：把上面对外售卖的各个模型组合并成一份配置。
+ *
+ * 中转站的实际形态是「一个账号一个密钥、所有模型通用」，按单元分别要密钥只是少数
+ * 「同一个站卖好几张卡」的特例。这里把 12 个单元收进一个预设，向导只让填一次 Key，
+ * 之后每类模型各建一个渠道（协议不同，渠道不能合）。
+ *
+ * 刻意**不**放进 `PROVIDER_PRESETS`：
+ * ① 站点卡片是按单元分组的，塞进去会在每一组里各出现一次；
+ * ② `MODEL_GROUPS` 由 `PROVIDER_PRESETS` 派生，放进去会让引导里的模型气泡全部翻倍。
+ */
+export const ONE_KEY_PRESET: ProviderPreset = {
+  id: ONE_KEY_PRESET_ID,
+  label: "词元流墟 · 一 Key 全开",
+  baseUrl: "https://api.tiantoken.com",
+  keyHint: "粘贴你的词元流墟 API Key（全模型通用）",
+  logo: "/logo-tiantoken.svg",
+  singleKey: true,
+  sharedSecretEnv: ONE_KEY_SECRET_ENV,
+  units: PROVIDER_PRESETS.flatMap((preset) => preset.units.map((unit) => ({
+    ...unit,
+    // 名字要能一眼认出是哪一类模型，否则列表里 12 行全叫「词元流墟」
+    channelName: `词元流墟 · ${unit.label}`,
+    secretEnv: ONE_KEY_SECRET_ENV,
+    ...(preset.uploadEndpoint ? { uploadEndpoint: preset.uploadEndpoint } : {}),
+    ...(preset.uploadHeaders ? { uploadHeaders: preset.uploadHeaders } : {}),
+  }))),
+};
+
+/** 一 key 模式：同一把密钥铺给选中的每个单元 */
+export function buildOneKeyDrafts(apiKey: string, unitIds?: readonly string[]): ChannelDraft[] {
+  const wanted = unitIds ? new Set(unitIds) : null;
+  return buildChannelDrafts(ONE_KEY_PRESET, ONE_KEY_PRESET.units
+    .filter((unit) => !wanted || wanted.has(unit.id))
+    .map((unit) => ({
+      unitId: unit.id,
+      models: [...unit.models],
+      secretEnv: ONE_KEY_SECRET_ENV,
+      ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+    })));
 }
 
 /** 适配器默认路径：和服务端共用 `adapter-endpoints.ts`，不再各写一份 */
@@ -311,6 +394,8 @@ export function buildChannelDrafts(preset: ProviderPreset, selections: UnitSelec
     if (!models.length) continue;
     const defaults = adapterDefaultEndpoint(unit.adapterType);
     const name = channelNameFor(preset, unit);
+    const uploadEndpoint = unit.uploadEndpoint ?? preset.uploadEndpoint;
+    const uploadHeaders = unit.uploadHeaders ?? preset.uploadHeaders;
     drafts.push({
       unitId: unit.id,
       name,
@@ -322,7 +407,7 @@ export function buildChannelDrafts(preset: ProviderPreset, selections: UnitSelec
         authHeaderName: "",
         secretEnv: selection.secretEnv || unit.secretEnv,
         endpoint: unit.endpoint ?? defaults.endpoint,
-        ...(preset.uploadEndpoint ? { uploadEndpoint: preset.uploadEndpoint, uploadHeaders: preset.uploadHeaders ?? {} } : {}),
+        ...(uploadEndpoint ? { uploadEndpoint, uploadHeaders: uploadHeaders ?? {} } : {}),
         models,
         allowPrivateNetwork: false,
         enabled: true,

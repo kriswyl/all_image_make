@@ -269,9 +269,7 @@ export class AgentService {
          * 现在这一轮真的结束了、闸也抬起来了——补查一次，让它照常收口。
          * 正常情况下（视频还在跑）这里是空转：任务没终态，什么都不做。
          */
-        if (this.db.getConversation(conversationId)?.status === "waiting_task") {
-          this.settleFinishedTasks(conversationId);
-        }
+        this.settleFinishedTasks(conversationId);
       });
   }
 
@@ -308,7 +306,7 @@ export class AgentService {
       .catch((error) => this.reportTurnFailure(conversationId, error))
       .finally(() => {
         this.activeTurns.delete(conversationId);
-        if (this.db.getConversation(conversationId)?.status === "waiting_task") this.settleFinishedTasks(conversationId);
+        this.settleFinishedTasks(conversationId);
       });
   }
 

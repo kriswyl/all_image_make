@@ -3,7 +3,8 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import multer from "multer";
 import { z } from "zod";
-import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
+import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
+import { MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
 import type { AppDatabase } from "../db.js";
 import type { KeyStore } from "../key-store.js";
 import { AppError, extensionForMime, matchesImageSignature, type ReferenceImageUpload } from "../tasks.js";
@@ -13,7 +14,7 @@ import { buildCapabilityAliases, buildCapabilityManifest } from "../capabilities
 import { pickBrainChannel, readAgentDefaults } from "../agent-settings.js";
 import { optimizePromptForWorkbench } from "../prompt-optimizer.js";
 import { writeThumbnail } from "../vision.js";
-import { VIDEO_CONFIRM_POLICIES, IMAGE_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent, type ConversationInput, type ConversationPatch } from "../../shared/agent-types.js";
+import { conversationImageAttachmentLimit, VIDEO_CONFIRM_POLICIES, IMAGE_CONFIRM_POLICIES, DEFAULT_CONVERSATION_TITLE, type AgentStreamEvent, type ConversationInput, type ConversationPatch } from "../../shared/agent-types.js";
 import { isChatAdapter } from "../../shared/types.js";
 import { appendConversationCanvasAssets } from "../board.js";
 import { referenceImageMimeTypes } from "./uploads.js";
@@ -27,12 +28,11 @@ import { referenceVideoDuration } from "../reference-video.js";
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
  *
- * 和生图工作台那个 `referenceUpload` 是两个入口，但**限额和校验是同一套**：
- * 单张 20MB、最多 8 张、PNG/JPEG/WebP。同一件事在两处给两种规矩，用户只会觉得坏了。
+ * 解析器容纳创作工具需要的图片数量。会话权限和额度在读取会话后校验。
  */
 const conversationUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_REFERENCE_IMAGES, fields: 0 },
+  limits: { fileSize: MAX_REFERENCE_IMAGE_BYTES + 1, files: MAX_IMAGE_GENERATION_REFERENCES, fields: 0 },
   fileFilter: (_req, file, callback) => referenceImageMimeTypes.includes(file.mimetype as typeof referenceImageMimeTypes[number])
     ? callback(null, true)
     : callback(new AppError("REFERENCE_IMAGE_INVALID", "仅支持 PNG、JPEG 或 WebP 图片", 400)),
@@ -95,7 +95,7 @@ const messageCreateSchema = z.object({
    * 这句话引用的一组已有产物（用户从画布/消息里把图拖进输入框）。
    * 上限和画布同一个数：这些图发送前会被并进画布，多出来的本来就进不去。
    */
-  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_CANVAS_IMAGES).optional(),
+  assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
   /** 统一入口里显式指定的视频首尾帧；同一张图不能同时当首帧和尾帧 */
   videoFrames: z.object({
     firstAssetId: z.string().trim().min(1).max(80),
@@ -299,8 +299,13 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
 
   app.post("/api/conversations/:id/messages", (req, res) => {
     const id = routeParam(req.params.id);
-    if (!db.getConversation(id)) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    const conversation = db.getConversation(id);
+    if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const input = messageCreateSchema.parse(req.body ?? {});
+    const limit = conversationImageAttachmentLimit(conversation);
+    if ((input.assetRefs?.length ?? 0) > limit) {
+      return res.status(400).json(fail("REFERENCE_IMAGE_LIMIT", `当前会话每条消息最多附带 ${limit} 张图片`));
+    }
     agent.startTurn(id, input.text, "user", input.assetRefs ?? [], input.videoFrames);
     res.status(202).json(ok({ accepted: true }));
   });
@@ -343,12 +348,14 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
    * 就等于往大脑的上下文里多塞一句「用户说的话」），但**中文原样留着**——
    * 这个 app 的用户多半传的是「猫.png」，洗成下划线等于给用户看一句废话。
    */
-  app.post("/api/conversations/:id/uploads", conversationUpload.array("images", MAX_REFERENCE_IMAGES), asyncHandler(async (req, res) => {
+  app.post("/api/conversations/:id/uploads", conversationUpload.array("images", MAX_IMAGE_GENERATION_REFERENCES), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     const conversation = db.getConversation(id);
     if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
+    const limit = conversationImageAttachmentLimit(conversation);
+    if (files.length > limit) throw new AppError("REFERENCE_IMAGE_LIMIT", `当前会话一次最多上传 ${limit} 张图片`, 400);
 
     const uploaded: string[] = [];
     for (const file of files) {
@@ -385,7 +392,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     const attachmentStaysInTurn = conversation.toolScope != null
       || (conversation.chatMode === "chat" && conversation.nativeImagePilot);
     if (uploaded.length && !attachmentStaysInTurn) db.updateConversation(id, { canvasAssetIds: uploaded });
-    res.status(201).json(ok(agent.buildView(id)));
+    res.status(201).json(ok({ ...agent.buildView(id), uploadedAssetIds: uploaded }));
   }));
 
   app.post("/api/conversations/:id/media", chatThreadOnly, conversationMediaUpload.array("files", MAX_CHAT_MEDIA_FILES), asyncHandler(async (req, res) => {

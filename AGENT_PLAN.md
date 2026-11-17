@@ -278,7 +278,7 @@ alias=grok       视频  1-15s  480p|720p|1080p  参考图≤7
 
 这套 `buildWanMedia()`（[adapters.ts:75](../src/server/adapters.ts)）已经写好了，直接用。
 
-⚠️ **内联素材有体积上限**。`tasks.ts:40` 的 `MAX_INLINE_MEDIA_CHARS = 1_400_000` 会拦超限请求。agent 传的参考图来自本地落盘的产物，体积不可控，所以：
+⚠️ **内联素材有体积上限**。`tasks.ts` 的 `MAX_INLINE_MEDIA_CHARS` 会拦超限请求；**现值 40 MiB 字符**（2026-10-29 从 `1_400_000` 上调到 15 MiB，2026-11-17 因网关实测硬顶 50 MiB 再上调到 40 MiB；常量已收进 `shared/types.ts`，见 `MEDIA_UPLOAD_HANDOFF.md`）。agent 传的参考图来自本地落盘的产物，体积不可控，所以：
 
 - 生图产物的参考图入参应尽量走**已生成的较小尺寸**（如果模型支持指定尺寸）
 - 超限时 `TaskRunner.create()` 会抛 `AppError`，错误进 `tool_result`，大脑可以据此改参数重试

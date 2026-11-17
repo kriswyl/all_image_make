@@ -1,3 +1,4 @@
+import type { VIDEO_ADAPTER_TYPES } from "./kinds.js";
 import type { KlingMediaType, KlingVideoMode } from "./types.js";
 
 /**
@@ -12,6 +13,9 @@ export interface VideoCapability {
   maxReferenceImages: number;
   durations: { min: number; max: number; fixed: number | null; default: number };
   resolutions: string[];
+  defaultResolution?: string;
+  nativeAudio?: boolean;
+  maxPromptLength?: number;
   aspectRatios: string[];
   /** 宽高比在请求体里的字段名：Grok 是 aspect_ratio，万相是 ratio */
   ratioField: "aspectRatio" | "ratio";
@@ -23,7 +27,7 @@ export interface VideoCapability {
   supportsSmartDuration: boolean;
 }
 
-export type VideoAdapter = "grok-video" | "wan-video" | "seedance-video" | "kling-video";
+export type VideoAdapter = typeof VIDEO_ADAPTER_TYPES[number];
 
 /**
  * 对话里能真正执行的视频模式。
@@ -141,7 +145,14 @@ export const VIDEO_DEFAULTS: Record<string, { duration: number; resolution: stri
   "seedance-video": { duration: 5, resolution: "720p", audio: false },
   "grok-video": { duration: 8, resolution: "720p", audio: false },
   "kling-video": { duration: 5, resolution: "720p", audio: false },
+  "minimax-video": { duration: 5, resolution: "768P", audio: false },
 };
+
+export const MINIMAX_REFERENCE_LIMITS = {
+  images: 9, videos: 3, audios: 3, total: 12,
+  minClipSeconds: 2, maxClipSeconds: 15, maxSecondsPerKind: 15,
+  videoBytes: 50 * 1024 * 1024, audioBytes: 15 * 1024 * 1024,
+} as const;
 
 /** Grok 那边的「图生视频」不叫参考生视频，卡片上说人话 */
 export function videoModeLabel(mode: ConversationVideoMode, adapterType?: string) {
@@ -189,6 +200,22 @@ export const VIDEO_CAPABILITIES: Record<VideoAdapter, VideoCapability> = {
     supportsSeed: false,
     supportsWatermark: true,
     supportsAudio: true,
+    supportsSmartDuration: false,
+  },
+  "minimax-video": {
+    label: "MiniMax H3",
+    maxReferenceImages: MINIMAX_REFERENCE_LIMITS.images,
+    durations: { min: 4, max: 15, fixed: null, default: VIDEO_DEFAULTS["minimax-video"]!.duration },
+    resolutions: ["768P", "2K"],
+    defaultResolution: VIDEO_DEFAULTS["minimax-video"]!.resolution,
+    aspectRatios: ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+    ratioField: "ratio",
+    supportsPromptExtend: false,
+    supportsSeed: false,
+    supportsWatermark: false,
+    supportsAudio: false,
+    nativeAudio: true,
+    maxPromptLength: 7000,
     supportsSmartDuration: false,
   },
   "seedance-video": {

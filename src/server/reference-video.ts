@@ -1,3 +1,4 @@
+import { MINIMAX_REFERENCE_LIMITS } from "../shared/video-capabilities.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assertSafeUrl, safeFileName } from "./security.js";
@@ -98,17 +99,18 @@ export function referenceVideoDuration(buffer: Buffer): number | null {
   return duration / scale;
 }
 
-export function referenceVideoAssetError(asset: AssetRow, mode: string): string | undefined {
+export function referenceVideoAssetError(asset: AssetRow, mode: string, adapter?: string): string | undefined {
   if (!asset.mimeType.startsWith("video/") || referenceMediaKindOf({ originalname: asset.fileName, mimetype: asset.mimeType }) !== "video") {
     return "请选择 MP4 或 MOV 视频";
   }
-  if (asset.byteSize > MAX_REFERENCE_VIDEO_BYTES) return "视频不能超过 100 MB";
-  const { min, max } = referenceVideoDurationRange(mode);
+  const maxBytes = adapter === "minimax-video" ? MINIMAX_REFERENCE_LIMITS.videoBytes : MAX_REFERENCE_VIDEO_BYTES;
+  if (asset.byteSize > maxBytes) return `视频不能超过 ${maxBytes / 1024 / 1024} MB`;
+  const { min, max } = referenceVideoDurationRange(mode, undefined, adapter);
   if (asset.duration != null && (asset.duration < min || asset.duration > max)) return `视频时长需为 ${min}–${max} 秒`;
 }
 
-export async function readReferenceVideoAsset(asset: AssetRow, mode: string): Promise<ReferenceVideoUpload> {
-  const issue = referenceVideoAssetError(asset, mode);
+export async function readReferenceVideoAsset(asset: AssetRow, mode: string, adapter?: string): Promise<ReferenceVideoUpload> {
+  const issue = referenceVideoAssetError(asset, mode, adapter);
   if (issue) throw new AppError("REFERENCE_VIDEO_INVALID", issue, 400);
   const base = path.resolve(asset.baseDir);
   const file = path.resolve(base, asset.relativePath);
@@ -118,13 +120,14 @@ export async function readReferenceVideoAsset(asset: AssetRow, mode: string): Pr
   }
   const stat = await fs.lstat(file).catch(() => null);
   if (!stat?.isFile()) throw new AppError("REFERENCE_VIDEO_INVALID", "参考视频文件不存在", 400);
-  if (stat.size > MAX_REFERENCE_VIDEO_BYTES) throw new AppError("REFERENCE_VIDEO_INVALID", "视频不能超过 100 MB", 400);
+  const maxBytes = adapter === "minimax-video" ? MINIMAX_REFERENCE_LIMITS.videoBytes : MAX_REFERENCE_VIDEO_BYTES;
+  if (stat.size > maxBytes) throw new AppError("REFERENCE_VIDEO_INVALID", `视频不能超过 ${maxBytes / 1024 / 1024} MB`, 400);
   const mimetype = referenceMediaType({ name: asset.fileName, type: asset.mimeType })!.mime;
   const originalname = asset.title && referenceMediaType({ name: asset.title, type: "" })?.mime === mimetype ? asset.title : asset.fileName;
   const upload = { buffer: await fs.readFile(file), mimetype, originalname };
   validateReferenceVideo(upload);
   const duration = asset.duration ?? referenceVideoDuration(upload.buffer);
-  const { min, max } = referenceVideoDurationRange(mode);
+  const { min, max } = referenceVideoDurationRange(mode, undefined, adapter);
   if (duration != null && (duration < min || duration > max)) {
     throw new AppError("REFERENCE_VIDEO_INVALID", `视频时长需为 ${min}–${max} 秒`, 400);
   }
