@@ -1,7 +1,7 @@
 import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, type BoardDoc, type BoardNode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, resolveBoardTimeoutMs, type BoardDoc, type BoardNode, type ConfigBoardNode, type ImageBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { TaskRunner } from "./tasks.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
@@ -61,6 +61,7 @@ export async function generateBoardImage(input: {
     ...(background ? { background } : {}),
     ...(outputFormat ? { outputFormat } : {}),
     ...(moderation ? { moderation } : {}),
+    timeoutMs: resolveBoardTimeoutMs("image", input.overrides?.timeoutSeconds ?? config.timeoutSeconds),
   };
 
   const { firstTask: task, slots } = await submitBoardImages(runner, generation, references, count);

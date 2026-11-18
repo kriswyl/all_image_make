@@ -1,7 +1,7 @@
 import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, composeConfigPrompt, directInputLinks, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, composeConfigPrompt, directInputLinks, resolveBoardTimeoutMs, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ImageBoardNode, type VideoBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
 import { prepareImageBytes, videoInlineProfile } from "./vision.js";
@@ -90,6 +90,7 @@ export async function generateBoardMediaNode(input: {
       ...(background ? { background } : {}),
       ...(outputFormat ? { outputFormat } : {}),
       ...(moderation ? { moderation } : {}),
+      timeoutMs: resolveBoardTimeoutMs("image", overrides.timeoutSeconds ?? node.timeoutSeconds),
     }, references, imageCount);
     task = batch.firstTask;
     imageSlots = batch.slots;
@@ -159,7 +160,7 @@ export async function generateBoardMediaNode(input: {
       ...(watermark === undefined ? {} : { watermark }),
       ...(seed === undefined ? {} : { seed }),
       ...(aspectRatio ? { aspectRatio } : {}),
-      timeoutMs: 300_000,
+      timeoutMs: resolveBoardTimeoutMs("video", overrides.timeoutSeconds ?? node.timeoutSeconds),
     };
     const uploads: ReferenceImageUpload[] = [];
     if (selection.inputs.length) {
@@ -266,6 +267,8 @@ export async function generateBoardMediaNode(input: {
     const musicTitle = overrides.musicTitle ?? node.musicTitle;
     const musicTags = overrides.musicTags ?? node.musicTags;
     const musicNegativeTags = overrides.musicNegativeTags ?? node.musicNegativeTags;
+    /** 只有显式填了才覆盖：音乐 15 分钟 / 配音 5 分钟是各自渠道的既有预期 */
+    const mediaAudioTimeout = overrides.timeoutSeconds ?? node.timeoutSeconds;
     task = await runner.create(audioKind === "music"
       ? {
         channelId: channel.id,
@@ -276,7 +279,7 @@ export async function generateBoardMediaNode(input: {
         ...(musicTitle ? { musicTitle } : {}),
         ...(musicTags ? { musicTags } : {}),
         ...(musicNegativeTags ? { musicNegativeTags } : {}),
-        timeoutMs: 900_000,
+        timeoutMs: mediaAudioTimeout === undefined ? 900_000 : resolveBoardTimeoutMs("audio", mediaAudioTimeout),
       }
       : {
         channelId: channel.id,
@@ -284,7 +287,7 @@ export async function generateBoardMediaNode(input: {
         prompt,
         ttsVoice: voice,
         ttsStyle: overrides.ttsStyle ?? node.ttsStyle,
-        timeoutMs: 300_000,
+        timeoutMs: mediaAudioTimeout === undefined ? 300_000 : resolveBoardTimeoutMs("audio", mediaAudioTimeout),
       });
     kind = "audio";
     modelAlias = resolution.alias;

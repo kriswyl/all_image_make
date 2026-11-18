@@ -144,6 +144,7 @@ export interface UseBoardResult {
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
+    timeoutSeconds?: number;
   }, expectedChannelId?: string) => Promise<{ taskId: string | null; taskIds?: string[]; kind: "image" | "video" | "text" | "audio"; resultNodeIds: string[] } | null>;
   cancelTask: (taskId: string) => Promise<void>;
   retryTask: (taskId: string) => Promise<{ taskId: string; resultNodeIds: string[] } | null>;
@@ -596,6 +597,7 @@ export function useBoard(
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
+    timeoutSeconds?: number;
   }, expectedChannelId?: string) => {
     const boardId = boardIdRef.current;
     if (!boardId) return null;

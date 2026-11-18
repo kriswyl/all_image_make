@@ -66,6 +66,8 @@ export interface BoardGenerateOverrides {
   musicTitle?: string;
   musicTags?: string;
   musicNegativeTags?: string;
+  /** 单次上游请求的等待上限（秒）；不填按节点类型的默认值 */
+  timeoutSeconds?: number;
 }
 
 export function now() {

@@ -106,6 +106,7 @@ export async function generateBoardConfig(input: {
           ...(input.overrides.aspectRatio ? { aspectRatio: input.overrides.aspectRatio } : {}),
           ...(input.overrides.promptExtend === undefined ? {} : { promptExtend: input.overrides.promptExtend }),
           ...(input.overrides.watermark === undefined ? {} : { watermark: input.overrides.watermark }),
+          ...(input.overrides.timeoutSeconds ? { timeoutSeconds: input.overrides.timeoutSeconds } : {}),
         },
       } : {}),
     });
@@ -140,6 +141,7 @@ export async function generateBoardConfig(input: {
           ...(input.overrides.musicTitle ? { musicTitle: input.overrides.musicTitle } : {}),
           ...(input.overrides.musicTags ? { musicTags: input.overrides.musicTags } : {}),
           ...(input.overrides.musicNegativeTags ? { musicNegativeTags: input.overrides.musicNegativeTags } : {}),
+          ...(input.overrides.timeoutSeconds ? { timeoutSeconds: input.overrides.timeoutSeconds } : {}),
         },
       } : {}),
     });

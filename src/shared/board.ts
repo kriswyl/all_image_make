@@ -42,6 +42,28 @@ export const BOARD_LIMITS = {
   maxGroups: 100,
 } as const;
 
+/**
+ * 画布节点可单独覆盖的等待上限（秒）。
+ *
+ * 这是「一次上游请求最多等多久」：视频渠道排队深、出片慢，20 分钟的出片轮询窗口下
+ * 300 秒经常在还没轮到就已经失败，所以视频默认给到 800 秒；图片 / 音频沿用原来的值。
+ * 上限和适配器的 MAX_TIMEOUT_MS（30 分钟）对齐，避免界面能填但请求被悄悄截断。
+ */
+export const BOARD_TIMEOUT = {
+  minSeconds: 10,
+  maxSeconds: 1_800,
+  defaults: { image: 300, video: 800, audio: 900, text: 240 },
+} as const;
+
+/** 把节点上的 timeoutSeconds 换算成 GenerationInput.timeoutMs；不填走该类型的默认值 */
+export function resolveBoardTimeoutMs(kind: BoardMode, timeoutSeconds: number | undefined): number {
+  const fallback = BOARD_TIMEOUT.defaults[kind] ?? 300;
+  const seconds = Number.isFinite(timeoutSeconds) && timeoutSeconds
+    ? Math.min(BOARD_TIMEOUT.maxSeconds, Math.max(BOARD_TIMEOUT.minSeconds, Math.round(timeoutSeconds)))
+    : fallback;
+  return seconds * 1_000;
+}
+
 export const BOARD_NODE_TYPES = ["text", "image", "video", "audio", "config"] as const;
 export type BoardNodeType = (typeof BOARD_NODE_TYPES)[number];
 
@@ -124,6 +146,8 @@ const generationParamShape = {
   musicTitle: z.string().max(80).optional(),
   musicTags: z.string().max(1_000).optional(),
   musicNegativeTags: z.string().max(1_000).optional(),
+  /** 单次上游请求的等待上限（秒）；不填按节点类型的默认值（视频 800 秒） */
+  timeoutSeconds: z.number().int().min(BOARD_TIMEOUT.minSeconds).max(BOARD_TIMEOUT.maxSeconds).optional(),
 } as const;
 
 const baseNodeShape = {
@@ -231,6 +255,8 @@ export const configNodeSchema = z.object({
   musicTitle: z.string().max(80).optional(),
   musicTags: z.string().max(1_000).optional(),
   musicNegativeTags: z.string().max(1_000).optional(),
+  /** 单次上游请求的等待上限（秒）；不填按节点类型的默认值（视频 800 秒） */
+  timeoutSeconds: z.number().int().min(BOARD_TIMEOUT.minSeconds).max(BOARD_TIMEOUT.maxSeconds).optional(),
   status: z.enum(BOARD_NODE_STATUSES).default("idle"),
   lastTaskId: z.string().max(80).nullable().optional(),
   imageBatchResultIds: z.array(nodeIdSchema).min(2).max(BOARD_LIMITS.maxCount).optional(),

@@ -7,7 +7,7 @@
  * 这里只定义协议，不执行；执行在 `src/server/board.ts`，工具在 `agent-tools.ts`。
  */
 import { z } from "zod";
-import { BOARD_AUDIO_KINDS, BOARD_LIMITS, BOARD_VIDEO_MODES } from "./board.js";
+import { BOARD_AUDIO_KINDS, BOARD_LIMITS, BOARD_TIMEOUT, BOARD_VIDEO_MODES } from "./board.js";
 import { IMAGE_SIZE_VALUES } from "./types.js";
 
 export const BOARD_OPS_PER_BATCH = 20;
@@ -172,6 +172,7 @@ export const boardGenerateSchema = z.object({
     voice: z.string().max(40).optional(),
     ttsStyle: z.string().max(200).optional(),
     instrumental: z.boolean().optional(),
+    timeoutSeconds: z.number().int().min(BOARD_TIMEOUT.minSeconds).max(BOARD_TIMEOUT.maxSeconds).optional(),
   }).optional(),
 });
 

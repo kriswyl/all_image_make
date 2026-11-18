@@ -1,7 +1,7 @@
 import { resolveBoardMentions } from "../shared/board-mentions.js";
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, directInputLinks, type BoardDoc, type BoardNode, type BoardVideoMode, type ConfigBoardNode, type VideoBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, directInputLinks, resolveBoardTimeoutMs, type BoardDoc, type BoardNode, type BoardVideoMode, type ConfigBoardNode, type VideoBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { ReferenceImageUpload, TaskRunner } from "./tasks.js";
 import { prepareImageBytes, videoInlineProfile } from "./vision.js";
@@ -30,6 +30,7 @@ export async function generateBoardVideo(input: {
     ratio?: string;
     promptExtend?: boolean;
     watermark?: boolean;
+    timeoutSeconds?: number;
   };
 }): Promise<BoardGenerateResult> {
   const { db, runner, board, config } = input;
@@ -91,7 +92,7 @@ export async function generateBoardVideo(input: {
     ...((input.overrides?.ratio ?? config.ratio)
       ? { ratio: input.overrides?.ratio ?? config.ratio }
       : {}),
-    timeoutMs: 300_000,
+    timeoutMs: resolveBoardTimeoutMs("video", input.overrides?.timeoutSeconds ?? config.timeoutSeconds),
   };
   const uploads: ReferenceImageUpload[] = [];
 

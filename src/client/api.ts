@@ -505,6 +505,7 @@ export const api = {
       voice?: string;
       ttsStyle?: string;
       instrumental?: boolean;
+      timeoutSeconds?: number;
     };
   }) => request<{
     board: BoardView;

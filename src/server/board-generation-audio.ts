@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
-import { allocateNodeRef, BOARD_LIMITS, directInputLinks, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ConfigBoardNode } from "../shared/board.js";
+import { allocateNodeRef, BOARD_LIMITS, directInputLinks, resolveBoardTimeoutMs, type BoardDoc, type BoardNode, type BoardAudioKind, type AudioBoardNode, type ConfigBoardNode } from "../shared/board.js";
 import { AppError } from "./app-error.js";
 import type { TaskRunner } from "./tasks.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
@@ -25,6 +25,7 @@ export async function generateBoardAudio(input: {
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
+    timeoutSeconds?: number;
   };
 }): Promise<BoardGenerateResult> {
   const { db, runner, board, config } = input;
@@ -75,6 +76,9 @@ export async function generateBoardAudio(input: {
     }
   }
 
+  /** 节点/请求显式指定了等待上限就照它走；没填保持老行为：音乐 15 分钟、配音 5 分钟 */
+  const explicitAudioTimeout = input.overrides?.timeoutSeconds ?? config.timeoutSeconds;
+
   const generation: GenerationInput = kind === "music"
     ? {
       channelId: channel.id,
@@ -91,7 +95,7 @@ export async function generateBoardAudio(input: {
       ...((input.overrides?.musicNegativeTags ?? config.musicNegativeTags)
         ? { musicNegativeTags: input.overrides?.musicNegativeTags ?? config.musicNegativeTags }
         : {}),
-      timeoutMs: 900_000,
+      timeoutMs: explicitAudioTimeout === undefined ? 900_000 : resolveBoardTimeoutMs("audio", explicitAudioTimeout),
     }
     : {
       channelId: channel.id,
@@ -99,7 +103,7 @@ export async function generateBoardAudio(input: {
       prompt: input.prompt,
       ttsVoice: voice,
       ttsStyle: input.overrides?.ttsStyle ?? config.ttsStyle,
-      timeoutMs: 300_000,
+      timeoutMs: explicitAudioTimeout === undefined ? 300_000 : resolveBoardTimeoutMs("audio", explicitAudioTimeout),
     };
 
   const task = await runner.create(generation);

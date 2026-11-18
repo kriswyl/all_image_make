@@ -1,7 +1,7 @@
 import multer from "multer";
 import { z } from "zod";
 import { imageOutputFormatSchema } from "../../shared/image-formats.js";
-import { BOARD_AUDIO_KINDS, BOARD_VIDEO_MODES } from "../../shared/board.js";
+import { BOARD_AUDIO_KINDS, BOARD_TIMEOUT, BOARD_VIDEO_MODES } from "../../shared/board.js";
 import { IMAGE_SIZE_VALUES } from "../../shared/types.js";
 import { StylePresetError, type AppDatabase } from "../db.js";
 import type { KeyStore } from "../key-store.js";
@@ -117,6 +117,7 @@ const boardGenerateSchema = z.object({
     musicTitle: z.string().trim().max(80).optional(),
     musicTags: z.string().trim().max(1_000).optional(),
     musicNegativeTags: z.string().trim().max(1_000).optional(),
+    timeoutSeconds: z.coerce.number().int().min(BOARD_TIMEOUT.minSeconds).max(BOARD_TIMEOUT.maxSeconds).optional(),
   }).optional(),
 });
 

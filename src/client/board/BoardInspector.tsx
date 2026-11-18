@@ -9,7 +9,7 @@ import {
   FolderOpen, Maximize2, Minimize2, MoreHorizontal, Plus, RefreshCw, Send, SlidersHorizontal, Square, Trash2, Upload, Video, X,
 } from "lucide-react";
 import {
-  BOARD_LIMITS, composeConfigPrompt, directInputLinks, directUpstreamImages, directUpstreamText,
+  BOARD_LIMITS, BOARD_TIMEOUT, composeConfigPrompt, directInputLinks, directUpstreamImages, directUpstreamText,
   type BoardAudioKind, type BoardEdgeRole, type BoardNode, type BoardView, type ConfigBoardNode,
 } from "../../shared/board";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts";
@@ -37,6 +37,15 @@ import { boardMentionLabel, removeBoardMention } from "../../shared/board-mentio
 import { PromptEditor, type PromptEditorHandle } from "../video/PromptEditor";
 import { VideoMentionPanel, type MentionItem } from "../video/VideoMentionPanel";
 import type { PanelAnchorRect } from "../video/useAnchoredPanel";
+
+/** 「超时（秒）」输入：清空 = 用该类型的默认值，填了就把范围夹到 10–1800 秒 */
+function timeoutPatch(value: string): { timeoutSeconds?: number } {
+  const trimmed = value.trim();
+  if (!trimmed) return { timeoutSeconds: undefined };
+  const seconds = Math.round(Number(trimmed));
+  if (!Number.isFinite(seconds)) return { timeoutSeconds: undefined };
+  return { timeoutSeconds: Math.min(BOARD_TIMEOUT.maxSeconds, Math.max(BOARD_TIMEOUT.minSeconds, seconds)) };
+}
 
 export interface BoardImageAlias {
   alias: string;
@@ -771,7 +780,21 @@ export function BoardInspector({
                               ))}
                             </select>
                           </label>
+                          <label className="board-field">
+                            <span>超时（秒）</span>
+                            <input
+                              type="number"
+                              min={BOARD_TIMEOUT.minSeconds}
+                              max={BOARD_TIMEOUT.maxSeconds}
+                              value={node.timeoutSeconds ?? ""}
+                              placeholder={`默认 ${BOARD_TIMEOUT.defaults.video}`}
+                              onChange={(event) => onUpdateNode(node.id, timeoutPatch(event.target.value) as Partial<BoardNode>)}
+                            />
+                          </label>
                         </div>
+                        <p className="board-inspector-hint">
+                          排队 + 出片最多等多久；不填按 {BOARD_TIMEOUT.defaults.video} 秒（{BOARD_TIMEOUT.minSeconds}–{BOARD_TIMEOUT.maxSeconds} 秒）算。
+                        </p>
                         {!isMinimaxVideo ? (
                           <>
                             <label className="board-config-check">
@@ -982,6 +1005,17 @@ export function BoardInspector({
                               <option value="low">low</option>
                               <option value="auto">auto</option>
                             </select>
+                          </label>
+                          <label className="board-field">
+                            <span>超时（秒）</span>
+                            <input
+                              type="number"
+                              min={BOARD_TIMEOUT.minSeconds}
+                              max={BOARD_TIMEOUT.maxSeconds}
+                              value={node.timeoutSeconds ?? ""}
+                              placeholder={`默认 ${BOARD_TIMEOUT.defaults.image}`}
+                              onChange={(event) => onUpdateNode(node.id, timeoutPatch(event.target.value) as Partial<BoardNode>)}
+                            />
                           </label>
                         </div>
                         <p className="board-inspector-hint">不同渠道支持度不同：不支持的高级参数会被适配器忽略。</p>
