@@ -53,6 +53,45 @@ it("保存期间继续编辑，后续保存使用已确认的版本和最新文�
   } finally { ui.unmount(); }
 });
 
+it("生成提交期间继续编辑，回包合并结果节点并接着保存本地修改", async () => {
+  vi.useFakeTimers();
+  const initial = board("submit");
+  const base = { x: 0, y: 0, width: 300, height: 200, title: "", createdAt: "", updatedAt: "" };
+  initial.doc.nodes = [{ ...base, id: "text", ref: "n1", type: "text", text: "原文" },
+    { ...base, id: "image", ref: "n2", type: "image", assetId: null, source: "generated", status: "empty" }];
+  initial.doc.nextRef = 3;
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  let finish!: (result: Awaited<ReturnType<typeof api.generateBoardNode>>) => void;
+  vi.spyOn(api, "generateBoardNode").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const save = vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 3, doc: input.doc }));
+  const root = createRoot(document.createElement("div"));
+  const toast = vi.fn();
+  let state!: ReturnType<typeof useBoard>;
+  function Harness() { state = useBoard(initial.id, toast); return null; }
+  try {
+    await act(async () => root.render(<Harness />));
+    let request!: ReturnType<typeof state.generate>;
+    await act(async () => { request = state.generate("image"); });
+    expect(state.submitting).toBe(true);
+    act(() => {
+      state.updateNode("text", { text: "新文本" });
+      state.addNode("text", { x: 80, y: 80 });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(450); });
+    expect(save).not.toHaveBeenCalled();
+    const remote = { ...initial, version: 2, doc: { ...initial.doc, nextRef: 4,
+      nodes: [...initial.doc.nodes, { ...base, id: "result", ref: "n3", type: "image" as const, assetId: null, status: "empty" as const, source: "generated" as const }] } };
+    await act(async () => {
+      finish({ board: remote, kind: "image", task: null, resultNodeIds: ["result"], configNodeId: "image", prompt: "", modelAlias: "", referenceCount: 0 });
+      await request;
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(state.view?.doc.nodes[0]).toMatchObject({ text: "新文本" });
+    expect(state.view?.doc.nodes.map((node) => node.ref)).toEqual(["n1", "n2", "n3", "n4"]);
+    expect(save).toHaveBeenCalledWith(initial.id, expect.objectContaining({ baseVersion: 2 }));
+  } finally { act(() => root.unmount()); }
+});
+
 it("切板后旧保存响应不覆盖新板，版本冲突使用服务端快照", async () => {
   vi.useFakeTimers();
   vi.spyOn(api, "board").mockImplementation(async id => board(id));

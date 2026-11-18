@@ -1,0 +1,70 @@
+.board-command-panel {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 26;
+  display: flex;
+  width: min(390px, calc(100% - 28px));
+  max-height: calc(100% - 76px);
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+}
+.board-command-panel > header, .board-command-tabs, .board-command-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.board-command-panel > header strong { flex: 1; }
+.board-command-toolbar { justify-content: space-between; font-size: 12px; }
+.board-command-toolbar label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.board-command-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; background: transparent; color: var(--ink-soft); border: 0; border-radius: 8px; font: inherit; }
+.board-command-tabs button[aria-pressed="true"] { background: var(--surface-soft); color: var(--ink); }
+.board-command-list { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.board-command-list > article, .board-command-list > button {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.board-command-list > button:hover { background: var(--surface-soft); }
+.board-command-list :is(article, button) > :is(div, span):first-child { display: grid; min-width: 0; gap: 3px; }
+.board-command-list strong { font-size: 12px; overflow-wrap: anywhere; }
+.board-command-list small { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.board-command-list .board-command-error { color: var(--coral-ink); }
+.board-command-empty { margin: 0; padding: 17px 12px; color: var(--muted); font-size: 12px; }
+.board-task-actions { display: flex; justify-content: flex-end; gap: 4px; margin-top: 4px; }
+.board-task-actions button { white-space: nowrap; }
+.board-selection-tools { position: absolute; z-index: 26; bottom: 62px; left: 50%; transform: translateX(-50%); display: flex; width: max-content; max-width: calc(100% - 24px); flex-wrap: wrap; align-items: center; justify-content: center; gap: 7px; padding: 7px; white-space: nowrap; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-control); box-shadow: var(--shadow-panel); font-size: 12px; }
+.board-project-panel { width: min(445px, calc(100% - 28px)); }
+.board-project-shot { width: 100%; }
+.board-project-shot > label { display: flex; align-items: center; gap: 8px; }
+.board-project-shot > label > strong { flex: 1; }
+.board-project-shot > p { margin: 4px 0; font-size: 11px; }
+.board-project-pinned { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-left: 23px; }
+.board-project-nodes { display: grid; gap: 4px; padding-left: 23px; }
+.board-project-nodes > div { display: flex; gap: 6px; align-items: center; justify-content: space-between; }
+.board-project-locate { display: inline-flex; gap: 5px; align-items: center; padding: 4px; color: var(--ink-soft); background: transparent; border: 0; font: inherit; font-size: 11px; }
+.board-project-locate:hover { color: var(--ink); background: var(--surface-soft); border-radius: 5px; }
+.modal.board-template-config { width: min(500px, 100%); }
+.board-template-config > .modal-body { align-content: start; }
+.board-template-config label { display: grid; gap: 6px; }
+.board-template-config .board-template-slot { grid-template-columns: minmax(0, 1fr) 140px; align-items: center; }
+.board-template-config .board-template-slot > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-template-config .board-command-empty { padding: 0; }
+.board-run-review-list > article { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
+.board-run-review-list > article > div { display: grid; min-width: 0; gap: 3px; }
+.board-run-review-list small { color: var(--muted); overflow-wrap: anywhere; }

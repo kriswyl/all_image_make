@@ -8,27 +8,40 @@ import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Bot, Check, Download, FileUp, History, Image as ImageIcon, LayoutTemplate, Menu,
-  Plus, Redo2, Trash2, Undo2, Upload,
+  Activity, Clapperboard, Image as ImageIcon, Menu, Plus, Redo2, Search, Trash2, Undo2,
 } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { confirmGeneration } from "../generation-confirm";
 import { AssetLightbox } from "../chat/AssetLightbox";
 import { extractVideoLastFrame } from "../chat/video-frame";
 import { BoardNodeVersions } from "./BoardNodeVersions";
+import { DiagnosticDialog } from "../dialogs/DiagnosticDialog";
 import {
-  createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
+  BOARD_LIMITS, createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
 } from "../../shared/board";
-import type { Asset } from "../../shared/types";
+import type { Asset, Task } from "../../shared/types";
 import { referenceVideoDurationRange } from "../../shared/video-modes";
 import { BoardAgentPanel } from "./BoardAgentPanel";
 import { BoardCanvas } from "./BoardCanvas";
 import { BoardHistoryDrawer } from "./BoardHistoryDrawer";
 import { BoardTemplateDrawer } from "./BoardTemplateDrawer";
 import { BoardMaterialDialog } from "./BoardMaterialDialog";
+import { BoardNodeSearch } from "./BoardNodeSearch";
+import { BoardTaskPanel } from "./BoardTaskPanel";
+import { BoardProductionPanel } from "./BoardProductionPanel";
+import { BoardProjectMenu } from "./BoardProjectMenu";
+import { BoardRunReview } from "./BoardRunReview";
+import { BoardTemplateInputDialog, BoardTemplateSaveDialog } from "./BoardWorkflowTemplate";
+import { StoryboardReview } from "../chat/StoryboardReview";
+import type { CanvasTemplate } from "../../shared/canvas-template";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "./CrossModeBridgeDialog";
 import { BoardInspector, type BoardImageAlias, type BoardVideoAlias } from "./BoardInspector";
 import { useBoard } from "./useBoard";
+import { planBoardRun } from "./board-run";
+import type { BoardRunStep } from "./board-run";
+import { matchModelAlias } from "../../shared/model-alias";
+import { useBoardRun } from "./useBoardRun";
+import "./board-production.css";
 
 const CURRENT_BOARD_KEY = "yida.board-current";
 
@@ -131,6 +144,7 @@ export function BoardWorkspace({
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [assets, setAssets] = useState<Map<string, Asset>>(new Map());
   const [versionNodeId, setVersionNodeId] = useState<string | null>(null);
+  const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
   const [extractingFrame, setExtractingFrame] = useState(false);
   const [imageAliases, setImageAliases] = useState<BoardImageAlias[]>([]);
   const [videoAliases, setVideoAliases] = useState<BoardVideoAlias[]>([]);
@@ -140,7 +154,6 @@ export function BoardWorkspace({
   const [defaultSpeechAlias, setDefaultSpeechAlias] = useState("");
   const [defaultMusicAlias, setDefaultMusicAlias] = useState("");
   const [preview, setPreview] = useState<Asset | null>(null);
-  const [agentOpen, setAgentOpen] = useState(true);
   const [agentUi, setAgentUi] = useState<BoardAgentUiState | undefined>(undefined);
   const [assetDrawerOpen, setAssetDrawerOpen] = useState(false);
   const [assetTargetId, setAssetTargetId] = useState<string | null>(null);
@@ -151,6 +164,13 @@ export function BoardWorkspace({
   const historyOpen = historyBoardId !== null && historyBoardId === currentId;
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [templateDrawerOpen, setTemplateDrawerOpen] = useState(false);
+  const [commandPanel, setCommandPanel] = useState<"tasks" | "search" | "production" | null>(null);
+  const [reviewProject, setReviewProject] = useState<string | null>(null);
+  const [templateDraft, setTemplateDraft] = useState<{ id: string; nodes: BoardNode[] } | null>(null);
+  const [templateInput, setTemplateInput] = useState<{ boardId: string; template: CanvasTemplate } | null>(null);
+  const [focusRequest, setFocusRequest] = useState<{ boardId: string; nodeId: string } | null>(null);
+  const [runPanelVersion, setRunPanelVersion] = useState(0);
+  const [runDraft, setRunDraft] = useState<{ boardId: string; steps: BoardRunStep[] } | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -159,6 +179,9 @@ export function BoardWorkspace({
   const initializedRef = useRef(false);
 
   const board = useBoard(currentId, onToast);
+  const runError = useCallback((message: string) => onToast("error", message), [onToast]);
+  const productionRun = useBoardRun(currentId, board, runError);
+  const projectIds = [...new Set((board.view?.doc.nodes ?? []).flatMap((node) => node.storyboard ? [node.storyboard.projectId] : []))];
   const activeViewRef = useRef(board.view);
   activeViewRef.current = board.view;
 
@@ -409,14 +432,15 @@ export function BoardWorkspace({
     }
   }, [board, currentId, onToast]);
 
-  const exportBoard = useCallback(async () => {
+  const exportBoard = useCallback(async (mode: "package" | "json") => {
     if (!board.view) return;
-    const data = createBoardExport(board.view.title, board.view.doc);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const stamp = new Date().toISOString().slice(0, 10);
     const stem = (board.view.title || "无限画布").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
-    const fileName = `${stem}-${stamp}.chatcanvas.json`;
+    const fileName = `${stem}-${stamp}.chatcanvas.${mode === "package" ? "zip" : "json"}`;
     try {
+      if (!await board.ensureSaved()) throw new Error("请等待画布保存后再导出");
+      const blob = mode === "package" ? await api.exportBoardPackage(board.view.id)
+        : new Blob([JSON.stringify(createBoardExport(board.view.title, board.view.doc), null, 2)], { type: "application/json" });
       if (isTauriRuntime()) {
         const [{ save }, { writeFile }] = await Promise.all([
           import("@tauri-apps/plugin-dialog"),
@@ -425,7 +449,7 @@ export function BoardWorkspace({
         const destination = await save({
           title: "导出无限画布",
           defaultPath: fileName,
-          filters: [{ name: "无限画布", extensions: ["json"] }],
+          filters: [{ name: mode === "package" ? "画布工程包" : "画布结构", extensions: [mode === "package" ? "zip" : "json"] }],
         });
         if (!destination) return;
         await writeFile(destination, new Uint8Array(await blob.arrayBuffer()));
@@ -445,10 +469,17 @@ export function BoardWorkspace({
     } catch (error) {
       onToast("error", error instanceof Error ? error.message : "导出失败");
     }
-  }, [board.view, onToast]);
+  }, [board.view, board.ensureSaved, onToast]);
 
   const importBoardFile = useCallback(async (file: File) => {
     try {
+      if (/\.zip$/i.test(file.name)) {
+        const result = await api.importBoardPackage(file);
+        await refreshBoards();
+        setCurrentId(result.board.id);
+        onToast("success", `已导入 ${result.boards} 块画布和 ${result.media} 份素材`);
+        return;
+      }
       const text = await file.text();
       let parsed: unknown;
       try {
@@ -490,6 +521,7 @@ export function BoardWorkspace({
   }, [board.applyDelta, reloadBoard]);
 
   const generateNode = useCallback(async (nodeId: string) => {
+    if (board.submitting) { onToast("error", "正在提交上一项生成，请稍候"); return; }
     const target = board.view?.doc.nodes.find((node) => node.id === nodeId);
     if (!target || target.type === "text") return;
     const kind = target.type === "config" ? target.mode : target.type;
@@ -537,11 +569,12 @@ export function BoardWorkspace({
     }
   }, [board, onToast, assets, videoAliases, defaultVideoAlias]);
 
-  const extractFrame = useCallback(async (nodeId: string) => {
+  const extractFrame = useCallback(async (nodeId: string, createNext = false) => {
     if (extractingFrame || !board.view || !currentId) return;
     const node = board.view.doc.nodes.find((item) => item.id === nodeId);
     const asset = node?.type === "video" && node.assetId ? assets.get(node.assetId) : null;
     if (!node || node.type !== "video" || !asset) { onToast("error", "视频素材不存在"); return; }
+    if (board.view.doc.nodes.length + (createNext ? 2 : 1) > BOARD_LIMITS.maxNodes) { onToast("error", "画布节点空间不足"); return; }
     setExtractingFrame(true);
     try {
       if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后再试");
@@ -550,6 +583,14 @@ export function BoardWorkspace({
       const image = board.addImageNode(frame, { x: node.x + node.width + 100, y: node.y }, `${node.title || node.ref} · 尾帧`);
       if (!image) throw new Error("无法添加尾帧节点，请检查画布节点数量");
       setAssets((current) => new Map(current).set(frame.id, frame));
+      if (createNext) {
+        const next = board.addNode("video", { x: image.x + image.width + 96, y: image.y });
+        if (!next || !board.addEdge(image.id, next.id, "input", "first-frame")) throw new Error("已提取尾帧，请手动连接下一镜");
+        board.updateNode(next.id, { title: "下一镜", model: node.model, videoMode: "first-frame" });
+        setFocusRequest({ boardId: currentId, nodeId: next.id });
+        onToast("success", "已创建下一镜并连接尾帧作为首帧");
+        return;
+      }
       board.setSelection([image.id]);
       onToast("success", "已提取尾帧。请将它连接到下一镜视频并设为首帧；若已有首帧连线，先移除原连线。");
     } catch (error) { onToast("error", error instanceof Error ? error.message : "提取尾帧失败"); }
@@ -589,11 +630,73 @@ export function BoardWorkspace({
     } catch (error) { onToast("error", error instanceof Error ? error.message : "读取任务失败"); }
   }, [board, onToast]);
 
+  function startRun(ids: string[], mode: "selection" | "downstream") {
+    if (!board.view || board.submitting || productionRun.running) {
+      onToast("error", "已有任务正在提交，请等待或暂停现有计划");
+      return;
+    }
+    const doc = board.view.doc;
+    const steps = planBoardRun(doc, ids, mode).map((step) => {
+      if (step.kind === "text") return step;
+      const node = doc.nodes.find(({ id }) => id === step.nodeId);
+      const music = node && "audioKind" in node && node.audioKind === "music";
+      const candidates = step.kind === "image" ? imageAliases : step.kind === "video" ? videoAliases
+        : audioAliases.filter((entry) => entry.adapterType === (music ? "suno-music" : "gemini-tts"));
+      const fallback = step.kind === "image" ? defaultImageAlias : step.kind === "video" ? defaultVideoAlias : music ? defaultMusicAlias : defaultSpeechAlias;
+      const model = matchModelAlias(candidates, step.model) ?? matchModelAlias(candidates, fallback) ?? candidates[0];
+      return model ? { ...step, model: model.alias, modelLabel: model.model, channelId: model.channelId, channelName: model.channelName } : step;
+    });
+    if (!steps.length) { onToast("error", "所选范围内没有就绪的生成节点，请检查提示词和节点状态"); return; }
+    const outstanding = productionRun.run?.steps.some(({ state }) => ["pending", "waiting", "choosing", "unknown"].includes(state));
+    if (outstanding && !window.confirm("新计划会替换当前计划。已提交的任务仍可在请求记录里查看。继续？")) return;
+    setRunDraft({ boardId: board.view.id, steps });
+  }
+
+  function locateNode(nodeId: string) {
+    if (currentId) setFocusRequest({ boardId: currentId, nodeId });
+  }
+
+  function createResultBranch(nodeId: string) {
+    const node = board.view?.doc.nodes.find((item) => item.id === nodeId);
+    if (!node || node.type !== "image" || !node.assetId) return;
+    const next = board.addNode("image", { x: node.x + node.width + 96, y: node.y + 65 });
+    if (!next || !board.addEdge(node.id, next.id, "input", "reference")) return;
+    board.updateNode(next.id, { title: `${node.title || "图片"} · 分支`.slice(0, 80), model: node.model });
+    locateNode(next.id);
+  }
+
+  async function openNodeDiagnostic(id: string) {
+    try { setDiagnosticTask(await api.task(id)); }
+    catch (error) { runError(error instanceof Error ? error.message : "读取请求诊断失败"); }
+  }
+
+  async function retryRunTasks(taskIds: string[]) {
+    if (productionRun.running || board.submitting) { runError("请先暂停计划并等当前提交结束"); return; }
+    const safe: string[] = [];
+    for (const id of taskIds) {
+      try {
+        const task = await api.task(id);
+        if (taskIds.length === 1 || !["SUBMISSION_UNKNOWN", "REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(task.errorCode ?? "")) safe.push(id);
+      } catch (error) { onToast("error", error instanceof Error ? error.message : "任务读取失败"); }
+    }
+    if (safe.length < taskIds.length) onToast("error", "未确认上游结果的请求已跳过，请查看诊断后单独确认重试");
+    if (!safe.length || !confirmGeneration({ kind: "画布生成", model: "沿用原任务", retry: true,
+      detail: safe.length === 1 ? "请先核对渠道记录，确认需要补发这 1 项。" : `将重试 ${safe.length} 项。` })) return;
+    const replacements = new Map<string, string>();
+    for (const id of safe) {
+      const result = await board.retryTask(id);
+      if (result) replacements.set(id, result.taskId);
+    }
+    productionRun.applyRetries(replacements);
+  }
+
   const rename = useCallback(() => {
     const value = titleDraft.trim();
     if (!value || !board.view || value === board.view.title) return;
     void board.rename(value).then(() => void refreshBoards());
   }, [board, refreshBoards, titleDraft]);
+
+  const saveStatus = board.retrying ? "保存失败，重试中" : board.saving ? "保存中" : board.submitting ? "提交中" : null;
 
   return (
     <div className="board-workspace">
@@ -612,65 +715,36 @@ export function BoardWorkspace({
         <button type="button" className="board-back" data-sidebar-toggle onClick={onOpenMenu} aria-expanded={sidebarOpen} title={sidebarOpen ? "关闭工作区菜单" : "打开工作区菜单"} aria-label={sidebarOpen ? "关闭工作区菜单" : "打开工作区菜单"}>
           <Menu size={14} /><span>菜单</span>
         </button>
-        <input
-          className="board-title"
-          value={titleDraft}
-          maxLength={80}
-          placeholder="未命名无限画布"
-          onChange={(event) => setTitleDraft(event.target.value)}
-          onBlur={rename}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") event.currentTarget.blur();
-            if (event.key === "Escape") { setTitleDraft(board.view?.title ?? ""); event.currentTarget.blur(); }
-          }}
-        />
+        <div className="board-topbar-identity">
+          <input
+            className="board-title"
+            aria-label="画布名称"
+            value={titleDraft}
+            maxLength={80}
+            placeholder="未命名无限画布"
+            onChange={(event) => setTitleDraft(event.target.value)}
+            onBlur={rename}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") { setTitleDraft(board.view?.title ?? ""); event.currentTarget.blur(); }
+            }}
+          />
+          {saveStatus ? <span className="board-save-state" role="status" aria-label={saveStatus} title={saveStatus}>
+            <LoadingIndicator variant="dots" size={24} /><span className="board-save-label">{saveStatus}</span>
+          </span> : null}
+        </div>
         <div className="board-topbar-actions">
+          <div className="board-topbar-undo" role="group" aria-label="撤销与重做">
+            <button type="button" className="secondary-button compact board-topbar-icon" disabled={!board.view?.canUndo} onClick={() => void board.undo()} title="撤销（Ctrl/Cmd + Z）" aria-label="撤销">
+              <Undo2 size={15} />
+            </button>
+            <button type="button" className="secondary-button compact board-topbar-icon" disabled={!board.view?.canRedo} onClick={() => void board.redo()} title="重做（Ctrl/Cmd + Shift + Z）" aria-label="重做">
+              <Redo2 size={15} />
+            </button>
+          </div>
           <button
             type="button"
-            className={`secondary-button compact ${historyOpen ? "is-on" : ""}`}
-            onClick={toggleHistory}
-            title="查看创作历史"
-          >
-            <History size={12} /><span className="board-history-label">创作历史</span>
-          </button>
-          <button
-            type="button"
-            className={`secondary-button compact ${templateDrawerOpen ? "is-on" : ""}`}
-            onClick={toggleTemplates}
-            title="查看对话里生成过的画布模板"
-          >
-            <LayoutTemplate size={12} /><span>模板</span>
-          </button>
-          <button
-            type="button"
-            className="secondary-button compact"
-            disabled={!selectedImageAssets.length}
-            title={selectedImageAssets.length
-              ? "把选中的图片加入某个对话的参考图组"
-              : "先选中至少一个已经绑定图片的节点"}
-            onClick={() => setBridgeItems(selectedImageAssets.map((asset) => ({
-              assetId: asset.id,
-              title: asset.fileName.replace(/\.[^.]+$/, ""),
-            })))}
-          >
-            <ImageIcon size={12} /><span>参考图组</span>
-          </button>
-          <button type="button" className="secondary-button compact" disabled={!board.view?.canUndo} onClick={() => void board.undo()} title="撤销（Ctrl/Cmd + Z）">
-            <Undo2 size={12} /><span>撤销</span>
-          </button>
-          <button type="button" className="secondary-button compact" disabled={!board.view?.canRedo} onClick={() => void board.redo()} title="重做（Ctrl/Cmd + Shift + Z）">
-            <Redo2 size={12} /><span>重做</span>
-          </button>
-          <span className={`board-save-state ${board.saving || board.retrying ? "is-saving" : ""}`}>
-            {board.retrying
-              ? <><LoadingIndicator variant="dots" size={24} />重试中</>
-              : board.saving
-                ? <><LoadingIndicator variant="dots" size={24} />保存中</>
-                : <><Check size={11} />已保存</>}
-          </span>
-          <button
-            type="button"
-            className={`secondary-button compact board-action-primary ${assetDrawerOpen ? "is-on" : ""}`}
+            className={`secondary-button compact ${assetDrawerOpen ? "is-on" : ""}`}
             onClick={() => {
               setHistoryBoardId(null);
               setTemplateDrawerOpen(false);
@@ -681,38 +755,18 @@ export function BoardWorkspace({
               setAssetDrawerOpen((open) => !open);
             }}
             title="查看这块无限画布用到的素材"
+            aria-label="素材"
           >
             <ImageIcon size={12} /><span>素材{boardAssets.length ? ` ${boardAssets.length}` : ""}</span>
           </button>
-          <button type="button" className="secondary-button compact board-action-primary" onClick={() => pickImage(null)} title="上传图片到无限画布">
-            <Upload size={12} /><span>上传图片</span>
-          </button>
-          <button
-            type="button"
-            className="secondary-button compact"
-            title="导入无限画布（JSON）"
-            aria-label="导入无限画布"
-            onClick={() => importInputRef.current?.click()}
-          >
-            <FileUp size={13} /><span>导入</span>
-          </button>
-          <button
-            type="button"
-            className="secondary-button compact"
-            title="导出无限画布（JSON）"
-            aria-label="导出无限画布"
-            onClick={() => void exportBoard()}
-          >
-            <Download size={13} /><span>导出</span>
-          </button>
-          <button
-            type="button"
-            className={`secondary-button compact board-action-primary ${agentOpen ? "is-on" : ""}`}
-            onClick={() => setAgentOpen((open) => !open)}
-            title={agentOpen ? "收起无限画布助手" : "打开无限画布助手"}
-          >
-            <Bot size={12} /><span>助手</span>
-          </button>
+          <button type="button" className={`secondary-button compact board-topbar-icon ${commandPanel === "search" ? "is-on" : ""}`} title="查找节点" aria-label="查找节点"
+            onClick={() => setCommandPanel((panel) => panel === "search" ? null : "search")}><Search size={14} /></button>
+          <button type="button" className={`secondary-button compact ${commandPanel === "tasks" ? "is-on" : ""}`} title="画布任务" aria-label="画布任务"
+            onClick={() => setCommandPanel((panel) => panel === "tasks" ? null : "tasks")}><Activity size={14} /><span>任务</span></button>
+          {projectIds.length ? <button type="button" className={`secondary-button compact ${commandPanel === "production" ? "is-on" : ""}`} title="分镜制作" aria-label="分镜制作"
+            onClick={() => setCommandPanel((panel) => panel === "production" ? null : "production")}><Clapperboard size={14} /><span>制作</span></button> : null}
+          <BoardProjectMenu hasBoard={Boolean(board.view)} onHistory={toggleHistory} onTemplates={toggleTemplates}
+            onImport={() => importInputRef.current?.click()} onExport={(mode) => void exportBoard(mode)} />
         </div>
       </header>
 
@@ -727,10 +781,19 @@ export function BoardWorkspace({
           onDeleteNode={deleteNode}
           onCompareVersions={setVersionNodeId}
           onExtractFrame={(nodeId) => void extractFrame(nodeId)}
+          onRun={startRun}
+          focusRequest={focusRequest}
+          onAddToReferenceGroup={selectedImageAssets.length ? () => setBridgeItems(selectedImageAssets.map((asset) => ({
+            assetId: asset.id, title: asset.fileName.replace(/\.[^.]+$/, ""),
+          }))) : undefined}
+          onSaveTemplate={(ids) => {
+            if (board.view) setTemplateDraft({ id: board.view.id, nodes: board.view.doc.nodes.filter((node) => ids.includes(node.id)) });
+          }}
           renderNodeSettings={(selectedNode, locate) => board.view && (
             <BoardInspector
               view={board.view}
               node={selectedNode}
+              submitting={board.submitting}
               assets={assets}
               imageAliases={imageAliases}
               defaultImageAlias={defaultImageAlias}
@@ -761,12 +824,59 @@ export function BoardWorkspace({
               onRetryTask={(taskId) => void retryBoardTask(taskId)}
               onExtractFrame={(nodeId) => void extractFrame(nodeId)}
               onCompareVersions={setVersionNodeId}
+              onDiagnostic={(id) => void openNodeDiagnostic(id)}
+              onNextShot={(id) => void extractFrame(id, true)}
+              onBranch={createResultBranch}
               onApplyStyle={(preset, nodeIds) => board.applyStyle(preset, nodeIds)}
               onClose={() => board.setSelection([])}
             />
           )}
         />
+        {currentId && board.view?.id === currentId && commandPanel === "search" ? <BoardNodeSearch key={currentId} doc={board.view.doc}
+          onLocate={locateNode} onClose={() => setCommandPanel(null)} /> : null}
+        {currentId && board.view?.id === currentId && commandPanel === "tasks" ? <BoardTaskPanel key={`${currentId}:${runPanelVersion}`} boardId={currentId} nodes={board.view.doc.nodes} selection={board.selection}
+          run={productionRun.run} running={productionRun.running} onPause={productionRun.pause} onResume={productionRun.resume} onChoose={productionRun.choose}
+          onLocate={locateNode} onRetry={(ids) => void retryRunTasks(ids)} onStop={(id) => void board.cancelTask(id)} onClose={() => setCommandPanel(null)} /> : null}
+        {currentId && board.view?.id === currentId && commandPanel === "production" ? <BoardProductionPanel key={currentId} boardId={currentId} boardVersion={board.view.version} projectIds={projectIds}
+          onLocate={locateNode} onClose={() => setCommandPanel(null)} onBeforeWrite={board.ensureSaved}
+          onSwitch={(id) => { void board.ensureSaved().then((ok) => { if (ok) setCurrentId(id); else runError("请等待画布保存后再切换"); }); }}
+          onReview={(id) => { void board.ensureSaved().then((ok) => { if (ok) setReviewProject(id); else runError("请等待画布保存后再打开分镜审阅"); }); }}
+          onRun={(ids) => startRun(ids, "selection")}
+          onSync={(id, revision, shotIds) => board.updateDocumentOnServer(async (boardId, boardVersion) => {
+            const result = await api.syncStoryboardReferences(id, boardId, { revision, boardVersion, shotIds });
+            onToast("success", result.updated ? `已更新 ${result.updated} 处镜头引用` : "所选镜头引用已是最新");
+            return result.board;
+          })} /> : null}
       </div>
+
+      {reviewProject ? <StoryboardReview id={reviewProject} onClose={() => { setReviewProject(null); if (!productionRun.running) void board.ensureSaved().then((ok) => { if (ok) void board.reload(); }); }}
+        onToast={(kind, message) => onToast(kind === "ok" ? "success" : "error", message)}
+        onImport={(templateId) => { void board.importTemplate(templateId).then((count) => {
+          if (count !== null) { setReviewProject(null); onToast("success", `已导入 ${count} 个分镜节点`); }
+        }); }} /> : null}
+      {runDraft && runDraft.boardId === currentId ? <BoardRunReview steps={runDraft.steps} onClose={() => setRunDraft(null)} onStart={(steps, concurrency) => {
+        productionRun.start(steps, concurrency);
+        setRunDraft(null);
+        setRunPanelVersion((version) => version + 1);
+        setCommandPanel("tasks");
+      }} /> : null}
+      {templateDraft && templateDraft.id === currentId ? <BoardTemplateSaveDialog title={board.view?.title ?? ""} nodes={templateDraft.nodes} onClose={() => setTemplateDraft(null)}
+        onSave={async (name, inputIds, outputIds) => {
+          if (!await board.ensureSaved()) throw new Error("请等待画布保存后重试");
+          await api.saveBoardSelectionTemplate(templateDraft.id, { name, nodeIds: templateDraft.nodes.map(({ id }) => id), inputIds, outputIds });
+          setTemplateDraft(null);
+          setTemplateDrawerOpen(true);
+          onToast("success", "流程模板已保存");
+        }} /> : null}
+      {templateInput && templateInput.boardId === currentId ? <BoardTemplateInputDialog template={templateInput.template} assets={boardAssets} onClose={() => setTemplateInput(null)}
+        onImport={async (values) => {
+          const count = await board.importTemplate(templateInput.template.id, values);
+          if (count === null) return false;
+          setTemplateInput(null);
+          setTemplateDrawerOpen(false);
+          onToast("success", `已导入 ${count} 个流程节点`);
+          return true;
+        }} /> : null}
 
       <input
         ref={fileInputRef}
@@ -787,7 +897,7 @@ export function BoardWorkspace({
         ref={importInputRef}
         className="file-input"
         type="file"
-        accept=".json,application/json"
+        accept=".zip,.json,application/zip,application/json"
         onChange={(event) => {
           const file = event.target.files?.[0];
           event.target.value = "";
@@ -795,7 +905,7 @@ export function BoardWorkspace({
         }}
       />
 
-      {agentOpen && board.view ? (
+      {board.view ? (
         <BoardAgentPanel
           key={board.view.threadId}
           threadId={board.view.threadId}
@@ -815,7 +925,6 @@ export function BoardWorkspace({
               if (added !== null) onToast("success", `已导入分镜「${name}」：新增 ${added} 个节点`);
             })();
           }}
-          onClose={() => setAgentOpen(false)}
         />
       ) : null}
 
@@ -832,6 +941,10 @@ export function BoardWorkspace({
         open={templateDrawerOpen}
         onClose={() => setTemplateDrawerOpen(false)}
         onImport={board.importTemplate}
+          onConfigure={(id) => {
+            if (currentId) void api.template(id).then((template) => setTemplateInput({ boardId: currentId, template }))
+              .catch((error) => runError(error instanceof Error ? error.message : "读取流程模板失败"));
+          }}
         onBoardsChanged={refreshBoards}
         onToast={onToast}
       />
@@ -856,6 +969,7 @@ export function BoardWorkspace({
         board.updateNode(versionNodeId, { assetId: asset.id, taskId: task.id, status: "succeeded" } as Partial<BoardNode>);
         onToast("success", "已切换节点素材；提示词和参数保持当前设置");
       }} /> : null}
+      {diagnosticTask ? createPortal(<DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} />, document.body) : null}
       {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId}
         onUseReferenceImage={referenceTargetId ? async (asset) => {
           if (!currentId || !asset.mimeType.startsWith("image/")) return false;

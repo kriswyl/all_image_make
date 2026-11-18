@@ -8,18 +8,26 @@ import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle, AudioLines, Download, FolderOpen, Image as ImageIcon, Maximize2, Minimize2, Pencil, Play,
-  Trash2, Upload, Video, X,
+  SlidersHorizontal, Trash2, Upload, Video, X,
 } from "lucide-react";
 import type {
   AudioBoardNode, BoardNode, ConfigBoardNode, ImageBoardNode, TextBoardNode, VideoBoardNode,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
 import { api } from "../api";
+import { BOARD_CONFIG_MODES } from "./board-config-modes";
+
+export interface ConfigNodeConnections {
+  inputs: number;
+  outputs: number;
+  hasUpstreamText: boolean;
+}
 
 export interface BoardNodeViewProps {
   node: BoardNode;
   asset: Asset | null;
   editing: boolean;
+  configConnections?: ConfigNodeConnections;
   imageResults?: { count: number; expanded: boolean; onToggle: () => void };
   primaryChoice?: { enabled: boolean; onChoose: () => void };
   onImageLoad?: (assetId: string, width: number, height: number) => void;
@@ -28,6 +36,7 @@ export interface BoardNodeViewProps {
   onCancelEdit: () => void;
   onPreview: (asset: Asset) => void;
   onSelect: () => void;
+  onEditConfig?: () => void;
   onPickImage: (nodeId: string) => void;
   onUploadMediaIntoNode: (nodeId: string) => void;
   onRemoveAsset: (nodeId: string) => void;
@@ -294,24 +303,35 @@ function AudioNodeView({ node, asset, onPreview, onSelect, onPickImage, onDelete
   );
 }
 
-function ConfigNodeView({ node }: { node: ConfigBoardNode }) {
+function ConfigNodeView({ node, connections }: { node: ConfigBoardNode; connections?: ConfigNodeConnections }) {
+  const { label, icon: Icon } = BOARD_CONFIG_MODES[node.mode];
+  const prompt = node.prompt.trim();
+  const hasUpstreamText = node.useUpstreamText !== false && connections?.hasUpstreamText;
+  const outputDetails = node.mode === "image" ? `${node.count ?? 1} 张`
+    : node.mode === "video" ? [node.durationSeconds && `${node.durationSeconds} 秒`, node.resolution].filter(Boolean).join(" · ")
+      : node.mode === "audio" ? (node.audioKind === "music" ? "音乐" : "配音") : "";
   return (
     <div className="board-config-body">
       <div className="board-config-row">
-        <span className="board-config-mode">
-          {node.mode === "video" ? "生视频" : node.mode === "text" ? "生文本" : node.mode === "audio" ? "生音频" : "生图"}
-        </span>
-        <span className="board-config-count">
-          {node.mode === "video"
-            ? [node.durationSeconds ? node.durationSeconds + " 秒" : "默认时长", node.resolution].filter(Boolean).join(" · ")
-            : node.mode === "text" ? "1 段"
-              : node.mode === "audio" ? (node.audioKind === "music" ? "通常 2 首" : "1 段")
-                : node.count + " 张"}
-        </span>
+        <span className="board-config-icon"><Icon size={17} /></span>
+        <div className="board-config-output">
+          <strong>{label}生成</strong>
+          {outputDetails && <span>{outputDetails}</span>}
+        </div>
         <StatusBadge status={node.status} />
       </div>
-      <p className="board-config-summary">{node.prompt.trim() || "选中节点，在下方填写生成配置"}</p>
-      {node.error ? <p className="board-config-error" title={node.error}>{node.error}</p> : null}
+      <div className="board-config-prompt-preview">
+        <span>{hasUpstreamText && !prompt ? "提示词来源" : "提示词"}</span>
+        <p className={`board-config-summary${!prompt ? " is-placeholder" : ""}`}>
+          {prompt || (hasUpstreamText ? "使用上游文本" : "待填写提示词")}
+        </p>
+      </div>
+      {node.error && <p className="board-config-error" title={node.error}>{node.error}</p>}
+      <div className="board-config-connections">
+        <span>输入 <strong>{connections?.inputs ?? 0}</strong></span>
+        <span>结果 <strong>{connections?.outputs ?? 0}</strong></span>
+        {prompt && hasUpstreamText && <span className="board-config-upstream">含上游文本</span>}
+      </div>
     </div>
   );
 }
@@ -338,8 +358,8 @@ function titleWithoutRole(title: string) {
 }
 
 export function BoardNodeView({
-  node, asset, editing, imageResults, primaryChoice, onImageLoad, onStartEdit, onCommitText, onCancelEdit,
-  onPreview, onSelect, onPickImage, onUploadMediaIntoNode, onRemoveAsset, onDelete, onCompareVersions, onExtractFrame,
+  node, asset, editing, configConnections, imageResults, primaryChoice, onImageLoad, onStartEdit, onCommitText, onCancelEdit,
+  onPreview, onSelect, onEditConfig, onPickImage, onUploadMediaIntoNode, onRemoveAsset, onDelete, onCompareVersions, onExtractFrame,
 }: BoardNodeViewProps) {
   const settingRole = settingRoleOf(node);
   const displayTitle = settingRole ? titleWithoutRole(node.title) : node.title;
@@ -352,12 +372,19 @@ export function BoardNodeView({
           <ImageIcon size={12} className="board-node-image-kind" aria-hidden="true" />
         ) : node.type === "video" ? (
           <Video size={12} className="board-node-image-kind" aria-hidden="true" />
+        ) : node.type === "config" ? (
+          <SlidersHorizontal size={13} className="board-node-image-kind" aria-hidden="true" />
         ) : (
           <span className={`board-node-kind is-${node.type}`}>
-            {node.type === "text" ? "文本" : node.type === "config" ? "配置" : "音频"}
+            {node.type === "text" ? "文本" : "音频"}
           </span>
         )}
         <strong className="board-node-title" title={node.title ? `${node.title} · ${node.ref}` : node.ref}>{displayTitle || node.ref}</strong>
+        {node.workflowSlot ? <span className="board-badge">{node.workflowSlot === "input" ? "输入" : "输出"}</span> : null}
+        {node.type === "config" && <button type="button" className="board-text-edit-button" title="编辑配置" aria-label="编辑配置"
+          onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); (onEditConfig ?? onSelect)(); }}>
+          <Pencil size={13} />
+        </button>}
         {node.type === "text" && !editing ? <button type="button" className="board-text-edit-button" title="编辑文本" aria-label="编辑文本" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onSelect(); onStartEdit(); }}><Pencil size={13} /></button> : null}
         {node.type === "image" || node.type === "video" || node.type === "audio"
           ? node.type === "video" && node.status === "empty" ? <span className="board-badge">待生成</span> : <StatusBadge status={node.status} />
@@ -414,13 +441,12 @@ export function BoardNodeView({
         />
       ) : null}
       {node.type === "config" ? (
-        <ConfigNodeView node={node} />
+        <ConfigNodeView node={node} connections={configConnections} />
       ) : null}
 
-      {node.type !== "image" && node.type !== "video" && <footer className="board-node-foot">
+      {(node.type === "text" || node.type === "audio") && <footer className="board-node-foot">
         <span>{node.ref}</span>
         {node.type === "text" ? <span>{node.text.length} 字</span> : null}
-        {node.type === "config" && node.useUpstreamText ? <span>含上游文本</span> : null}
       </footer>}
     </>
   );

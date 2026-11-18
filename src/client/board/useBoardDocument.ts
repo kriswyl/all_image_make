@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api";
 import { applyBoardDeltaToDoc, DEFAULT_BOARD_VIEWPORT, type BoardDelta, type BoardDoc, type BoardView, type BoardViewport } from "../../shared/board";
+import { mergeBoardEdits } from "./board-edit-merge";
 
 const SAVE_DEBOUNCE_MS = 400;
 const SELECTION_DEBOUNCE_MS = 250;
@@ -8,6 +9,7 @@ const VIEWPORT_DEBOUNCE_MS = 600;
 
 type Toast = (kind: "success" | "error", message: string) => void;
 type PendingBoardSave = { doc: BoardDoc; reason: string; boardId: string; baseVersion: number };
+type BoardSubmission = { base: BoardView; pending: PendingBoardSave | null };
 
 /** Owns the board snapshot, optimistic edits, and the versioned save queue. */
 export function useBoardDocument(boardId: string | null, onToast: Toast) {
@@ -15,6 +17,7 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
   const [loading, setLoading] = useState(Boolean(boardId));
   const [saving, setSaving] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const retryPendingRef = useRef(false);
   const retryFailuresRef = useRef(0);
   const retryToastAtRef = useRef(0);
@@ -27,6 +30,7 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
   const localRevisionRef = useRef(0);
   const savingRef = useRef(false);
   const pendingRef = useRef<PendingBoardSave | null>(null);
+  const submissionRef = useRef<BoardSubmission | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const reloadSeqRef = useRef(0);
   /** 服务端临时故障后的重试间隔；正常保存是 0 */
@@ -113,7 +117,11 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
     return () => {
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
       if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
-      if (viewportTimerRef.current) window.clearTimeout(viewportTimerRef.current);
+      if (viewportTimerRef.current) {
+        window.clearTimeout(viewportTimerRef.current);
+        viewportTimerRef.current = null;
+        if (boardId && viewRef.current?.id === boardId) void api.saveBoardViewport(boardId, viewportRef.current).catch(() => undefined);
+      }
       // 切到另一块板之前，把旧板最后 400ms 里的改动写掉
       void flushRef.current();
     };
@@ -124,7 +132,7 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
-    if (savingRef.current || !pendingRef.current) return;
+    if (savingRef.current || !pendingRef.current || submissionRef.current?.base.id === pendingRef.current.boardId) return;
     const pending = pendingRef.current;
     pendingRef.current = null;
     const revision = localRevisionRef.current;
@@ -235,6 +243,7 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
   /** 外部操作前等待在途保存结束；失败时保留本地改动，不允许后续操作覆盖它。 */
   const ensureSaved = useCallback(async (): Promise<boolean> => {
     const boardId = boardIdRef.current;
+    if (submissionRef.current?.base.id === boardId) return false;
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline && boardIdRef.current === boardId) {
       if (savingRef.current) {
@@ -263,11 +272,39 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
     const doc = mutator(current.doc);
     localRevisionRef.current += 1;
     pendingRef.current = { doc, reason, boardId: current.id, baseVersion: current.version };
+    if (submissionRef.current?.base.id === current.id) submissionRef.current.pending = pendingRef.current;
     const next = { ...current, doc, canUndo: true, canRedo: false };
     viewRef.current = next;
     setViewState(next);
     scheduleSave(immediate);
   }, [scheduleSave]);
+
+  const beginSubmission = useCallback(() => {
+    const base = viewRef.current;
+    if (!base || submissionRef.current || pendingRef.current || savingRef.current) return null;
+    const submission: BoardSubmission = { base, pending: null };
+    submissionRef.current = submission;
+    setSubmitting(true);
+    return (saved?: BoardView) => {
+      submissionRef.current = null;
+      setSubmitting(false);
+      const draft = submission.pending;
+      const doc = saved && draft ? mergeBoardEdits(base.doc, draft.doc, saved.doc) : draft?.doc;
+      if (viewRef.current?.id !== base.id || boardIdRef.current !== base.id) {
+        if (draft && doc) void api.saveBoard(base.id, { doc, baseVersion: saved?.version ?? draft.baseVersion, reason: draft.reason })
+          .catch((error) => toastRef.current("error", error instanceof Error ? error.message : "上一画布的改动未保存"));
+        return;
+      }
+      if (saved) {
+        const selected = new Set((doc ?? saved.doc).nodes.map(({ id }) => id));
+        setView({ ...saved, doc: doc ?? saved.doc, viewport: viewportRef.current, selection: selectionRef.current.filter((id) => selected.has(id)) });
+      }
+      if (draft && doc) {
+        pendingRef.current = { ...draft, doc, baseVersion: saved?.version ?? draft.baseVersion };
+        scheduleSave(true);
+      }
+    };
+  }, [scheduleSave, setView]);
 
   const updateLocalDocument = useCallback((mutator: (doc: BoardDoc) => BoardDoc) => {
     const current = viewRef.current;
@@ -304,6 +341,7 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
     if (!boardId) return;
     if (viewportTimerRef.current) window.clearTimeout(viewportTimerRef.current);
     viewportTimerRef.current = window.setTimeout(() => {
+      viewportTimerRef.current = null;
       void api.saveBoardViewport(boardId, next).catch(() => undefined);
     }, VIEWPORT_DEBOUNCE_MS);
   }, []);
@@ -324,9 +362,9 @@ export function useBoardDocument(boardId: string | null, onToast: Toast) {
   }, [flush]);
 
   return {
-    view, loading, saving, retrying, selection, viewport,
+    view, loading, saving, retrying, submitting, selection, viewport,
     viewRef, boardIdRef, selectionRef, toastRef,
     reload, applyDelta, setView, setSelection, setViewport,
-    applyLocal, updateLocalDocument, adoptSavedView, flush, ensureSaved,
+    applyLocal, updateLocalDocument, adoptSavedView, beginSubmission, flush, ensureSaved,
   };
 }

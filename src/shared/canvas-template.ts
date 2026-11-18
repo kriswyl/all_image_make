@@ -90,7 +90,7 @@ export interface CanvasTemplate {
   id: string;
   name: string;
   description: string;
-  source: "agent" | "storyboard" | "import";
+  source: "agent" | "storyboard" | "import" | "board";
   doc: BoardDoc;
   createdAt: string;
 }

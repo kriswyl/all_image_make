@@ -104,7 +104,7 @@ export function StoryboardPreview({ id, data, startIndex = 0, initialBoardId, on
       setExporting(true);
       setDraftNote("");
       const result = await api.exportStoryboardDraft(id, { boardId: board.id, targetDir, name: `${data.name}-成片` });
-      setDraftNote(`已导出 ${result.clips} 个镜头${result.skipped ? `，跳过 ${result.skipped} 个没有画面的镜头` : ""}：${result.path}`);
+      setDraftNote(`已导出 ${result.clips} 个镜头${result.skipped ? `，跳过 ${result.skipped} 个没有画面的镜头` : ""}${result.subtitlesPath ? "，已附字幕文件" : ""}：${result.path}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "导出剪映草稿失败");
     } finally {

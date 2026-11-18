@@ -9,16 +9,19 @@ import { AppError, type TaskRunner } from "../tasks.js";
 import { claimBoardFrame, completeBoardFrame } from "../board-frame-broker.js";
 import { addAssetsToBoard, createBoard, deleteBoard, getBoard, importBoard, listBoardAssets, listBoardHistory, listBoards, linkBoardAsset, redoBoard, removeBoardAsset, renameBoard, restoreBoardVersion, saveBoard, saveBoardSelection, saveBoardUiState, saveBoardViewport, storeBoardUpload, undoBoard } from "../board.js";
 import { cancelBoardTask, generateBoardConfig, retryBoardTask } from "../board-generation.js";
-import { cleanupMigratedStoryboards, createBoardFromTemplate, importTemplateIntoBoard, migrateAllStoryboards } from "../canvas-template.js";
+import { cleanupMigratedStoryboards, createBoardFromTemplate, importTemplateIntoBoard, migrateAllStoryboards, saveBoardSelectionTemplate } from "../canvas-template.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
 import type { Express } from "express";
 import { registerStoryboardRoutes } from "./storyboards.js";
+import { exportBoardPackage, importBoardPackage, MAX_BOARD_PACKAGE_BYTES } from "../board-package.js";
+import { buildCapabilityAliases } from "../capabilities.js";
 
 /** 画布素材包括本地视频和音频；图片按 20 MB 限制。 */
 const boardUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 0 },
 });
+const packageUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BOARD_PACKAGE_BYTES, files: 1, fields: 0 } });
 
 const boardCreateSchema = z.object({
   title: z.string().trim().max(80).optional(),
@@ -51,13 +54,16 @@ const boardBridgeSchema = z.object({
   })).min(1).max(50),
 });
 
+const templateValuesSchema = z.record(z.string().min(1).max(80), z.object({ text: z.string().max(20000).optional(), assetId: z.string().min(1).max(80).optional() }));
 const templateImportSchema = z.object({
   templateId: z.string().trim().min(1).max(80),
   title: z.string().trim().max(80).optional(),
+  values: templateValuesSchema.optional(),
 });
 
 const boardTemplateSchema = z.object({
   templateId: z.string().trim().min(1).max(80),
+  values: templateValuesSchema.optional(),
 });
 
 const templateUpdateSchema = z.object({
@@ -83,6 +89,7 @@ const boardViewportSchema = z.object({
 
 const boardGenerateSchema = z.object({
   nodeId: z.string().trim().min(1).max(80),
+  expectedChannelId: z.string().min(1).max(80).optional(),
   overrides: z.object({
     prompt: z.string().max(20000).optional(),
     model: z.string().trim().max(80).optional(),
@@ -129,6 +136,16 @@ export function registerCanvasRoutes(app: Express, db: AppDatabase, runner: Task
     const input = boardImportSchema.parse(req.body ?? {});
     res.status(201).json(ok(importBoard(db, { file: input.file })));
   });
+
+  app.post("/api/boards/import-package", packageUpload.single("file"), asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("UPLOAD_EMPTY", "没有收到画布工程包", 400);
+    res.status(201).json(ok(await importBoardPackage(db, req.file.buffer)));
+  }));
+
+  app.get("/api/boards/:id/package", asyncHandler(async (req, res) => {
+    const bytes = await exportBoardPackage(db, routeParam(req.params.id));
+    res.type("application/zip").send(bytes);
+  }));
 
   registerStoryboardRoutes(app, db, sessionKeys);
 
@@ -206,12 +223,20 @@ export function registerCanvasRoutes(app: Express, db: AppDatabase, runner: Task
 
   app.post("/api/boards/from-template", (req, res) => {
     const input = templateImportSchema.parse(req.body ?? {});
-    res.status(201).json(ok(createBoardFromTemplate(db, input.templateId, input.title)));
+    res.status(201).json(ok(createBoardFromTemplate(db, input.templateId, input.title, input.values)));
   });
 
   app.post("/api/boards/:id/templates", (req, res) => {
     const input = boardTemplateSchema.parse(req.body ?? {});
-    res.json(ok(importTemplateIntoBoard(db, routeParam(req.params.id), input.templateId)));
+    res.json(ok(importTemplateIntoBoard(db, routeParam(req.params.id), input.templateId, input.values)));
+  });
+
+  app.post("/api/boards/:id/save-template", (req, res) => {
+    const nodeIds = z.array(z.string().min(1).max(80)).max(200);
+    const input = z.object({ name: z.string().trim().min(1).max(80), nodeIds: nodeIds.min(1), inputIds: nodeIds, outputIds: nodeIds }).parse(req.body);
+    const board = db.getBoardRecord(routeParam(req.params.id));
+    if (!board) throw new AppError("BOARD_NOT_FOUND", "画布不存在", 404);
+    res.status(201).json(ok(saveBoardSelectionTemplate(db, board, input)));
   });
 
   app.get("/api/boards/:id", (req, res) => {
@@ -310,15 +335,30 @@ export function registerCanvasRoutes(app: Express, db: AppDatabase, runner: Task
 
   app.post("/api/boards/:id/generate", asyncHandler(async (req, res) => {
     const input = boardGenerateSchema.parse(req.body ?? {});
+    const id = routeParam(req.params.id);
+    if (input.expectedChannelId) {
+      const node = db.getBoardRecord(id)?.doc.nodes.find(({ id }) => id === input.nodeId);
+      const kind = node?.type === "config" ? node.mode : node?.type;
+      const alias = buildCapabilityAliases(db.listChannels()).find((entry) => entry.alias === input.overrides?.model
+        && entry.channelId === input.expectedChannelId && entry.kind === kind);
+      const adapter = node && "audioKind" in node && node.audioKind === "music" ? "suno-music" : "gemini-tts";
+      if (!alias || (kind === "audio" && alias.adapterType !== adapter)) throw new AppError("BOARD_PLANNED_CHANNEL_CHANGED", "计划中的模型或渠道已变更，请检查后重建计划", 409);
+    }
     res.status(202).json(ok(await generateBoardConfig({
       db,
       runner,
       keys: sessionKeys,
-      boardId: routeParam(req.params.id),
+      boardId: id,
       nodeId: input.nodeId,
       ...(input.overrides ? { overrides: input.overrides } : {}),
     })));
   }));
+
+  app.get("/api/boards/:id/tasks", (req, res) => {
+    const boardId = routeParam(req.params.id);
+    if (!db.getBoardRecord(boardId)) return res.status(404).json(fail("BOARD_NOT_FOUND", "画布不存在"));
+    res.json(ok(db.listBoardTaskSummaries(boardId)));
+  });
 
   app.post("/api/boards/:id/tasks/:taskId/cancel", (req, res) => {
     res.json(ok(cancelBoardTask(db, runner, routeParam(req.params.id), routeParam(req.params.taskId))));

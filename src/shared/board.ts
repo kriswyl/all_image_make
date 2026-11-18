@@ -134,6 +134,7 @@ const baseNodeShape = {
   width: z.number().finite().min(BOARD_LIMITS.minNodeWidth).max(BOARD_LIMITS.maxNodeWidth),
   height: z.number().finite().min(BOARD_LIMITS.minNodeHeight).max(BOARD_LIMITS.maxNodeHeight),
   title: titleSchema,
+  workflowSlot: z.enum(["input", "output"]).optional(),
   storyboard: z.object({ projectId: nodeIdSchema, shotId: nodeIdSchema, role: z.enum(["text", "image", "video", "audio"]) }).optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
@@ -305,6 +306,16 @@ export interface BoardViewport {
   x: number;
   y: number;
   scale: number;
+}
+
+export interface BoardTaskSummary {
+  id: string;
+  nodeIds: string[];
+  sourceNodeId: string;
+  model: string;
+  status: import("./types.js").TaskStatus;
+  createdAt: string;
+  errorMessage: string | null;
 }
 
 export const DEFAULT_BOARD_VIEWPORT: BoardViewport = { x: 0, y: 0, scale: 1 };

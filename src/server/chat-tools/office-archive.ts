@@ -12,21 +12,26 @@ function entryData(file: ArchiveEntry) {
 
 /** Check the ZIP directory before inflating any Office parts. */
 export async function openOfficeArchive(bytes: Buffer, mainPart: string, label: string) {
+  const zip = await openBoundedArchive(bytes, mainPart, label, { part: 32 * 1024 * 1024, total: 96 * 1024 * 1024, count: 2_000 });
+  if (Object.values(zip.files).some((file) => /\/vbaProject\.bin$/i.test(file.name))) throw new Error(`含宏的 ${label} 文件请先另存为无宏版本`);
+  return zip;
+}
+
+export async function openBoundedArchive(bytes: Buffer, mainPart: string, label: string, limits: { part: number; total: number; count: number }) {
   let zip: JSZip;
   try { zip = await JSZip.loadAsync(bytes); }
   catch { throw new Error(`无法读取 ${label} 文件，文件可能已损坏或加密`); }
   if (!zip.file(mainPart)) throw new Error(`文件不是有效的 ${label} 文档`);
   const files = Object.values(zip.files).filter(entry => !entry.dir);
   let total = 0;
-  if (files.length > 2_000) throw new Error(`${label} 文件包含过多组件，请拆分后重试`);
+  if (files.length > limits.count) throw new Error(`${label} 文件包含过多组件，请拆分后重试`);
   for (const file of files) {
     // Loaded empty entries become a resolved Promise. Other entries retain compressed data and a declared size.
     const data = entryData(file);
     const size = data instanceof Promise ? 0 : data?.uncompressedSize;
-    if (size === undefined || !Number.isSafeInteger(size) || size < 0 || size > 32 * 1024 * 1024) throw new Error(`${label} 文件组件过大或已损坏`);
+    if (size === undefined || !Number.isSafeInteger(size) || size < 0 || size > limits.part) throw new Error(`${label} 文件组件过大或已损坏`);
     total += size;
-    if (total > 96 * 1024 * 1024) throw new Error(`${label} 文件解压后过大，请拆分后重试`);
-    if (/\/vbaProject\.bin$/i.test(file.name)) throw new Error(`含宏的 ${label} 文件请先另存为无宏版本`);
+    if (total > limits.total) throw new Error(`${label} 文件解压后过大，请拆分后重试`);
   }
   return zip;
 }

@@ -15,7 +15,18 @@ export function fitBoardImageSize(bounds: ImageDimensions, image: ImageDimension
   return { width: image.width * scale, height: image.height * scale };
 }
 
-export function edgePath(source: BoardNode, target: BoardNode): string {
+type BoardRect = Pick<BoardNode, "x" | "y" | "width" | "height">;
+
+export function boardFitViewport(bounds: BoardRect | null, size: { width: number; height: number }, fallback?: BoardRect) {
+  if (!bounds) return { x: 80, y: 80, scale: 1 };
+  const scale = Math.min(1.05, size.width / (bounds.width + 120), size.height / (bounds.height + 120));
+  if (scale < MIN_SCALE && fallback && fallback !== bounds) return boardFitViewport(fallback, size);
+  const fitted = clampScale(scale);
+  return { scale: fitted, x: (size.width - bounds.width * fitted) / 2 - bounds.x * fitted,
+    y: (size.height - bounds.height * fitted) / 2 - bounds.y * fitted };
+}
+
+export function edgePath(source: BoardRect, target: BoardRect): string {
   const sx = source.x + source.width;
   const sy = source.y + source.height / 2;
   const tx = target.x;

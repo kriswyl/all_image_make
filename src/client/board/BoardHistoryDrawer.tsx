@@ -30,7 +30,7 @@ export function BoardHistoryDrawer({
       const result = await api.boardHistory(boardId);
       if (request === requestRef.current) setHistoryEntries(result.entries);
     } catch (error) {
-      if (request === requestRef.current) toastRef.current("error", error instanceof Error ? error.message : "创作历史加载失败");
+      if (request === requestRef.current) toastRef.current("error", error instanceof Error ? error.message : "画布版本加载失败");
     } finally {
       if (request === requestRef.current) setHistoryLoading(false);
     }
@@ -58,13 +58,13 @@ export function BoardHistoryDrawer({
 
   if (!open) return null;
   return (
-    <aside className="board-asset-drawer board-history-drawer" aria-label="创作历史">
+    <aside className="board-asset-drawer board-history-drawer" aria-label="画布版本">
       <header className="board-asset-head">
         <div>
-          <strong>创作历史</strong>
+          <strong>画布版本</strong>
           <span>{historyEntries.length} 个版本 · 最多保留 50 个</span>
         </div>
-        <button type="button" className="icon-button compact" aria-label="关闭创作历史" onClick={onClose}>
+        <button type="button" className="icon-button compact" aria-label="关闭画布版本" onClick={onClose}>
           <X size={14} />
         </button>
       </header>

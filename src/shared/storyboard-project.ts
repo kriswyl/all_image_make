@@ -2,6 +2,9 @@ import { z } from "zod";
 
 const variant = z.object({ id: z.string().min(1).max(80), name: z.string().trim().min(1).max(40).refine((name) => !/[、,，]/.test(name), "版本名称不能包含逗号或顿号"), prompt: z.string().max(1000).default(""), assetId: z.string().max(80).nullable().default(null) });
 const setting = z.object({ name: z.string().trim().min(1).max(80), prompt: z.string().max(1000).default(""), assetId: z.string().max(80).nullable().default(null), variants: z.array(variant).max(12).default([]) });
+const deliveryAsset = z.object({ assetId: z.string().min(1).max(80), boardId: z.string().min(1).max(80), nodeId: z.string().min(1).max(80) });
+export const storyboardMediaRoleSchema = z.enum(["image", "video", "audio"]);
+export type StoryboardMediaRole = z.infer<typeof storyboardMediaRoleSchema>;
 export const storyboardShotSchema = z.object({
   id: z.string().min(1).max(80),
   prompt: z.string().trim().min(1).max(2000),
@@ -21,6 +24,7 @@ export const storyboardShotSchema = z.object({
   soundEffect: z.string().max(500).default(""),
   finalImagePrompt: z.string().max(5000).default(""),
   finalVideoPrompt: z.string().max(5000).default(""),
+  delivery: z.object({ image: deliveryAsset.optional(), video: deliveryAsset.optional(), audio: deliveryAsset.optional() }).optional(),
 });
 export const storyboardProjectDataSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -42,6 +46,22 @@ export type StoryboardProjectData = z.infer<typeof storyboardProjectDataSchema>;
 export type StoryboardProject = { id: string; revision: number; data: StoryboardProjectData };
 
 export type StoryboardPreviewBoard = { id: string; title: string; shots: Array<{ shotId: string; image: import("./types.js").Asset | null; video: import("./types.js").Asset | null; audio: import("./types.js").Asset | null }> };
+
+export interface StoryboardProduction {
+  id: string;
+  name: string;
+  revision: number;
+  boards: Array<{ id: string; title: string }>;
+  shots: Array<{
+    id: string;
+    scene: string;
+    title: string;
+    duration: number;
+    references: Array<{ title: string; nodeId: string; expected: boolean; outdated: boolean }>;
+    nodes: Array<{ id: string; title: string; role: StoryboardMediaRole; assetId: string | null; status: import("./board.js").BoardNodeStatus; pinned: boolean }>;
+    delivery?: StoryboardProjectData["shots"][number]["delivery"];
+  }>;
+}
 
 /** Deterministic prompt assembly; generated text remains editable by the user. */
 export function assembleStoryboardPrompt(shot: Pick<StoryboardProjectData["shots"][number], "prompt" | "videoPrompt" | "shotSize" | "cameraMove">, kind: "image" | "video"): string {

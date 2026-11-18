@@ -5,12 +5,12 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useRef, useState } from "react";
 import {
-  ArrowUp, AtSign, AudioLines, Box, ChevronDown, FileText, Image as ImageIcon,
-  FolderOpen, Maximize2, Minimize2, Plus, RefreshCw, Send, SlidersHorizontal, Square, Trash2, Upload, Video, X,
+  Activity, ArrowUp, AtSign, AudioLines, Box, ChevronDown, FileText, Image as ImageIcon,
+  FolderOpen, Maximize2, Minimize2, MoreHorizontal, Plus, RefreshCw, Send, SlidersHorizontal, Square, Trash2, Upload, Video, X,
 } from "lucide-react";
 import {
   BOARD_LIMITS, composeConfigPrompt, directInputLinks, directUpstreamImages, directUpstreamText,
-  type BoardAudioKind, type BoardEdgeRole, type BoardNode, type BoardView,
+  type BoardAudioKind, type BoardEdgeRole, type BoardNode, type BoardView, type ConfigBoardNode,
 } from "../../shared/board";
 import { TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts";
 import {
@@ -29,6 +29,7 @@ import { StylePresetPicker } from "../chat/StylePresetPicker";
 import type { StylePreset } from "../../shared/style-presets";
 import { api } from "../api";
 import { BoardComposerPopover } from "./BoardComposerPopover";
+import { BOARD_CONFIG_MODES } from "./board-config-modes";
 import { BoardVideoReferences, type VideoReference } from "./BoardVideoReferences";
 import { resolveBoardVideoSelection } from "../../shared/board-video-selection";
 import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec, videoRatioIsAdaptive } from "../../shared/video-modes";
@@ -63,14 +64,15 @@ const VIDEO_MODE_OPTIONS = [
 ] as const;
 
 export function BoardInspector({
-  view, node, assets, imageAliases, defaultImageAlias, videoAliases, defaultVideoAlias,
+  view, node, assets, imageAliases, defaultImageAlias, videoAliases, defaultVideoAlias, submitting = false,
   audioAliases, defaultSpeechAlias, defaultMusicAlias,
   onUpdateNode, onUpdateEdge, onDeleteNode, onPreview, onPickImage, onRemoveAsset,
-  onGenerate, onStopTask, onRetryTask, onExtractFrame, onCompareVersions, onClose,
+  onGenerate, onStopTask, onRetryTask, onExtractFrame, onCompareVersions, onClose, onDiagnostic, onNextShot, onBranch,
   onApplyStyle, onConnectReference, onUploadMediaIntoNode, onLocateReference, onRemoveReference, onPickReference,
 }: {
   view: BoardView;
   node: BoardNode;
+  submitting?: boolean;
   assets: Map<string, Asset>;
   imageAliases: BoardImageAlias[];
   defaultImageAlias: string;
@@ -90,6 +92,9 @@ export function BoardInspector({
   onRetryTask: (taskId: string) => void;
   onExtractFrame: (nodeId: string) => void;
   onCompareVersions: (nodeId: string) => void;
+  onDiagnostic?: (taskId: string) => void;
+  onNextShot?: (nodeId: string) => void;
+  onBranch?: (nodeId: string) => void;
   /** 套用风格模板；nodeIds 不传 = 整块画布。只用到 id 和 prompt 两个字段 */
   onApplyStyle: (preset: Pick<StylePreset, "id" | "prompt"> | null, nodeIds?: string[]) => void;
   onClose: () => void;
@@ -99,7 +104,7 @@ export function BoardInspector({
   onRemoveReference: (edgeId: string) => void;
   onPickReference: (nodeId: string) => void;
 }) {
-  const [section, setSection] = useState<"assets" | "references" | "style" | "parameters" | "video-mode" | null>(null);
+  const [section, setSection] = useState<"assets" | "references" | "style" | "parameters" | "video-mode" | "node" | null>(null);
   const [expanded, setExpanded] = useState(false);
   const assetTriggerRef = useRef<HTMLButtonElement>(null);
   const referenceTriggerRef = useRef<HTMLButtonElement>(null);
@@ -111,6 +116,7 @@ export function BoardInspector({
   const videoModeTriggerRef = useRef<HTMLButtonElement>(null);
   const styleTriggerRef = useRef<HTMLButtonElement>(null);
   const parameterTriggerRef = useRef<HTMLButtonElement>(null);
+  const nodeTriggerRef = useRef<HTMLButtonElement>(null);
   const closeSection = useCallback(() => setSection(null), []);
   const toggleSection = (next: NonNullable<typeof section>) => setSection((current) => current === next ? null : next);
   const toggleVideoReferences = (trigger: HTMLButtonElement) => {
@@ -185,7 +191,10 @@ export function BoardInspector({
   const videoSelection = isGenerator && isVideo && effectiveAliasInfo
     ? resolveBoardVideoSelection({ doc: view.doc, config: node, adapterType: effectiveAliasInfo.adapterType, model: effectiveAliasInfo.model, localVideoUploadConfigured: effectiveAliasInfo.localVideoUploadConfigured })
     : undefined;
-  const referenceError = imageReferenceError ?? videoSelection?.error;
+  const unsupportedConfigInputs = isConfig && (isText || isAudio) && upstreamLinks.some(({ node: source }) =>
+    isText ? source.type === "image" || source.type === "video" : source.type !== "text");
+  const referenceError = unsupportedConfigInputs ? "请从上方移除当前生成类型不支持的媒体引用。" : imageReferenceError ?? videoSelection?.error;
+  const showImageReferenceCount = isImage && effectiveAliasInfo && upstreamImages.length > 0;
   const activeVideoMode = videoSelection?.selection?.mode ?? (isGenerator ? node.videoMode : undefined);
   const modeLabel = activeVideoMode === "motion-control" ? "运动控制"
     : activeVideoMode ? videoModeLabel(activeVideoMode, effectiveAliasInfo?.adapterType) : "自动识别";
@@ -200,13 +209,14 @@ export function BoardInspector({
     `${node.durationSeconds ?? videoDefaults.duration} 秒`,
     ...(videoCapability?.supportsAudio ? [(node.audio ?? videoDefaults.audio) ? "有声" : "无声"] : []),
   ] : [];
-  const mediaReferences: VideoReference[] = usesMediaReferences ? upstreamLinks.map((link) => {
+  const mediaReferences: VideoReference[] = upstreamLinks.map((link) => {
     const source = link.node;
     const asset = "assetId" in source && source.assetId ? assets.get(source.assetId) : undefined;
     if (source.type === "text") {
       const enabled = isGenerator && node.useUpstreamText !== false && Boolean(source.text.trim());
       return { link, label: enabled ? "文本提示" : "未参与生成", warning: !enabled };
     }
+    if (!isVideo && !(isImage && source.type === "image")) return { link, asset, label: "当前类型不使用", warning: true };
     if (!("assetId" in source) || !source.assetId) return { link, label: "未就绪", warning: true };
     if (isImage) return { link, asset, label: "参考图" };
     if (videoSelection?.error) return { link, asset, label: "检查引用", warning: true };
@@ -215,7 +225,7 @@ export function BoardInspector({
     const label = role === "first_frame" ? "首帧" : role === "last_frame" ? "尾帧"
       : source.type === "image" ? "参考图" : source.type === "video" ? "参考视频" : "参考音频";
     return { link, asset, label };
-  }) : [];
+  });
   const mentionItems = mediaReferences.flatMap(({ link, asset, warning }): MentionItem[] => {
     const label = boardMentionLabel(link.node);
     if (!label || !asset || warning) return [];
@@ -257,14 +267,57 @@ export function BoardInspector({
     : !isConfig && node.assetId ? "重新生成" : isVideo ? "生成视频" : isText ? "生成文本"
       : isAudio ? (audioKind === "music" ? "生成音乐" : "生成配音") : "生成图片";
 
+  const changeConfigMode = (nextMode: ConfigBoardNode["mode"]) => {
+    if (!isConfig || nextMode === node.mode || submitting || node.status === "loading") return;
+    closeSection();
+    closeMentions();
+    referenceAnchor.current = null;
+    // 模型别名和以下参数属于当前生成类型，切换时重新使用新类型的默认值。
+    onUpdateNode(node.id, {
+      mode: nextMode,
+      model: undefined,
+      channelId: undefined,
+      size: undefined,
+      imageSize: undefined,
+      quality: undefined,
+      videoMode: undefined,
+      durationSeconds: undefined,
+      resolution: undefined,
+      audio: undefined,
+      audioKind: "speech",
+      voice: undefined,
+      ttsStyle: undefined,
+      instrumental: undefined,
+      lastTaskId: undefined,
+      imageBatchResultIds: undefined,
+      status: "idle",
+      error: undefined,
+    });
+  };
+
   return (
-    <aside className={`board-inspector${isGenerator ? " board-composer" : ""}${isVideo ? " vstudio-composer board-video-composer" : ""}${expanded ? " is-expanded" : ""}`} aria-label={isGenerator ? "生成配置" : "节点设置"}>
+    <aside className={`board-inspector${isGenerator ? " board-composer" : ""}${isConfig ? " board-config-composer" : ""}${isVideo ? " vstudio-composer board-video-composer" : ""}${expanded ? " is-expanded" : ""}`} aria-label={isGenerator ? "生成配置" : "节点设置"}>
       {!isGenerator && <header className="board-inspector-head">
         <div>
           <strong>文本设置</strong>
         </div>
         <button type="button" className="icon-button compact" aria-label="关闭节点设置" onClick={onClose}>
           <X size={14} />
+        </button>
+      </header>}
+      {isConfig && <header className="board-config-composer-head">
+        <div className="board-config-mode-switch" role="group" aria-label="生成类型">
+          {(Object.keys(BOARD_CONFIG_MODES) as ConfigBoardNode["mode"][]).map((kind) => {
+            const { label, icon: Icon } = BOARD_CONFIG_MODES[kind];
+            return <button key={kind} type="button" aria-pressed={kind === node.mode}
+              disabled={submitting || node.status === "loading"} onClick={() => changeConfigMode(kind)}>
+              <Icon size={14} />{label}
+            </button>;
+          })}
+        </div>
+        <button ref={nodeTriggerRef} type="button" className="board-composer-tool board-config-node-settings"
+          aria-label="配置节点设置" title="配置节点设置" aria-expanded={section === "node"} onClick={() => toggleSection("node")}>
+          <MoreHorizontal size={18} />
         </button>
       </header>}
 
@@ -274,35 +327,28 @@ export function BoardInspector({
             <section className="board-composer-editor">
               <div className="board-composer-reference-row">
                 <div className="board-composer-reference-list">
-                  {usesMediaReferences ? <>
-                    {isVideo && <button ref={referenceTriggerRef} type="button" className="vstudio-slot board-video-add-reference"
-                      aria-expanded={section === "references" && referenceAnchor.current === referenceTriggerRef.current}
-                      onClick={(event) => toggleVideoReferences(event.currentTarget)}>
-                      <Plus size={16} /><span>参考内容</span>
-                    </button>}
-                    <BoardVideoReferences entries={mediaReferences} onPreview={onPreview} onLocate={onLocateReference}
-                      onRemove={({ edge, node: source }) => {
-                        const prompt = removeBoardMention(node.prompt ?? "", source);
-                        if (prompt !== (node.prompt ?? "")) onUpdateNode(node.id, { prompt });
-                        onRemoveReference(edge.id);
-                      }}
-                      onChangeRole={isVideo ? (edgeId, role) => onUpdateEdge(edgeId, { role }) : undefined}
-                      onOpen={() => { closeSection(); closeMentions(); }} />
-                  </> : upstreamLinks.map(({ node: source }) => {
-                    const media = "assetId" in source && source.assetId ? assets.get(source.assetId) : undefined;
-                    const Icon = source.type === "text" ? FileText : source.type === "video" ? Video : source.type === "audio" ? AudioLines : ImageIcon;
-                    return (
-                      <button key={source.id} type="button" className="board-composer-reference"
-                        title={source.title || source.ref} aria-label={`查看引用 ${source.title || source.ref}`}
-                        onClick={() => toggleSection("references")}>
-                        {source.type === "image" && media
-                          ? <img src={api.assetUrl(media.thumbUrl ?? media.url)} alt="" />
-                          : <Icon size={18} />}
-                        <span>{source.title || (source.type === "text" ? "文本" : source.ref)}</span>
-                      </button>
-                    );
-                  })}
+                  {isVideo && <button ref={referenceTriggerRef} type="button" className="vstudio-slot board-video-add-reference"
+                    aria-expanded={section === "references" && referenceAnchor.current === referenceTriggerRef.current}
+                    onClick={(event) => toggleVideoReferences(event.currentTarget)}>
+                    <Plus size={16} /><span>参考内容</span>
+                  </button>}
+                  <BoardVideoReferences entries={mediaReferences} onPreview={onPreview} onLocate={onLocateReference}
+                    onRemove={({ edge, node: source }) => {
+                      const prompt = removeBoardMention(node.prompt ?? "", source);
+                      if (prompt !== (node.prompt ?? "")) onUpdateNode(node.id, { prompt });
+                      onRemoveReference(edge.id);
+                    }}
+                    onChangeRole={isVideo ? (edgeId, role) => onUpdateEdge(edgeId, { role }) : undefined}
+                    onOpen={() => { closeSection(); closeMentions(); }} />
                 </div>
+                {showImageReferenceCount && (
+                  <span className={`board-image-reference-quota${imageReferenceError ? " is-warn" : ""}`}
+                    title={imageReferencePolicy.source === "default" ? "应用默认参考图上限" : "当前模型的参考图上限"}
+                    aria-label={`已引用 ${upstreamImages.length} 张参考图，上限 ${imageReferencePolicy.max} 张`}>
+                    <ImageIcon size={12} aria-hidden="true" />
+                    <span>{upstreamImages.length}<span className="board-image-reference-quota-separator">/</span>{imageReferencePolicy.max}</span>
+                  </span>
+                )}
               </div>
               <div className={isVideo ? "board-video-prompt-area vstudio-prompt" : "board-prompt-area"}>
               {usesMediaReferences ? <div className="board-reference-prompt">
@@ -356,9 +402,25 @@ export function BoardInspector({
                 </button>}
               </div>
             </BoardComposerPopover>}
-            {section === "references" && <BoardComposerPopover anchor={node.type === "image" ? assetTriggerRef.current : referenceAnchor.current ?? referenceTriggerRef.current} label={isVideo ? "添加引用" : "画布引用"} onClose={closeSection}>
+            {section === "node" && isConfig && <BoardComposerPopover anchor={nodeTriggerRef.current} label="配置节点设置" width={252} onClose={closeSection}>
               <div className="board-inspector-more-body">
-                {isVideo && <div className="board-inspector-actions">
+                <label className="board-field">
+                  <span>节点名称</span>
+                  <input value={node.title} maxLength={80} onChange={(event) => onUpdateNode(node.id, { title: event.target.value })} placeholder="配置节点" />
+                </label>
+                <label className="board-config-check">
+                  <input type="checkbox" checked={node.useUpstreamText !== false}
+                    onChange={(event) => onUpdateNode(node.id, { useUpstreamText: event.target.checked })} />
+                  拼接上游文本
+                </label>
+                <button type="button" className="secondary-button compact is-danger" onClick={() => onDeleteNode(node.id)}>
+                  <Trash2 size={12} />删除节点
+                </button>
+              </div>
+            </BoardComposerPopover>}
+            {section === "references" && <BoardComposerPopover anchor={node.type === "image" ? assetTriggerRef.current : referenceAnchor.current ?? referenceTriggerRef.current} label={isVideo || isConfig ? "添加输入" : "画布引用"} onClose={closeSection}>
+              <div className="board-inspector-more-body">
+                {(isVideo || (isConfig && isImage)) && <div className="board-inspector-actions">
                   <button type="button" className="secondary-button compact" onClick={() => { closeSection(); onPickReference(node.id); }}>
                     <FolderOpen size={14} />本地上传或资源库
                   </button>
@@ -391,6 +453,8 @@ export function BoardInspector({
                         <button type="button" className="secondary-button compact" onClick={() => onPreview(asset)}>预览</button>
                       ) : null}
                       {asset && node.type === "video" ? <button type="button" className="secondary-button compact" onClick={() => onExtractFrame(node.id)}>提取尾帧</button> : null}
+                      {asset && node.type === "video" && onNextShot ? <button type="button" className="secondary-button compact" onClick={() => onNextShot(node.id)}>用尾帧创建下一镜</button> : null}
+                      {asset && node.type === "image" && onBranch ? <button type="button" className="secondary-button compact" onClick={() => onBranch(node.id)}>从此结果建分支</button> : null}
                       {asset ? <button type="button" className="secondary-button compact" onClick={() => onCompareVersions(node.id)}>版本对比</button> : null}
                       <button type="button" className="secondary-button compact" onClick={() => onPickImage(node.id)}>
                         <Upload size={12} />{asset ? "替换素材" : "选择素材"}
@@ -405,7 +469,7 @@ export function BoardInspector({
                   </section>
                 ) : null}
 
-                {!isVideo && <section className="board-inspector-section">
+                {!isConfig && !isVideo && <section className="board-inspector-section">
                   <div className="board-inspector-label">
                     <span>上游</span>
                     <em>
@@ -429,7 +493,7 @@ export function BoardInspector({
                     ) : null}
                   </div>
                 </section>}
-                <label className="board-config-check">
+                {!isConfig && <><label className="board-config-check">
                   <input
                     type="checkbox"
                     checked={node.useUpstreamText !== false}
@@ -453,7 +517,7 @@ export function BoardInspector({
 
                 {node.type !== "video" && <button type="button" className="secondary-button compact is-danger" onClick={() => onDeleteNode(node.id)}>
                   <Trash2 size={12} />删除节点
-                </button>}
+                </button>}</>}
               </div>
             </BoardComposerPopover>}
             {section === "style" && isImage && <BoardComposerPopover anchor={styleTriggerRef.current} label="风格" width={320} onClose={closeSection}>
@@ -928,46 +992,7 @@ export function BoardInspector({
                   )}
                 </section>
 
-                <section className={`board-inspector-section ${isVideo || isText ? "" : "board-inspector-grid"}`}>
-                  {isConfig ? (
-                    <label className="board-field">
-                      <span>模式</span>
-                      <select
-                        value={node.mode}
-                        disabled={node.status === "loading"}
-                        title={node.status === "loading" ? "生成中不能切换模式" : undefined}
-                        onChange={(event) => {
-                          const nextMode = event.target.value as "image" | "video";
-                          onUpdateNode(node.id, {
-                            mode: nextMode,
-                            // 生图 / 视频模型不通用，切模式时清掉另一方参数
-                            model: undefined,
-                            channelId: undefined,
-                            size: undefined,
-                            imageSize: undefined,
-                            quality: undefined,
-                            videoMode: undefined,
-                            durationSeconds: undefined,
-                            resolution: undefined,
-                            audio: undefined,
-                            audioKind: "speech",
-                            voice: undefined,
-                            ttsStyle: undefined,
-                            instrumental: undefined,
-                            lastTaskId: undefined,
-                            imageBatchResultIds: undefined,
-                            status: "idle",
-                            error: undefined,
-                          } as Partial<BoardNode>);
-                        }}
-                      >
-                        <option value="image">生图</option>
-                        <option value="video">生视频</option>
-                        <option value="text">生文本</option>
-                        <option value="audio">生音频</option>
-                      </select>
-                    </label>
-                  ) : (
+                {!isConfig && <section className={`board-inspector-section ${isVideo || isText ? "" : "board-inspector-grid"}`}>
                     <label className="board-field">
                       <span>类型</span>
                       <input
@@ -975,8 +1000,7 @@ export function BoardInspector({
                         readOnly
                       />
                     </label>
-                  )}
-                </section>
+                </section>}
               </div>
             </BoardComposerPopover>}
           </>
@@ -1019,9 +1043,6 @@ export function BoardInspector({
         {isGenerator ? (
           <>
             {referenceError || node.error ? <p className="board-config-error" title={referenceError ?? node.error}>{referenceError ?? node.error}</p> : null}
-            {isImage && effectiveAliasInfo && <span className="board-inspector-label">
-              {imageReferencePolicy.source === "default" ? "参考图（应用默认）" : "参考图"} {upstreamImages.length}/{imageReferencePolicy.max}
-            </span>}
             <div className={`board-inspector-actions board-inspector-generate-actions${isVideo ? " vstudio-footer" : ""}`}>
               {!isConfig && !isVideo && <button ref={assetTriggerRef} type="button" className="board-composer-tool" aria-expanded={section === "assets" || (node.type === "image" && section === "references")} disabled={node.status === "loading"} onClick={() => {
                 if (node.type === "image" && section === "references") closeSection();
@@ -1029,7 +1050,11 @@ export function BoardInspector({
               }}>
                 <Plus size={16} /><span>素材</span>
               </button>}
-              {!isVideo && node.type !== "image" && <button ref={referenceTriggerRef} type="button" className="board-composer-tool" title="画布引用与节点操作" aria-label="画布引用与节点操作" aria-expanded={section === "references"} onClick={() => toggleSection("references")}>
+              {!isVideo && isConfig && <button ref={referenceTriggerRef} type="button" className="board-composer-tool"
+                aria-expanded={section === "references"} onClick={() => toggleSection("references")}>
+                <Plus size={16} /><span>添加输入</span>
+              </button>}
+              {!isVideo && !isConfig && node.type !== "image" && <button ref={referenceTriggerRef} type="button" className="board-composer-tool" title="画布引用与节点操作" aria-label="画布引用与节点操作" aria-expanded={section === "references"} onClick={() => toggleSection("references")}>
                 <AtSign size={15} /><span>引用{upstreamLinks.length > 0 && ` ${upstreamLinks.length}`}</span>
               </button>}
               {isImage && <button ref={styleTriggerRef} type="button" className="board-composer-tool" aria-expanded={section === "style"} onClick={() => toggleSection("style")}><Box size={15} /><span>风格</span><ChevronDown size={12} /></button>}
@@ -1091,12 +1116,13 @@ export function BoardInspector({
                   <RefreshCw size={12} />重试
                 </button>
               ) : null}
+              {taskId && onDiagnostic && node.status === "failed" ? <button type="button" className="board-composer-tool" onClick={() => onDiagnostic(taskId)}><Activity size={13} />诊断</button> : null}
               <button
                 type="button"
-                className={isVideo ? "vstudio-send" : "board-composer-send"}
+                className={isConfig ? "board-composer-send board-config-send" : isVideo ? "vstudio-send" : "board-composer-send"}
                 aria-label={generateLabel}
-                disabled={node.status === "loading" || generateBlocked || !effectivePrompt || Boolean(referenceError)}
-                title={node.status === "loading"
+                disabled={submitting || node.status === "loading" || generateBlocked || !effectivePrompt || Boolean(referenceError)}
+                title={submitting ? "正在提交生成…" : node.status === "loading"
                   ? "正在生成…"
                   : generateBlocked
                     ? (isAudio ? "还没有可用的音频渠道" : isVideo ? "还没有可用的视频渠道" : "还没有可用的生图渠道")
@@ -1104,6 +1130,7 @@ export function BoardInspector({
                 onClick={() => onGenerate(node.id)}
               >
                 {node.status === "loading" ? <LoadingIndicator variant="dots" size={24} /> : isVideo ? <Send size={15} /> : <ArrowUp size={18} />}
+                {isConfig && <span>{generateLabel}</span>}
               </button>
             </div>
           </>

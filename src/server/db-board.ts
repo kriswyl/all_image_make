@@ -340,6 +340,23 @@ export class BoardRepository {
     this.db.prepare("DELETE FROM board_tasks WHERE task_id = ?").run(taskId);
   }
 
+  listBoardTaskSummaries(boardId: string): import("../shared/board.js").BoardTaskSummary[] {
+    const rows = this.db.prepare(`
+      SELECT t.id, t.model, t.status, t.created_at, t.error_message, b.config_node_id,
+        json_group_array(b.result_node_id) AS result_node_ids
+      FROM board_tasks b JOIN tasks t ON t.id = b.task_id
+      WHERE b.board_id = ?
+      GROUP BY t.id, b.config_node_id
+      ORDER BY (t.status IN ('queued', 'validating', 'submitting', 'running')) DESC, t.created_at DESC
+      LIMIT 100
+    `).all(boardId) as DbRow[];
+    return rows.map((row) => ({
+      id: String(row.id), sourceNodeId: String(row.config_node_id), nodeIds: JSON.parse(String(row.result_node_ids)) as string[],
+      model: String(row.model), status: row.status as import("../shared/types.js").TaskStatus,
+      createdAt: String(row.created_at), errorMessage: row.error_message == null ? null : String(row.error_message),
+    }));
+  }
+
   private replaceBoardAssetsUnsafe(boardId: string, doc: BoardDoc): void {
     this.db.prepare("DELETE FROM board_assets WHERE board_id = ?").run(boardId);
     const insert = this.db.prepare(

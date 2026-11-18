@@ -10,18 +10,18 @@ import {
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import {
   AudioLines, ChevronDown, ChevronUp, ClipboardPaste, Copy, Image as ImageIcon, LayoutGrid, Map as MapIcon,
-  Maximize2, Mic, Music2, Plus, SlidersHorizontal, Trash2, Type, Ungroup, Upload, Video, ZoomIn, ZoomOut,
+  Maximize2, Mic, Music2, Play, Plus, SlidersHorizontal, Trash2, Type, Ungroup, Upload, Video, ZoomIn, ZoomOut,
 } from "lucide-react";
 import {
-  boardGroups, BOARD_LIMITS,
+  boardGroups, BOARD_LIMITS, DEFAULT_BOARD_VIEWPORT,
   type BoardGroup, type BoardNode, type BoardNodeType,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
 import type { UseBoardResult } from "./useBoard";
-import { BoardNodeView } from "./BoardNodeView";
+import { BoardNodeView, type ConfigNodeConnections } from "./BoardNodeView";
 import { BoardMinimap } from "./BoardMinimap";
 import { useBoardMinimap } from "./useBoardMinimap";
-import { clampScale, edgePath, edgeClass, fitBoardImageSize, rectsIntersect, nodesBounds, type ImageDimensions } from "./board-geometry";
+import { boardFitViewport, clampScale, edgePath, edgeClass, fitBoardImageSize, rectsIntersect, nodesBounds, type ImageDimensions } from "./board-geometry";
 
 interface PositionPatch {
   x?: number;
@@ -91,7 +91,7 @@ interface GroupDragState {
 
 export function BoardCanvas({
   board, assets, onPickImage, onUploadMediaIntoNode, onUploadFiles, onPreviewAsset, renderNodeSettings,
-  onDeleteNode, onCompareVersions, onExtractFrame,
+  onDeleteNode, onCompareVersions, onExtractFrame, onRun, focusRequest, onSaveTemplate, onAddToReferenceGroup,
 }: {
   board: UseBoardResult;
   assets: Map<string, Asset>;
@@ -103,6 +103,10 @@ export function BoardCanvas({
   onDeleteNode: (nodeId: string) => void;
   onCompareVersions: (nodeId: string) => void;
   onExtractFrame: (nodeId: string) => void;
+  onRun?: (ids: string[], mode: "selection" | "downstream") => void;
+  focusRequest?: { boardId: string; nodeId: string } | null;
+  onSaveTemplate?: (ids: string[]) => void;
+  onAddToReferenceGroup?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -159,6 +163,25 @@ export function BoardCanvas({
   }, [doc, imageDimensions, localPositions]);
 
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const configConnections = useMemo(() => {
+    const connections = new Map<string, ConfigNodeConnections>();
+    if (!doc) return connections;
+    const nodesById = new Map(doc.nodes.map((node) => [node.id, node]));
+    for (const edge of doc.edges) {
+      const configId = edge.kind === "input" ? edge.target : edge.source;
+      if (nodesById.get(configId)?.type !== "config") continue;
+      const counts = connections.get(configId) ?? { inputs: 0, outputs: 0, hasUpstreamText: false };
+      if (edge.kind === "input") {
+        const source = nodesById.get(edge.source);
+        counts.inputs++;
+        if (source?.type === "text" && source.text.trim()) counts.hasUpstreamText = true;
+      } else {
+        counts.outputs++;
+      }
+      connections.set(configId, counts);
+    }
+    return connections;
+  }, [doc]);
   const groups = useMemo(() => (doc ? boardGroups(doc) : []), [doc]);
   const imageResultOwners = useMemo(() => {
     const owners = new Map<string, string>();
@@ -187,6 +210,13 @@ export function BoardCanvas({
     [collapsedNodeIds, nodes],
   );
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const renderedNodes = useMemo(() => {
+    if (!size.width || !size.height) return visibleNodes;
+    const margin = 240;
+    const area = { x: (-viewport.x - margin) / viewport.scale, y: (-viewport.y - margin) / viewport.scale,
+      width: (size.width + margin * 2) / viewport.scale, height: (size.height + margin * 2) / viewport.scale };
+    return visibleNodes.filter((node) => board.selection.includes(node.id) || rectsIntersect(node, area));
+  }, [visibleNodes, viewport, size, board.selection]);
   const settingsNode = board.selection.length === 1 && visibleNodeIds.has(board.selection[0])
     ? nodeMap.get(board.selection[0])
     : undefined;
@@ -211,10 +241,10 @@ export function BoardCanvas({
     // 只在首次选中时腾出编辑空间；后续平移、缩放和拖动仍由用户控制。
     if (!size.height || dragging || nodeDragging || revealedSettingsRef.current === settingsKey) return;
     revealedSettingsRef.current = settingsKey;
-    const reserved = Math.min(224, size.height * 0.48);
+    const reserved = Math.min(settingsNode?.type === "config" ? 264 : 224, size.height * 0.48);
     const offset = Math.max(0, settingsTop + reserved + 12 - size.height);
     if (offset > 0) board.setViewport({ ...viewport, y: viewport.y - offset });
-  }, [board, dragging, nodeDragging, settingsKey, settingsTop, size.height, viewport]);
+  }, [board, dragging, nodeDragging, settingsKey, settingsNode?.type, settingsTop, size.height, viewport]);
   const groupBounds = useMemo(() => {
     const result = new Map<string, { x: number; y: number; width: number; height: number }>();
     for (const group of groups) {
@@ -226,6 +256,17 @@ export function BoardCanvas({
     }
     return result;
   }, [groups, nodeMap]);
+  const foldedGroups = useMemo(() => {
+    const members = new Map<string, string>();
+    const bounds = new Map<string, { x: number; y: number; width: number; height: number }>();
+    for (const group of groups) {
+      const rect = groupBounds.get(group.id);
+      if (!group.collapsed || !rect) continue;
+      bounds.set(group.id, { ...rect, width: Math.max(240, Math.min(360, rect.width)), height: 96 });
+      for (const id of group.nodeIds) members.set(id, group.id);
+    }
+    return { members, bounds };
+  }, [groups, groupBounds]);
   /**
    * 画布没有固定边界：这里只是画布层的尺寸，用来给 SVG 一个坐标系。
    * 负坐标的节点 / 连线靠 overflow: visible 正常显示，平移本身不设上限。
@@ -241,28 +282,37 @@ export function BoardCanvas({
   const minimapNodes = useMemo(() => nodes.filter((node) => !hiddenImageResults.has(node.id)), [nodes, hiddenImageResults]);
   const { contentBounds, minimapBounds, minimapLayout } = useBoardMinimap(minimapNodes, viewport, size);
 
+  const locate = useCallback((nodeId: string) => {
+    const source = nodeMap.get(nodeId);
+    if (!source) return;
+    const group = groups.find((item) => item.collapsed && item.nodeIds.includes(nodeId));
+    if (group) board.updateGroup(group.id, { collapsed: false });
+    const ownerId = imageResultOwners.get(nodeId);
+    const owner = ownerId ? nodeMap.get(ownerId) : undefined;
+    const expanded = owner?.type === "image" && owner.imageResultGroup && !owner.imageResultGroup.expanded
+      ? board.setImageResultsExpanded(owner.id, true) : undefined;
+    const target = expanded?.nodes.find((item) => item.id === nodeId) ?? source;
+    const scale = clampScale(Math.max(viewport.scale, Math.min(1, size.width / (target.width + 72))));
+    setSelectedEdgeId(null);
+    board.setViewport({ scale, x: size.width / 2 - (target.x + target.width / 2) * scale,
+      y: size.height * 0.34 - (target.y + target.height / 2) * scale });
+    board.setSelection([nodeId]);
+  }, [board, groups, imageResultOwners, nodeMap, size, viewport.scale]);
+  const lastFocusRequest = useRef<typeof focusRequest>(null);
+  useEffect(() => {
+    if (!focusRequest || focusRequest === lastFocusRequest.current || focusRequest.boardId !== view?.id || !size.width) return;
+    lastFocusRequest.current = focusRequest;
+    locate(focusRequest.nodeId);
+  }, [focusRequest, locate, size.width, view?.id]);
+
   const fit = useCallback(() => {
     const element = containerRef.current;
     if (!element) return;
     const width = element.clientWidth;
     const height = element.clientHeight;
     if (!width || !height) return;
-    if (!contentBounds) {
-      board.setViewport({ x: 80, y: 80, scale: 1 });
-      return;
-    }
-    const fitted = Math.min(
-      1.05,
-      (width - 120) / (contentBounds.width + 240),
-      (height - 120) / (contentBounds.height + 240),
-    );
-    const scale = clampScale(Math.max(0.3, fitted));
-    board.setViewport({
-      scale,
-      x: (width - contentBounds.width * scale) / 2 - contentBounds.x * scale,
-      y: (height - contentBounds.height * scale) / 2 - contentBounds.y * scale,
-    });
-  }, [board, contentBounds]);
+    board.setViewport(boardFitViewport(contentBounds, { width, height }, visibleNodes[0] ?? foldedGroups.bounds.values().next().value));
+  }, [board, contentBounds, foldedGroups, visibleNodes]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -281,7 +331,8 @@ export function BoardCanvas({
     const frame = requestAnimationFrame(() => {
       fittedBoardRef.current = view.id;
       revealedSettingsRef.current = null;
-      fit();
+      if (view.viewport.x === DEFAULT_BOARD_VIEWPORT.x && view.viewport.y === DEFAULT_BOARD_VIEWPORT.y
+        && view.viewport.scale === DEFAULT_BOARD_VIEWPORT.scale) fit();
     });
     return () => cancelAnimationFrame(frame);
   }, [fit, size, view]);
@@ -377,7 +428,7 @@ export function BoardCanvas({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || isEditable(event.target)) return;
       if (event.key !== "Escape" && event.target instanceof HTMLElement
-        && event.target.closest(".board-node-settings, .board-composer-popover, .vstudio-mention-panel, .board-video-node-menu, .model-picker-menu, .style-preset-dialog")) return;
+        && event.target.closest(".board-topbar, .board-selection-tools, .board-node-settings, .board-composer-popover, .vstudio-mention-panel, .board-video-node-menu, .model-picker-menu, .style-preset-dialog")) return;
       if (event.code === "Space") {
         event.preventDefault();
         spacePressedRef.current = true;
@@ -936,10 +987,12 @@ export function BoardCanvas({
 
         <svg className="board-edges" width={worldWidth} height={worldHeight} aria-hidden="true">
           {doc.edges.map((edge) => {
-            const source = nodeMap.get(edge.source);
-            const target = nodeMap.get(edge.target);
+            const sourceGroup = foldedGroups.members.get(edge.source);
+            const targetGroup = foldedGroups.members.get(edge.target);
+            if (sourceGroup && sourceGroup === targetGroup) return null;
+            const source = sourceGroup ? foldedGroups.bounds.get(sourceGroup) : visibleNodeIds.has(edge.source) ? nodeMap.get(edge.source) : undefined;
+            const target = targetGroup ? foldedGroups.bounds.get(targetGroup) : visibleNodeIds.has(edge.target) ? nodeMap.get(edge.target) : undefined;
             if (!source || !target) return null;
-            if (!visibleNodeIds.has(edge.source) || !visibleNodeIds.has(edge.target)) return null;
             const d = edgePath(source, target);
             return (
               <g key={edge.id} className={`board-edge ${edgeClass(edge)} ${selectedEdgeId === edge.id ? "is-selected" : ""}`}>
@@ -955,7 +1008,7 @@ export function BoardCanvas({
           {connectPath ? <path d={connectPath} className="board-edge-line is-preview" /> : null}
         </svg>
 
-        {visibleNodes.map((node) => {
+        {renderedNodes.map((node) => {
           const selected = board.selection.includes(node.id);
           const asset = (node.type === "image" || node.type === "video" || node.type === "audio") && node.assetId
             ? assets.get(node.assetId) ?? null
@@ -999,6 +1052,7 @@ export function BoardCanvas({
                 node={node}
                 asset={asset}
                 editing={editingTextId === node.id}
+                configConnections={configConnections.get(node.id)}
                 imageResults={imageResults}
                 onImageLoad={readImageDimensions}
                 primaryChoice={primaryChoice}
@@ -1010,6 +1064,15 @@ export function BoardCanvas({
                 onCancelEdit={() => setEditingTextId(null)}
                 onPreview={onPreviewAsset}
                 onSelect={() => board.setSelection([node.id])}
+                onEditConfig={() => {
+                  board.setSelection([node.id]);
+                  requestAnimationFrame(() => {
+                    const settings = containerRef.current?.querySelector<HTMLElement>(".board-node-settings");
+                    if (settings?.dataset.nodeId === node.id) {
+                      settings.querySelector<HTMLElement>('[aria-label="提示词"]')?.focus({ preventScroll: true });
+                    }
+                  });
+                }}
                 onPickImage={onPickImage}
                 onUploadMediaIntoNode={onUploadMediaIntoNode}
                 onRemoveAsset={(nodeId) => {
@@ -1050,15 +1113,14 @@ export function BoardCanvas({
         })}
 
         {groups.filter((group) => group.collapsed).map((group) => {
-          const bounds = groupBounds.get(group.id);
+          const bounds = foldedGroups.bounds.get(group.id);
           if (!bounds) return null;
-          const width = Math.max(240, Math.min(360, bounds.width));
           return (
             <article
               key={group.id}
               className="board-group-card"
               data-board-group
-              style={{ left: bounds.x, top: bounds.y, width, height: 96 }}
+              style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height }}
               onPointerDown={(event) => beginGroupDrag(event, group)}
               onPointerMove={moveGroupDrag}
               onPointerUp={endGroupDrag}
@@ -1075,6 +1137,8 @@ export function BoardCanvas({
               <div className="board-group-card-meta">
                 <span>{group.nodeIds.length} 个节点已折叠</span>
                 <div className="board-group-card-actions">
+                  {onRun ? <button type="button" title="运行分组" aria-label="运行分组" onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => onRun(group.nodeIds, "selection")}><Play size={13} /></button> : null}
                   <button
                     type="button"
                     title="展开分组"
@@ -1116,6 +1180,7 @@ export function BoardCanvas({
         <div
           key={settingsKey}
           className="board-node-settings"
+          data-node-id={settingsNode.id}
           style={{
             left: settingsLeft,
             top: settingsTop,
@@ -1128,26 +1193,24 @@ export function BoardCanvas({
           onDragOver={(event) => event.stopPropagation()}
           onDrop={(event) => event.stopPropagation()}
         >
-          {renderNodeSettings(settingsNode, (nodeId) => {
-            const source = nodeMap.get(nodeId);
-            if (!source) return;
-            const group = groups.find((item) => item.collapsed && item.nodeIds.includes(nodeId));
-            if (group) board.updateGroup(group.id, { collapsed: false });
-              const ownerId = imageResultOwners.get(nodeId);
-              const owner = ownerId ? nodeMap.get(ownerId) : undefined;
-              const expanded = owner?.type === "image" && owner.imageResultGroup && !owner.imageResultGroup.expanded
-                ? board.setImageResultsExpanded(owner.id, true) : undefined;
-              const target = expanded?.nodes.find((item) => item.id === nodeId) ?? source;
-            setSelectedEdgeId(null);
-            board.setViewport({
-              ...viewport,
-              x: size.width / 2 - (target.x + target.width / 2) * viewport.scale,
-              y: size.height * 0.36 - (target.y + target.height / 2) * viewport.scale,
-            });
-            board.setSelection([nodeId]);
-          })}
+          {renderNodeSettings(settingsNode, locate)}
         </div>
       ) : null}
+
+      {board.selection.length > 1 || onAddToReferenceGroup ? <div className="board-selection-tools" role="group" aria-label="选区操作" onPointerDown={(event) => event.stopPropagation()}>
+        {board.selection.length > 1 ? <>
+          <span>已选 {board.selection.length} 项</span>
+          <button type="button" className="secondary-button compact" onClick={() => board.createGroup(board.selection)}><Ungroup size={13} />编组</button>
+          <button type="button" className="secondary-button compact" onClick={() => {
+            const selected = nodes.filter(({ id }) => board.selection.includes(id));
+            const left = Math.min(...selected.map(({ x }) => x));
+            board.moveNodes(selected.map(({ id, y }) => ({ id, x: left, y })));
+          }}>左对齐</button>
+          {onSaveTemplate ? <button type="button" className="secondary-button compact" onClick={() => onSaveTemplate(board.selection)}>存为模板</button> : null}
+        </> : null}
+        {onAddToReferenceGroup ? <button type="button" className="secondary-button compact" onClick={onAddToReferenceGroup}><ImageIcon size={13} />加入对话参考图组</button> : null}
+        {board.selection.length > 1 && onRun ? <button type="button" className="primary-button compact" onClick={() => onRun(board.selection, "selection")}><Play size={13} />运行所选</button> : null}
+      </div> : null}
 
       {!nodes.length ? (
         <div className="board-empty">
@@ -1232,6 +1295,9 @@ export function BoardCanvas({
           <button type="button" role="menuitem" disabled={board.selection.length < 2} onClick={() => { board.createGroup(board.selection); setContextMenu(null); }}>
             <Ungroup size={13} /><span>把选中节点编组</span>
           </button>
+          {onRun && board.selection.length === 1 ? <button type="button" role="menuitem" onClick={() => { onRun(board.selection, "downstream"); setContextMenu(null); }}>
+            <Play size={13} /><span>从所选节点运行下游</span>
+          </button> : null}
           <span className="board-context-sep" />
           <button type="button" role="menuitem" disabled={!board.selection.length} onClick={() => { copySelection(); setContextMenu(null); }}>
             <Copy size={13} /><span>复制</span>

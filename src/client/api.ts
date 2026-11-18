@@ -3,10 +3,10 @@ import type {
   AgentStreamEvent, ChatVideoFrames, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
 import type {
-  BoardAudioKind, BoardDoc, BoardSummary, BoardUiState, BoardView, BoardViewport, BoardVideoMode,
+  BoardAudioKind, BoardDoc, BoardSummary, BoardTaskSummary, BoardUiState, BoardView, BoardViewport, BoardVideoMode,
 } from "../shared/board";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template";
-import type { StoryboardPreviewBoard, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
+import type { StoryboardMediaRole, StoryboardPreviewBoard, StoryboardProduction, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 import type { PresentationVersionReport } from "../shared/presentation-report";
 import { withReferenceMediaType } from "./media-files";
@@ -373,8 +373,24 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ file }),
   }),
+  importBoardPackage: (file: File) => {
+    const body = new FormData();
+    body.set("file", file);
+    return request<{ board: BoardView; boards: number; media: number }>("/api/boards/import-package", { method: "POST", body });
+  },
+  exportBoardPackage: async (id: string) => {
+    const response = await fetch(apiUrl(`/api/boards/${encodeURIComponent(id)}/package`));
+    if (response.ok) return response.blob();
+    const result = await response.json().catch(() => null) as ApiResponse<unknown> | null;
+    throw new ApiError(result?.error?.message ?? "工程包导出失败", response.status, result?.error?.code ?? "");
+  },
   templates: () => request<CanvasTemplateSummary[]>("/api/templates"),
   storyboardProject: (id: string) => request<StoryboardProject>(`/api/storyboard-projects/${id}`),
+  storyboardProduction: (id: string, boardId: string) => request<StoryboardProduction>(`/api/storyboard-projects/${id}/boards/${boardId}/production`),
+  pinStoryboardDelivery: (id: string, boardId: string, input: { revision: number; shotId: string; role: StoryboardMediaRole; nodeId: string | null }) =>
+    request<StoryboardProduction>(`/api/storyboard-projects/${id}/boards/${boardId}/delivery`, { method: "PUT", body: JSON.stringify(input) }),
+  syncStoryboardReferences: (id: string, boardId: string, input: { revision: number; boardVersion: number; shotIds: string[] }) =>
+    request<{ updated: number; board: BoardView }>(`/api/storyboard-projects/${id}/boards/${boardId}/references`, { method: "POST", body: JSON.stringify(input) }),
   splitStoryboardShot: (id: string, revision: number, shotId: string) => request<{ shots: Array<{ prompt: string; videoPrompt: string; dialogue: string; sourceText: string; shotSize: string; cameraMove: string }> }>(`/api/storyboard-projects/${id}/split`, { method: "POST", body: JSON.stringify({ revision, shotId }) }),
   storyboardPreview: (id: string) => request<StoryboardPreviewBoard[]>(`/api/storyboard-projects/${id}/preview`),
   /** 把分镜改动同步到已导入的画布节点 */
@@ -388,10 +404,12 @@ export const api = {
 
   /** 导出剪映草稿：素材复制进目标目录下的同名草稿文件夹 */
   exportStoryboardDraft: (id: string, input: { boardId: string; targetDir: string; name?: string }) =>
-    request<{ path: string; clips: number; skipped: number; durationSeconds: number }>(`/api/storyboard-projects/${id}/draft`, { method: "POST", body: JSON.stringify(input) }),
+    request<{ path: string; clips: number; skipped: number; durationSeconds: number; subtitlesPath?: string }>(`/api/storyboard-projects/${id}/draft`, { method: "POST", body: JSON.stringify(input) }),
   saveStoryboardProject: (id: string, revision: number, data: StoryboardProjectData) => request<StoryboardProject>(`/api/storyboard-projects/${id}`, { method: "PUT", body: JSON.stringify({ revision, data }) }),
   storyboardSelectionTemplate: (id: string, revision: number, shotIds: string[]) => request<CanvasTemplate>(`/api/storyboard-projects/${id}/templates`, { method: "POST", body: JSON.stringify({ revision, shotIds }) }),
   template: (id: string) => request<CanvasTemplate>(`/api/templates/${id}`),
+  saveBoardSelectionTemplate: (boardId: string, input: { name: string; nodeIds: string[]; inputIds: string[]; outputIds: string[] }) =>
+    request<CanvasTemplate>(`/api/boards/${boardId}/save-template`, { method: "POST", body: JSON.stringify(input) }),
   updateTemplate: (id: string, patch: { name?: string; description?: string }) =>
     request<CanvasTemplate>(`/api/templates/${id}`, {
       method: "PATCH",
@@ -418,10 +436,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ templateId, ...(title ? { title } : {}) }),
     }),
-  importTemplateToBoard: (boardId: string, templateId: string) =>
+  importTemplateToBoard: (boardId: string, templateId: string, values?: Record<string, { text?: string; assetId?: string }>) =>
     request<{ board: BoardView; addedNodes: number }>(`/api/boards/${boardId}/templates`, {
       method: "POST",
-      body: JSON.stringify({ templateId }),
+      body: JSON.stringify({ templateId, values }),
     }),
   renameBoard: (id: string, title: string) => request<BoardView>(`/api/boards/${id}`, {
     method: "PATCH",
@@ -459,6 +477,7 @@ export const api = {
   claimBoardFrame: (boardId: string, requestId: string) => request<{ claimed: boolean }>(`/api/boards/${boardId}/frame-requests/${requestId}/claim`, { method: "POST" }),
   completeBoardFrame: (boardId: string, requestId: string, result: { assetId?: string; error?: string }) => request<{ accepted: boolean }>(`/api/boards/${boardId}/frame-requests/${requestId}/complete`, { method: "POST", body: JSON.stringify(result) }),
   boardNodeVersions: (boardId: string, nodeId: string) => request<Task[]>(`/api/boards/${boardId}/nodes/${nodeId}/versions`),
+  boardTasks: (boardId: string) => request<BoardTaskSummary[]>(`/api/boards/${boardId}/tasks`),
   boardHistory: (id: string) => request<{
     currentVersion: number;
     entries: Array<{ version: number; reason: string; createdAt: string; current: boolean }>;
@@ -470,6 +489,7 @@ export const api = {
     }),
   generateBoardNode: (id: string, input: {
     nodeId: string;
+    expectedChannelId?: string;
     overrides?: {
       prompt?: string;
       model?: string;

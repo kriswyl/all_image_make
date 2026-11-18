@@ -23,7 +23,11 @@ export function BoardNodeVersions({ boardId, nodeId, onClose, onApply }: { board
     const task = tasks[index]; const asset = task?.assets[0];
     return <div className="board-version-pane"><select value={index} onChange={(e) => setIndex(Number(e.target.value))} aria-label="选择生成版本">{tasks.map((item, i) => <option key={item.id} value={i}>{formatTime(item.finishedAt || item.createdAt)} · {item.model}</option>)}</select>
       {asset ? <div className="board-version-media">{asset.mimeType.startsWith("video/") ? <video src={api.assetUrl(asset.url)} controls preload="metadata" /> : asset.mimeType.startsWith("audio/") ? <audio src={api.assetUrl(asset.url)} controls preload="metadata" /> : <img src={api.assetUrl(asset.url)} alt="版本预览" />}</div> : null}
-      {task ? <><p title={task.prompt}>{task.prompt}</p><button type="button" className="secondary-button compact" disabled={busy} onClick={() => void apply(task)}>使用此版本</button></> : null}
+      {task ? <><p title={task.prompt}>{task.prompt}</p><button type="button" className="secondary-button compact" disabled={busy} onClick={() => void apply(task)}>使用此版本</button>
+        <button type="button" className="secondary-button compact" disabled={busy} onClick={() => {
+          void navigator.clipboard.writeText(JSON.stringify({ model: task.model, prompt: task.prompt, parameters: task.inputParameters ?? task.effectiveParameters }, null, 2))
+            .catch(() => setError("无法复制生成参数"));
+        }}>复制生成参数</button></> : null}
     </div>;
   }
   return createPortal(<div className="board-versions-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}><section className="board-versions-dialog" role="dialog" aria-modal="true" aria-label="节点生成版本对比">

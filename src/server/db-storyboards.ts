@@ -602,6 +602,10 @@ export class StoryboardRepository {
     return row ? String(row.conversation_id) : null;
   }
 
+  deleteStoryboardProject(id: string): void {
+    this.db.prepare("DELETE FROM storyboard_projects WHERE id = ?").run(id);
+  }
+
   getStoryboardProject(id: string): StoryboardProject | null {
     const row = this.db.prepare("SELECT * FROM storyboard_projects WHERE id = ?").get(id) as DbRow | undefined;
     if (!row) return null;
@@ -620,7 +624,8 @@ export class StoryboardRepository {
       UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.characters') c, json_each(c.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ?
       UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.scenes') s, json_each(s.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ?
       UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.props') x WHERE json_extract(x.value, '$.assetId') = ?
-      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.props') x, json_each(x.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ? LIMIT 1`).get(assetId, assetId, assetId, assetId, assetId, assetId));
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.props') x, json_each(x.value, '$.variants') v WHERE json_extract(v.value, '$.assetId') = ?
+      UNION ALL SELECT 1 FROM storyboard_projects p, json_each(p.data_json, '$.shots') s, json_each(s.value, '$.delivery') d WHERE json_extract(d.value, '$.assetId') = ? LIMIT 1`).get(assetId, assetId, assetId, assetId, assetId, assetId, assetId));
   }
 
   taskHasStoryboardProjectReferences(taskId: string): boolean {

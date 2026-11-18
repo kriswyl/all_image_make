@@ -1326,6 +1326,8 @@ export class AppDatabase {
   addBoardTaskRows = (...args: Parameters<BoardRepository["addBoardTaskRows"]>): ReturnType<BoardRepository["addBoardTaskRows"]> => this.boards.addBoardTaskRows(...args);
   listBoardTasksByTask = (...args: Parameters<BoardRepository["listBoardTasksByTask"]>): ReturnType<BoardRepository["listBoardTasksByTask"]> => this.boards.listBoardTasksByTask(...args);
   listBoardTasksByBoard = (...args: Parameters<BoardRepository["listBoardTasksByBoard"]>): ReturnType<BoardRepository["listBoardTasksByBoard"]> => this.boards.listBoardTasksByBoard(...args);
+  listBoardTaskSummaries = (boardId: string) => this.boards.listBoardTaskSummaries(boardId);
+  deleteImportedStoryboardProject = (id: string) => this.storyboards.deleteStoryboardProject(id);
   deleteBoardTaskRows = (...args: Parameters<BoardRepository["deleteBoardTaskRows"]>): ReturnType<BoardRepository["deleteBoardTaskRows"]> => this.boards.deleteBoardTaskRows(...args);
 
   recordBrainCall(conversationId: string, usage: { promptTokens: number; completionTokens: number; reasoningTokens: number }) {

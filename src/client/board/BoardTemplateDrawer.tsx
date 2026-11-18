@@ -6,11 +6,12 @@ import { api } from "../api";
 import { historyTime } from "./board-history";
 
 export function BoardTemplateDrawer({
-  open, onClose, onImport, onBoardsChanged, onToast,
+  open, onClose, onImport, onBoardsChanged, onToast, onConfigure,
 }: {
   open: boolean;
   onClose: () => void;
   onImport: (id: string) => Promise<number | null>;
+  onConfigure?: (id: string) => void;
   onBoardsChanged: () => Promise<unknown>;
   onToast: (kind: "success" | "error", message: string) => void;
 }) {
@@ -43,6 +44,7 @@ export function BoardTemplateDrawer({
   }, [open, refreshTemplates]);
 
   const importTemplate = useCallback(async (template: CanvasTemplateSummary) => {
+    if (template.source === "board" && onConfigure) { onConfigure(template.id); return; }
     setImportingTemplateId(template.id);
     try {
       const added = await onImport(template.id);
@@ -54,7 +56,7 @@ export function BoardTemplateDrawer({
     } finally {
       setImportingTemplateId(null);
     }
-  }, [onClose, onImport, onToast, refreshTemplates]);
+  }, [onClose, onImport, onToast, onConfigure, refreshTemplates]);
 
   const commitTemplateRename = useCallback(async (template: CanvasTemplateSummary) => {
     const name = templateNameDraft.trim();
@@ -159,7 +161,7 @@ export function BoardTemplateDrawer({
                 </strong>
               )}
               <span>
-                {template.source === "storyboard" ? "分镜" : template.source === "import" ? "导入" : "对话"}
+                {template.source === "storyboard" ? "分镜" : template.source === "import" ? "导入" : template.source === "board" ? "流程" : "对话"}
                 {" · "}{template.nodeCount} 节点
                 {template.groupCount ? ` · ${template.groupCount} 分组` : ""}
               </span>

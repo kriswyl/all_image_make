@@ -17,6 +17,7 @@ import {
 } from "../shared/canvas-template.js";
 import type { BoardView } from "../shared/board.js";
 import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
+import { boardMentionLabel } from "../shared/board-mentions.js";
 
 function now() {
   return new Date().toISOString();
@@ -25,6 +26,36 @@ function now() {
 function templateNodeId() {
   return `node-${crypto.randomUUID()}`;
 }
+
+export function saveBoardSelectionTemplate(db: AppDatabase, board: BoardRecord, options: { name: string; nodeIds: string[]; inputIds: string[]; outputIds: string[] }) {
+  const selected = new Set(options.nodeIds);
+  const inputs = new Set(options.inputIds);
+  const outputs = new Set(options.outputIds);
+  const nodes = board.doc.nodes.filter(({ id }) => selected.has(id));
+  if (!nodes.length || nodes.length !== selected.size || [...inputs, ...outputs].some((id) => !selected.has(id))
+    || nodes.some((node) => inputs.has(node.id) && (node.type === "config" || outputs.has(node.id)))) {
+    throw new AppError("TEMPLATE_INPUT_INVALID", "模板节点或输入输出设置无效", 400);
+  }
+  const doc = parseBoardDoc({ ...board.doc,
+    nodes: nodes.map((node) => {
+      const workflowSlot = inputs.has(node.id) ? "input" : outputs.has(node.id) ? "output" : undefined;
+      const base = { storyboard: undefined, workflowSlot };
+      if (node.type === "text") return { ...node, ...base };
+      if (node.type === "config") return { ...node, ...base, error: undefined, lastTaskId: undefined, imageBatchResultIds: undefined, status: "idle", channelId: undefined };
+      return { ...node, ...base, assetId: null, error: undefined, taskId: undefined, status: "empty", channelId: undefined,
+        ...(node.type === "image" ? { imageResultGroup: undefined, naturalWidth: undefined, naturalHeight: undefined, resultIndex: undefined } : {}) };
+    }),
+    edges: board.doc.edges.filter(({ source, target }) => selected.has(source) && selected.has(target)),
+    groups: boardGroups(board.doc).flatMap((group) => {
+      const nodeIds = group.nodeIds.filter((id) => selected.has(id));
+      return nodeIds.length ? [{ ...group, nodeIds }] : [];
+    }),
+  });
+  return db.createCanvasTemplate({ id: crypto.randomUUID(), name: options.name,
+    description: `${inputs.size} 项输入 · ${outputs.size} 项输出`, source: "board", doc });
+}
+
+export type TemplateInputValues = Record<string, { text?: string; assetId?: string }>;
 
 function configNodeDefaults(config: TemplateConfigInput | undefined, title: string): Omit<BoardNode, "id" | "ref" | "x" | "y" | "width" | "height" | "createdAt" | "updatedAt"> & { type: "config" } {
   return {
@@ -259,6 +290,21 @@ function instantiateDoc(
     source: idMap.get(edge.source)!,
     target: idMap.get(edge.target)!,
   }));
+  const originals = new Map(template.doc.nodes.map((node) => [node.id, node]));
+  const createdNodes = new Map(nodes.map((node) => [node.id, node]));
+  for (const [index, node] of nodes.entries()) {
+    if (!("prompt" in node) || !node.prompt?.includes("@")) continue;
+    const labels = new Map<string, string>();
+    for (const edge of template.doc.edges) {
+      if (edge.kind !== "input" || idMap.get(edge.target) !== node.id) continue;
+      const before = originals.get(edge.source);
+      const after = createdNodes.get(idMap.get(edge.source) ?? "");
+      const oldLabel = before && boardMentionLabel(before);
+      const newLabel = after && boardMentionLabel(after);
+      if (oldLabel && newLabel) labels.set(oldLabel, newLabel);
+    }
+    nodes[index] = { ...node, prompt: node.prompt.replace(/@(图片|视频|音频)\d+/g, (token) => labels.has(token.slice(1)) ? `@${labels.get(token.slice(1))}` : token) };
+  }
   const groups: BoardGroup[] = boardGroups(template.doc).map((group) => ({
     ...group,
     id: `group-${crypto.randomUUID()}`,
@@ -290,15 +336,35 @@ function validTemplateAssets(db: AppDatabase, template: CanvasTemplate): Map<str
   return bindings;
 }
 
-export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templateId: string): {
+function prepareTemplate(db: AppDatabase, template: CanvasTemplate, values: TemplateInputValues = {}, boardId?: string) {
+  const bindings = validTemplateAssets(db, template);
+  const slots = new Map(template.doc.nodes.filter((node) => node.workflowSlot === "input").map((node) => [node.id, node]));
+  for (const [id, value] of Object.entries(values)) {
+    const node = slots.get(id);
+    if (!node || (node.type === "text" ? value.assetId !== undefined : value.text !== undefined)) throw new AppError("TEMPLATE_INPUT_INVALID", "模板输入与目标节点不匹配", 400);
+    if (!value.assetId) continue;
+    const asset = db.getAsset(value.assetId);
+    const task = asset && db.getTaskRow(asset.taskId);
+    const linked = boardId && db.findBoardAssetRefs(value.assetId).some((entry) => entry.boardId === boardId);
+    if (!asset?.mimeType.startsWith(`${node.type}/`) || (!linked && task?.libraryScope !== "public")) throw new AppError("TEMPLATE_INPUT_INVALID", "请选择公共素材或当前画布中的同类型素材", 400);
+    bindings.set(id, value.assetId);
+  }
+  const prepared = { ...template, doc: { ...template.doc,
+    nodes: template.doc.nodes.map((node) => node.type === "text" && values[node.id]?.text !== undefined
+      ? { ...node, text: values[node.id]!.text! } : node),
+  } };
+  return { prepared, bindings };
+}
+
+export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templateId: string, values?: TemplateInputValues): {
   board: BoardView;
   addedNodes: number;
 } {
   const record = db.getBoardRecord(boardId);
   if (!record) throw new AppError("BOARD_NOT_FOUND", "无限画布不存在", 404);
   const template = requireTemplate(db, templateId);
-  const bindings = validTemplateAssets(db, template);
-  const { doc, nodeCount } = instantiateDoc(template, record.doc, bindings);
+  const { prepared, bindings } = prepareTemplate(db, template, values, boardId);
+  const { doc, nodeCount } = instantiateDoc(prepared, record.doc, bindings);
   db.saveBoardSnapshot({
     boardId,
     previousDoc: record.doc,
@@ -309,12 +375,12 @@ export function importTemplateIntoBoard(db: AppDatabase, boardId: string, templa
   return { board: getBoard(db, boardId)!, addedNodes: nodeCount };
 }
 
-export function createBoardFromTemplate(db: AppDatabase, templateId: string, title?: string): BoardView {
+export function createBoardFromTemplate(db: AppDatabase, templateId: string, title?: string, values?: TemplateInputValues): BoardView {
   const template = requireTemplate(db, templateId);
-  const bindings = validTemplateAssets(db, template);
+  const { prepared, bindings } = prepareTemplate(db, template, values);
   const created = createBoard(db, { title: title?.trim() || template.name });
   const record = db.getBoardRecord(created.id)!;
-  const { doc } = instantiateDoc(template, null, bindings);
+  const { doc } = instantiateDoc(prepared, null, bindings);
   db.saveBoardSnapshot({
     boardId: created.id,
     previousDoc: record.doc,

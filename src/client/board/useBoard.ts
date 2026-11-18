@@ -91,6 +91,7 @@ export interface UseBoardResult {
   saving: boolean;
   /** 服务暂时不可用，正在后台重试保存（saving 已经结束，但改动还在本地） */
   retrying: boolean;
+  submitting: boolean;
   selection: string[];
   viewport: BoardViewport;
   reload: () => Promise<void>;
@@ -143,18 +144,19 @@ export interface UseBoardResult {
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
-  }) => Promise<{ taskId: string | null; taskIds?: string[]; kind: "image" | "video" | "text" | "audio"; resultNodeIds: string[] } | null>;
+  }, expectedChannelId?: string) => Promise<{ taskId: string | null; taskIds?: string[]; kind: "image" | "video" | "text" | "audio"; resultNodeIds: string[] } | null>;
   cancelTask: (taskId: string) => Promise<void>;
-  retryTask: (taskId: string) => Promise<void>;
+  retryTask: (taskId: string) => Promise<{ taskId: string; resultNodeIds: string[] } | null>;
   uploadAsset: (file: File, position?: { x: number; y: number }) => Promise<Asset | null>;
   removeAsset: (assetId: string) => Promise<void>;
   rename: (title: string) => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   restoreVersion: (version: number) => Promise<void>;
-  importTemplate: (templateId: string) => Promise<number | null>;
+  importTemplate: (templateId: string, values?: Record<string, { text?: string; assetId?: string }>) => Promise<number | null>;
   flush: () => Promise<void>;
   ensureSaved: () => Promise<boolean>;
+  updateDocumentOnServer: (update: (id: string, version: number) => Promise<BoardView>) => Promise<boolean>;
 }
 
 export function useBoard(
@@ -162,10 +164,10 @@ export function useBoard(
   onToast: Toast,
 ): UseBoardResult {
   const {
-    view, loading, saving, retrying, selection, viewport,
+    view, loading, saving, retrying, submitting, selection, viewport,
     viewRef, boardIdRef, selectionRef, toastRef,
     reload, applyDelta, setView, setSelection, setViewport,
-    applyLocal, updateLocalDocument, adoptSavedView, flush, ensureSaved,
+    applyLocal, updateLocalDocument, adoptSavedView, beginSubmission, flush, ensureSaved,
   } = useBoardDocument(boardId, onToast);
   const reconcilingRef = useRef(false);
   const submittingBoardsRef = useRef(new Set<string>());
@@ -594,18 +596,24 @@ export function useBoard(
     musicTitle?: string;
     musicTags?: string;
     musicNegativeTags?: string;
-  }) => {
+  }, expectedChannelId?: string) => {
     const boardId = boardIdRef.current;
-    if (!boardId || submittingBoardsRef.current.has(boardId)) return null;
+    if (!boardId) return null;
+    if (submittingBoardsRef.current.has(boardId)) {
+      toastRef.current("error", "正在提交上一项生成，请等提交完成或使用批量运行");
+      return null;
+    }
     submittingBoardsRef.current.add(boardId);
+    let complete: ReturnType<typeof beginSubmission> = null;
     try {
-      if (!await ensureSaved() || viewRef.current?.id !== boardId) return null;
+      if (!await ensureSaved() || viewRef.current?.id !== boardId || !(complete = beginSubmission())) return null;
       const result = await api.generateBoardNode(boardId, {
         nodeId,
+        ...(expectedChannelId ? { expectedChannelId } : {}),
         ...(overrides ? { overrides } : {}),
       });
-      if (viewRef.current?.id !== boardId) return null;
-      adoptSavedView(result.board, true);
+      complete(result.board);
+      complete = null;
       return {
         taskId: result.task?.id ?? null,
         taskIds: result.taskIds,
@@ -613,12 +621,29 @@ export function useBoard(
         resultNodeIds: result.resultNodeIds,
       };
     } catch (error) {
+      if (complete) {
+        // A failed acknowledgement can follow a committed board update. Rebase the local edits against the latest board.
+        const latest = await api.board(boardId).catch(() => undefined);
+        complete(latest);
+        complete = null;
+      }
       toastRef.current("error", error instanceof Error ? error.message : "提交生成失败");
       return null;
     } finally {
+      complete?.();
       submittingBoardsRef.current.delete(boardId);
     }
-  }, [ensureSaved, adoptSavedView]);
+  }, [ensureSaved, beginSubmission]);
+
+  const updateDocumentOnServer = useCallback(async (update: (id: string, version: number) => Promise<BoardView>) => {
+    if (!await ensureSaved()) return false;
+    const current = viewRef.current;
+    const complete = current && beginSubmission();
+    if (!current || !complete) return false;
+    try { complete(await update(current.id, current.version)); }
+    catch (error) { complete(); throw error; }
+    return true;
+  }, [ensureSaved, beginSubmission]);
 
   /**
    * 轮询进行中的任务，把结果写回占位节点。
@@ -757,10 +782,10 @@ export function useBoard(
 
   const retryTask = useCallback(async (taskId: string) => {
     const boardId = boardIdRef.current;
-    if (!boardId) return;
+    if (!boardId) return null;
     try {
       const result = await api.retryBoardTask(boardId, taskId);
-      if (viewRef.current?.id !== boardId) return;
+      if (viewRef.current?.id !== boardId) return null;
       const resultIds = new Set(result.resultNodeIds);
       applyLocal((doc) => ({
         ...doc,
@@ -788,19 +813,21 @@ export function useBoard(
           return node;
         })),
       }), "generate:retry", true);
+      return { taskId: result.task.id, resultNodeIds: result.resultNodeIds };
     } catch (error) {
       toastRef.current("error", error instanceof Error ? error.message : "重试失败");
+      return null;
     }
   }, [applyLocal]);
 
-  const importTemplate = useCallback(async (templateId: string) => {
+  const importTemplate = useCallback(async (templateId: string, values?: Record<string, { text?: string; assetId?: string }>) => {
     const id = boardIdRef.current;
     if (!id || viewRef.current?.id !== id) return null;
     // 模板会写进当前文档；先把本地改动落库再导入，避免冲突把其中一边冲掉
     await flush();
     if (boardIdRef.current !== id || viewRef.current?.id !== id) return null;
     try {
-      const result = await api.importTemplateToBoard(id, templateId);
+      const result = await (values ? api.importTemplateToBoard(id, templateId, values) : api.importTemplateToBoard(id, templateId));
       if (boardIdRef.current !== id) return null;
       adoptSavedView(result.board, true);
       return result.addedNodes;
@@ -856,6 +883,7 @@ export function useBoard(
     loading,
     saving,
     retrying,
+    submitting,
     selection,
     viewport,
     reload,
@@ -891,11 +919,12 @@ export function useBoard(
     importTemplate,
     flush,
     ensureSaved,
+    updateDocumentOnServer,
   }), [
-    view, loading, saving, retrying, selection, viewport,
+    view, loading, saving, retrying, submitting, selection, viewport,
     reload, applyDelta, setSelection, setViewport, addNode, addImageNode, updateNode, updateNodeSilently, choosePrimaryImage, setImageResultsExpanded,
     removeNodes, duplicateNodes, autoLayout, moveNodes, addEdge, updateEdge, removeEdges,
     createGroup, updateGroup, ungroup, generate, cancelTask, retryTask,
-    uploadAsset, removeAsset, rename, undo, redo, restoreVersion, importTemplate, flush, ensureSaved,
+    uploadAsset, removeAsset, rename, undo, redo, restoreVersion, importTemplate, flush, ensureSaved, updateDocumentOnServer,
   ]);
 }

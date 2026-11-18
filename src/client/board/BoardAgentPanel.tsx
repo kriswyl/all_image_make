@@ -9,7 +9,7 @@ import { ContextSummaryControl } from "../chat/ContextSummaryControl";
  * 面板可拖动、缩放、收起；位置和尺寸存进 boards.ui_state_json。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Send, Square, X } from "lucide-react";
+import { Bot, Check, ChevronDown, Send, Square } from "lucide-react";
 import { api } from "../api";
 import { buildRows } from "../chat/rows";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "../chat/MessageBubble";
@@ -80,7 +80,7 @@ function clampUi(ui: BoardAgentUiState): BoardAgentUiState {
 }
 
 export function BoardAgentPanel({
-  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onImportTemplate, onClose,
+  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onImportTemplate,
 }: {
   threadId: string;
   initialUiState?: BoardAgentUiState;
@@ -90,7 +90,6 @@ export function BoardAgentPanel({
   onFrameRequest: (request: { boardId: string; requestId: string; videoAssetId: string }) => void;
   onBeforeSend: () => Promise<void>;
   onImportTemplate: (templateId: string, name: string) => void;
-  onClose: () => void;
 }) {
   const [view, setView] = useState<(ConversationView & { running: boolean }) | null>(null);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -447,6 +446,7 @@ export function BoardAgentPanel({
         type="button"
         className="board-agent-bubble"
         style={{ left: bubbleX, top: bubbleY }}
+        aria-label="展开无限画布助手"
         title="拖动调整位置，点击展开无限画布助手"
         onPointerDown={beginBubbleDrag}
         onPointerMove={moveBubbleDrag}
@@ -510,15 +510,6 @@ export function BoardAgentPanel({
           })}
         >
           <ChevronDown size={14} />
-        </button>
-        <button
-          type="button"
-          className="board-agent-head-btn"
-          title="关闭"
-          aria-label="关闭无限画布助手"
-          onClick={onClose}
-        >
-          <X size={14} />
         </button>
       </header>
 

@@ -7,13 +7,14 @@ import type { KeyStore } from "../key-store.js";
 import { AppError } from "../tasks.js";
 import { safeFileName } from "../security.js";
 import { callBrain } from "../brain.js";
-import { storyboardProjectDataSchema } from "../../shared/storyboard-project.js";
+import { storyboardMediaRoleSchema, storyboardProjectDataSchema } from "../../shared/storyboard-project.js";
 import { resolveStoryboardSelection } from "../storyboard-selection.js";
 import { composeShotImagePrompt, composeShotVideoPrompt } from "../canvas-template.js";
 import { buildDraftContent, buildDraftMeta, type DraftShot } from "../jianying-draft.js";
-import { saveBoard } from "../board.js";
+import { getBoard, saveBoard } from "../board.js";
 import { buildStoryboardTemplateInput, createCanvasTemplate } from "../canvas-template.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
+import { getStoryboardProduction, pinStoryboardDelivery, storyboardShotAsset, syncStoryboardReferences } from "../storyboard-production.js";
 import type { Express } from "express";
 
 export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionKeys: KeyStore) {
@@ -21,6 +22,38 @@ export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionK
     const project = db.getStoryboardProject(routeParam(req.params.id));
     if (!project) return res.status(404).json(fail("STORYBOARD_NOT_FOUND", "该分镜没有可编辑的审阅数据"));
     res.json(ok(project));
+  });
+
+  function productionContext(projectId: string, boardId: string) {
+    const project = db.getStoryboardProject(projectId);
+    if (!project) throw new AppError("STORYBOARD_NOT_FOUND", "分镜不存在", 404);
+    const board = db.getBoardRecord(boardId);
+    if (!board?.doc.nodes.some((node) => node.storyboard?.projectId === projectId)) {
+      throw new AppError("STORYBOARD_BOARD_NOT_FOUND", "这块画布没有关联本分镜", 404);
+    }
+    return { project, board };
+  }
+
+  app.get("/api/storyboard-projects/:id/boards/:boardId/production", (req, res) => {
+    const { project, board } = productionContext(routeParam(req.params.id), routeParam(req.params.boardId));
+    res.json(ok(getStoryboardProduction(db, project, board)));
+  });
+
+  app.put("/api/storyboard-projects/:id/boards/:boardId/delivery", (req, res) => {
+    const { project, board } = productionContext(routeParam(req.params.id), routeParam(req.params.boardId));
+    const input = z.object({ revision: z.number().int().positive(), shotId: z.string().min(1).max(80), role: storyboardMediaRoleSchema, nodeId: z.string().min(1).max(80).nullable() }).parse(req.body);
+    if (input.revision !== project.revision) throw new AppError("STORYBOARD_CONFLICT", "分镜已更改，请刷新后重试", 409);
+    const saved = pinStoryboardDelivery(db, project, { ...input, boardId: board.id });
+    res.json(ok(getStoryboardProduction(db, saved, board)));
+  });
+
+  app.post("/api/storyboard-projects/:id/boards/:boardId/references", (req, res) => {
+    const { project, board } = productionContext(routeParam(req.params.id), routeParam(req.params.boardId));
+    const input = z.object({ revision: z.number().int().positive(), boardVersion: z.number().int().positive(), shotIds: z.array(z.string().min(1).max(80)).min(1).max(60) }).parse(req.body);
+    if (input.revision !== project.revision || input.boardVersion !== board.version) throw new AppError("STORYBOARD_CONFLICT", "分镜或画布已更改，请刷新后重试", 409);
+    if (input.shotIds.some((id) => !project.data.shots.some((shot) => shot.id === id))) throw new AppError("STORYBOARD_SHOTS_INVALID", "所选镜头不存在", 400);
+    const updated = syncStoryboardReferences(db, project, board, input.shotIds);
+    res.json(ok({ updated, board: getBoard(db, board.id)! }));
   });
 
   app.post("/api/storyboard-projects/:id/split", asyncHandler(async (req, res) => {
@@ -58,9 +91,7 @@ export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionK
       if (!nodes.length) return [];
       const shots = project.data.shots.map((shot) => {
         const getAsset = (role: "image" | "video" | "audio") => {
-          const node = [...nodes].reverse().find((item) => item.storyboard?.shotId === shot.id && item.storyboard.role === role && (item.type === "image" || item.type === "video" || item.type === "audio"));
-          if (!node || (node.type !== "image" && node.type !== "video" && node.type !== "audio") || !node.assetId) return null;
-          const asset = db.getAsset(node.assetId);
+          const asset = storyboardShotAsset(db, nodes, project.id, shot, role);
           return asset ? db.assetView(asset) : null;
         };
         return { shotId: shot.id, image: getAsset("image"), video: getAsset("video"), audio: getAsset("audio") };
@@ -89,13 +120,7 @@ export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionK
     if (!board) throw new AppError("BOARD_NOT_FOUND", "画布不存在", 404);
 
     const linked = board.doc.nodes.filter((node) => node.storyboard?.projectId === project.id);
-    const pickNode = (shotId: string, role: "image" | "video" | "audio") => {
-      const node = [...linked].reverse().find((item) => item.storyboard?.shotId === shotId
-        && item.storyboard.role === role
-        && (item.type === "image" || item.type === "video" || item.type === "audio"));
-      if (!node) return null;
-      return node.type === "image" || node.type === "video" || node.type === "audio" ? node : null;
-    };
+    const pickMedia = (shot: typeof project.data.shots[number], role: "image" | "video" | "audio") => storyboardShotAsset(db, linked, project.id, shot, role);
 
     // 草稿文件夹名要留在剪映里给人看，不能用 safeFileName——它只留 ASCII，
     // 「安静的力量」会被洗成「____________」，所以在剪映里根本认不出是哪个草稿。
@@ -105,44 +130,51 @@ export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionK
       .trim()
       .slice(0, 60) || "剪映草稿";
 
-    const hasAnyClip = project.data.shots.some((shot) => Boolean((pickNode(shot.id, "video") ?? pickNode(shot.id, "image"))?.assetId));
+    const hasAnyClip = project.data.shots.some((shot) => Boolean(pickMedia(shot, "video") ?? pickMedia(shot, "image")));
     if (!hasAnyClip) throw new AppError("DRAFT_EMPTY", "这组分镜在画布上还没有任何已生成的画面", 400);
 
     const draftDir = path.join(input.targetDir, draftName);
     const materialsDir = path.join(draftDir, "materials");
     await fs.promises.mkdir(materialsDir, { recursive: true });
 
-    const copyMaterial = async (assetId: string, index: number): Promise<{ path: string; name: string; bytes: number; durationUs: number } | null> => {
-      const row = db.getAsset(assetId);
+    const copyMaterial = async (row: ReturnType<typeof pickMedia>, index: number, kind: "video" | "image" | "audio"): Promise<{ path: string; name: string; bytes: number; durationUs: number } | null> => {
       if (!row) return null;
       const source = path.join(row.baseDir, row.relativePath);
       if (!fs.existsSync(source)) return null;
-      const fileName = `${String(index).padStart(3, "0")}-${safeFileName(row.fileName) || path.basename(row.relativePath)}`;
+      const fileName = `${String(index).padStart(3, "0")}-${kind}-${safeFileName(row.fileName) || path.basename(row.relativePath)}`;
       const target = path.join(materialsDir, fileName);
       await fs.promises.copyFile(source, target);
       return { path: target, name: fileName, bytes: row.byteSize, durationUs: Math.round((row.duration ?? 0) * 1_000_000) };
     };
 
     const shots: DraftShot[] = [];
+    const subtitles: string[] = [];
     let skipped = 0;
     let materialBytes = 0;
+    let offsetUs = 0;
+    const subtitleTime = (micros: number) => {
+      const milliseconds = Math.floor(micros / 1000);
+      const hours = String(Math.floor(milliseconds / 3_600_000)).padStart(2, "0");
+      const minutes = String(Math.floor(milliseconds / 60_000) % 60).padStart(2, "0");
+      const seconds = String(Math.floor(milliseconds / 1000) % 60).padStart(2, "0");
+      return `${hours}:${minutes}:${seconds},${String(milliseconds % 1000).padStart(3, "0")}`;
+    };
     for (const [index, shot] of project.data.shots.entries()) {
-      const videoNode = pickNode(shot.id, "video");
-      const imageNode = pickNode(shot.id, "image");
-      const audioNode = pickNode(shot.id, "audio");
-      const clipNode = videoNode ?? imageNode;
-      if (!clipNode?.assetId) { skipped += 1; continue; }
-      const clip = await copyMaterial(clipNode.assetId, index + 1);
+      const video = await copyMaterial(pickMedia(shot, "video"), index + 1, "video");
+      const clip = video ?? await copyMaterial(pickMedia(shot, "image"), index + 1, "image");
       if (!clip) { skipped += 1; continue; }
       materialBytes += clip.bytes;
-      const audio = audioNode?.assetId ? await copyMaterial(audioNode.assetId, index + 1) : null;
+      const audio = await copyMaterial(pickMedia(shot, "audio"), index + 1, "audio");
       if (audio) materialBytes += audio.bytes;
 
       const wanted = Math.max(0.4, shot.duration ?? 3);
       const available = clip.durationUs > 0 ? clip.durationUs / 1_000_000 : wanted;
       const durationUs = Math.round(Math.min(wanted, available) * 1_000_000);
+      const dialogue = shot.dialogue.trim().replace(/\r/g, "").split("\n").filter((line) => line.trim()).join("\n");
+      if (dialogue) subtitles.push(`${subtitles.length + 1}\n${subtitleTime(offsetUs)} --> ${subtitleTime(offsetUs + durationUs)}\n${dialogue}\n`);
+      offsetUs += durationUs;
       shots.push({
-        clipKind: clipNode.type === "video" ? "video" : "photo",
+        clipKind: video ? "video" : "photo",
         clip: { path: clip.path, name: clip.name, durationUs: clip.durationUs },
         ...(audio ? { audio: { path: audio.path, name: audio.name, durationUs: audio.durationUs } } : {}),
         durationUs,
@@ -164,8 +196,10 @@ export function registerStoryboardRoutes(app: Express, db: AppDatabase, sessionK
     const meta = buildDraftMeta({ draftId, name: draftName, draftDir, rootDir: input.targetDir, durationUs, materialBytes });
     await fs.promises.writeFile(path.join(draftDir, "draft_content.json"), JSON.stringify(content, null, 2), "utf8");
     await fs.promises.writeFile(path.join(draftDir, "draft_meta_info.json"), JSON.stringify(meta, null, 2), "utf8");
+    const subtitlesPath = subtitles.length ? path.join(draftDir, "subtitles.srt") : undefined;
+    if (subtitlesPath) await fs.promises.writeFile(subtitlesPath, subtitles.join("\n"), "utf8");
 
-    res.json(ok({ path: draftDir, clips: shots.length, skipped, durationSeconds: durationUs / 1_000_000 }));
+    res.json(ok({ path: draftDir, clips: shots.length, skipped, durationSeconds: durationUs / 1_000_000, subtitlesPath }));
   }));
 
   /**

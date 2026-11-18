@@ -13,7 +13,7 @@ const IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"] as const;
 const MAX_IMAGE_BYTES = MAX_REFERENCE_IMAGE_BYTES;
 const now = () => new Date().toISOString();
 
-function boardUploadExtension(bytes: Buffer, mime: string): string | null {
+export function boardUploadExtension(bytes: Buffer, mime: string): string | null {
   if (IMAGE_MIME.includes(mime as typeof IMAGE_MIME[number])) {
     return bytes.length <= MAX_IMAGE_BYTES && matchesImageSignature(bytes, mime as ReferenceImageUpload["mimeType"]) ? extensionForMime(mime) : null;
   }
@@ -143,7 +143,7 @@ export function appendConversationCanvasAssets(
 export async function storeBoardUpload(
   db: AppDatabase,
   boardId: string,
-  file: { buffer: Buffer; mimetype: string; originalname: string },
+  file: { buffer: Buffer; mimetype: string; originalname: string; duration?: number | null },
 ): Promise<Asset> {
   requireBoard(db, boardId);
   const extension = boardUploadExtension(file.buffer, file.mimetype);
@@ -162,7 +162,7 @@ export async function storeBoardUpload(
   });
   db.insertAsset({
     id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
-    relativePath: fileName, baseDir, sha256, thumbPath,
+    relativePath: fileName, baseDir, sha256, thumbPath, duration: file.duration,
   });
   // 文档保存前先挂一条临时链接，保存时会按节点重建
   db.insertBoardAssetLink(boardId, assetId, `pending:${assetId}`);
