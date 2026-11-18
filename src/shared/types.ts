@@ -230,6 +230,7 @@ export const DEFAULT_IMAGE_SIZE: ImageSizeValue = "2K";
 /** 普通对话图片上下文和未使用专用素材字段的非生图请求的额度。 */
 export const MAX_REFERENCE_IMAGES = 8;
 export const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+export const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 5 * 60_000;
 /**
  * 局部重绘蒙版的上限，来自 OpenAI Images edit 的官方约束：
  * 必须是 PNG、不超过 20 MB、并且和底图同尺寸。
@@ -450,6 +451,17 @@ export function taskKind(task: Task, channels: Channel[]) {
   return taskKindOfFromKinds(task, channels);
 }
 
+export interface RequestDiagnosticTrace {
+  phase: "prepare" | "upstream" | "response_body" | "parse_result" | "download_result" | "save_result" | "service_restart";
+  outcome: "pending" | "succeeded" | "failed";
+  startedAt: string;
+  responseAt?: string;
+  finishedAt?: string;
+  timeoutMs?: number;
+  upstreamRequestId?: string;
+  error?: { code: string; message: string; causeCode?: string };
+}
+
 export interface Diagnostic {
   id: string;
   taskId: string;
@@ -458,6 +470,7 @@ export interface Diagnostic {
   httpStatus: number | null;
   durationMs: number | null;
   createdAt: string;
+  trace?: RequestDiagnosticTrace;
 }
 
 export interface BootstrapData {

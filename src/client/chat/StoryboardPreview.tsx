@@ -1,9 +1,10 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Download, Film, Pause, Play, X } from "lucide-react";
+import { Clapperboard, Download, Film, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import type { StoryboardPreviewBoard, StoryboardProjectData } from "../../shared/storyboard-project";
+import { shotDuration, shotNumber } from "./StoryboardShotWorkspace";
 
 function csvCell(value: unknown) {
   let text = String(value ?? "");
@@ -25,28 +26,50 @@ export function storyboardCsv(data: StoryboardProjectData, board?: StoryboardPre
   return "\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }
 
-export function StoryboardPreview({ id, data, onClose }: { id: string; data: StoryboardProjectData; onClose: () => void }) {
+export function StoryboardPreview({ id, data, startIndex = 0, initialBoardId, onClose }: {
+  id: string; data: StoryboardProjectData; startIndex?: number; initialBoardId?: string; onClose: () => void;
+}) {
   const [boards, setBoards] = useState<StoryboardPreviewBoard[]>([]);
   const [boardId, setBoardId] = useState("");
-  const [index, setIndex] = useState(0);
+  const [index, setIndex] = useState(startIndex);
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
   const [draftNote, setDraftNote] = useState("");
+  const [showStrip, setShowStrip] = useState(false);
   const remaining = useRef(0);
+  const finished = useRef(false);
   const mediaRef = useRef<HTMLVideoElement>(null);
-  useEffect(() => { let cancelled = false; void api.storyboardPreview(id).then((items) => { if (!cancelled) { setBoards(items); setBoardId(items[0]?.id ?? ""); } }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "加载画布失败"); }).finally(() => { if (!cancelled) setLoading(false); }); return () => { cancelled = true; }; }, [id]);
+  useEffect(() => {
+    let cancelled = false;
+    void api.storyboardPreview(id).then((items) => {
+      if (cancelled) return;
+      setBoards(items);
+      setBoardId(items.find((item) => item.id === initialBoardId)?.id ?? items[0]?.id ?? "");
+    }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "加载画布失败"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [id, initialBoardId]);
   const board = boards.find((item) => item.id === boardId);
   const shot = data.shots[index];
   const media = board?.shots.find((item) => item.shotId === shot?.id);
-  useEffect(() => { remaining.current = (shot?.duration ?? 0) * 1000; }, [shot?.id, shot?.duration, boardId]);
+  useEffect(() => {
+    remaining.current = (shot?.duration ?? 0) * 1000;
+    finished.current = false;
+  }, [shot?.id, shot?.duration, boardId]);
   useEffect(() => {
     const video = mediaRef.current;
     if (video) { if (playing) void video.play().catch(() => undefined); else video.pause(); }
     if (!playing || !shot) return;
     const started = Date.now();
-    const timer = window.setTimeout(() => { remaining.current = 0; if (index >= data.shots.length - 1) setPlaying(false); else setIndex(index + 1); }, remaining.current || shot.duration * 1000);
+    const timer = window.setTimeout(() => {
+      remaining.current = 0;
+      if (index >= data.shots.length - 1) {
+        finished.current = true;
+        setPlaying(false);
+      } else setIndex(index + 1);
+    }, remaining.current || shot.duration * 1000);
     return () => { window.clearTimeout(timer); remaining.current = Math.max(0, remaining.current - (Date.now() - started)); };
   }, [playing, index, shot?.id, shot?.duration, data.shots.length, boardId]);
   async function exportCsv() {
@@ -89,15 +112,58 @@ export function StoryboardPreview({ id, data, onClose }: { id: string; data: Sto
     }
   }
 
-  return createPortal(<div className="story-reference-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="story-preview-dialog" role="dialog" aria-modal="true" aria-label="分镜粗剪预览">
-    <header><div><strong>分镜粗剪预览</strong><small>按镜头预估时长播放，供检查节奏；不是成片或精确混音。同画布重复导入时使用最新节点。</small></div><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={16} /></button></header>
-    {loading ? <p><LoadingIndicator variant="dots" size={24} /> 正在读取画布…</p> : <label>画布 <select value={boardId} onChange={(e) => { setPlaying(false); setBoardId(e.target.value); }}><option value="">仅预览分镜文字</option>{boards.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
-    <div className="story-preview-stage" key={`${boardId}-${shot?.id}`}>{media?.video ? <video ref={mediaRef} src={api.assetUrl(media.video.url)} controls muted={Boolean(media.audio)} playsInline /> : media?.image ? <img src={api.assetUrl(media.image.url)} alt={`第 ${index + 1} 镜`} /> : <div>第 {index + 1} 镜尚无画面<br /><small>{shot?.prompt}</small></div>}
-      {playing && media?.audio ? <audio src={api.assetUrl(media.audio.url)} autoPlay /> : null}</div>
-    <div className="story-preview-details"><strong>第 {index + 1} / {data.shots.length} 镜 · {shot?.duration} 秒</strong><span>{shot?.dialogue || shot?.videoPrompt || shot?.prompt}</span></div>
-    <div className="story-preview-strip">{data.shots.map((item, i) => { const frame = board?.shots.find((entry) => entry.shotId === item.id); return <button type="button" key={item.id} className={i === index ? "active" : ""} onClick={() => { setPlaying(false); setIndex(i); }}>{frame?.image ? <img src={api.assetUrl(frame.image.thumbUrl || frame.image.url)} alt="" /> : null}<span>第 {i + 1} 镜<br />{item.duration} 秒</span></button>; })}</div>
-    {error ? <p role="alert" className="story-review-error">{error}</p> : null}
-    <footer><button type="button" className="secondary-button" onClick={() => { if (!playing && index === data.shots.length - 1) setIndex(0); setPlaying(!playing); }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button><span>总计 {data.shots.reduce((sum, item) => sum + item.duration, 0).toFixed(1)} 秒</span><button type="button" className="secondary-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表及素材清单</button><button type="button" className="secondary-button" disabled={exporting || !board} onClick={() => void exportDraft()}>{exporting ? <LoadingIndicator variant="dots" size={24} /> : <Film size={15} />}导出剪映草稿</button></footer>
-    {draftNote ? <p className="story-preview-note">{draftNote}</p> : null}
-  </section></div>, document.body);
+  function goTo(next: number) {
+    setPlaying(false);
+    setIndex(next);
+  }
+
+  return createPortal(<div className="story-reference-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="storydesk-dialog storydesk-preview" role="dialog" tabIndex={-1} aria-modal="true" aria-label="分镜粗剪预览">
+      <header><div><h2>粗剪预览</h2><p>{data.name} · 按预估时长播放</p></div>
+        <button type="button" className="storydesk-icon" aria-label="关闭粗剪" onClick={onClose}><X size={18} /></button></header>
+      {loading ? <p role="status"><LoadingIndicator variant="dots" size={24} />正在读取画布…</p> : <label className="storydesk-board-select"><span>素材来源</span>
+        <select value={boardId} onChange={(event) => { setPlaying(false); setBoardId(event.target.value); }}>
+          <option value="">仅预览分镜文字</option>{boards.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}
+        </select>
+      </label>}
+      <div className="storydesk-preview-stage" key={`${boardId}-${shot?.id}`}>
+        {media?.video ? <video ref={mediaRef} src={api.assetUrl(media.video.url)} controls muted={Boolean(media.audio)} playsInline />
+          : media?.image ? <img src={api.assetUrl(media.image.url)} alt={`第 ${index + 1} 镜`} />
+          : <div><Clapperboard size={26} /><strong>第 {index + 1} 镜暂无画面</strong><p>{shot?.prompt}</p></div>}
+        {playing && media?.audio ? <audio src={api.assetUrl(media.audio.url)} autoPlay /> : null}
+      </div>
+      <div className="storydesk-preview-controls">
+        <div className="storydesk-actions">
+          <button type="button" className="storydesk-icon" aria-label="上一镜" disabled={index === 0} onClick={() => goTo(index - 1)}><SkipBack size={16} /></button>
+          <button type="button" className="storydesk-button is-primary" onClick={() => {
+            if (!playing && finished.current) {
+              finished.current = false;
+              if (index === 0 && mediaRef.current) mediaRef.current.currentTime = 0;
+              setIndex(0);
+            }
+            setPlaying(!playing);
+          }}>{playing ? <Pause size={15} /> : <Play size={15} />}{playing ? "暂停" : "播放"}</button>
+          <button type="button" className="storydesk-icon" aria-label="下一镜" disabled={index >= data.shots.length - 1} onClick={() => goTo(index + 1)}><SkipForward size={16} /></button>
+        </div>
+        <strong>第 {index + 1} / {data.shots.length} 镜 · {shotDuration(shot?.duration ?? 0)}</strong>
+        <button type="button" className="storydesk-button" aria-pressed={showStrip || playing} disabled={playing} onClick={() => setShowStrip(!showStrip)}><Film size={15} />镜头条</button>
+      </div>
+      {shot?.dialogue ? <p className="storydesk-preview-dialogue">{shot.speaker ? `${shot.speaker} · ` : ""}{shot.dialogue}</p> : null}
+      {showStrip || playing ? <div className="storydesk-preview-strip" aria-label="镜头条">
+        {data.shots.map((item, position) => {
+          const frame = board?.shots.find((entry) => entry.shotId === item.id);
+          return <button type="button" key={item.id} aria-current={position === index ? "true" : undefined} onClick={() => goTo(position)}>
+            <span>{frame?.image ? <img src={api.assetUrl(frame.image.url)} alt="" loading="lazy" /> : <Clapperboard size={15} />}</span>
+            <small>{shotNumber(position)} · {shotDuration(item.duration)}</small>
+          </button>;
+        })}
+      </div> : null}
+      {error ? <p role="alert" className="story-review-error">{error}</p> : null}
+      {draftNote ? <p role="status">{draftNote}</p> : null}
+      <footer><span className="storydesk-muted">总计 {shotDuration(data.shots.reduce((sum, item) => sum + item.duration, 0))}</span>
+        <button type="button" className="storydesk-button" onClick={() => void exportCsv()}><Download size={15} />导出分镜表</button>
+        <button type="button" className="storydesk-button" disabled={exporting || !board} onClick={() => void exportDraft()}>{exporting ? <LoadingIndicator variant="dots" size={24} /> : <Film size={15} />}导出剪映草稿</button>
+      </footer>
+    </section>
+  </div>, document.body);
 }

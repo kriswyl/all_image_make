@@ -190,7 +190,13 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
             </li>
           ))}
         </ol>
-        <div className="modal-body wizard-body">
+        <div
+          key={step}
+          className={`modal-body wizard-body${step === lastStep ? " wizard-review-body" : ""}`}
+          tabIndex={step === lastStep ? 0 : undefined}
+          role={step === lastStep ? "region" : undefined}
+          aria-label={step === lastStep ? "渠道保存清单" : undefined}
+        >
           {step === 0 ? (
             <>
               {/* 一 key 模式放在最上面、单独一档：大多数人只有一个中转站密钥，

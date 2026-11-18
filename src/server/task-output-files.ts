@@ -250,12 +250,20 @@ export class TaskOutputFiles {
     }
     if (!image.url) throw new AppError("ASSET_INVALID", "图片响应缺少 URL 或 Base64", 502);
     const headers = this.assetDownloadHeaders(image.url, channel, "image/*");
-    const response = await safeFetch(image.url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-    if (!response.ok) throw new AppError("ASSET_DOWNLOAD_FAILED", `图片下载失败：HTTP ${response.status}`, 502);
-    const contentLength = Number(response.headers.get("content-length") ?? 0);
-    if (contentLength > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
-    const mimeType = (response.headers.get("content-type") ?? "application/octet-stream").split(";")[0];
-    return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
+    try {
+      const response = await safeFetch(image.url, { method: "GET", headers }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+      if (!response.ok) throw new AppError("ASSET_DOWNLOAD_FAILED", `图片下载失败：HTTP ${response.status}`, 502);
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      if (contentLength > MAX_IMAGE_BYTES) throw new AppError("ASSET_TOO_LARGE", "图片超过 30 MB 限制", 502);
+      const mimeType = (response.headers.get("content-type") ?? "application/octet-stream").split(";")[0];
+      return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      const timedOut = error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name);
+      const failure = new AppError("ASSET_DOWNLOAD_FAILED", timedOut ? "图片下载超时" : "图片下载失败：无法读取产物地址或响应内容", 502);
+      failure.cause = error instanceof Error ? error.cause ?? error : undefined;
+      throw failure;
+    }
   }
 }
 

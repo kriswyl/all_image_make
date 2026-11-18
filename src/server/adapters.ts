@@ -2,6 +2,8 @@ import { VIDEO_DEFAULTS } from "../shared/video-capabilities.js";
 import { resolveMinimaxMode, videoRatioIsAdaptive } from "../shared/video-modes.js";
 import type { DbChannel } from "./db.js";
 import type { GenerationInput, KlingVideoMode } from "../shared/types.js";
+import { DEFAULT_IMAGE_REQUEST_TIMEOUT_MS } from "../shared/types.js";
+import { isImageAdapter } from "../shared/kinds.js";
 import { modelSupportsNegativePrompt, normalizeAspectFields, unsupportedLabels } from "../shared/channel-fields.js";
 import { frameParameters, gifBudgetMessage } from "../shared/image-formats.js";
 import { validateSeedanceMedia } from "../shared/seedance-capabilities.js";
@@ -778,7 +780,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     url, method: "POST", headers, body, formData, diagnosticBody,
     allowPrivateNetwork: channel.allowPrivateNetwork,
     ...(ignoredFields.length ? { ignoredFields } : {}),
-    timeoutMs: normalizeTimeout(input.timeoutMs),
+    timeoutMs: normalizeTimeout(input.timeoutMs, isImageAdapter(channel.adapterType) ? DEFAULT_IMAGE_REQUEST_TIMEOUT_MS : undefined),
   };
 }
 
@@ -786,9 +788,8 @@ export const MIN_TIMEOUT_MS = 10_000;
 export const MAX_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_TIMEOUT_MS = 180_000;
 
-/** 超时时长约束在 10 秒到 30 分钟之间，缺省沿用原有的 180 秒 */
-export function normalizeTimeout(timeoutMs: number | undefined): number {
-  if (!Number.isFinite(timeoutMs) || timeoutMs == null) return DEFAULT_TIMEOUT_MS;
+export function normalizeTimeout(timeoutMs: number | undefined, fallback = DEFAULT_TIMEOUT_MS): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs == null) return fallback;
   return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.round(timeoutMs)));
 }
 
@@ -813,7 +814,10 @@ export function requestForDiagnostic(request: PreparedRequest) {
   };
 }
 
-export async function sendPreparedRequest(request: PreparedRequest, options: { checkErrorEnvelope?: boolean } = {}) {
+export async function sendPreparedRequest(request: PreparedRequest, options: {
+  checkErrorEnvelope?: boolean;
+  onResponse?: (details: { status: number; requestId?: string }) => void;
+} = {}) {
   const started = Date.now();
   const response = await safeFetch(request.url, {
     method: request.method,
@@ -821,6 +825,9 @@ export async function sendPreparedRequest(request: PreparedRequest, options: { c
     body: request.formData ?? (request.body ? JSON.stringify(request.body) : undefined),
     ...(request.timeoutMs ? { signal: AbortSignal.timeout(request.timeoutMs) } : {}),
   }, { allowPrivateNetwork: request.allowPrivateNetwork });
+  const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+  const responseDetails = { status: response.status, ...(requestId ? { requestId: requestId.slice(0, 256) } : {}) };
+  options.onResponse?.(responseDetails);
   const contentType = response.headers.get("content-type") ?? "";
   let payload: unknown;
   if (contentType.startsWith("image/")) {
@@ -833,8 +840,7 @@ export async function sendPreparedRequest(request: PreparedRequest, options: { c
   const error = objectRecord(payload).error;
   const explicitError = typeof error === "string" ? Boolean(error.trim()) : Object.keys(objectRecord(error)).length > 0;
   if (!response.ok || (options.checkErrorEnvelope && explicitError)) {
-    const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
-    throw new RemoteApiError(response.status, payload, extractErrorMessage(payload), requestId?.slice(0, 256));
+    throw new RemoteApiError(response.status, payload, extractErrorMessage(payload), responseDetails.requestId);
   }
   return { payload, status: response.status, durationMs };
 }

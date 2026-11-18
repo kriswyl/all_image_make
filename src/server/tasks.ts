@@ -4,7 +4,7 @@ import { VIDEO_DEFAULTS } from "../shared/video-capabilities.js";
 import crypto from "node:crypto";
 import { DEFAULT_IMAGE_SIZE, MAX_INLINE_MEDIA_CHARS, normalizeImageSize, VIDEO_MEDIA_FIELDS } from "../shared/types.js";
 import { isImageAdapter } from "../shared/kinds.js";
-import type { GenerationInput, Task } from "../shared/types.js";
+import type { GenerationInput, RequestDiagnosticTrace, Task } from "../shared/types.js";
 import type { SunoTaskMeta } from "../shared/suno.js";
 import type { AppDatabase, DbChannel } from "./db.js";
 import type { TaskPatch, TaskRow } from "./db-tasks.js";
@@ -91,7 +91,7 @@ export type TaskListener = (event: TaskEvent) => void;
 type TaskRunnerStore = Pick<AppDatabase,
   | "assetsDir" | "inputsDir" | "thumbsDir" | "getChannel" | "getSetting"
   | "createTask" | "getTaskRow" | "getTaskView" | "updateTask" | "listPendingTasks"
-  | "taskHasConversationReferences" | "insertAsset" | "insertDiagnostic"
+  | "taskHasConversationReferences" | "insertAsset" | "insertDiagnostic" | "updateDiagnostic"
 >;
 
 export class TaskRunner {
@@ -240,6 +240,8 @@ export class TaskRunner {
   async run(taskId: string) {
     if (this.running.has(taskId)) return;
     this.running.add(taskId);
+    let phase: "prepare" | "upstream" | "poll" | "result" = "prepare";
+    let phaseStartedAt = Date.now();
     try {
       const task = this.requireTask(taskId);
       const channel = this.requireChannel(task.channelId);
@@ -280,12 +282,13 @@ export class TaskRunner {
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
       this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
+      phase = "upstream";
       const result = await this.sendWithDiagnostic(taskId, prepared, isImageAdapter(channel.adapterType)).catch(error => {
         const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url") || input.minimaxVideoMedia?.some(item => item.type === "video"));
         if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
-        const transportInterrupted = error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name);
+        const transportInterrupted = error instanceof AppError && ["REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(error.code);
         if ((task.agentOperationId || channel.adapterType === "suno-music") && transportInterrupted) {
           throw new AppError("SUBMISSION_UNKNOWN", "生成请求在返回结果前断开，上游可能已接收，请先到渠道核对任务", 409);
         }
@@ -306,6 +309,7 @@ export class TaskRunner {
           remoteTaskId: asyncTaskId,
           ...(sunoIds.length ? { remoteMeta: JSON.stringify({ suno: { remoteIds: sunoIds } }) } : {}),
         });
+        phase = "poll";
         await this.pollAsyncTask(taskId, asyncTaskId, channel, key, spec);
         return;
       }
@@ -313,6 +317,8 @@ export class TaskRunner {
       if (channel.adapterType === "suno-music") {
         throw new AppError("SUBMISSION_UNKNOWN", "渠道未返回可查询的任务 ID，请先核对渠道记录", 409);
       }
+      phase = "result";
+      phaseStartedAt = Date.now();
       await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt);
       this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
     } catch (error) {
@@ -324,6 +330,12 @@ export class TaskRunner {
         const current = this.db.getTaskRow(taskId);
         if (current && current.status !== "cancelled") {
           const normalized = normalizeError(error);
+          if (phase === "prepare" || phase === "result") {
+            const failedPhase = phase === "prepare" ? "prepare"
+              : normalized.code === "RESPONSE_PARSE_FAILED" ? "parse_result"
+              : normalized.code === "ASSET_DOWNLOAD_FAILED" ? "download_result" : "save_result";
+            this.recordDiagnosticFailure(taskId, failedPhase, phaseStartedAt, normalized, error);
+          }
           this.updateTask(taskId, { status: "failed", errorCode: normalized.code, errorMessage: normalized.message, finishedAt: new Date().toISOString() });
         }
       } catch {
@@ -385,8 +397,10 @@ export class TaskRunner {
       const spec = channel ? asyncProviderSpec(channel.adapterType) : null;
       if (!channel || !spec) {
         if ((task.agentOperationId || task.channelAdapterType === "suno-music") && task.status === "submitting") {
+          this.recordDiagnosticFailure(task.id, "service_restart", Date.now(), new AppError("SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果"), undefined);
           this.markFailed(task.id, "SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果，请先到渠道核对任务");
         } else {
+          this.recordDiagnosticFailure(task.id, "service_restart", Date.now(), new AppError("SERVICE_RESTARTED", "服务重启时该任务尚未结束"), undefined);
           this.markFailed(task.id, "SERVICE_RESTARTED", "服务已重启，请重新生成");
         }
         continue;
@@ -416,21 +430,60 @@ export class TaskRunner {
     this.updateTask(taskId, { status: "failed", errorCode: code, errorMessage: message, finishedAt: new Date().toISOString() });
   }
 
-  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>, checkErrorEnvelope = false) {
+  private recordDiagnosticFailure(taskId: string, phase: RequestDiagnosticTrace["phase"], startedAt: number, error: AppError, original?: unknown) {
+    const endedAt = Date.now();
     try {
-      const result = await sendPreparedRequest(prepared, { checkErrorEnvelope });
-      this.db.insertDiagnostic({ taskId, request: redact(requestForDiagnostic(prepared)), response: redact(truncatePayload(result.payload)), httpStatus: result.status, durationMs: result.durationMs });
+      this.db.insertDiagnostic({ taskId, request: null, response: null, durationMs: endedAt - startedAt, trace: {
+        phase, outcome: "failed", startedAt: new Date(startedAt).toISOString(), finishedAt: new Date(endedAt).toISOString(),
+        error: diagnosticError(error, original),
+      } });
+    } catch {
+      // A diagnostic write must not prevent the task's terminal state from being recorded.
+    }
+  }
+
+  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>, checkErrorEnvelope = false) {
+    const started = Date.now();
+    const trace: RequestDiagnosticTrace = {
+      phase: "upstream", outcome: "pending", startedAt: new Date(started).toISOString(), timeoutMs: prepared.timeoutMs,
+    };
+    let diagnosticId: string | undefined;
+    let httpStatus: number | undefined;
+    const request = redact(requestForDiagnostic(prepared));
+    const record = (entry: Parameters<TaskRunnerStore["updateDiagnostic"]>[1]) => {
+      try {
+        if (diagnosticId) this.db.updateDiagnostic(diagnosticId, entry);
+        else diagnosticId = this.db.insertDiagnostic({ taskId, request, ...entry });
+      } catch {
+        // Diagnostics are best-effort and cannot change the result of a generation.
+      }
+    };
+    record({ response: null, trace });
+    try {
+      const result = await sendPreparedRequest(prepared, {
+        checkErrorEnvelope,
+        onResponse: ({ status, requestId }) => {
+          httpStatus = status;
+          trace.responseAt = new Date().toISOString();
+          trace.upstreamRequestId = requestId;
+          trace.phase = "response_body";
+          record({ response: null, httpStatus, trace });
+        },
+      });
+      record({ response: redact(truncatePayload(result.payload)), httpStatus: result.status, durationMs: result.durationMs,
+        trace: { ...trace, phase: "upstream", outcome: "succeeded", finishedAt: new Date().toISOString() } });
       return result;
     } catch (error) {
-      if (error instanceof RemoteApiError) {
-        this.db.insertDiagnostic({
-          taskId,
-          request: redact({ ...requestForDiagnostic(prepared), ...(error.requestId ? { upstreamRequestId: error.requestId } : {}) }),
-          response: redact(truncatePayload(error.payload)),
-          httpStatus: error.status,
-        });
-      }
-      throw error;
+      const upstreamError = error instanceof RemoteApiError;
+      const normalized = normalizeSubmissionError(error, httpStatus !== undefined);
+      const finished = Date.now();
+      record({
+        response: upstreamError ? redact(truncatePayload(error.payload)) : null,
+        httpStatus, durationMs: finished - started,
+        trace: { ...trace, phase: upstreamError ? "upstream" : trace.phase, outcome: "failed",
+          finishedAt: new Date(finished).toISOString(), error: diagnosticError(normalized, error) },
+      });
+      throw upstreamError ? error : normalized;
     }
   }
 
@@ -740,4 +793,23 @@ export function normalizeError(error: unknown) {
   const message = error instanceof Error ? error.message : "未知错误";
   if (/timeout|aborted/i.test(message)) return new AppError("REQUEST_TIMEOUT", "请求超时", 504);
   return new AppError("INTERNAL_ERROR", message, 500);
+}
+
+function normalizeSubmissionError(error: unknown, receivedHeaders: boolean) {
+  if (error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name)) {
+    return new AppError("REQUEST_TIMEOUT", receivedHeaders ? "已收到上游 HTTP 响应头，读取响应内容超时"
+      : "本地等待超时，未收到上游 HTTP 响应。上游可能仍在处理，请先核对渠道记录", 504);
+  }
+  if (error instanceof TypeError) {
+    return new AppError("REQUEST_NETWORK_ERROR", receivedHeaders ? "已收到上游 HTTP 响应头，读取响应时连接中断"
+      : "连接或传输失败，未收到上游 HTTP 响应。请核对渠道记录", 502);
+  }
+  return normalizeError(error);
+}
+
+function diagnosticError(error: AppError, original: unknown): NonNullable<RequestDiagnosticTrace["error"]> {
+  const cause = original instanceof Error && original.cause && typeof original.cause === "object" && "code" in original.cause
+    ? original.cause.code : undefined;
+  const causeCode = typeof cause === "string" && /^[A-Z][A-Z0-9_]{1,60}$/.test(cause) ? cause : undefined;
+  return { code: error.code, message: error.message, ...(causeCode ? { causeCode } : {}) };
 }

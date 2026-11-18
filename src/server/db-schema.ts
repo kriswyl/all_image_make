@@ -74,6 +74,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         response_json TEXT,
         http_status INTEGER,
         duration_ms INTEGER,
+        trace_json TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS settings (
@@ -478,6 +479,11 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     if (!messageColumns.some((col) => col.name === "video_frames_json")) db.exec("ALTER TABLE messages ADD COLUMN video_frames_json TEXT");
     // 上传的图借 tasks 占一个 task_id（assets.task_id 是 NOT NULL，而重建表会动到真实数据），
     // 靠 origin 把它和真正的生成记录区分开（需求.md 问题 4）
+    const diagnosticColumns = db.prepare("PRAGMA table_info(diagnostics)").all() as Array<{ name: string }>;
+    if (!diagnosticColumns.some((column) => column.name === "trace_json")) {
+      db.exec("ALTER TABLE diagnostics ADD COLUMN trace_json TEXT");
+    }
+
     const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
     if (!taskColumns.some((col) => col.name === "origin")) {
       db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'generate'");

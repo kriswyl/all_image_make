@@ -1,4 +1,4 @@
-import type { GenerationInput } from "../../shared/types";
+import { DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, type GenerationInput } from "../../shared/types";
 
 export type ImageDraft = {
   size: string; imageSize: string; aspectRatio: string; quality: string; count: string;
@@ -6,7 +6,7 @@ export type ImageDraft = {
   temperature: string; topP: string; topK: string; maxOutputTokens: string; seed: string; responseModalities: string;
   midjourneyVersion: string; timeoutSeconds: string; raw: string;
 };
-export const defaultImageDraft: ImageDraft = { size: "", imageSize: "", aspectRatio: "", quality: "", count: "1", negativePrompt: "", background: "", outputFormat: "", moderation: "", style: "", responseFormat: "", temperature: "", topP: "", topK: "", maxOutputTokens: "", seed: "", responseModalities: "IMAGE", midjourneyVersion: "", timeoutSeconds: "180", raw: "{}" };
+export const defaultImageDraft: ImageDraft = { size: "", imageSize: "", aspectRatio: "", quality: "", count: "1", negativePrompt: "", background: "", outputFormat: "", moderation: "", style: "", responseFormat: "", temperature: "", topP: "", topK: "", maxOutputTokens: "", seed: "", responseModalities: "IMAGE", midjourneyVersion: "", timeoutSeconds: String(DEFAULT_IMAGE_REQUEST_TIMEOUT_MS / 1000), raw: "{}" };
 
 /** Only send fields the selected image adapter understands. */
 export function imageGenerationParameters(adapter: string, draft: ImageDraft): Partial<GenerationInput> {

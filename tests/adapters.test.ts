@@ -241,16 +241,16 @@ describe("adapter request building", () => {
     });
   });
 
-  it("carries the requested timeout onto the prepared request", () => {
+  it("preserves an explicitly requested shorter image timeout", () => {
     const request = buildGenerationRequest(channel, {
-      channelId: channel.id, model: "image-model", prompt: "city", timeoutMs: 300_000,
+      channelId: channel.id, model: "image-model", prompt: "city", timeoutMs: 180_000,
     }, "secret");
-    expect(request.timeoutMs).toBe(300_000);
+    expect(request.timeoutMs).toBe(180_000);
   });
 
-  it("falls back to the default timeout when none is requested", () => {
+  it("defaults image requests to five minutes", () => {
     const request = buildGenerationRequest(channel, { channelId: channel.id, model: "image-model", prompt: "city" }, "secret");
-    expect(request.timeoutMs).toBe(180_000);
+    expect(request.timeoutMs).toBe(300_000);
   });
 });
 

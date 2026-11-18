@@ -16,7 +16,7 @@ import {
   type SaveStoryboardMigrationInput, type StoryboardSettings, type StoryboardShotPatch,
 } from "./db-storyboards.js";
 import { AssetRepository, type AssetRow, type InsertAssetInput, type StoredFileRef } from "./db-assets.js";
-import { TaskRepository, type CreateTaskInput, type InsertDiagnosticInput, type LibraryTaskQuery, type TaskKey, type TaskOrigin, type TaskPatch, type TaskRow } from "./db-tasks.js";
+import { TaskRepository, type CreateTaskInput, type DiagnosticResult, type InsertDiagnosticInput, type LibraryTaskQuery, type TaskKey, type TaskOrigin, type TaskPatch, type TaskRow } from "./db-tasks.js";
 import { canvasIdsFromRow, now, parseJson, stringArrayFromJson, type DbRow } from "./db-row.js";
 import { ConversationRepository, type CreateConversationInput } from "./db-conversations.js";
 import { ConversationMessageRepository, type AppendMessageInput, type MessagePatch } from "./db-conversation-messages.js";
@@ -692,6 +692,10 @@ export class AppDatabase {
 
   insertDiagnostic(input: InsertDiagnosticInput) {
     return this.tasks.insertDiagnostic(input);
+  }
+
+  updateDiagnostic(id: string, result: DiagnosticResult) {
+    this.tasks.updateDiagnostic(id, result);
   }
 
   listDiagnostics(taskId: string): Diagnostic[] {

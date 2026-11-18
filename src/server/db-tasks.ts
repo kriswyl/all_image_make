@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { AdapterType, Diagnostic, Task, TaskKind, TaskStatus } from "../shared/types.js";
+import type { AdapterType, Diagnostic, RequestDiagnosticTrace, Task, TaskKind, TaskStatus } from "../shared/types.js";
 import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, taskKindFor } from "../shared/kinds.js";
 import { summarizeTaskInput } from "../shared/video-snapshot.js";
 import { auditParameters } from "./diagnose.js";
@@ -48,7 +48,8 @@ export type CreateTaskInput = {
 export type TaskPatch = Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remotePollAfter" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>;
 export type TaskKey = Pick<TaskRow, "id" | "channelId">;
 
-export type InsertDiagnosticInput = { taskId: string; request: unknown; response: unknown; httpStatus?: number | null; durationMs?: number | null };
+export type DiagnosticResult = { response: unknown; httpStatus?: number | null; durationMs?: number | null; trace?: RequestDiagnosticTrace };
+export type InsertDiagnosticInput = DiagnosticResult & { taskId: string; request: unknown };
 
 export type LibraryTaskQuery = { limit: number; offset: number; query: string; kind: "all" | "image" | "video" | "audio"; mode: "all" | "assets" | "records"; includeChat?: "all" | "image" };
 
@@ -153,10 +154,20 @@ export class TaskRepository {
   }
 
   insertDiagnostic(input: InsertDiagnosticInput) {
+    const id = crypto.randomUUID();
     this.db.prepare(`
-      INSERT INTO diagnostics (id, task_id, request_json, response_json, http_status, duration_ms, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(crypto.randomUUID(), input.taskId, JSON.stringify(input.request), JSON.stringify(input.response), input.httpStatus ?? null, input.durationMs ?? null, now());
+      INSERT INTO diagnostics (id, task_id, request_json, response_json, http_status, duration_ms, trace_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.taskId, JSON.stringify(input.request), JSON.stringify(input.response), input.httpStatus ?? null,
+      input.durationMs ?? null, input.trace ? JSON.stringify(input.trace) : null, now());
+    return id;
+  }
+
+  updateDiagnostic(id: string, result: DiagnosticResult) {
+    this.db.prepare(`
+      UPDATE diagnostics SET response_json = ?, http_status = ?, duration_ms = ?, trace_json = ? WHERE id = ?
+    `).run(JSON.stringify(result.response), result.httpStatus ?? null, result.durationMs ?? null,
+      result.trace ? JSON.stringify(result.trace) : null, id);
   }
 
   listDiagnostics(taskId: string): Diagnostic[] {
@@ -166,6 +177,7 @@ export class TaskRepository {
     return rows.map((row) => ({
       id: String(row.id), taskId: String(row.task_id), request: parseJson(row.request_json, null), response: parseJson(row.response_json, null),
       httpStatus: row.http_status == null ? null : Number(row.http_status), durationMs: row.duration_ms == null ? null : Number(row.duration_ms), createdAt: String(row.created_at),
+      ...(row.trace_json ? { trace: parseJson<RequestDiagnosticTrace | undefined>(row.trace_json, undefined) } : {}),
     }));
   }
 

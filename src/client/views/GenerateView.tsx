@@ -25,7 +25,7 @@ import "./image-workbench.css";
 import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
-import type { Channel, Task } from "../../shared/types";
+import { DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, type Channel, type Task } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
 const openAiSizeGroups = OPENAI_SIZE_GROUPS;
@@ -60,7 +60,7 @@ const responseModalityOptions: SelectOption[] = [
   { value: "IMAGE", label: "仅图片" }, { value: "TEXT,IMAGE", label: "文字 + 图片" },
 ];
 const timeoutQuickOptions: SelectOption[] = [
-  { value: "60", label: "1 分钟" }, { value: "180", label: "3 分钟（默认）" }, { value: "300", label: "5 分钟" },
+  { value: "60", label: "1 分钟" }, { value: "180", label: "3 分钟" }, { value: String(DEFAULT_IMAGE_REQUEST_TIMEOUT_MS / 1000), label: "5 分钟（默认）" },
   { value: "600", label: "10 分钟" }, { value: "900", label: "15 分钟" }, { value: "custom", label: "自定义" },
 ];
 
@@ -111,7 +111,7 @@ export function GenerateView(props: {
   const [maxOutputTokens, setMaxOutputTokens] = useScopedPersistentState(draftScope, "maxOutputTokens", "");
   const [responseModalities, setResponseModalities] = useScopedPersistentState<"IMAGE" | "TEXT,IMAGE">(draftScope, "responseModalities", "IMAGE");
   const [seed, setSeed] = useScopedPersistentState(draftScope, "seed", "");
-  const [timeoutSeconds, setTimeoutSeconds] = useScopedPersistentState(draftScope, "timeoutSeconds", 180);
+  const [timeoutSeconds, setTimeoutSeconds] = useScopedPersistentState(draftScope, "timeoutSeconds", DEFAULT_IMAGE_REQUEST_TIMEOUT_MS / 1000);
   const [count, setCount] = useScopedPersistentState(draftScope, "count", 1);
   const [raw, setRaw] = useScopedPersistentState(draftScope, "raw", "{}");
   const [submitting, setSubmitting] = useState(false);
@@ -431,7 +431,7 @@ export function GenerateView(props: {
                         <label>
                           <span>等待时长 <small>秒</small></span>
                           <input type="number" min={10} max={1800} step={10} value={timeoutSeconds}
-                            onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(1800, Number(event.target.value) || 180)))} />
+                            onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(1800, Number(event.target.value) || DEFAULT_IMAGE_REQUEST_TIMEOUT_MS / 1000)))} />
                         </label>
                         <label>
                           <span>快速选择</span>

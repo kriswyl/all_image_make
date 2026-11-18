@@ -31,6 +31,7 @@ export function ModelPicker({
   menuPlacement = "up",
   className,
   menuClassName,
+  portalContainer,
   ariaLabel,
   onOpen,
 }: {
@@ -43,6 +44,7 @@ export function ModelPicker({
   menuPlacement?: "up" | "down";
   className?: string;
   menuClassName?: string;
+  portalContainer?: HTMLElement | null;
   ariaLabel?: string;
   onOpen?: () => void;
 }) {
@@ -169,7 +171,7 @@ export function ModelPicker({
             </button>
           ))}
         </div>,
-        document.body,
+        portalContainer ?? document.body,
       ) : null}
     </div>
   );

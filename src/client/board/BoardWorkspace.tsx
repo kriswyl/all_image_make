@@ -676,6 +676,8 @@ export function BoardWorkspace({
               setTemplateDrawerOpen(false);
               setAssetTargetId(null);
               setReferenceTargetId(null);
+              setAssetSearch("");
+              setAssetType("all");
               setAssetDrawerOpen((open) => !open);
             }}
             title="查看这块无限画布用到的素材"
@@ -870,7 +872,7 @@ export function BoardWorkspace({
           setAssets((items) => new Map(items).set(asset.id, asset));
           return true;
         } : undefined}
-        onPreview={setPreview} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); setReferenceTargetId(null); }} onToast={onToast} /> : null}
+        onPreview={setPreview} previewOpen={Boolean(preview)} onClose={() => { setAssetDrawerOpen(false); setAssetTargetId(null); setReferenceTargetId(null); }} onToast={onToast} /> : null}
 
       {preview ? (
         <AssetLightbox
