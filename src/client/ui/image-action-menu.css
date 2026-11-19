@@ -1,0 +1,129 @@
+.image-action-card {
+  --image-action-inset: 10px;
+  --image-action-size: 28px;
+  position: relative;
+}
+
+.image-action-card.is-action-open { z-index: 4; }
+
+.image-action-shortcuts {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: var(--image-action-inset);
+  pointer-events: none;
+}
+
+.library-card-wrap > .image-action-shortcuts {
+  inset: 1px 1px auto;
+  aspect-ratio: var(--library-card-media-ratio, 1);
+  padding: 7px;
+}
+
+.image-action-shortcut-group {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
+  pointer-events: auto;
+}
+
+.image-action-shortcut-group > button {
+  display: grid;
+  place-items: center;
+  width: var(--image-action-size);
+  height: var(--image-action-size);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.image-action-shortcut-group > button:hover:not(:disabled),
+.image-action-shortcut-group > button:focus-visible,
+.image-action-trigger[aria-expanded="true"] {
+  background: var(--surface-hover);
+}
+.image-action-shortcut-group > button:disabled { color: var(--muted); cursor: default; }
+
+.image-action-card .image-action-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: -1px;
+  z-index: 3;
+  display: grid;
+  align-items: start;
+  gap: 0;
+  width: 64px;
+  padding: 3px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 9%);
+  backdrop-filter: blur(12px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 150ms ease-out, transform 150ms ease-out, visibility 0s 150ms;
+}
+
+.image-action-card .image-action-menu.opens-above {
+  top: auto;
+  bottom: calc(100% + 4px);
+  transform: translateY(4px);
+}
+
+.image-action-card.is-action-open .image-action-menu {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+
+.image-action-row + .image-action-row { border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+
+.image-action-row button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 37px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.image-action-row button svg { flex: 0 0 13px; width: 13px; height: 13px; }
+.image-action-row button:hover:not(:disabled),
+.image-action-row button:focus-visible { background: var(--surface-hover); }
+.image-action-row button:disabled { color: var(--muted); pointer-events: none; }
+.image-action-row button:focus-visible { outline-offset: -2px; }
+
+@media (pointer: coarse) {
+  .image-action-card { --image-action-size: 36px; }
+  .image-action-row button { min-height: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-action-card .image-action-menu { transition: none; }
+}

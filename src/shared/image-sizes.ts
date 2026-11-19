@@ -12,3 +12,28 @@ export const OPENAI_SIZE_GROUPS = [
 
 /** 拍平后的预设，给 `<datalist>` 这种不支持分组的地方用 */
 export const OPENAI_SIZE_PRESETS: readonly string[] = OPENAI_SIZE_GROUPS.flatMap((group) => [...group.sizes]);
+import { CHANNEL_FIELD_SUPPORT, isGptImage2Model } from "./channel-fields.js";
+import type { AdapterType } from "./types.js";
+
+
+const GPT_IMAGE_RATIOS = new Set(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21"]);
+
+interface ImageDimensions {
+  size?: string;
+  aspectRatio?: string;
+  imageSize?: string;
+}
+
+/** Convert the Agent's generic image fields once the target model is resolved. */
+export function normalizeAgentImageDimensions(adapter: AdapterType, model: string, dimensions: ImageDimensions): ImageDimensions {
+  if (!CHANNEL_FIELD_SUPPORT[adapter]?.size || !isGptImage2Model(model) || dimensions.size
+    || (!dimensions.aspectRatio && !dimensions.imageSize)) return dimensions;
+  const ratio = dimensions.aspectRatio?.replace(/\s/g, "") || "1:1";
+  if (!GPT_IMAGE_RATIOS.has(ratio)) return dimensions;
+  const reduced = ratio === "21:9" ? "7:3" : ratio === "9:21" ? "3:7" : ratio;
+  const [width, height] = reduced.split(":").map(Number) as [number, number];
+  const longEdge = dimensions.imageSize === "4K" ? 3840 : dimensions.imageSize === "2K" ? 2048
+    : dimensions.imageSize === "1K" || ratio === "1:1" ? 1024 : 1536;
+  const factor = Math.floor(longEdge / (Math.max(width, height) * 16)) * 16;
+  return { size: `${width * factor}x${height * factor}` };
+}

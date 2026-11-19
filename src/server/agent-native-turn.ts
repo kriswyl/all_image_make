@@ -10,6 +10,7 @@ import { createNativeToolRegistry } from "./agent-native-tools.js";
 import type { ToolContext } from "./agent-tools.js";
 import type { BrainContentPart, BrainMessage, BrainResult } from "./brain.js";
 import { initialToolGroups } from "./chat-tools/capability-search.js";
+import type { VideoOverviewFrames } from "../shared/media-review.js";
 import { parseNativeTurnCheckpoint, type NativeTurnCheckpoint } from "./chat-tools/checkpoint.js";
 import { compactNativeToolReads } from "./chat-tools/context.js";
 import { nativeImageSpecs, nativeImageViewSpec, requestsDirectSingleImage, type NativeMediaConfirmation } from "./chat-tools/native-image.js";
@@ -23,6 +24,7 @@ interface NativeTurnHost {
   brain: Pick<BrainRunner, "buildBrainMessages" | "callBrainRaw" | "degradeVision">;
   presentations: Pick<PresentationCoordinator, "registerDocumentTools" | "scheduleChecks">;
   confirmations: Pick<AgentConfirmationService, "approve">;
+  readVideoOverviewFrames(assetId: string): Promise<VideoOverviewFrames>;
   defaultAliases(): { image?: string; video?: string };
   toolContext(conversation: Conversation, controller: AbortController): ToolContext;
   broadcast(conversationId: string, event: AgentStreamEvent): void;
@@ -69,19 +71,25 @@ export async function runNativeTurn(
     : undefined;
   const frameMessage = turnConversation.toolScope === "all" ? recoveredUser ?? userMessage : userMessage;
   const turnVideoFrames = frameMessage?.videoFrames;
+  const attachmentMessage = recoveredUser ?? userMessage;
+  const turnVideoIds = attachmentMessage ? collectTurnAssetIds(db, conversationId, attachmentMessage.seq, { preferDeclared: true })
+    .filter(id => db.getAsset(id)?.mimeType.startsWith("video/")) : [];
   const registry = createNativeToolRegistry({
     db, presentations, defaultAliases: host.defaultAliases,
     toolContext: () => host.toolContext(turnConversation, controller),
   }, {
     conversationId, turnConversation, text, userMessage, recoveredUser, resume,
-    signal: controller.signal, callWithBudget, nativeCreative, turnAttachmentIds, turnVideoFrames,
+    signal: controller.signal, callWithBudget, nativeCreative, turnAttachmentIds, turnVideoFrames, turnVideoIds,
+    readVideoOverviewFrames: host.readVideoOverviewFrames,
+    canReviewWithModel: () => budget.brainCalls + 1 < budget.maxBrainCalls
+      && budget.elapsedMs < (turnConversation.chatTurnMinutes ?? 30) * 60_000
+      && (!turnConversation.chatTokenLimit || !budget.usageMissing && budget.usedTokens < turnConversation.chatTokenLimit),
   });
   // 能力组：首轮按用户意图和会话状态预加载；恢复轮沿用断点里记录的组。
   const initialGroups = initialToolGroups({
     text: userMessage?.content ?? text ?? db.lastUserText(conversationId) ?? null,
     hasAttachments: turnAttachmentIds.length > 0,
-    hasVideoAttachments: userMessage ? collectTurnAssetIds(db, conversationId, userMessage.seq)
-      .some((id) => db.getAsset(id)?.mimeType.startsWith("video/")) : false,
+    hasVideoAttachments: turnVideoIds.length > 0,
     hasDocuments: db.listConversationDocuments(conversationId).length > 0
       || db.listWorkspaceDocuments(conversationId).length > 0,
     hasImages: db.canvasImages(turnConversation).length > 0
@@ -104,9 +112,10 @@ export async function runNativeTurn(
   let toolSignature = toolSignatureOf(toolSpecs);
   // A 新增 presentation_spec_update：旧版本保存的断点不含它，签名按「排除新工具」兼容一次。
   // 该工具只记录要求、不改变已有操作的执行语义，因此允许带旧签名继续恢复。
-  const legacyToolSignature = toolSignatureOf(toolSpecs.filter(spec => spec.function.name !== "presentation_spec_update"));
+  const previousToolSignature = toolSignatureOf(toolSpecs.filter(spec => spec.function.name !== "media_review"));
+  const legacyToolSignature = toolSignatureOf(toolSpecs.filter(spec => spec.function.name !== "presentation_spec_update" && spec.function.name !== "media_review"));
   const channelVersion = db.getChannel(turnConversation.brainChannelId)?.updatedAt ?? "";
-  if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || (checkpoint.toolSignature !== toolSignature && checkpoint.toolSignature !== legacyToolSignature))) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
+  if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || ![toolSignature, previousToolSignature, legacyToolSignature].includes(checkpoint.toolSignature))) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
   const lastPlan = db.listMessages(conversationId).filter((message) => message.role === "tool" && message.toolName === "plan_update" && message.status === "ok").at(-1);
   const context: BrainMessage[] = [{ role: "system", content: `复杂任务应分步规划、使用工具并检查结果；仅在实际完成后声称完成。${lastPlan?.content ? `\n本会话最近的任务计划（可能属于之前的任务，仅在相关时参考）：\n${lastPlan.content}` : ""}` }];
   let plainMessages = checkpoint?.messages ?? [...context, ...built.messages];
@@ -322,7 +331,7 @@ export async function runNativeTurn(
         broadcast(conversationId, { type: "done", status: "idle" });
         return;
       }
-      plainMessages.push({ role: "tool", tool_call_id: call.id, content: `${outcome.ok ? "成功" : "失败"}：${outcome.summary}${typeof outcome.data?.fileId === "string" ? `\n文件ID：${outcome.data.fileId}` : ""}${typeof outcome.data?.sha256 === "string" ? `\n此新文件版本的 SHA-256：${outcome.data.sha256}` : ""}` });
+      plainMessages.push({ role: "tool", tool_call_id: call.id, content: `${outcome.ok ? "成功" : "失败"}：${outcome.summary}${typeof outcome.data?.fileId === "string" ? `\n文件ID：${outcome.data.fileId}` : ""}${typeof outcome.data?.sha256 === "string" ? `\n此新文件版本的 SHA-256：${outcome.data.sha256}` : ""}${outcome.agentContext ? `\n${outcome.agentContext}` : ""}` });
       if (lastFileMutationFailure) plainMessages.push({ role: "system", content: `上一次文件操作失败（${lastFileMutationFailure}），文件没有被修改。禁止声称该操作已经完成；请如实说明失败原因并等待用户指令。` });
     }
     if (groupedImages.length && firstImage) {

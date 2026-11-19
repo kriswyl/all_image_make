@@ -62,12 +62,14 @@ export const MESSAGE_ROLES = ["user", "assistant", "tool", "system"] as const;
 export type MessageRole = (typeof MESSAGE_ROLES)[number];
 
 export type MessageStatus = "ok" | "pending" | "error";
+export const CONVERSATION_ASSET_LINK = "asset_library_link";
 
 /** §8 工具清单。这一份是「大脑能调什么」的唯一真相，提示词和解析共用它 */
 export const AGENT_TOOL_NAMES = [
   "generate_image",
   "edit_image",
   "view_images",
+  "media_review",
   "set_canvas",
   "optimize_prompt",
   "generate_video",
@@ -112,6 +114,7 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   generate_image: "生成图片",
   edit_image: "修改图片",
   view_images: "查看图片",
+  media_review: "视频概述",
   set_canvas: "切换画布",
   optimize_prompt: "优化提示词",
   generate_video: "生成视频",
@@ -257,6 +260,7 @@ export interface EditImageArgs {
   /** 额外参考图使用会话素材引用，并与选定底图一起按生成模型的额度校验。 */
   extraReferences?: string[];
   /** 改图同样能指定输出尺寸与宽高比——改完的画面未必沿用原图的形状 */
+  size?: string;
   aspectRatio?: string;
   imageSize?: string;
   outputFormat?: "png" | "jpeg" | "webp" | "gif";
@@ -539,6 +543,8 @@ export interface ChatMessage {
   confirm: ConfirmPreview | null;
   taskId: string | null;
   assetId: string | null;
+  /** 已加入素材库的公共素材引用，只有显式选用时才成为本轮附件。 */
+  assetLink?: boolean;
   /**
    * 这条消息引用的一组产物。
    *
@@ -667,7 +673,7 @@ export interface CanvasAsset {
    * 两者的可预期行为不一样——上传的图没有提示词、也没花钱——所以「本会话的图」
    * 里要能一眼看出来源，不能长得一模一样。
    */
-  source: "generate" | "upload" | "storyboard" | "setting" | "bridge";
+  source: "generate" | "upload" | "storyboard" | "setting" | "bridge" | "library";
 }
 
 /** 简短的产物编号，展示和大脑引用都用它 */
@@ -682,6 +688,7 @@ export interface ConversationSummary extends Conversation {
 
 /** §14 SSE 事件协议 */
 export type AgentStreamEvent =
+  | import("./media-review.js").VideoOverviewRequest
   /** 推理模型的思考过程，实时推给前端（§21.3 的延迟缓解手段） */
   | { type: "reasoning"; text: string }
   /** 正文 token */

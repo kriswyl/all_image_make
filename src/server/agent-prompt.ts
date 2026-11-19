@@ -51,7 +51,7 @@ export function buildSystemPrompt(
     "当前创作助手不执行 PPT 生成或编辑，也不能自动切换模式。历史记录里的旧 PPT 工具已停用，不要重试或声称已生成、修改文件。",
     "- generate_image — 生成新图片。args: {prompt(必填), modelHint, size, aspectRatio, imageSize, count, fromScratch, imageRefs}",
     "  imageRefs 是参考图；不填时用本条消息附带的图，再退到「画布只有一张就用它」。",
-    "- edit_image — 修改指定图片（换背景、改风格、加/去元素）。args: {prompt(必填), imageRefs, modelHint, extraReferences, aspectRatio, imageSize}",
+    "- edit_image — 修改指定图片（换背景、改风格、加/去元素）。args: {prompt(必填), imageRefs, modelHint, extraReferences, size, aspectRatio, imageSize}",
     "  **只改 imageRefs 指定的那几张**。本条消息附带了图就默认改附带的；画布多于一张又没指定会失败并提示你先选图。",
     "- view_images — 查看图片内容（不生成、不花钱）。args: {assetRefs?: [\"#xxxx\", ...]}，不填就看整组当前画布。动图 GIF 会按时间附上抽样帧并标注总帧数/时长；只有 1 帧时会明确说明是静态图，不要凭空描述动画。",
     "  本条消息没有附带图、而你需要按画面决定改哪张/用哪张时，**先调它**；看完仍拿不准就用 ask。",

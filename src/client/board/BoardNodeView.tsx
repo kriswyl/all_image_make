@@ -15,7 +15,9 @@ import type {
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
 import { api } from "../api";
+import { ModelLogo, modelBrand } from "../chat/ModelLogo";
 import { BOARD_CONFIG_MODES } from "./board-config-modes";
+import type { BoardConfigModelSummary } from "./board-models";
 
 export interface ConfigNodeConnections {
   inputs: number;
@@ -28,6 +30,7 @@ export interface BoardNodeViewProps {
   asset: Asset | null;
   editing: boolean;
   configConnections?: ConfigNodeConnections;
+  configModel?: BoardConfigModelSummary;
   imageResults?: { count: number; expanded: boolean; onToggle: () => void };
   primaryChoice?: { enabled: boolean; onChoose: () => void };
   onImageLoad?: (assetId: string, width: number, height: number) => void;
@@ -303,25 +306,31 @@ function AudioNodeView({ node, asset, onPreview, onSelect, onPickImage, onDelete
   );
 }
 
-function ConfigNodeView({ node, connections }: { node: ConfigBoardNode; connections?: ConfigNodeConnections }) {
+function ConfigNodeView({ node, connections, summary }: {
+  node: ConfigBoardNode;
+  connections?: ConfigNodeConnections;
+  summary?: BoardConfigModelSummary;
+}) {
   const { label, icon: Icon } = BOARD_CONFIG_MODES[node.mode];
   const prompt = node.prompt.trim();
   const hasUpstreamText = node.useUpstreamText !== false && connections?.hasUpstreamText;
-  const outputDetails = node.mode === "image" ? `${node.count ?? 1} 张`
-    : node.mode === "video" ? [node.durationSeconds && `${node.durationSeconds} 秒`, node.resolution].filter(Boolean).join(" · ")
-      : node.mode === "audio" ? (node.audioKind === "music" ? "音乐" : "配音") : "";
+  const model = summary?.model;
+  const kind = node.mode === "text" ? "chat" : node.mode;
+  const hasLogo = model && modelBrand(model, kind);
+  const details = [model ? `${label}生成` : undefined, summary?.parameters].filter(Boolean).join(" · ");
   return (
     <div className="board-config-body">
       <div className="board-config-row">
-        <span className="board-config-icon"><Icon size={17} /></span>
+        <span className="board-config-icon" aria-hidden="true">
+          {hasLogo ? <ModelLogo model={model} kind={kind} size={16} /> : <Icon size={16} />}
+        </span>
         <div className="board-config-output">
-          <strong>{label}生成</strong>
-          {outputDetails && <span>{outputDetails}</span>}
+          <strong title={model}>{model || `${label}生成`}</strong>
+          {details && <span title={details}>{details}</span>}
         </div>
         <StatusBadge status={node.status} />
       </div>
-      <div className="board-config-prompt-preview">
-        <span>{hasUpstreamText && !prompt ? "提示词来源" : "提示词"}</span>
+      <div className={`board-config-prompt-preview${!prompt ? " is-empty" : ""}`}>
         <p className={`board-config-summary${!prompt ? " is-placeholder" : ""}`}>
           {prompt || (hasUpstreamText ? "使用上游文本" : "待填写提示词")}
         </p>
@@ -358,7 +367,7 @@ function titleWithoutRole(title: string) {
 }
 
 export function BoardNodeView({
-  node, asset, editing, configConnections, imageResults, primaryChoice, onImageLoad, onStartEdit, onCommitText, onCancelEdit,
+  node, asset, editing, configConnections, configModel, imageResults, primaryChoice, onImageLoad, onStartEdit, onCommitText, onCancelEdit,
   onPreview, onSelect, onEditConfig, onPickImage, onUploadMediaIntoNode, onRemoveAsset, onDelete, onCompareVersions, onExtractFrame,
 }: BoardNodeViewProps) {
   const settingRole = settingRoleOf(node);
@@ -441,7 +450,7 @@ export function BoardNodeView({
         />
       ) : null}
       {node.type === "config" ? (
-        <ConfigNodeView node={node} connections={configConnections} />
+        <ConfigNodeView node={node} connections={configConnections} summary={configModel} />
       ) : null}
 
       {(node.type === "text" || node.type === "audio") && <footer className="board-node-foot">

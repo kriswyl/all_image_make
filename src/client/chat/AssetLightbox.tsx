@@ -1,6 +1,6 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { Download, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { assetRef } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
@@ -9,6 +9,7 @@ import type { Asset } from "../../shared/types";
 export function AssetLightbox({
   assetId,
   asset,
+  startAtMs,
   onClose,
   onToast,
   onSetFirst,
@@ -19,6 +20,7 @@ export function AssetLightbox({
 }: {
   assetId: string;
   asset: Asset | null;
+  startAtMs?: number | null;
   onClose: () => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
   /** 图片可以直接设为首帧 / 尾帧 / 加入画布；故事板里的灯箱不传这些 */
@@ -29,8 +31,19 @@ export function AssetLightbox({
   inCanvas?: boolean;
 }) {
   const [downloading, setDownloading] = useState(false);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement;
+    closeButton.current?.focus();
+    return () => { if (opener instanceof HTMLElement && opener.isConnected) opener.focus(); };
+  }, []);
   const isAudio = asset?.mimeType.startsWith("audio/") ?? false;
   const isVideo = asset?.mimeType.startsWith("video/") ?? false;
+  function seekToTime(event: React.SyntheticEvent<HTMLMediaElement>) {
+    if (startAtMs == null) return;
+    const media = event.currentTarget;
+    media.currentTime = Math.min(startAtMs / 1000, Number.isFinite(media.duration) ? media.duration : Infinity);
+  }
 
   async function download() {
     if (!asset || downloading) return;
@@ -45,13 +58,18 @@ export function AssetLightbox({
   }
 
   return (
-    <div className="chat-lightbox" onClick={onClose} role="presentation">
+    <div className="chat-lightbox" onClick={onClose} role="dialog" aria-modal="true" aria-label="素材预览"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        onClose();
+      }}>
       <div className="chat-lightbox-body" onClick={(event) => event.stopPropagation()}>
         {isAudio ? (
           <div className="chat-audio-lightbox">
             {asset?.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" /> : null}
             <strong>{asset?.title || "音频"}</strong>
-            <audio src={api.assetUrl(`/api/assets/${assetId}/file`)} controls controlsList="nodownload" autoPlay onContextMenu={(event) => event.preventDefault()} />
+            <audio src={api.assetUrl(`/api/assets/${assetId}/file`)} controls controlsList="nodownload" autoPlay onLoadedMetadata={seekToTime} onContextMenu={(event) => event.preventDefault()} />
             {asset?.lyrics ? (
               <details className="music-lyrics chat-lyrics">
                 <summary>歌词</summary>
@@ -60,10 +78,10 @@ export function AssetLightbox({
             ) : null}
           </div>
         ) : isVideo ? (
-          // 视频只能交给浏览器解码：服务端缩略图走 jimp，喂给它视频会直接 404
           <video
             src={api.assetUrl(`/api/assets/${assetId}/file`)}
             controls controlsList="nodownload" autoPlay loop playsInline disablePictureInPicture disableRemotePlayback
+            onLoadedMetadata={seekToTime}
             onContextMenu={(event) => event.preventDefault()}
           />
         ) : (
@@ -102,7 +120,7 @@ export function AssetLightbox({
               {downloading ? <LoadingIndicator variant="dots" size={24} /> : <Download size={14} />}
               下载
             </button>
-            <button type="button" className="icon-button compact" onClick={onClose} title="关闭">
+            <button ref={closeButton} type="button" className="icon-button compact" onClick={onClose} title="关闭预览" aria-label="关闭预览">
               <X size={14} />
             </button>
           </div>

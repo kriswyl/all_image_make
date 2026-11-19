@@ -3,6 +3,8 @@ import type { AgentToolName, ChatVideoFrames } from "../shared/agent-types.js";
 import type { ToolContext } from "./agent-tools.js";
 import { isVisionBlocked } from "./agent-vision.js";
 import { createCapabilitySearchTool } from "./chat-tools/capability-search.js";
+import { createVideoOverviewTool } from "./chat-tools/media-review.js";
+import type { VideoOverviewFrames } from "../shared/media-review.js";
 import { nativeAudioSpecs, prepareNativeAudio } from "./chat-tools/native-audio.js";
 import { nativeImageSpecs, nativeImageViewSpec, prepareNativeImage, viewNativeImages } from "./chat-tools/native-image.js";
 import { createNativeTemplateTool } from "./chat-tools/native-templates.js";
@@ -23,6 +25,9 @@ interface NativeToolsHost {
 type NativeToolsTurn = Parameters<PresentationCoordinator["registerDocumentTools"]>[1] & {
   nativeCreative: boolean;
   turnAttachmentIds: string[];
+  turnVideoIds: string[];
+  readVideoOverviewFrames(assetId: string): Promise<VideoOverviewFrames>;
+  canReviewWithModel: () => boolean;
   turnVideoFrames?: ChatVideoFrames;
 };
 
@@ -44,6 +49,13 @@ export function createNativeToolRegistry(
   registry.register(createPlanTool());
   registry.register(createCapabilitySearchTool(registry));
   if (nativeCreative) {
+    registry.register(createVideoOverviewTool({
+      db, conversation: turnConversation, attachments: turn.turnVideoIds, signal: turn.signal,
+      question: turn.userMessage?.content ?? turn.recoveredUser?.content ?? turn.text,
+      readFrames: turn.readVideoOverviewFrames,
+      call: (messages) => turn.callWithBudget(messages, { plain: true, silent: true, visionRequired: true, maxTokens: 4096 }),
+      canCall: turn.canReviewWithModel,
+    }));
     const registerConfirmed = (spec: ChatTool["spec"], name: AgentToolName, prepareConfirmation: NonNullable<ChatTool["prepareConfirmation"]>) => registry.register({
       spec, displayName: name,
       group: name === "generate_video" ? "video" : name === "generate_music" || name === "generate_speech" ? "audio" : "image",

@@ -10,11 +10,12 @@
  *
  * 用 jimp 而不是客户端 canvas 回传：agent 的续跑是服务端驱动的，
  * 服务端要图时前端未必已经上传完，回传要额外一套请求 + 等待 + 超时协调（§11.3）。
- * jimp 是纯 JS，没有原生二进制，不影响 Tauri 的打包流程。
+ * Jimp 负责缩放和 JPEG 编码，WebP 由随应用分发的 WASM 解码，无需原生插件。
  *
  * 所有函数**不抛异常**：缩略图是锦上添花，失败就该静默跳过让这一轮走盲改（§15）。
  */
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { Jimp, JimpMime } from "jimp";
 import { MAX_INLINE_MEDIA_CHARS, MAX_REFERENCE_IMAGE_BYTES } from "../shared/types.js";
@@ -134,8 +135,23 @@ async function readFileOrNull(filePath: string | null): Promise<Buffer | null> {
   }
 }
 
+let webpDecoder: Promise<typeof import("@jsquash/webp/decode.js").default> | undefined;
+
+async function loadWebpDecoder() {
+  const { default: decodeWebp, init } = await import("@jsquash/webp/decode.js");
+  // 桌面端的服务进程从磁盘加载 WASM，和解码模块一起离线分发。
+  const wasmPath = createRequire(import.meta.url).resolve("@jsquash/webp/codec/dec/webp_dec.wasm");
+  const wasmBinary = Uint8Array.from(await fs.readFile(wasmPath)).buffer;
+  await init({ wasmBinary });
+  return decodeWebp;
+}
+
 async function decode(bytes: Buffer) {
   try {
+    if (detectImageMime(bytes) === "image/webp") {
+      const decodeWebp = await (webpDecoder ??= loadWebpDecoder());
+      return Jimp.fromBitmap(await decodeWebp(Uint8Array.from(bytes).buffer));
+    }
     return await Jimp.read(bytes);
   } catch {
     // 可能是视频、损坏的图，或 jimp 不认识的格式
@@ -304,7 +320,7 @@ export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profil
     [Math.round(profile.maxEdge * 0.5), profile.quality],
   ] as Array<[number, number]>) {
     try {
-      const attempt = await Jimp.read(original);
+      const attempt = image.clone();
       attempt.scaleToFit({ w: edge, h: edge });
       const bytes = await attempt.getBuffer(JimpMime.jpeg, { quality });
       if (bytes.length <= profile.maxBytes) {
@@ -317,9 +333,9 @@ export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profil
   // 全部档位都塞不下，返回最后一档——让 TaskRunner 的体积校验给出明确的错误，
   // 总比在这里返回 null、大脑看不出发生了什么要好
   try {
-    const last = await Jimp.read(original);
-    last.scaleToFit({ w: Math.round(profile.maxEdge * 0.5), h: Math.round(profile.maxEdge * 0.5) });
-    const bytes = await last.getBuffer(JimpMime.jpeg, { quality: 60 });
+    const edge = Math.round(profile.maxEdge * 0.5);
+    image.scaleToFit({ w: edge, h: edge });
+    const bytes = await image.getBuffer(JimpMime.jpeg, { quality: 60 });
     return { bytes, mimeType: "image/jpeg", fileName: `${stem}.jpg` };
   } catch {
     return null;

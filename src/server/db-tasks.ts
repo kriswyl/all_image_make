@@ -7,6 +7,7 @@ import type { AssetRepository } from "./db-assets.js";
 import { now, parseJson, type DbRow } from "./db-row.js";
 import { collectInlineVideoImagePaths } from "./task-video-images.js";
 import type { StoredGenerationInput } from "./task-input-files.js";
+import { CONVERSATION_ASSET_LINK } from "../shared/agent-types.js";
 
 /**
  * `generate` = 走 runner 的真实生成；`upload` = 用户在对话框里自己传的图（需求.md 问题 4）。
@@ -218,7 +219,8 @@ export class TaskRepository {
     const kindSql = `(CASE WHEN channels.adapter_type IN (${videoTypes}) THEN 'video' WHEN channels.adapter_type IN (${audioTypes}) THEN 'audio' WHEN channels.adapter_type IS NOT NULL THEN 'image' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'audio/%') THEN 'audio' WHEN EXISTS (SELECT 1 FROM assets k WHERE k.task_id = tasks.id AND k.mime_type LIKE 'video/%') THEN 'video' ELSE 'image' END)`;
     const query = options?.query.trim().toLowerCase() ?? "";
     const hasChatMessage = `EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
-      LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND (m.task_id = tasks.id OR a.task_id = tasks.id))`;
+      LEFT JOIN assets a ON a.id = m.asset_id WHERE c.kind = 'chat' AND COALESCE(m.tool_name, '') <> '${CONVERSATION_ASSET_LINK}'
+        AND (m.task_id = tasks.id OR a.task_id = tasks.id))`;
     const chatTask = options?.includeChat ? `(tasks.origin = 'generate'
       ${options.includeChat === "image" ? `AND ${kindSql} = 'image'` : ""}
       AND (

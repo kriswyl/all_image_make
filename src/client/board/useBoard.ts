@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { ApiError, api } from "../api";
 import { useBoardDocument } from "./useBoardDocument";
 import {
-  allocateNodeRef, boardGroups, BOARD_LIMITS, parseBoardDoc,
+  allocateNodeRef, boardGroups, BOARD_CONFIG_NODE_SIZE, BOARD_LIMITS, parseBoardDoc,
   type BoardAudioKind, type BoardDelta, type BoardDoc, type BoardEdge, type BoardEdgeKind, type BoardEdgeRole,
   type BoardGroup, type BoardNode, type BoardNodeType, type BoardView, type BoardViewport, type BoardVideoMode,
 } from "../../shared/board";
@@ -80,7 +80,7 @@ function defaultNode(type: BoardNodeType, ref: string, position: { x: number; y:
     };
   }
   return {
-    ...base, type: "config", width: 330, height: 260, title: "配置节点",
+    ...base, ...BOARD_CONFIG_NODE_SIZE, type: "config", title: "配置节点",
     mode: "image", prompt: "", useUpstreamText: true, count: 1, status: "idle",
   };
 }

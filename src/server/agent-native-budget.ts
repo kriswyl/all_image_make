@@ -37,6 +37,7 @@ export function createNativeTurnBudget(
     // A resumed turn can include images collected before the user changed the setting.
     if (options?.plain && (!turnConversation.visionEnabled || isVisionBlocked(db, turnConversation))
       && messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"))) {
+      if (options.visionRequired) throw new Error("当前模型无法接收画面");
       messages = [...messages.map((message): BrainMessage => message.role !== "tool" && Array.isArray(message.content)
         ? { ...message, content: message.content.filter(part => part.type !== "image_url") }
         : message), { role: "system", content: "本次请求没有传入图片，不能声称看到了画面。" }];
@@ -51,6 +52,10 @@ export function createNativeTurnBudget(
       // brain rejects images, degrade once and retry the same turn without them.
       const hasImage = messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === "image_url"));
       if (!hasImage || controller.signal.aborted || !isVisionError(error)) throw error;
+      if (options?.visionRequired) {
+        brain.degradeVision(turnConversation, error);
+        throw error;
+      }
       broadcast(conversationId, { type: "reset" });
       brain.degradeVision(turnConversation, error);
       const withoutImages = messages.map((message): BrainMessage => Array.isArray(message.content)

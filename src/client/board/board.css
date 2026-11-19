@@ -513,8 +513,9 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 7px;
+  padding: 9px 11px;
+  overflow: hidden;
 }
 .board-config-row {
   display: flex;
@@ -524,8 +525,8 @@
 }
 .board-config-icon {
   display: grid;
-  flex: 0 0 34px;
-  height: 34px;
+  flex: 0 0 30px;
+  height: 30px;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -535,25 +536,26 @@
 .board-config-output { display: grid; gap: 2px; min-width: 0; }
 .board-config-output strong { color: var(--ink); font-size: 13px; font-weight: 600; }
 .board-config-output span { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.board-config-output > :is(strong, span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-config-icon .model-logo { width: 16px; height: 16px; }
 .board-config-prompt-preview {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
   overflow: hidden;
-  padding: 9px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
   background: var(--surface-soft);
 }
-.board-config-prompt-preview > span { display: block; color: var(--muted); font-size: 10px; }
+.board-config-prompt-preview.is-empty { padding-inline: 0; background: transparent; }
 .board-config-summary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  margin: 4px 0 0;
+  -webkit-line-clamp: 2;
+  margin: 0;
   overflow: hidden;
   color: var(--ink);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
@@ -564,6 +566,9 @@
   align-items: center;
   gap: 12px;
   min-width: 0;
+  margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -944,6 +949,37 @@ html[data-theme="dark"] .board-composer { background: #1c1c1c; }
 }
 .board-config-mode-switch button:disabled { opacity: .6; cursor: default; }
 .board-config-composer-head .board-config-node-settings { flex: 0 0 30px; justify-content: center; padding: 0; }
+.board-config-prompt-area {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+.board-config-prompt-area:has(:is(textarea, .vstudio-input):focus) {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.board-config-prompt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 36px;
+  padding: 4px 7px 0 12px;
+  color: var(--muted);
+}
+.board-config-prompt-toolbar > span { flex: 1; font-size: 11px; font-weight: 600; }
+.board-config-prompt-toolbar button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+  padding: 0;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--ink-soft);
+}
+.board-config-prompt-toolbar button:hover,
+.board-config-prompt-toolbar button:focus-visible { background: var(--surface-hover); color: var(--ink); }
 .board-composer-editor { position: relative; min-width: 0; }
 .board-composer-reference-row {
   position: relative;
@@ -1176,6 +1212,25 @@ html[data-theme="dark"] .board-model-menu { background: #1c1c1c; }
 .board-composer-editor-actions { display: flex; gap: 2px; }
 .board-composer-editor:has(.board-reference-prompt) > .board-composer-reference-row { padding-right: 60px; }
 .board-video-composer .board-composer-editor > .board-composer-reference-row { padding-right: 0; }
+.board-config-composer .board-composer-editor > .board-composer-reference-row {
+  min-height: 0;
+  padding: 0 0 8px;
+}
+.board-config-composer .board-config-prompt-area :is(textarea.board-composer-prompt, .vstudio-input) {
+  box-sizing: border-box;
+  height: 76px;
+  min-height: 0;
+  padding: 0 12px 10px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.board-config-composer.is-expanded .board-config-prompt-area :is(textarea.board-composer-prompt, .vstudio-input) { height: 196px; }
 .board-reference-tile { position: relative; flex: 0 0 auto; }
 .board-reference-tile .board-video-reference {
   width: 58px;

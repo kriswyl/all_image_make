@@ -113,6 +113,8 @@ export function Composer({
   // 一轮正在跑的时候不让传：画布会在中途被换掉，大脑看到的和用户以为的对不上
   const blocked = running || Boolean(disabled) || Boolean(uploading);
   const hasMedia = pending.some(item => item.kind === "audio" || item.kind === "video");
+  const selectedImageCount = canvasItems.filter(({ asset }) => asset.mimeType.startsWith("image/")).length;
+  const selectedMediaCount = canvasItems.length - selectedImageCount;
 
   // 组件卸载时把没发出去的预览地址收掉，否则每挂一张图就漏一个 blob
   const pendingRef = useRef(pending);
@@ -136,7 +138,7 @@ export function Composer({
     if (!files.length && !attachedAssets.length) return;
     const currentImages = pending.filter((item) => item.kind === "image").length;
     const currentDocuments = pending.filter((item) => item.kind === "document").length;
-    if (currentImages + images.length + (plainAttachments ? canvasItems.length + attachedAssets.length : 0) > maxImageAttachments) {
+    if (currentImages + images.length + (plainAttachments ? selectedImageCount + attachedAssets.length : 0) > maxImageAttachments) {
       setReject(`一次最多 ${maxImageAttachments} 张图片`);
       return;
     }
@@ -144,7 +146,7 @@ export function Composer({
       setReject(`一次最多 ${MAX_DOCUMENTS_PER_MESSAGE} 个文档`);
       return;
     }
-    if (pending.filter(item => item.kind === "audio" || item.kind === "video").length + media.length > MAX_CHAT_MEDIA_FILES) {
+    if (selectedMediaCount + pending.filter(item => item.kind === "audio" || item.kind === "video").length + media.length > MAX_CHAT_MEDIA_FILES) {
       setReject(`一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`);
       return;
     }
@@ -178,7 +180,7 @@ export function Composer({
   function submit() {
     const value = text.trim();
     if ((!value && !hasMedia) || blocked) return;
-    if (plainAttachments && canvasItems.length + pending.filter((item) => item.kind === "image").length > maxImageAttachments) {
+    if (plainAttachments && selectedImageCount + pending.filter((item) => item.kind === "image").length > maxImageAttachments) {
       setReject(`一次最多 ${maxImageAttachments} 张图片`);
       return;
     }
@@ -233,7 +235,7 @@ export function Composer({
                 </button>
               </div>
             ))}
-            {imageVisionWarning && (canvasItems.length > 0 || pending.some(item => item.kind === "image")) ? (
+            {imageVisionWarning && (selectedImageCount > 0 || pending.some(item => item.kind === "image")) ? (
               <p className="composer-image-warning" role="status">{imageVisionWarning}</p>
             ) : null}
           </div>
@@ -323,7 +325,9 @@ export function Composer({
           <span className="composer-hint-pending">{pending.filter((item) => item.kind === "document").length} 个脚本文档将在发送时读取</span>
         ) : null}
         {canvasItems.length ? (
-          <span className="composer-hint-pending">{plainAttachments ? `${canvasItems.length} 张素材图片将在本轮发送` : `${canvasItems.length} 张已选入这一轮（①首帧 / ②尾帧 / 其余参考），发送后清空`}</span>
+          <span className="composer-hint-pending">
+            {[selectedImageCount ? `${selectedImageCount} 张图片` : "", selectedMediaCount ? `${selectedMediaCount} 项音视频` : ""].filter(Boolean).join(" · ")} 随本轮消息发送
+          </span>
         ) : null}
         <div className="composer-hint-right">
           {statusSlot}

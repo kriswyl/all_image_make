@@ -26,6 +26,7 @@ import type { KeyStore } from "./key-store.js";
 import { PresentationCoordinator } from "./presentation-coordinator.js";
 import type { PresentationAction } from "./presentation-revision.js";
 import { AppError, type TaskRunner } from "./tasks.js";
+import { VideoOverviewRequests } from "./video-overview-requests.js";
 
 // 测试和外部调用仍从 `agent.ts` 导入这些纯函数，保留原来的入口
 export {
@@ -44,6 +45,7 @@ export {
 export type TurnTrigger = "user" | "task_finished" | "confirmation" | "recovered";
 
 export class AgentService {
+  readonly videoOverview = new VideoOverviewRequests();
   /** 每个会话的 SSE 订阅者。HTTP 断开会退订，但会话本身继续跑（§12.2） */
   private readonly listeners = new Map<string, Set<(event: AgentStreamEvent) => void>>();
   /** 正在跑的那一轮。同一会话同时只允许一轮（§16 串行） */
@@ -243,7 +245,7 @@ export class AgentService {
    * 抛出的异常只有「本地就能判定」的那几种（会话不存在、上一轮没结束），
    * 大脑和上游的错误一律变成 `error` 事件推给前端。
    */
-  startTurn(conversationId: string, text: string | null, trigger: TurnTrigger, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) {
+  startTurn(conversationId: string, text: string | null, trigger: TurnTrigger, assetRefs: string[] = [], videoFrames?: ChatVideoFrames, libraryAssetIds: string[] = []) {
     const conversation = this.db.getConversation(conversationId);
     if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
     if (this.activeTurns.has(conversationId)) {
@@ -252,7 +254,7 @@ export class AgentService {
     if (text !== null) this.db.clearNativeTurnCheckpoint(conversationId);
     const controller = new AbortController();
     this.activeTurns.set(conversationId, controller);
-    void this.turn(conversationId, text, trigger, controller, assetRefs, conversation, videoFrames)
+    void this.turn(conversationId, text, trigger, controller, assetRefs, conversation, videoFrames, libraryAssetIds)
       .catch((error) => this.reportTurnFailure(conversationId, error))
       .finally(() => {
         this.activeTurns.delete(conversationId);
@@ -337,6 +339,7 @@ export class AgentService {
     assetRefs: string[] = [],
     turnConversation: Conversation,
     videoFrames?: ChatVideoFrames,
+    libraryAssetIds: string[] = [],
   ) {
     const plain = usesPlainChat(turnConversation);
     let userMessage: ChatMessage | null = null;
@@ -346,7 +349,10 @@ export class AgentService {
     if (text !== null) {
       // 引用的一组装在**同一条消息**上：用户拖了三张图说了句话，界面上就是一条气泡
       // 配三张缩略图，而不是四条消息
-      userMessage = this.db.appendMessage({ conversationId, role: "user", content: text, assetRefs, videoFrames });
+      userMessage = this.db.appendMessage({
+        conversationId, role: "user", content: text, assetRefs, videoFrames,
+        ...(libraryAssetIds.length ? { toolArgs: { libraryAssetIds } } : {}),
+      });
       turnAttachmentIds = collectTurnAttachmentIds(this.db, conversationId, userMessage.seq);
       this.broadcast(conversationId, { type: "message", message: userMessage });
       this.nameFromFirstMessage(conversationId, text);
@@ -362,6 +368,7 @@ export class AgentService {
           brain: this.brain,
           presentations: this.presentations,
           confirmations: this.confirmations,
+          readVideoOverviewFrames: (assetId) => this.videoOverview.read(conversationId, assetId, controller.signal, event => this.broadcast(conversationId, event)),
           toolContext: (conversation, controller) => this.toolContext(conversation, controller, {}),
           defaultAliases: () => this.defaultAliases(),
           broadcast: (conversationId, event) => this.broadcast(conversationId, event),

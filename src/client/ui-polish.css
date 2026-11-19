@@ -58,7 +58,7 @@ select,
 .chat-option,
 .mode-chip,
 .filter-tabs button,
-.asset-library-tabs > button,
+.asset-library-segments > button,
 .asset-library-thumb,
 .composer-canvas-thumb,
 .canvas-bar-thumb,
@@ -208,20 +208,12 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 .modal,
 .storyboard-modal { animation: ui-dialog-in var(--dur-3) var(--ease-out); }
 
-/* 素材库：抽屉整块从右侧滑入，内部信息再错开一点，避免「啪」地出现 */
+/* 素材库随面板一起进入，避免操作区分批出现。 */
 @keyframes asset-drawer-slide {
-  from { transform: translateX(100%); }
+  from { transform: translateX(14px); opacity: 0; }
   to { transform: none; }
 }
-@keyframes asset-content-in {
-  from { opacity: 0; transform: translateX(14px); }
-  to { opacity: 1; transform: none; }
-}
-.asset-library { animation: asset-drawer-slide 340ms cubic-bezier(.22, 1, .36, 1); }
-.asset-library-head { animation: asset-content-in 260ms var(--ease-out) 60ms both; }
-.asset-library-tabs { animation: asset-content-in 260ms var(--ease-out) 100ms both; }
-.asset-library-tools { animation: asset-content-in 260ms var(--ease-out) 130ms both; }
-.asset-library-grid { animation: asset-content-in 300ms var(--ease-out) 160ms both; }
+.asset-library { animation: asset-drawer-slide 180ms var(--ease-out); }
 
 /* 分镜工作台：大浮层从下方托起，左右两栏再稍微错开淡入 */
 @keyframes storyboard-in {
@@ -357,7 +349,7 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 .chat-header-controls,
 .composer-bar,
 .filter-tabs button,
-.asset-library-tabs > button,
+.asset-library-segments > button,
 .model-picker-trigger {
   user-select: none;
 }
@@ -369,7 +361,7 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
 }
 .chat-bubble-thumb img,
 .tool-card-thumb img,
-.asset-library-thumb > img,
+.asset-library-cover > img,
 .composer-canvas-thumb > img,
 .canvas-bar-thumb > img,
 .stage-image img,
@@ -690,4 +682,13 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
   word-break: break-word;
   pointer-events: none;
   animation: ui-fade-in var(--dur-1) var(--ease-out);
+}
+
+.global-tooltip.global-tooltip-image-action[role="tooltip"] {
+  padding: 4px 8px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: #242428;
+  color: #fff;
+  font-size: 11px;
 }

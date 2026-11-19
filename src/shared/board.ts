@@ -15,6 +15,7 @@ import { IMAGE_SIZE_VALUES } from "./types.js";
 import type { ConversationVideoMode } from "./video-capabilities.js";
 
 export const BOARD_DOC_VERSION = 1;
+export const BOARD_CONFIG_NODE_SIZE = { width: 330, height: 168 } as const;
 
 export const BOARD_LIMITS = {
   /** 一块无限画布最多多少节点 */

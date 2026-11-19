@@ -962,6 +962,11 @@ export function App() {
             onDeleteSelected={requestDeleteSelected}
             onClear={requestClearTasks}
             onOpenAssetSettings={() => setAssetDirOpen(true)}
+            onImageTask={(task) => {
+              setTasks(current => [task, ...current.filter(item => item.id !== task.id)]);
+              setActiveTaskId(task.id);
+              switchView("generate");
+            }}
             onUseMusicSource={(selection) => {
               setTasks(current => current.some(task => task.id === selection.task.id) ? current : [selection.task, ...current]);
               setActiveMusicTaskId(selection.task.id);

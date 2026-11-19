@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentPlan, ChatDocumentRef, ChatMessage, ChatVideoFrames, ConfirmPreview, MessageRole, MessageStatus, ToolResult } from "../shared/agent-types.js";
+import { CONVERSATION_ASSET_LINK } from "../shared/agent-types.js";
 import type { DocumentRepository } from "./db-documents.js";
 import type { ConversationRepository } from "./db-conversations.js";
 import { now, parseJson, type DbRow } from "./db-row.js";
@@ -123,8 +124,8 @@ export class ConversationMessageRepository {
    */
   lastUserText(conversationId: string): string | null {
     const row = this.db.prepare(
-      "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND content IS NOT NULL ORDER BY seq DESC LIMIT 1",
-    ).get(conversationId) as DbRow | undefined;
+      "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND content IS NOT NULL AND COALESCE(tool_name, '') <> ? ORDER BY seq DESC LIMIT 1",
+    ).get(conversationId, CONVERSATION_ASSET_LINK) as DbRow | undefined;
     const text = row ? String(row.content).trim() : "";
     return text || null;
   }
@@ -325,17 +326,19 @@ export class ConversationMessageRepository {
   }
 
   private messageFromRow(row: DbRow): ChatMessage {
+    const assetLink = row.tool_name === CONVERSATION_ASSET_LINK;
     return {
       id: String(row.id), conversationId: String(row.conversation_id), seq: Number(row.seq),
       role: String(row.role) as MessageRole,
       content: row.content == null ? null : String(row.content),
       plan: parseJson<AgentPlan | null>(row.plan_json, null),
-      toolName: row.tool_name == null ? null : String(row.tool_name) as ChatMessage["toolName"],
+      toolName: row.tool_name == null || assetLink ? null : String(row.tool_name) as ChatMessage["toolName"],
       toolArgs: parseJson<Record<string, unknown> | null>(row.tool_args_json, null),
       toolResult: parseJson<ToolResult | null>(row.tool_result_json, null),
       confirm: parseJson<ConfirmPreview | null>(row.confirm_json, null),
       taskId: row.task_id == null ? null : String(row.task_id),
       assetId: row.asset_id == null ? null : String(row.asset_id),
+      ...(assetLink ? { assetLink } : {}),
       assetRefs: parseJson<string[]>(row.asset_refs, []),
       ...(row.video_frames_json ? { videoFrames: parseJson<ChatVideoFrames | undefined>(row.video_frames_json, undefined) } : {}),
       documents: parseJson<ChatDocumentRef[]>(row.documents_json, []),

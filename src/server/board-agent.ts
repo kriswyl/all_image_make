@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import type { AppDatabase, BoardRecord } from "./db.js";
 import { AppError } from "./tasks.js";
 import {
-  allocateNodeRef, BOARD_LIMITS, boardGroups, BoardValidationError, directUpstreamImages, directUpstreamText, parseBoardDoc,
+  allocateNodeRef, BOARD_CONFIG_NODE_SIZE, BOARD_LIMITS, boardGroups, BoardValidationError, directUpstreamImages, directUpstreamText, parseBoardDoc,
   type BoardDoc, type BoardEdge, type BoardNode, type ConfigBoardNode,
 } from "../shared/board.js";
 import { arrangePositions } from "../shared/board-layout.js";
@@ -205,8 +205,8 @@ export function applyBoardOps(db: AppDatabase, boardId: string, ops: BoardOp[]):
           ref: allocated.ref,
           x: op.x,
           y: op.y,
-          width: op.width ?? (op.type === "text" ? 300 : op.type === "config" ? 330 : 280),
-          height: op.height ?? (op.type === "text" ? 170 : op.type === "config" ? 260 : 210),
+          width: op.width ?? (op.type === "text" ? 300 : op.type === "config" ? BOARD_CONFIG_NODE_SIZE.width : 280),
+          height: op.height ?? (op.type === "text" ? 170 : op.type === "config" ? BOARD_CONFIG_NODE_SIZE.height : 210),
           title: op.title?.slice(0, 80) ?? (op.type === "text" ? "文本" : op.type === "config" ? "配置节点" : op.type === "video" ? "视频" : op.type === "audio" ? "音频" : "图片"),
           createdAt: at,
           updatedAt: at,

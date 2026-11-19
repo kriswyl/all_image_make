@@ -80,6 +80,7 @@ export function createApp(options: { dataDir?: string } = {}) {
   const context: AppContext = { db, sessionKeys, runner, agent };
 
   app.disable("x-powered-by");
+  app.use("/api/conversations/:id/video-overview/:requestId", express.json({ limit: "2mb" }));
   // 万相支持 10 张参考图，每张 20MB，base64 后 * 4/3 ≈ 266MB；留 300MB 余量
   app.use(express.json({ limit: "300mb" }));
   app.use((req, res, next) => {

@@ -85,8 +85,12 @@ export function modelSupportsNegativePrompt(model: string): boolean {
  * 中转站的自定义模型 ID（gpt-image-2、gpt-image-2.6-xxx）会被误判成不支持。
  * 这里只做「提示」用的宽松识别，服务端不再据此硬拦截 —— 是否真的支持由上游决定。
  */
-export function modelSupportsGifOutput(model: string): boolean {
+export function isGptImage2Model(model: string): boolean {
   return /^gpt-image-2(?:\.\d+)?(?:-[a-z0-9-]+)?$/i.test(model);
+}
+
+export function modelSupportsGifOutput(model: string): boolean {
+  return isGptImage2Model(model);
 }
 
 export function modelSupportsSvgOutput(model: string): boolean {

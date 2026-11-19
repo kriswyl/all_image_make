@@ -20,7 +20,6 @@ import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
 import { CHANNEL_FIELD_SUPPORT, unsupportedLabels } from "../../shared/channel-fields";
 import { IMAGE_OUTPUT_FORMATS, type ImageOutputFormat } from "../../shared/image-formats";
 import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
-import { matchModelAlias } from "../../shared/model-alias";
 import { CLAUSE_LABELS, readPromptClauses, replacePromptClause } from "../../shared/prompt-clauses";
 import type { AdapterType } from "../../shared/types";
 import type { Asset } from "../../shared/types";
@@ -30,6 +29,7 @@ import type { StylePreset } from "../../shared/style-presets";
 import { api } from "../api";
 import { BoardComposerPopover } from "./BoardComposerPopover";
 import { BOARD_CONFIG_MODES } from "./board-config-modes";
+import { boardAudioModels, resolveBoardModel, type BoardModelAlias } from "./board-models";
 import { BoardVideoReferences, type VideoReference } from "./BoardVideoReferences";
 import { resolveBoardVideoSelection } from "../../shared/board-video-selection";
 import { maxImagesForMode, referenceMediaLimits, supportedVideoModes, videoModeSpec, videoRatioIsAdaptive } from "../../shared/video-modes";
@@ -46,17 +46,6 @@ function timeoutPatch(value: string): { timeoutSeconds?: number } {
   if (!Number.isFinite(seconds)) return { timeoutSeconds: undefined };
   return { timeoutSeconds: Math.min(BOARD_TIMEOUT.maxSeconds, Math.max(BOARD_TIMEOUT.minSeconds, seconds)) };
 }
-
-export interface BoardImageAlias {
-  alias: string;
-  model: string;
-  channelName: string;
-  channelId: string;
-  adapterType: string;
-  localVideoUploadConfigured?: boolean;
-}
-
-export type BoardVideoAlias = BoardImageAlias;
 
 const GEMINI_SIZES = ["1K", "2K", "4K"] as const;
 const IMAGE_RATIOS = ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"] as const;
@@ -83,11 +72,11 @@ export function BoardInspector({
   node: BoardNode;
   submitting?: boolean;
   assets: Map<string, Asset>;
-  imageAliases: BoardImageAlias[];
+  imageAliases: BoardModelAlias[];
   defaultImageAlias: string;
-  videoAliases: BoardVideoAlias[];
+  videoAliases: BoardModelAlias[];
   defaultVideoAlias: string;
-  audioAliases: BoardImageAlias[];
+  audioAliases: BoardModelAlias[];
   defaultSpeechAlias: string;
   defaultMusicAlias: string;
   onUpdateNode: (nodeId: string, patch: Partial<BoardNode>) => void;
@@ -144,8 +133,7 @@ export function BoardInspector({
   const isText = mode === "text";
   const isAudio = mode === "audio";
   const audioKind: BoardAudioKind = isGenerator ? node.audioKind ?? "speech" : "speech";
-  const audioAliasList = audioAliases.filter((alias) =>
-    alias.adapterType === (audioKind === "music" ? "suno-music" : "gemini-tts"));
+  const audioAliasList = boardAudioModels(audioAliases, audioKind);
   const upstreamText = isGenerator ? directUpstreamText(view.doc, node.id) : [];
   const upstreamImages = isGenerator ? directUpstreamImages(view.doc, node.id) : [];
   const upstreamLinks = isGenerator ? directInputLinks(view.doc, node.id) : [];
@@ -155,9 +143,7 @@ export function BoardInspector({
     : isAudio
       ? (audioKind === "music" ? defaultMusicAlias : defaultSpeechAlias)
       : defaultImageAlias;
-  const effectiveAliasInfo = isGenerator
-    ? matchModelAlias(aliasList, node.model) ?? matchModelAlias(aliasList, defaultAlias) ?? aliasList[0] ?? null
-    : null;
+  const effectiveAliasInfo = isGenerator ? resolveBoardModel(aliasList, node.model, defaultAlias) : undefined;
   const sizeMode = effectiveAliasInfo?.adapterType === "gemini-content"
     ? "gemini"
     : effectiveAliasInfo?.adapterType === "midjourney"
@@ -175,7 +161,7 @@ export function BoardInspector({
   const modelOptions = [
     {
       value: "",
-      model: (aliasList.find((item) => item.alias === defaultAlias) ?? aliasList[0])?.model ?? "选择模型",
+      model: resolveBoardModel(aliasList, undefined, defaultAlias)?.model ?? "选择模型",
       channelName: defaultAlias
         ? `默认${isVideo ? "视频" : isAudio ? "音频" : "生图"}模型 ${defaultAlias}`
         : `默认${isVideo ? "视频" : isAudio ? "音频" : "生图"}模型`,
@@ -241,9 +227,12 @@ export function BoardInspector({
     const kind = link.node.type === "image" ? "图片" : link.node.type === "video" ? "视频" : "音频";
     return [{ label, kind, previewUrl: kind === "图片" ? api.assetUrl(asset.thumbUrl ?? asset.url) : api.assetUrl(asset.url) }];
   });
-  const promptPlaceholder = (isGenerator && !node.prompt?.trim() && effectivePrompt) || (isAudio
+  const promptPlaceholder = (isGenerator && !node.prompt?.trim() && effectivePrompt
+    ? isConfig ? "补充生成要求。留空时使用上游文本。" : effectivePrompt
+    : "") || (isAudio
     ? (audioKind === "speech" ? "要朗读的正文；留空则只用上游文本" : "风格 / 情绪 / 使用场景；留空则只用上游文本")
-    : isVideo ? "描述视频里的动作、镜头和画面变化…" : "描述要生成的内容，或连接上游文本作为提示词");
+    : isText ? "描述要生成的文本，例如一段旁白或分镜对白。"
+      : isVideo ? "描述视频里的动作、镜头和画面变化…" : "描述要生成的内容，或连接上游文本作为提示词");
   const imageFields = CHANNEL_FIELD_SUPPORT[effectiveAliasInfo?.adapterType as AdapterType];
   const supportsImageRatio = Boolean(imageFields?.aspectRatio);
   const imageRatio = isGenerator && supportsImageRatio ? (node.aspectRatio ?? node.ratio ?? "") : "";
@@ -303,6 +292,22 @@ export function BoardInspector({
       error: undefined,
     });
   };
+  const promptActions = (
+    <div className={isConfig ? "board-config-prompt-toolbar" : isVideo ? "vstudio-composer-tools" : "board-composer-editor-actions"}>
+      {isConfig && <span>{isAudio && audioKind === "speech" ? "朗读正文" : "提示词"}</span>}
+      {usesMediaReferences && <button ref={mentionTriggerRef} type="button" className="vstudio-tool" title="在提示词中引用素材"
+        aria-label="引用素材" aria-expanded={Boolean(mentionAnchor)}
+        onClick={(event) => {
+          closeSection();
+          setMentionAnchor(mentionAnchor ? null : event.currentTarget);
+        }}>@</button>}
+      <button type="button" className={isVideo ? "vstudio-tool" : "board-composer-tool"}
+        title={expanded ? "收起提示词" : "展开提示词"} aria-label={expanded ? "收起提示词" : "展开提示词"}
+        aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+        {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+      </button>
+    </div>
+  );
 
   return (
     <aside className={`board-inspector${isGenerator ? " board-composer" : ""}${isConfig ? " board-config-composer" : ""}${isVideo ? " vstudio-composer board-video-composer" : ""}${expanded ? " is-expanded" : ""}`} aria-label={isGenerator ? "生成配置" : "节点设置"}>
@@ -334,7 +339,7 @@ export function BoardInspector({
         {isGenerator ? (
           <>
             <section className="board-composer-editor">
-              <div className="board-composer-reference-row">
+              {(!isConfig || isVideo || mediaReferences.length > 0) && <div className="board-composer-reference-row">
                 <div className="board-composer-reference-list">
                   {isVideo && <button ref={referenceTriggerRef} type="button" className="vstudio-slot board-video-add-reference"
                     aria-expanded={section === "references" && referenceAnchor.current === referenceTriggerRef.current}
@@ -358,39 +363,27 @@ export function BoardInspector({
                     <span>{upstreamImages.length}<span className="board-image-reference-quota-separator">/</span>{imageReferencePolicy.max}</span>
                   </span>
                 )}
-              </div>
-              <div className={isVideo ? "board-video-prompt-area vstudio-prompt" : "board-prompt-area"}>
-              {usesMediaReferences ? <div className="board-reference-prompt">
-                <PromptEditor ref={promptEditorRef} value={node.prompt ?? ""} placeholder={promptPlaceholder}
-                  items={mentionItems} onChange={(prompt) => onUpdateNode(node.id, { prompt })}
-                  onTypedAt={(rect) => { closeSection(); setMentionAnchor(rect ?? mentionTriggerRef.current); }}
-                  onOpenItem={(item) => {
-                    const entry = mediaReferences.find(({ link }) => boardMentionLabel(link.node) === item.label);
-                    if (entry?.asset) onPreview(entry.asset);
-                  }} />
-              </div> : <textarea
-                className="board-composer-prompt"
-                aria-label="提示词"
-                rows={3}
-                maxLength={20000}
-                value={node.prompt ?? ""}
-                onChange={(event) => {
-                  onUpdateNode(node.id, { prompt: event.target.value } as Partial<BoardNode>);
-                }}
-                placeholder={promptPlaceholder}
-              />}
-                <div className={isVideo ? "vstudio-composer-tools" : "board-composer-editor-actions"}>
-                  {usesMediaReferences && <button ref={mentionTriggerRef} type="button" className="vstudio-tool" title="在提示词中引用素材"
-                    aria-label="引用素材" aria-expanded={Boolean(mentionAnchor)}
-                    onClick={(event) => {
-                      closeSection();
-                      setMentionAnchor(mentionAnchor ? null : event.currentTarget);
-                    }}>@</button>}
-                  <button type="button" className={isVideo ? "vstudio-tool" : "board-composer-tool"}
-                    title={expanded ? "收起提示词" : "展开提示词"} aria-label={expanded ? "收起提示词" : "展开提示词"} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-                    {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                  </button>
-                </div>
+              </div>}
+              <div className={isConfig ? "board-config-prompt-area" : isVideo ? "board-video-prompt-area vstudio-prompt" : "board-prompt-area"}>
+                {isConfig && promptActions}
+                {usesMediaReferences ? <div className="board-reference-prompt">
+                  <PromptEditor ref={promptEditorRef} value={node.prompt ?? ""} placeholder={promptPlaceholder}
+                    items={mentionItems} onChange={(prompt) => onUpdateNode(node.id, { prompt })}
+                    onTypedAt={(rect) => { closeSection(); setMentionAnchor(rect ?? mentionTriggerRef.current); }}
+                    onOpenItem={(item) => {
+                      const entry = mediaReferences.find(({ link }) => boardMentionLabel(link.node) === item.label);
+                      if (entry?.asset) onPreview(entry.asset);
+                    }} />
+                </div> : <textarea
+                  className="board-composer-prompt"
+                  aria-label="提示词"
+                  rows={3}
+                  maxLength={BOARD_LIMITS.maxTextChars}
+                  value={node.prompt ?? ""}
+                  onChange={(event) => onUpdateNode(node.id, { prompt: event.target.value })}
+                  placeholder={promptPlaceholder}
+                />}
+                {!isConfig && promptActions}
               </div>
             </section>
             {usesMediaReferences && <VideoMentionPanel open={Boolean(mentionAnchor)} anchor={mentionAnchor} items={mentionItems}

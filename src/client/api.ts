@@ -1,3 +1,5 @@
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs";
 import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
 import type {
   AgentStreamEvent, ChatVideoFrames, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
@@ -9,6 +11,7 @@ import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-tem
 import type { StoryboardMediaRole, StoryboardPreviewBoard, StoryboardProduction, StoryboardProject, StoryboardProjectData } from "../shared/storyboard-project";
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 import type { PresentationVersionReport } from "../shared/presentation-report";
+import type { VideoOverviewFrames } from "../shared/media-review";
 import { withReferenceMediaType } from "./media-files";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
@@ -210,7 +213,6 @@ export const api = {
    */
   pickDirectory: async (title = "选择素材目录"): Promise<string | null> => {
     if (!isTauriRuntime()) return null;
-    const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({ directory: true, multiple: false, title });
     return typeof picked === "string" ? picked : null;
   },
@@ -259,9 +261,9 @@ export const api = {
    * 发一条消息。**立即返回**，模型输出走 `openConversationStream`。
    * 卡在这里等会撞上前端自己的超时——一趟生图几十秒，连接等不起。
    */
-  sendMessage: (id: string, text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
+  sendMessage: (id: string, text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames, libraryAssetIds: string[] = []) => request<{ accepted: true }>(`/api/conversations/${id}/messages`, {
     method: "POST",
-    body: JSON.stringify({ text, ...(assetRefs.length ? { assetRefs } : {}), videoFrames }),
+    body: JSON.stringify({ text, ...(assetRefs.length ? { assetRefs } : {}), videoFrames, ...(libraryAssetIds.length ? { libraryAssetIds } : {}) }),
   }),
   interruptConversation: (id: string) => request<{ interrupted: boolean }>(`/api/conversations/${id}/interrupt`, { method: "POST" }),
   /**
@@ -270,10 +272,10 @@ export const api = {
    * 走 multipart：图片本来就该按字节传，base64 塞进 JSON 只会让请求体再膨大三分之一。
    * 返回会话视图和这次上传的图片 ID。创作附件可以只属于本轮消息。
    */
-  uploadConversationImages: (id: string, files: File[]) => {
+  uploadConversationImages: (id: string, files: File[], keepCanvas = false) => {
     const form = new FormData();
     for (const file of files) form.append("images", file, file.name);
-    return request<ConversationView & { uploadedAssetIds?: string[] }>(`/api/conversations/${id}/uploads`, { method: "POST", body: form });
+    return request<ConversationView & { uploadedAssetIds?: string[] }>(`/api/conversations/${id}/uploads${keepCanvas ? "?keepCanvas=1" : ""}`, { method: "POST", body: form });
   },
   uploadConversationMedia: (id: string, files: File[]) => {
     const form = new FormData();
@@ -297,7 +299,6 @@ export const api = {
     if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "原文件下载失败"); }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (isTauriRuntime()) {
-      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
       const target = await save({ defaultPath: filename, filters: [{ name: "XMind", extensions: ["xmind"] }] });
       if (!target) return false;
       await writeFile(target, bytes); return true;
@@ -325,7 +326,6 @@ export const api = {
     if (!response.ok) throw new Error("文件不存在或不可访问");
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (isTauriRuntime()) {
-      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
       const target = await save({ defaultPath: filename }); if (!target) return false;
       await writeFile(target, bytes); return true;
     }
@@ -336,7 +336,6 @@ export const api = {
     if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "文件下载失败"); }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (isTauriRuntime()) {
-      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
       const target = await save({ defaultPath: filename, filters: [{ name: "PowerPoint", extensions: ["pptx"] }] });
       if (!target) return false;
       await writeFile(target, bytes); return true;
@@ -349,7 +348,6 @@ export const api = {
     if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || "PPT 生成失败"); }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (isTauriRuntime()) {
-      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
       const target = await save({ defaultPath: filename, filters: [{ name: "PowerPoint", extensions: ["pptx"] }] });
       if (!target) return false;
       await writeFile(target, bytes); return true;
@@ -608,6 +606,11 @@ export const api = {
     return () => source.close();
   },
 
+  submitVideoOverview: (id: string, requestId: string, frames: VideoOverviewFrames, signal: AbortSignal) =>
+    request<{ accepted: boolean }>(`/api/conversations/${id}/video-overview/${requestId}`, {
+      method: "POST", body: JSON.stringify(frames), signal,
+    }),
+
   assetUrl: (url: string) => apiUrl(url),
   assetAsFile: async (asset: Asset) => {
     const response = await fetch(apiUrl(asset.url));
@@ -623,10 +626,6 @@ export const api = {
     const fileType = isVideo ? "视频" : isAudio ? "音频" : "图片";
 
     if (isTauriRuntime()) {
-      const [{ save }, { writeFile }] = await Promise.all([
-        import("@tauri-apps/plugin-dialog"),
-        import("@tauri-apps/plugin-fs"),
-      ]);
       const extension = assetExtension(asset);
       // 用修正后的扩展名拼默认文件名；旧记录里的 .m4a 图片也能存成 .png
       const stem = asset.fileName.replace(/\.[^.]+$/, "") || "asset";

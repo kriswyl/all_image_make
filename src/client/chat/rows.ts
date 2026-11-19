@@ -36,6 +36,7 @@ export function buildRows(messages: ChatMessage[]): Row[] {
     const message = messages[index];
     if (!message) continue;
     if (message.role === "user") {
+      if (message.assetLink) continue;
       // 图片上传会落一条内部记录供会话素材和模型上下文引用；实际发言会携带 assetRefs。
       // 隐藏这条上传提示，避免和随后发送的图文气泡重复显示。
       if (message.assetId && message.content?.startsWith("上传了图片 ") && !message.assetRefs?.length && !message.documents?.length) continue;

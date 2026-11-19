@@ -17,6 +17,7 @@ const GAP = 8;
 
 interface Tip {
   text: string;
+  compact?: boolean;
   /** 目标元素中心点；实际 left 在渲染后按提示卡真实宽度再居中 */
   center: number;
   top?: number;
@@ -96,21 +97,22 @@ export function GlobalTooltip() {
 
     const showFor = (element: HTMLElement) => {
       const text = element.dataset.tooltip?.trim();
-      if (!text) return;
+      if (!text || !element.isConnected || element.closest("[inert]")) return;
+      const compact = element.dataset.tooltipVariant === "image-action";
       const rect = element.getBoundingClientRect();
       const center = rect.left + rect.width / 2;
       // 下方放不下就翻到上方；用 bottom 定位，不需要提前知道提示卡高度
       const above = rect.bottom + 160 > window.innerHeight && rect.top > 160;
       setTip(above
-        ? { text, center, bottom: window.innerHeight - rect.top + GAP }
-        : { text, center, top: rect.bottom + GAP });
+        ? { text, compact, center, bottom: window.innerHeight - rect.top + GAP }
+        : { text, compact, center, top: rect.bottom + GAP });
     };
 
     const schedule = (element: HTMLElement) => {
       if (current.current === element) return;
       hide();
       current.current = element;
-      timer.current = window.setTimeout(() => showFor(element), SHOW_DELAY);
+      timer.current = window.setTimeout(() => showFor(element), element.dataset.tooltipVariant === "image-action" ? 150 : SHOW_DELAY);
     };
 
     const onOver = (event: MouseEvent) => {
@@ -138,6 +140,8 @@ export function GlobalTooltip() {
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", hide);
     document.addEventListener("mousedown", hide);
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") hide(); };
+    document.addEventListener("keydown", onKeyDown);
     window.addEventListener("scroll", hide, true);
     window.addEventListener("resize", hide);
 
@@ -149,6 +153,7 @@ export function GlobalTooltip() {
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", hide);
       document.removeEventListener("mousedown", hide);
+      document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("scroll", hide, true);
       window.removeEventListener("resize", hide);
     };
@@ -158,7 +163,7 @@ export function GlobalTooltip() {
   return createPortal(
     <div
       ref={tipRef}
-      className="global-tooltip"
+      className={`global-tooltip${tip.compact ? " global-tooltip-image-action" : ""}`}
       style={{ left: 0, top: tip.top, bottom: tip.bottom, visibility: "hidden" }}
       role="tooltip"
     >

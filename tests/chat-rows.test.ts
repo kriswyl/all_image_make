@@ -39,7 +39,8 @@ describe("buildRows", () => {
     const notice = message("user", { content: "上传了图片 2.png", assetId: "a1" });
     const actual = message("user", { content: "这是啥？", assetRefs: ["a1"] });
     const plain = message("user", { content: "上传了图片 2.png" });
-    const rows = buildRows([notice, actual, plain]);
+    const legacyLink = message("user", { content: "引用了素材 2.png", assetId: "a1", assetLink: true });
+    const rows = buildRows([notice, legacyLink, actual, plain]);
     expect(rows.map((row) => row.message.id)).toEqual([actual.id, plain.id]);
   });
   it("keeps plain conversation in order", () => {

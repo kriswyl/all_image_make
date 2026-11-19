@@ -29,7 +29,7 @@ import {
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
 import { Composer, isImageFile, isScriptDocument } from "./chat/Composer";
-import { chatMediaMime } from "../shared/chat-media";
+import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../shared/chat-media";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
@@ -43,7 +43,7 @@ import { ContextSummaryControl } from "./chat/ContextSummaryControl";
 import { BINARY_DOCUMENT_ATTACHMENT, OFFICE_ATTACHMENT } from "../shared/document-formats";
 import { SelectMenu } from "./ui/SelectMenu";
 import { TemplateImportDialog } from "./board/TemplateImportDialog";
-import { CrossModeBridgeDialog } from "./board/CrossModeBridgeDialog";
+import { CrossModeBridgeDialog, type BridgeAssetItem } from "./board/CrossModeBridgeDialog";
 
 const STORAGE_KEY = "yida.agent.lastConversation";
 
@@ -119,12 +119,21 @@ export function ChatView({
   const [defaults, setDefaults] = useState<Record<DefaultModelGroup, string>>({
     image: "", video: "", music: "", speech: "",
   });
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreviewId] = useState<string | null>(null);
+  const [previewStartMs, setPreviewStartMs] = useState<number | null>(null);
+  const setPreview = useCallback((next: React.SetStateAction<string | null>) => {
+    setPreviewStartMs(null);
+    setPreviewId(next);
+  }, []);
+  const [libraryPreview, setLibraryPreview] = useState<Asset | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [boardAssetId, setBoardAssetId] = useState<string | null>(null);
+  const [boardAsset, setBoardAsset] = useState<BridgeAssetItem | null>(null);
   const [chatAssetIds, setChatAssetIds] = useState<string[]>([]);
+  const [libraryAttachments, setLibraryAttachments] = useState<Asset[] | null>(null);
   const [chatVideoFrames, setChatVideoFrames] = useState<ChatVideoFrames | null>(null);
-  useEffect(() => { setChatAssetIds([]); setChatVideoFrames(null); setLibraryOpen(false); setBoardAssetId(null); }, [activeId]);
+  useEffect(() => {
+    setChatAssetIds([]); setLibraryAttachments(null); setChatVideoFrames(null); setLibraryOpen(false); setBoardAsset(null); setLibraryPreview(null); setPreview(null);
+  }, [activeId]);
   const [templateImport, setTemplateImport] = useState<{
     id: string; name: string; description?: string;
   } | null>(null);
@@ -423,19 +432,27 @@ export function ChatView({
     }
   }
 
-  async function send(text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames) {
+  async function send(text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames, staged: Asset[] | null = null) {
     if (!activeId) return;
     // 画布是「这一轮要带的图」：连同拖进来的产物一起写进这条消息，
     // 这样发完清空画布也不会影响助手这一轮看到的图。
     const plain = usesPlainChat(viewRef.current);
-    const refs = [...new Set([...(plain ? [] : viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
+    const refs = [...new Set([...(plain || staged ? [] : viewRef.current?.canvasAssetIds ?? []), ...assetRefs])];
     // 发了新指令就盯住最新：即使用户之前翻在历史里，也要把这一轮的开头和结果带到他眼前
     forcedScrollConversation.current = activeId;
     clearOutput();
     try {
-      await api.sendMessage(activeId, text, refs, videoFrames);
+      await api.sendMessage(activeId, text, refs, videoFrames, staged?.map(({ id }) => id));
+      if (activeIdRef.current !== activeId) return false;
+      if (staged?.length) setView((current) => {
+        if (!current) return current;
+        const known = new Set(current.mediaAssets.map(({ asset }) => asset.id));
+        const added = staged.filter(({ id }) => !known.has(id)).map((asset) => ({ asset, round: 0, prompt: "", source: "library" as const }));
+        return { ...current, mediaAssets: [...current.mediaAssets, ...added],
+          sessionImages: [...current.sessionImages, ...added.filter(({ asset }) => asset.mimeType.startsWith("image/"))] };
+      });
       setStatus("running");
-      if (refs.length && !plain) writeCanvas([]);
+      if ((refs.length || staged) && !plain) writeCanvas([]);
       return true;
     } catch (error) {
       toastError(error);
@@ -499,6 +516,22 @@ export function ChatView({
   }
 
   function toggleChatAsset(assetId: string) {
+    if (libraryAttachments) {
+      if (libraryAttachments.some(({ id }) => id === assetId)) {
+        setLibraryAttachments((current) => current?.filter(({ id }) => id !== assetId) ?? null);
+        clearFrameFor(assetId);
+        return;
+      }
+      const asset = viewRef.current?.mediaAssets.find(({ asset }) => asset.id === assetId)?.asset;
+      if (!asset?.mimeType.startsWith("image/")) return;
+      const limit = plainChat ? attachmentLimit : MAX_CANVAS_IMAGES;
+      if (libraryAttachments.filter(({ mimeType }) => mimeType.startsWith("image/")).length >= limit) {
+        toast("error", `一次最多 ${limit} 张图片`);
+        return;
+      }
+      setLibraryAttachments((current) => current ? [...current, asset] : [asset]);
+      return;
+    }
     if (!chatAssetIds.includes(assetId) && chatAssetIds.length >= attachmentLimit) {
       toast("error", `一次最多 ${attachmentLimit} 张图片`);
       return;
@@ -512,20 +545,6 @@ export function ChatView({
       : current?.lastAssetId === assetId ? { firstAssetId: current.firstAssetId } : current);
   }
 
-  /** 素材库单击：在画布里就移出，不在就加到末尾（参考图） */
-  function toggleCanvasSelection(assetId: string) {
-    const current = viewRef.current?.canvasAssetIds ?? [];
-    if (current.includes(assetId)) {
-      writeCanvas(current.filter((id) => id !== assetId));
-      return;
-    }
-    if (current.length >= MAX_CANVAS_IMAGES) {
-      toast("error", `画布最多 ${MAX_CANVAS_IMAGES} 张，先移出一张再加`);
-      return;
-    }
-    writeCanvas([...current, assetId]);
-  }
-
   /**
    * 素材库右键删除：服务端会一并清理任务、文件以及消息 / 画布 / 分镜引用，
    * 返回整份会话视图，这里直接回灌即可。
@@ -533,21 +552,81 @@ export function ChatView({
   async function deleteSessionAsset(assetId: string) {
     const id = activeId;
     if (!id) return;
+    const linked = viewRef.current?.mediaAssets.find(({ asset }) => asset.id === assetId)?.source === "library";
     try {
       const next = await api.deleteConversationAsset(id, assetId);
+      if (activeIdRef.current !== id) return;
       setView(next);
       setChatAssetIds((current) => current.filter((id) => id !== assetId));
+      setLibraryAttachments((current) => current?.filter(({ id }) => id !== assetId) ?? null);
       clearFrameFor(assetId);
       setPreview((current) => current === assetId ? null : current);
-      toast("ok", "已删除图片");
+      toast("ok", linked ? "已移出会话" : "已删除素材");
     } catch (error) {
       toastError(error);
       throw error;
     }
   }
 
+  function applyLibrarySelection(assets: Asset[]) {
+    const ids = new Set(assets.map(({ id }) => id));
+    setLibraryAttachments(assets);
+    setChatVideoFrames((frames) => {
+      if (!frames || !ids.has(frames.firstAssetId)) return null;
+      return frames.lastAssetId && !ids.has(frames.lastAssetId) ? { firstAssetId: frames.firstAssetId } : frames;
+    });
+  }
+
+  function moveStagedFrame(assetId: string, index: number) {
+    setLibraryAttachments((current) => {
+      if (!current) return current;
+      const images = current.filter((asset) => asset.mimeType.startsWith("image/"));
+      const target = images.find(({ id }) => id === assetId);
+      if (!target) return current;
+      const ordered = images.filter(({ id }) => id !== assetId);
+      ordered.splice(index, 0, target);
+      return [...ordered, ...current.filter((asset) => !asset.mimeType.startsWith("image/"))];
+    });
+  }
+
+  async function uploadLibraryFiles(files: File[]) {
+    const id = activeId;
+    if (!id || uploading) return;
+    const images = files.filter(isImageFile);
+    const media = files.filter((file) => !isImageFile(file) && chatMediaMime(file));
+    if (images.length + media.length !== files.length) throw new Error("请上传 PNG、JPEG、WebP 图片或支持的音视频文件");
+    if (images.length > attachmentLimit) throw new Error(`一次最多上传 ${attachmentLimit} 张图片`);
+    if (media.length > MAX_CHAT_MEDIA_FILES) throw new Error(`一次最多上传 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`);
+    const oversized = files.find((file) => file.size > (isImageFile(file) ? MAX_REFERENCE_IMAGE_BYTES : MAX_CHAT_MEDIA_BYTES));
+    if (oversized) throw new Error(`${oversized.name} 超过 ${isImageFile(oversized) ? MAX_REFERENCE_IMAGE_BYTES / 1024 / 1024 : MAX_CHAT_MEDIA_MB} MB`);
+    setUploading(true);
+    let uploaded = 0;
+    try {
+      if (images.length) {
+        const next = await api.uploadConversationImages(id, images, true);
+        uploaded += images.length;
+        if (activeIdRef.current !== id) return;
+        setView(next);
+      }
+      if (media.length) {
+        const next = await api.uploadConversationMedia(id, media);
+        uploaded += media.length;
+        if (activeIdRef.current !== id) return;
+        setView(next);
+      }
+      toast("ok", `已上传 ${uploaded} 项素材`);
+    } catch (error) {
+      if (uploaded) throw new Error(`已上传 ${uploaded} 项，剩余文件上传失败：${error instanceof Error ? error.message : "请重试"}`);
+      throw error;
+    } finally {
+      setUploading(false);
+      if (uploaded) void reloadList();
+    }
+  }
+
   /** 设为首帧：移到画布第 1 位；不在画布里就加进来 */
   function setCanvasFirst(assetId: string) {
+    if (libraryAttachments) { moveStagedFrame(assetId, 0); return; }
     if (!view) return;
     const ids = view.canvasAssetIds.filter((id) => id !== assetId);
     const next = [assetId, ...ids].slice(0, MAX_CANVAS_IMAGES);
@@ -558,6 +637,7 @@ export function ChatView({
 
   /** 设为尾帧：放到画布第 2 位；画布为空时先把它加进来 */
   function setCanvasLast(assetId: string) {
+    if (libraryAttachments) { moveStagedFrame(assetId, 1); return; }
     if (!view) return;
     const current = view.canvasAssetIds;
     if (!current.length) {
@@ -707,12 +787,18 @@ export function ChatView({
     const media = files.filter(file => !isImageFile(file) && !isScriptDocument(file) && Boolean(chatMediaMime(file)));
     const documents = files.filter(isScriptDocument);
     const plain = usesPlainChat(viewRef.current);
+    const staged = libraryAttachments;
     const previousCanvas = viewRef.current?.canvasAssetIds ?? [];
     const selectedForChat = [...new Set([...chatAssetIds, ...assetIds])];
     const limit = conversationImageAttachmentLimit(viewRef.current);
-    const existingRefs = plain ? selectedForChat : [...new Set([...(images.length ? [] : previousCanvas), ...assetIds])];
+    const existingRefs = staged ? [...new Set([...staged.filter(({ mimeType }) => mimeType.startsWith("image/")).map(({ id }) => id), ...assetIds])]
+      : plain ? selectedForChat : [...new Set([...(images.length ? [] : previousCanvas), ...assetIds])];
     if (existingRefs.length + images.length > limit) {
       toast("error", `一次最多 ${limit} 张图片`);
+      return;
+    }
+    if (media.length + (staged?.filter(({ mimeType }) => !mimeType.startsWith("image/")).length ?? 0) > MAX_CHAT_MEDIA_FILES) {
+      toast("error", `一次最多 ${MAX_CHAT_MEDIA_FILES} 个音视频附件`);
       return;
     }
     const uploadedIds = images.length ? await uploadImages(images) : [];
@@ -738,9 +824,10 @@ export function ChatView({
       }
     }
     if (!text || activeIdRef.current !== conversationId) return;
-    if (plain) {
-      if (await send(text, [...new Set([...uploadedIds, ...selectedForChat])], viewRef.current?.toolScope === "all" ? chatVideoFrames ?? undefined : undefined)) {
+    if (plain || staged) {
+      if (await send(text, [...new Set([...uploadedIds, ...existingRefs])], viewRef.current?.toolScope === "all" ? chatVideoFrames ?? undefined : undefined, staged)) {
         setChatAssetIds([]);
+        setLibraryAttachments(null);
         setChatVideoFrames(null);
       }
       return;
@@ -850,14 +937,20 @@ export function ChatView({
         ?? sessionImages.find((item) => item.asset.id === id)?.asset)
       .filter((asset): asset is Asset => asset !== undefined && asset.mimeType.startsWith("image/"));
   }, [view?.canvasAssetIds, mediaAssets, sessionImages]);
+  const assetsById = useMemo(() => new Map(mediaAssets.map(({ asset }) => [asset.id, asset])), [mediaAssets]);
+  const composerAssets = libraryAttachments ?? (plainChat
+    ? chatAssetIds.flatMap((id) => { const asset = assetsById.get(id); return asset ? [asset] : []; })
+    : canvasImages);
   /**
    * 预览要在**全部**素材里找。只在 `sessionImages`（只有图）里找的话，视频的
    * assetId 永远查不到，灯箱就拿不到 mimeType、照旧当图片渲染——用户看到的是一个
    * 裂图加一条 `#711e ✕` 的 bar，这正是需求.md 问题 3 的现场。
    */
   const previewAsset = preview
-    ? mediaAssets.find((item) => item.asset.id === preview)?.asset
+    ? assetsById.get(preview)
       ?? sessionImages.find((item) => item.asset.id === preview)?.asset
+      ?? libraryAttachments?.find(({ id }) => id === preview)
+      ?? (libraryPreview?.id === preview ? libraryPreview : null)
       ?? null
     : null;
   const previewIsVideo = previewAsset?.mimeType.startsWith("video/") ?? false;
@@ -975,7 +1068,7 @@ export function ChatView({
                 <button
                   type="button"
                   className="chat-control chat-toggle"
-                  title={plainChat ? "从本会话素材中选择图片发送" : "打开素材库：筛选、搜索、选图和设置首尾帧"}
+                  title="浏览、上传和选用聊天素材"
                   onClick={() => setLibraryOpen(true)}
                 >
                   <Images size={13} />
@@ -1010,7 +1103,9 @@ export function ChatView({
               ) : null}
 
               {rows.map((row) => {
-                if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message} asset={row.message.assetId ? mediaAssets.find(item => item.asset.id === row.message.assetId)?.asset : undefined} onPreview={setPreview} />;
+                if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message}
+                  asset={row.message.assetId ? assetsById.get(row.message.assetId) : undefined}
+                  lookupAsset={(id) => assetsById.get(id)} onPreview={setPreview} />;
                 if (row.kind === "note") return <SystemNote key={row.message.id} message={row.message} />;
                 if (row.kind === "assistant") {
                   // 「还没被回答的那一条」才给按钮：翻回去看老记录时，那些选项早就失效了
@@ -1049,6 +1144,10 @@ export function ChatView({
                     stale={!running}
                     assets={mediaAssets}
                     onPreview={setPreview}
+                    onPreviewMedia={(assetId, startMs) => {
+                      setPreviewStartMs(startMs);
+                      setPreviewId(assetId);
+                    }}
                     onDiagnostics={onDiagnostics}
                     onToast={toast}
                     presentationActionsEnabled={!running && view.toolScope !== "conversation"}
@@ -1145,16 +1244,14 @@ export function ChatView({
               ) : null}</>}
               onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
               onInterrupt={() => void interrupt()}
-              onAssetAttached={(assetId) => plainChat ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
+              onAssetAttached={(assetId) => plainChat || libraryAttachments ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
               plainAttachments={plainChat}
               maxImageAttachments={attachmentLimit}
               videoFrames={view.toolScope === "all" ? chatVideoFrames ?? {} : undefined}
               onClearVideoFrames={() => setChatVideoFrames(null)}
-              canvasItems={plainChat
-                ? chatAssetIds.flatMap((id, index) => { const entry = sessionImages.find((item) => item.asset.id === id); return entry ? [{ asset: entry.asset, index }] : []; })
-                : canvasImages.map((asset, index) => ({ asset, index }))}
+              canvasItems={composerAssets.map((asset, index) => ({ asset, index }))}
               onPreviewCanvas={setPreview}
-              onRemoveCanvas={(assetId) => plainChat ? toggleChatAsset(assetId) : removeCanvasBatch([assetId])}
+              onRemoveCanvas={(assetId) => plainChat || libraryAttachments ? toggleChatAsset(assetId) : removeCanvasBatch([assetId])}
               onSetCanvasFirst={view.toolScope === "all" ? (assetId) => setChatVideoFrames(current => ({ firstAssetId: assetId,
                 ...(current?.lastAssetId && current.lastAssetId !== assetId ? { lastAssetId: current.lastAssetId } : {}),
               })) : setCanvasFirst}
@@ -1175,34 +1272,40 @@ export function ChatView({
         />
       ) : null}
 
-      <AssetLibrary
-        open={libraryOpen}
-        assets={sessionImages}
-        canvasIds={plainChat ? chatAssetIds : canvasImages.map((asset) => asset.id)}
+      {libraryOpen && view && <AssetLibrary
+        assets={mediaAssets}
+        selection={composerAssets}
+        limit={plainChat ? attachmentLimit : MAX_CANVAS_IMAGES}
         chatSelection={plainChat}
+        canModify={!running && !busy && !uploading}
+        previewOpen={Boolean(preview)}
         onClose={() => setLibraryOpen(false)}
-        onPreview={setPreview}
-        onToggleCanvas={plainChat ? toggleChatAsset : toggleCanvasSelection}
-        onAddToBoard={unified ? (assetId) => { setLibraryOpen(false); setBoardAssetId(assetId); } : undefined}
-        onSetFirst={setCanvasFirst}
-        onSetLast={setCanvasLast}
+        onPreview={(asset) => { setLibraryPreview(asset); setPreview(asset.id); }}
+        onApply={applyLibrarySelection}
+        onUpload={uploadLibraryFiles}
+        removableLibraryIds={new Set(view.messages.flatMap((message) => message.assetLink && message.assetId ? [message.assetId] : []))}
+        onAddToBoard={unified ? ({ asset, prompt }) => {
+          setLibraryOpen(false);
+          setBoardAsset({ assetId: asset.id, title: asset.title ?? undefined, prompt });
+        } : undefined}
         onDeleteAsset={deleteSessionAsset}
-      />
+      />}
 
-      {boardAssetId ? <CrossModeBridgeDialog mode="to-board" items={sessionImages.filter(entry => entry.asset.id === boardAssetId)
-        .map(entry => ({ assetId: entry.asset.id, title: entry.asset.title ?? undefined, prompt: entry.prompt }))}
-        onClose={() => setBoardAssetId(null)} onToast={(kind, message) => toast(kind === "success" ? "ok" : "error", message)} /> : null}
+      {boardAsset ? <CrossModeBridgeDialog mode="to-board" items={[boardAsset]}
+        onClose={() => setBoardAsset(null)} onToast={(kind, message) => toast(kind === "success" ? "ok" : "error", message)} /> : null}
 
       {preview ? (
         <AssetLightbox
+          key={`${preview}:${previewStartMs ?? ""}`}
           assetId={preview}
           asset={previewAsset}
-          onClose={() => setPreview(null)}
+          startAtMs={previewStartMs}
+          onClose={() => { setPreview(null); setLibraryPreview(null); }}
           onToast={toast}
-          onSetFirst={setCanvasFirst}
-          onSetLast={setCanvasLast}
-          onAddToCanvas={(assetId) => addCanvasBatch([assetId])}
-          onRemoveFromCanvas={(assetId) => removeCanvasBatch([assetId])}
+          onSetFirst={libraryOpen ? undefined : setCanvasFirst}
+          onSetLast={libraryOpen ? undefined : setCanvasLast}
+          onAddToCanvas={libraryOpen ? undefined : (assetId) => addCanvasBatch([assetId])}
+          onRemoveFromCanvas={libraryOpen ? undefined : (assetId) => removeCanvasBatch([assetId])}
           inCanvas={Boolean(view?.canvasAssetIds.includes(preview))}
         />
       ) : null}

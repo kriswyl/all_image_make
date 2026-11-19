@@ -13,6 +13,8 @@ import { StoryboardReview } from "./StoryboardReview";
 import { WpsPreview } from "./WpsPreview";
 import { PresentationFileReport } from "./PresentationFileReport";
 import { WorkflowProgress } from "./WorkflowProgress";
+import { MediaReviewCard, VideoOverviewCard } from "./MediaReviewCard";
+import { mediaReviewSchema, videoOverviewSchema } from "../../shared/media-review";
 import { presentationReportSchema } from "../../shared/presentation-report";
 import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -40,6 +42,7 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   generate_image: ImageIcon,
   edit_image: Sparkles,
   view_images: Eye,
+  media_review: Film,
   set_canvas: Layers,
   optimize_prompt: Wand2,
   generate_video: Film,
@@ -125,6 +128,7 @@ export function ToolCard({
   stale = false,
   assets = [],
   onPreview,
+  onPreviewMedia,
   onDiagnostics,
   onToast,
   onImportTemplate,
@@ -139,6 +143,7 @@ export function ToolCard({
   /** 本会话的全部素材（图 + 视频），用来把 assetId 还原成 mimeType 和缩略图 */
   assets?: CanvasAsset[];
   onPreview?: (assetId: string) => void;
+  onPreviewMedia?: (assetId: string, startMs: number) => void;
   /** 打开应用内诊断弹窗；Tauri webview 会拦掉 window.open，所以不能再走新窗口 */
   onDiagnostics?: (taskId: string) => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
@@ -153,7 +158,7 @@ export function ToolCard({
   const [mjBusy, setMjBusy] = useState(false);
   const tool = message.toolName ?? "reply";
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
-  const payload = result?.toolResult ?? null;
+  const payload = result?.toolResult ?? (tool === "media_review" ? message.toolResult : null);
   const [resumingQuery, setResumingQuery] = useState(false);
   const pausedTaskId = payload?.error === "VIDEO_TIMEOUT" ? result?.taskId : null;
   const querying = resumingQuery || Boolean(pausedTaskId && progress?.status === "running");
@@ -176,11 +181,13 @@ export function ToolCard({
   const workflow = payload?.data?.workflow;
   const workflowRunId = workflow && typeof workflow === "object" && typeof (workflow as Record<string,unknown>).runId === "string" ? String((workflow as Record<string,unknown>).runId) : null;
   const presentation = presentationReportSchema.safeParse(payload?.data?.presentation).data;
+  const mediaReview = tool === "media_review" ? mediaReviewSchema.safeParse(payload?.data?.mediaReview).data : undefined;
+  const videoOverview = tool === "media_review" ? videoOverviewSchema.safeParse(payload?.data?.videoOverview).data : undefined;
   const failed = !paused && ((result && result.status === "error") || payload?.ok === false);
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
-  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update"].includes(tool);
+  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update", "media_review"].includes(tool);
   const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数", page: "页码" };
   const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;
@@ -302,9 +309,11 @@ export function ToolCard({
           <div className="tool-card-bar"><span style={{ width: `${Math.max(0, Math.min(100, progress.progress))}%` }} /></div>
         ) : null}
 
-        {orphaned ? <div className="tool-card-result">{message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
+        {orphaned ? <div className="tool-card-result">{tool === "media_review" ? "视频概述已中断。" : message.errorMessage || "这一轮被中断了，没有拿到结果；请先检查已生成的文件，再决定是否重试。"}</div> : null}
         {nativeTool && isPending && message.content ? <div className="tool-card-result" aria-live="polite">{message.content}</div> : null}
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
+        {videoOverview ? <VideoOverviewCard overview={videoOverview} onSeek={onPreviewMedia} /> : null}
+        {mediaReview ? <MediaReviewCard review={mediaReview} onSeek={onPreviewMedia} /> : null}
         {pausedTaskId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={querying} onClick={() => void continueQuery(pausedTaskId)}>{querying ? "正在查询…" : "继续查询原任务"}</button></div> : null}
         {presentation && !deletedWorkspaceFile ? <PresentationFileReport key={workspaceFileId ?? result?.id} conversationId={message.conversationId} fileId={workspaceFileId}
           initial={presentation} canUseModel={presentationActionsEnabled} onToast={onToast} /> : null}

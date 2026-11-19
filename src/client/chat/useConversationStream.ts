@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type Dispatch, type RefObject, type S
 import type { AgentStreamEvent, ChatMessage, ConversationStatus, ConversationView } from "../../shared/agent-types";
 import { api } from "../api";
 import type { TaskProgress } from "./ToolCard";
+import { cancelVideoOverviews, respondToVideoOverview } from "./video-overview-client";
 
 function upsert(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
   const index = messages.findIndex((item) => item.id === incoming.id);
@@ -49,6 +50,9 @@ export function useConversationStream(input: {
     const onEvent = (event: AgentStreamEvent) => {
       if (!isCurrent()) return;
       switch (event.type) {
+        case "video_overview_frames":
+          void respondToVideoOverview(activeId, event);
+          break;
         case "context_compression":
           setCompressing(event.status === "started");
           if (event.status === "finished") toast(/失败|不完整/.test(event.message) ? "error" : "ok", event.message);
@@ -90,6 +94,7 @@ export function useConversationStream(input: {
           toast("error", event.message);
           break;
         case "done":
+          cancelVideoOverviews(activeId);
           setStatus(event.status);
           clearOutput();
           // 画布指针、任务额度这些都不在事件里，落定后拉一次最稳

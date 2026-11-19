@@ -21,7 +21,7 @@ export const capabilitySearchSpec: BrainToolSpec = {
   type: "function",
   function: {
     name: "capability_search",
-    description: "当前工具组不足时使用：按用户目标查找并开启下一轮可用的能力（文档、图片、视频、音乐、配音、模板、画布工具）。只查目录，不执行任务、不产生费用。拿到结果后，下一轮直接调用被开启的工具。",
+    description: "当前工具组不足时使用：按用户目标查找并开启下一轮可用的能力（文档、图片、视频生成、视频概述、音乐、配音、模板、画布工具）。只查目录，不执行任务、不产生费用。拿到结果后，下一轮直接调用被开启的工具。",
     parameters: z.toJSONSchema(searchSchema),
   },
 };
@@ -32,6 +32,7 @@ const GROUP_LABELS: Record<ChatToolGroup, string> = {
   image: "图片生成与编辑",
   video: "视频生成",
   audio: "音乐与配音",
+  media: "视频画面概述",
   templates: "画布模板与分镜",
   utility: "画布指针与提示词",
 };
@@ -41,6 +42,7 @@ const GROUP_HINTS: Record<Exclude<ChatToolGroup, "core">, RegExp> = {
   image: /(图片|照片|海报|插画|封面|配图|生图|出图|改图|绘图|画一|画个|画张|画两|参考图|抠图|修图|这张图|那张图|这几张图|画面|图中|图里)/i,
   video: /(视频|动起来|首帧|尾帧|镜头|运镜|字幕)/i,
   audio: /(音乐|歌曲|写一首|一首歌|配乐|配音|朗读|旁白|音效|翻唱|混音|口播|歌|唱|曲)/i,
+  media: /(视频|原片|全片|短片|概述|大概讲了什么)/i,
   templates: /(模板|分镜|工作流|流程图)/i,
   utility: /(设为画布|设为参考|提示词|润色|优化提示词)/i,
 };
@@ -68,6 +70,7 @@ export function initialToolGroups(context: InitialToolContext): Set<ChatToolGrou
   if (context.hasAttachments || context.hasImages || GROUP_HINTS.image.test(text)) groups.add("image");
   if (context.hasVideoAttachments || GROUP_HINTS.video.test(text)) groups.add("video");
   if (GROUP_HINTS.audio.test(text)) groups.add("audio");
+  if (context.hasVideoAttachments || GROUP_HINTS.media.test(text)) groups.add("media");
   if (GROUP_HINTS.templates.test(text)) groups.add("templates");
   if (GROUP_HINTS.utility.test(text)) groups.add("utility");
   return groups;

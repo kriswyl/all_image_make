@@ -3,6 +3,7 @@ import type { ConfirmPreview, Conversation } from "../../shared/agent-types.js";
 import { assetRef } from "../../shared/agent-types.js";
 import { MAX_REFERENCE_IMAGES } from "../../shared/types.js";
 import { imageReferenceCountError } from "../../shared/image-reference-limits.js";
+import { normalizeAgentImageDimensions } from "../../shared/image-sizes.js";
 import type { BrainToolSpec } from "../brain.js";
 import type { AppDatabase } from "../db.js";
 import { editImageSchema, generateImageSchema, resolveImageRefs } from "../agent-tools.js";
@@ -43,7 +44,7 @@ export const nativeImageSpecs: Record<"generate_image" | "edit_image", BrainTool
     type: "function",
     function: {
       name: "edit_image",
-      description: "按用户明确要求修改一张底图。imageRefs 只填一个会话图片 ID，只有本轮单张附件时可省略。extraReferences 可指定额外参考图。多个候选底图且目标不明时先询问要改哪一张。单张改图默认直接提交；只有用户选择每次确认时才等待确认。",
+      description: "按用户明确要求修改一张底图。imageRefs 只填一个会话图片 ID，只有本轮单张附件时可省略。extraReferences 可指定额外参考图。用户未要求改变尺寸时留空尺寸参数。GPT Image 有明确尺寸要求时用 size（宽x高）。多个候选底图且目标不明时先询问。单张改图默认直接提交；只有用户选择每次确认时才等待确认。",
       parameters: z.toJSONSchema(editingSchema),
     },
   },
@@ -146,16 +147,18 @@ export function prepareNativeImage(db: AppDatabase, conversation: Conversation, 
   const referenceError = imageReferenceCountError(channel.adapterType, resolution.model, imageRefs.length + extraReferences.length);
   if (referenceError) return { error: referenceError } as const;
   const prompt = conversation.verbatimPrompt ? db.lastUserText(conversation.id) ?? args.prompt : args.prompt;
-  const size = ["size" in args ? args.size : undefined, args.aspectRatio, args.imageSize].filter(Boolean).join(" / ");
+  const { size, aspectRatio, imageSize, ...rest } = args;
+  const dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, { size, aspectRatio, imageSize });
+  const sizeLabel = [dimensions.size, dimensions.aspectRatio, dimensions.imageSize].filter(Boolean).join(" / ");
   const references = editing
     ? `底图：${assetRef(imageRefs[0]!)}。${extraReferences.length ? ` 额外参考图：${extraReferences.map(assetRef).join("、")}。` : ""}`
     : imageRefs.length ? `参考图：${imageRefs.map(assetRef).join("、")}。` : "纯文生图。";
   const preview: ConfirmPreview = {
     reason: "native_image", prompt, channelName: channel.name, model: resolution.model,
-    message: `将提交一次${editing ? "改图" : "生图"}请求，费用由渠道决定。${size ? ` 尺寸：${size}。` : ""} ${references}`,
+    message: `将提交一次${editing ? "改图" : "生图"}请求，费用由渠道决定。${sizeLabel ? ` 尺寸：${sizeLabel}。` : ""} ${references}`,
   };
   return {
-    args: { ...args, prompt, modelHint: resolution.alias, imageRefs, ...(editing ? { extraReferences } : { fromScratch: !imageRefs.length, count }) },
+    args: { ...rest, ...dimensions, prompt, modelHint: resolution.alias, imageRefs, ...(editing ? { extraReferences } : { fromScratch: !imageRefs.length, count }) },
     preview, target: { kind: "image", channelId: channel.id, channelVersion: channel.updatedAt, model: resolution.model } as const,
   } as const;
 }

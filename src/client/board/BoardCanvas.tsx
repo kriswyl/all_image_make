@@ -13,12 +13,13 @@ import {
   Maximize2, Mic, Music2, Play, Plus, SlidersHorizontal, Trash2, Type, Ungroup, Upload, Video, ZoomIn, ZoomOut,
 } from "lucide-react";
 import {
-  boardGroups, BOARD_LIMITS, DEFAULT_BOARD_VIEWPORT,
-  type BoardGroup, type BoardNode, type BoardNodeType,
+  boardGroups, BOARD_CONFIG_NODE_SIZE, BOARD_LIMITS, DEFAULT_BOARD_VIEWPORT,
+  type BoardGroup, type BoardNode, type BoardNodeType, type ConfigBoardNode,
 } from "../../shared/board";
 import type { Asset } from "../../shared/types";
 import type { UseBoardResult } from "./useBoard";
 import { BoardNodeView, type ConfigNodeConnections } from "./BoardNodeView";
+import type { BoardConfigModelSummary } from "./board-models";
 import { BoardMinimap } from "./BoardMinimap";
 import { useBoardMinimap } from "./useBoardMinimap";
 import { boardFitViewport, clampScale, edgePath, edgeClass, fitBoardImageSize, rectsIntersect, nodesBounds, type ImageDimensions } from "./board-geometry";
@@ -91,7 +92,7 @@ interface GroupDragState {
 
 export function BoardCanvas({
   board, assets, onPickImage, onUploadMediaIntoNode, onUploadFiles, onPreviewAsset, renderNodeSettings,
-  onDeleteNode, onCompareVersions, onExtractFrame, onRun, focusRequest, onSaveTemplate, onAddToReferenceGroup,
+  onDeleteNode, onCompareVersions, onExtractFrame, onRun, focusRequest, onSaveTemplate, onAddToReferenceGroup, describeConfigModel,
 }: {
   board: UseBoardResult;
   assets: Map<string, Asset>;
@@ -100,6 +101,7 @@ export function BoardCanvas({
   onUploadFiles: (files: File[], position: { x: number; y: number }) => void;
   onPreviewAsset: (asset: Asset) => void;
   renderNodeSettings: (node: BoardNode, locate: (nodeId: string) => void) => ReactNode;
+  describeConfigModel?: (node: ConfigBoardNode) => BoardConfigModelSummary;
   onDeleteNode: (nodeId: string) => void;
   onCompareVersions: (nodeId: string) => void;
   onExtractFrame: (nodeId: string) => void;
@@ -154,7 +156,12 @@ export function BoardCanvas({
     if (!doc) return [];
     return doc.nodes.map((node) => {
       const patch = localPositions[node.id];
-      const positioned = patch ? { ...node, ...patch } as BoardNode : node;
+      let positioned = patch ? { ...node, ...patch } as BoardNode : node;
+      // Compact cards saved with the previous default dimensions. Explicit sizes retain their bounds.
+      if (positioned.type === "config" && patch?.height === undefined
+        && positioned.width === BOARD_CONFIG_NODE_SIZE.width && positioned.height === 260) {
+        positioned = { ...positioned, height: BOARD_CONFIG_NODE_SIZE.height };
+      }
       if (positioned.type !== "image" || !positioned.assetId) return positioned;
       const dimensions = imageDimensions[positioned.assetId] ?? (positioned.naturalWidth && positioned.naturalHeight
         ? { width: positioned.naturalWidth, height: positioned.naturalHeight } : null);
@@ -1053,6 +1060,7 @@ export function BoardCanvas({
                 asset={asset}
                 editing={editingTextId === node.id}
                 configConnections={configConnections.get(node.id)}
+                configModel={node.type === "config" ? describeConfigModel?.(node) : undefined}
                 imageResults={imageResults}
                 onImageLoad={readImageDimensions}
                 primaryChoice={primaryChoice}

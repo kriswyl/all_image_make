@@ -11,6 +11,10 @@ import { useReferenceImages } from "../src/client/hooks/useReferenceImages";
 import { imageReferenceLimit } from "../src/shared/image-reference-limits";
 import { readPromptText } from "../src/client/video/PromptEditor";
 import { ImagePromptComposer } from "../src/client/views/ImagePromptComposer";
+import { ImageActionMenu } from "../src/client/ui/ImageActionMenu";
+import { GlobalTooltip } from "../src/client/ui/GlobalTooltip";
+import { Copy, Download } from "lucide-react";
+import { HistoryView } from "../src/client/views/HistoryView";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -28,6 +32,81 @@ const imageChannel: Channel = {
   createdAt, updatedAt: createdAt,
 };
 const mjChannel: Channel = { ...imageChannel, id: "mj", name: "Midjourney", adapterType: "midjourney", models: ["mj_imagine"] };
+
+it("图片菜单由更多按钮切换，鼠标离开时保持，可用外点、Escape 和动作收起", () => {
+  vi.useFakeTimers();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const copy = vi.fn();
+  const download = vi.fn();
+  const preview = vi.fn();
+  const pointer = (element: Element, type: string, relatedTarget: EventTarget, pointerType = "mouse") =>
+    act(() => element.dispatchEvent(new PointerEvent(type, { bubbles: true, relatedTarget, pointerType })));
+  const advance = (ms: number) => act(() => vi.advanceTimersByTime(ms));
+  try {
+    act(() => root.render(<>
+      <GlobalTooltip />
+      <ImageActionMenu className="test-image"
+        shortcuts={[{ label: "下载", tooltip: "下载原图", icon: Download, onSelect: download }]}
+        actions={[{ label: "复制", icon: Copy, onSelect: copy }]}>
+        <button type="button" onClick={preview}>查看图片</button>
+      </ImageActionMenu>
+    </>));
+    const card = host.querySelector(".test-image")!;
+    const trigger = card.querySelector<HTMLButtonElement>(".image-action-trigger")!;
+    const panel = card.querySelector(".image-action-menu")!;
+    const action = panel.querySelector<HTMLButtonElement>("button")!;
+    const shortcut = card.querySelector<HTMLButtonElement>('.image-action-shortcuts [aria-label="下载"]')!;
+    const expanded = () => trigger.getAttribute("aria-expanded");
+    expect(expanded()).toBe("false");
+    expect(panel.hasAttribute("inert")).toBe(true);
+    expect(shortcut.textContent).toBe("");
+    act(() => shortcut.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    advance(150);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("下载原图");
+    expect(expanded()).toBe("false");
+    act(() => shortcut.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: card })));
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    act(() => shortcut.click());
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(preview).not.toHaveBeenCalled();
+    expect(expanded()).toBe("false");
+    pointer(card, "pointerover", document.body);
+    advance(200);
+    expect(expanded()).toBe("false");
+    pointer(card, "pointerout", trigger);
+    pointer(trigger, "pointerover", card);
+    advance(200);
+    expect(expanded()).toBe("false");
+    act(() => trigger.click());
+    expect(expanded()).toBe("true");
+    pointer(trigger, "pointerout", document.body);
+    advance(200);
+    expect(expanded()).toBe("true");
+    act(() => trigger.click());
+    expect(expanded()).toBe("false");
+    act(() => trigger.click());
+    expect(expanded()).toBe("true");
+    act(() => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+    expect(expanded()).toBe("false");
+    act(() => trigger.click());
+    act(() => action.focus());
+    act(() => action.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(expanded()).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+    act(() => trigger.click());
+    act(() => action.click());
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(expanded()).toBe("false");
+    act(() => card.querySelector<HTMLButtonElement>("button")!.click());
+    expect(preview).toHaveBeenCalledTimes(1);
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    vi.useRealTimers();
+  }
+});
 
 it("参考图展开后按可用宽度翻页，提示词框单独展开和收起", async () => {
   const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(460);
@@ -136,6 +215,115 @@ function task(id: string, channel: Channel, assets: Asset[]): Task {
   };
 }
 
+it("右键生成历史时直接下载该缩略图对应的原图，左键仍用于切换任务", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(new Blob(["image"]))));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const active = task("active", imageChannel, [asset("active-image", "active")]);
+  const history = task("history-image", imageChannel, [asset("cover", "history-image"), asset("other", "history-image")]);
+  const failed: Task = { ...task("pending", imageChannel, []), status: "failed" };
+  const select = vi.fn();
+  const download = vi.spyOn(api, "downloadAsset").mockResolvedValue(true);
+  const noop = () => {};
+  const references: ReferenceController = {
+    images: [], reading: false, select: noop, dropFiles: noop, remove: noop, clear: noop, addFromAsset: async () => {},
+  };
+  try {
+    await act(async () => root.render(<ImageResultWorkspace task={active} tasks={[active, history, failed]} references={references}
+      onTask={noop} onSelectTask={select} onToast={noop} onDiagnostics={noop} />));
+    const thumbs = host.querySelectorAll<HTMLButtonElement>(".image-history-item");
+    const menu = () => document.querySelector(".image-history-context-menu");
+    const rightClick = (target: Element) => act(() => target.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 200, clientY: 180 }),
+    ));
+    rightClick(thumbs[2]!);
+    expect(menu()).toBeNull();
+    rightClick(thumbs[1]!);
+    expect(menu()?.textContent).toBe("下载");
+    expect(select).not.toHaveBeenCalled();
+    act(() => document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    expect(menu()).toBeNull();
+    rightClick(thumbs[1]!);
+    await act(async () => menu()?.querySelector<HTMLButtonElement>("button")?.click());
+    expect(menu()).toBeNull();
+    expect(download).toHaveBeenCalledExactlyOnceWith(history.assets[0]);
+    expect(select).not.toHaveBeenCalled();
+    act(() => thumbs[1]!.click());
+    expect(select).toHaveBeenCalledExactlyOnceWith(history);
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+  }
+});
+
+it("素材画廊的图片菜单使用这张素材及其来源任务", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const generated = task("gallery", imageChannel, [asset("first", "gallery"), asset("second", "gallery")]);
+  const resubmitted = { ...generated, id: "retry", status: "queued" } satisfies Task;
+  vi.spyOn(api, "libraryPage").mockResolvedValue({ items: [generated], hasMore: false });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const download = vi.spyOn(api, "downloadAsset").mockResolvedValue(true);
+  const clipboardFile = new File(["sample"], "second.png", { type: "image/png" });
+  const readFile = vi.spyOn(api, "assetAsFile").mockResolvedValue(clipboardFile);
+  const write = vi.fn(async ([item]: { data: { "image/png": Promise<Blob> } }[]) => {
+    expect(await item?.data["image/png"]).toBe(clipboardFile);
+  });
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write } });
+  vi.stubGlobal("ClipboardItem", class {
+    constructor(readonly data: { "image/png": Promise<Blob> }) {}
+  });
+  const retry = vi.spyOn(api, "retry").mockResolvedValue(resubmitted);
+  const onImageTask = vi.fn();
+  const onDiagnostics = vi.fn();
+  const addFromAsset = vi.fn(async (_asset: Asset) => {});
+  const noop = () => {};
+  const references: ReferenceController = {
+    images: [], reading: false, select: noop, dropFiles: noop, remove: noop, clear: noop, addFromAsset,
+  };
+  const click = (element: HTMLButtonElement) => act(async () => { element.click(); });
+  try {
+    await act(async () => root.render(<HistoryView channels={[imageChannel]} tasks={[]} references={references}
+      onRefresh={noop} onDelete={noop} onDeleteSelected={noop} onClear={noop} onOpenAssetSettings={noop}
+      onDiagnostics={onDiagnostics} onImageTask={onImageTask} onToast={noop} />));
+    await click(host.querySelector<HTMLButtonElement>(".header-actions .filter-tabs button")!);
+    await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 10)); });
+    const card = host.querySelectorAll(".library-card-wrap")[1]!;
+    const trigger = card.querySelector<HTMLButtonElement>(".image-action-trigger")!;
+    const shortcuts = [...card.querySelectorAll<HTMLButtonElement>(".image-action-shortcut")];
+    expect(trigger.parentElement).toBe(shortcuts[0]?.parentElement);
+    expect(shortcuts.map(button => button.getAttribute("aria-label"))).toEqual(["下载", "参考"]);
+    expect(shortcuts.map(button => button.dataset.tooltip)).toEqual(["下载原图", "用作参考图"]);
+    expect(shortcuts.map(button => button.textContent)).toEqual(["", ""]);
+    for (const shortcut of shortcuts) {
+      await click(shortcut);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    }
+    const buttons = [...card.querySelectorAll<HTMLButtonElement>(".image-action-menu button")];
+    expect(buttons.map(button => button.textContent)).toEqual(["复制", "重绘", "诊断"]);
+    for (const index of [0, 2, 1]) {
+      await click(trigger);
+      await click(buttons[index]!);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    }
+    expect(download).toHaveBeenCalledWith(generated.assets[1]);
+    expect(readFile).toHaveBeenCalledWith(generated.assets[1]);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(addFromAsset).toHaveBeenCalledWith(generated.assets[1]);
+    expect(onDiagnostics).toHaveBeenCalledWith(generated);
+    expect(retry).toHaveBeenCalledWith(generated.id);
+    expect(onImageTask).toHaveBeenCalledWith(resubmitted);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+
 it("按实际任务状态切换加载动效，只有返回进度才显示百分比", () => {
   const container = document.createElement("div");
   const root = createRoot(container);
@@ -184,6 +372,7 @@ it("切历史与切本次候选互相独立，历史 MJ 操作跟随选中的任
   const onTask = vi.fn();
   const submit = vi.spyOn(api, "midjourneyAction").mockResolvedValue(upscale);
   const generate = vi.spyOn(api, "generate").mockResolvedValue(first);
+  const download = vi.spyOn(api, "downloadAsset").mockResolvedValue(true);
   const addFromAsset = vi.fn(async (_asset: Asset) => {});
   const references: ReferenceController = {
     images: [], reading: false, select: vi.fn(), dropFiles: vi.fn(), remove: vi.fn(), clear: vi.fn(), addFromAsset,
@@ -227,10 +416,11 @@ it("切历史与切本次候选互相独立，历史 MJ 操作跟随选中的任
     expect(parameters.open).toBe(false);
     await click('[aria-label="结果 2"]');
     expect(container.querySelector(".image-preview-trigger img")?.getAttribute("src")).toBe("/assets/two");
-    const reference = [...container.querySelectorAll<HTMLButtonElement>(".image-result-tools button")]
-      .find(button => button.textContent?.trim() === "参考")!;
-    await act(async () => { reference.click(); });
-    expect(addFromAsset).toHaveBeenCalledWith(first.assets[1]);
+    await click('.image-result-stage .image-action-shortcuts [aria-label="下载"]');
+    expect(download).toHaveBeenCalledExactlyOnceWith(first.assets[1]);
+    await click('.image-result-stage .image-action-shortcuts [aria-label="参考"]');
+    expect(addFromAsset).toHaveBeenCalledExactlyOnceWith(first.assets[1]);
+    expect(container.querySelector('.image-result-stage [aria-label="图片操作"]')?.getAttribute("aria-expanded")).toBe("false");
 
     await click('.image-history-item[aria-label$="历史 mj"]');
     expect(prompt()).toBe("正在编辑的提示词");

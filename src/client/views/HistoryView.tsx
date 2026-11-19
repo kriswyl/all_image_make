@@ -1,15 +1,18 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
-import { Download, Eraser, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, Music, RefreshCw, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { Copy, Download, Eraser, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, Music, RefreshCw, RotateCcw, Settings2, Trash2, Wand2, X } from "lucide-react";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "../board/CrossModeBridgeDialog";
 import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
 import { StatusBadge, formatTime, terminalStatuses } from "../task-ui";
-import { taskKind, type ClearScope, type Channel, type Task } from "../../shared/types";
+import { taskKind, type Asset, type ClearScope, type Channel, type Task } from "../../shared/types";
 import { isSunoSong, sunoResultLabel, sunoTrackInfo, type SunoSourceSelection } from "../../shared/suno";
 import type { ReferenceController, Toast } from "../app-shared";
+import { copyImageToClipboard } from "../clipboard";
+import { ImageActionMenu } from "../ui/ImageActionMenu";
+import { retryImageResult } from "./image-result-actions";
 
-export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onUseMusicSource, onToast }: {
+export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onImageTask, onUseMusicSource, onToast }: {
   channels: Channel[];
   tasks: Task[];
   references: ReferenceController;
@@ -19,6 +22,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   onClear: (scope: ClearScope, records: Task[]) => void;
   onOpenAssetSettings: () => void;
   onDiagnostics: (task: Task) => void;
+  onImageTask: (task: Task) => void;
   onUseMusicSource?: (selection: SunoSourceSelection) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
 }) {
@@ -141,6 +145,27 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
     });
   }
 
+  async function deleteAsset(task: Task, asset: Asset) {
+    const fromChat = task.historySource === "chat";
+    if (!window.confirm(fromChat
+      ? "这条素材来自对话，删除会移除整条生成记录，对话里对应的图也会一起消失。确定删除？"
+      : "确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
+    try {
+      if (fromChat) await api.deleteTask(task.id, false, true);
+      else await api.deleteLibraryAsset(asset.id);
+      // 让开始于删除前的分页请求失效。
+      requestId.current++;
+      setLoading(false);
+      setLibrary(items => fromChat
+        ? items.filter(item => item.id !== task.id)
+        : items.map(item => item.id === task.id ? { ...item, assets: item.assets.filter(entry => entry.id !== asset.id) } : item));
+      onRefresh();
+      onToast("success", fromChat ? "记录已删除" : "素材已删除");
+    } catch (error) {
+      onToast("error", error instanceof Error ? error.message : fromChat ? "删除记录失败" : "删除素材失败");
+    }
+  }
+
   // 图片视频都落在应用数据目录里，路径不好记，给个按钮直接翻到那儿
   async function revealMedia() {
     try {
@@ -202,33 +227,11 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       </div>
       {loadError ? <p role="alert">素材加载失败：{loadError}</p> : null}
       {mode === "assets" ? <div className="library-grid">
-        {visibleAssets.map(({task, asset, index}) => <div className="library-card-wrap" key={asset.id}><button type="button" className="library-card" onClick={() => { setPreviewIndex(index); setPreview(task); }}>
-          <span className="library-card-media">{asset.mimeType.startsWith("video/") ? <LazyVideoThumb src={api.assetUrl(asset.url)} alt="视频预览" /> : asset.mimeType.startsWith("audio/") ? asset.thumbUrl ? <img src={api.assetUrl(asset.thumbUrl)} alt="" loading="lazy" /> : <Music size={32} /> : <img src={api.assetUrl(asset.thumbUrl || asset.url)} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = api.assetUrl(asset.url); }} alt="" loading="lazy" />}</span>
-          <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span><span className="library-card-meta">{task.historySource === "chat" ? "聊天生成" : task.origin === "upload" ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
-        </button><button type="button" className="library-card-delete" title={task.historySource === "chat" ? "删除整条记录" : "删除素材"} aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={() => {
-          // 聊天生成的一张图归整条记录所有，单删图会被服务端拦下来（还被对话引用）；
-          // 这里按「删整条记录 + 摘掉对话引用」处理，确认文案要说清楚。
-          if (task.historySource === "chat") {
-            if (!window.confirm("这条素材来自对话，删除会移除整条生成记录，对话里对应的图也会一起消失。确定删除？")) return;
-            void api.deleteTask(task.id, false, true).then(() => {
-              requestId.current++;
-              setLoading(false);
-              setLibrary((items) => items.filter((item) => item.id !== task.id));
-              onRefresh();
-              onToast("success", "记录已删除");
-            }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除记录失败"));
-            return;
-          }
-          if (!window.confirm("确定删除这个素材及其本地文件？生成记录和其他素材会保留。")) return;
-          void api.deleteLibraryAsset(asset.id).then(() => {
-            // 作废删除前开始的分页请求，避免旧结果把刚删掉的素材重新带回列表。
-            requestId.current++;
-            setLoading(false);
-            setLibrary((items) => items.map((item) => item.id === task.id ? { ...item, assets: item.assets.filter((entry) => entry.id !== asset.id) } : item));
-            onRefresh();
-            onToast("success", "素材已删除");
-          }).catch((error) => onToast("error", error instanceof Error ? error.message : "删除素材失败"));
-        }}><Trash2 size={16} /></button></div>)}
+        {visibleAssets.map(({ task, asset, index }) => (
+          <LibraryAssetCard key={asset.id} task={task} asset={asset} references={references}
+            onPreview={() => { setPreviewIndex(index); setPreview(task); }}
+            onDelete={() => void deleteAsset(task, asset)} onDiagnostics={onDiagnostics} onImageTask={onImageTask} onToast={onToast} />
+        ))}
         {!loading && !filtered.some((task) => task.assets.length) && !loadError ? <div className="table-empty"><ImageIcon size={28} /><span>没有符合条件的素材</span></div> : null}
       </div> :
       <div className="data-table-wrap">
@@ -275,6 +278,69 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onUseMusicSource={onUseMusicSource} onToast={onToast} /> : null}
       {bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
     </div>
+  );
+}
+
+function LibraryAssetCard({ task, asset, references, onPreview, onDelete, onDiagnostics, onImageTask, onToast }: {
+  task: Task;
+  asset: Asset;
+  references: ReferenceController;
+  onPreview: () => void;
+  onDelete: () => void;
+  onDiagnostics: (task: Task) => void;
+  onImageTask: (task: Task) => void;
+  onToast: (kind: Toast["kind"], message: string) => void;
+}) {
+  const [action, setAction] = useState<"download" | "copy" | "retry" | null>(null);
+  const isVideo = asset.mimeType.startsWith("video/");
+  const isAudio = asset.mimeType.startsWith("audio/");
+  const isImage = asset.mimeType.startsWith("image/");
+  const uploaded = task.origin === "upload";
+  const fromChat = task.historySource === "chat";
+  const pending = !terminalStatuses.includes(task.status);
+  const continueQuery = task.errorCode === "VIDEO_TIMEOUT";
+  async function run(kind: NonNullable<typeof action>, perform: () => Promise<void>, fallback: string) {
+    if (action) return;
+    setAction(kind);
+    try { await perform(); }
+    catch (error) { onToast("error", error instanceof Error ? error.message : fallback); }
+    finally { setAction(null); }
+  }
+  const original = api.assetUrl(asset.url);
+  const thumb = asset.thumbUrl ? api.assetUrl(asset.thumbUrl) : original;
+  const content = <>
+    <button type="button" className="library-card" onClick={onPreview}>
+      <span className="library-card-media">
+        {isVideo ? <LazyVideoThumb src={original} alt="视频预览" /> : isAudio && !asset.thumbUrl ? <Music size={32} /> : (
+          <img src={thumb} alt="" loading="lazy" onError={(event) => {
+            if (event.currentTarget.getAttribute("src") !== original) event.currentTarget.src = original;
+          }} />
+        )}
+      </span>
+      <span className="library-card-title">{asset.title || task.prompt || asset.fileName}</span>
+      <span className="library-card-meta">{fromChat ? "聊天生成" : uploaded ? "上传" : "生成"} · {formatTime(asset.createdAt)}</span>
+    </button>
+    <button type="button" className="library-card-delete" title={fromChat ? "删除整条记录" : "删除素材"}
+      aria-label={`删除素材 ${asset.title || asset.fileName}`} onClick={onDelete}><Trash2 size={16} /></button>
+  </>;
+  if (!isImage) return <div className="library-card-wrap">{content}</div>;
+
+  return (
+    <ImageActionMenu className="library-card-wrap" shortcuts={[
+      { label: "下载", tooltip: "下载原图", icon: Download, disabled: Boolean(action), onSelect: () => void run("download", async () => {
+        if (await api.downloadAsset(asset)) onToast("success", "图片已保存");
+      }, "下载失败") },
+      { label: "参考", tooltip: "用作参考图", icon: Wand2, disabled: references.reading, onSelect: () => void references.addFromAsset(asset) },
+    ]} actions={[
+      { label: "复制", icon: Copy, disabled: Boolean(action), onSelect: () => void run("copy", async () => {
+        await copyImageToClipboard(() => api.assetAsFile(asset));
+        onToast("success", "图片已复制到剪贴板");
+      }, "复制图片失败") },
+      { label: continueQuery ? "续查" : "重绘", icon: RotateCcw, disabled: Boolean(action) || uploaded || fromChat || pending,
+        tooltip: uploaded ? "上传的图片可先用作参考图" : fromChat ? "回到原对话重绘" : pending ? "任务仍在生成中" : continueQuery ? "继续查询原任务" : "按原参数重新生成",
+        onSelect: () => void run("retry", () => retryImageResult(task, onImageTask, onToast), "重试失败") },
+      { label: "诊断", tooltip: uploaded ? "上传的图片没有生成诊断" : "查看请求诊断", icon: Eye, disabled: uploaded, onSelect: () => onDiagnostics(task) },
+    ]}>{content}</ImageActionMenu>
   );
 }
 

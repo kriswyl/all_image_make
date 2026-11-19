@@ -10,10 +10,13 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/server/app";
+import { collectTurnAssetIds } from "../src/server/agent-context";
+import { prepareNativeImage } from "../src/server/chat-tools/native-image";
 import { displayFileName } from "../src/server/security";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -44,6 +47,61 @@ async function bootConversation(prefix: string, brainBaseUrl = "http://127.0.0.1
 function upload(app: ReturnType<typeof createApp>["app"], conversationId: string, name = "猫.png", bytes = pngBytes) {
   return request(app).post(`/api/conversations/${conversationId}/uploads`).attach("images", bytes, name);
 }
+
+it("发送时把公共素材与正文存为同一条消息，保持公共可见性", async () => {
+  const mock = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: '{"tool":"reply","args":{"text":"收到"}}' } }] }));
+    });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise<void>((resolve) => { mock.close(() => resolve()); }));
+  const { port } = mock.address() as { port: number };
+  const { app, context, conversationId } = await bootConversation("chat-asset-library-", `http://127.0.0.1:${port}`);
+  for (const [taskId, scope] of [["legacy-public", undefined], ["public-media", "public"], ["private-image", "conversation"]] as const) {
+    context.db.createTask({ id: taskId, channelId: "", model: "", prompt: taskId, input: {}, status: "succeeded", libraryScope: scope });
+  }
+  const sql = new DatabaseSync(context.db.filePath);
+  try { sql.prepare("UPDATE tasks SET library_scope = 'legacy' WHERE id = ?").run("legacy-public"); }
+  finally { sql.close(); }
+  for (const [id, taskId, mimeType] of [["public", "legacy-public", "image/png"], ["sibling", "legacy-public", "image/png"],
+    ["voice", "public-media", "audio/wav"], ["private", "private-image", "image/png"]] as const) {
+    context.db.insertAsset({ id, taskId, mimeType, byteSize: 1, fileName: id, relativePath: id, baseDir: context.db.assetsDir, sha256: "test" });
+  }
+  const base = `/api/conversations/${conversationId}`;
+  const send = (libraryAssetIds: string[]) => request(app).post(`${base}/messages`)
+    .send({ text: "参考这些素材", assetRefs: ["public"], libraryAssetIds });
+  await send(["public", "private"]).expect(403);
+  expect((await request(app).get(base).expect(200)).body.data.messages).toEqual([]);
+  await send(["public", "voice", "public"]).expect(202);
+  await vi.waitFor(() => expect(context.agent.isRunning(conversationId)).toBe(false));
+  const linked = (await request(app).get(base).expect(200)).body.data;
+  expect(linked.mediaAssets).toMatchObject([
+    { asset: { id: "public" }, source: "library" },
+    { asset: { id: "voice" }, source: "library" },
+  ]);
+  expect(linked.canvasAssetIds).toEqual([]);
+  const userMessages = linked.messages.filter(({ role }: { role: string }) => role === "user");
+  expect(userMessages).toMatchObject([{ content: "参考这些素材", assetId: null, assetRefs: ["public", "voice"] }]);
+  expect(collectTurnAssetIds(context.db, conversationId, userMessages[0].seq)).toEqual(["public", "voice"]);
+  expect(context.db.listLibraryTaskViews().map(({ id }) => id)).toContain("legacy-public");
+  await request(app).delete(`${base}/assets/public`).expect(409);
+  expect(context.db.getAsset("public")).not.toBeNull();
+  expect(context.db.getAsset("sibling")).not.toBeNull();
+  await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+  expect(context.db.getAsset("voice")).not.toBeNull();
+});
+
+it("素材库上传图片保留旧创作会话的参考图组", async () => {
+  const { app, conversationId } = await bootConversation("chat-asset-upload-");
+  const first = (await upload(app, conversationId).expect(201)).body.data;
+  const second = (await request(app).post(`/api/conversations/${conversationId}/uploads?keepCanvas=1`)
+    .attach("images", pngBytes, "新素材.png").expect(201)).body.data;
+  expect(second.canvasAssetIds).toEqual(first.canvasAssetIds);
+  expect(second.sessionImages).toHaveLength(2);
+});
 
 it("把音频和视频作为会话消息保存，刷新后仍可读取", async () => {
   const { app, conversationId } = await bootConversation("chat-media-upload-");
@@ -134,7 +192,7 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     expect(context.db.getTaskRow(context.db.getAsset(assetId)!.taskId)?.ownerConversationId).toBe(conversationId);
   });
 
-  it("大脑能用它改图：上传的图真的当参考图发到了生图接口上", async () => {
+  it("GPT 改图发送参考图和转换后的 size，不发送 Gemini 字段", async () => {
     // 假中转站：同时演大脑和生图。收到的**原始字节**要留下，用来证明图确实发出去了
     const hits: Array<{ url: string; raw: Buffer }> = [];
     let chatCalls = 0;
@@ -148,7 +206,7 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
           chatCalls += 1;
           // 第二轮的提示词里应当已经出现画布上的那张图（§11.2），所以它才敢直接说「这张」
           const plan = chatCalls === 1
-            ? { tool: "edit_image", args: { prompt: "把手改成握着咖啡杯" }, say: "改这张。" }
+            ? { tool: "edit_image", args: { prompt: "把手改成握着咖啡杯", aspectRatio: "4:3", imageSize: "2K" }, say: "改这张。" }
             : { tool: "reply", args: { text: "改好了。" }, say: "改好了。" };
           res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(plan) } }] }));
           return;
@@ -166,13 +224,17 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     await context.db.saveChannel({
       name: "Images", baseUrl: base, adapterType: "openai-images", authType: "none",
       authHeaderName: "", secretEnv: "", endpoint: "/v1/images/generations",
-      models: ["mock-image"], allowPrivateNetwork: true, enabled: true,
+      models: ["gpt-image-2.6-flare-c"], allowPrivateNetwork: true, enabled: true,
     });
 
     const uploaded = (await upload(app, conversationId).expect(201)).body.data as {
       canvasAssetIds: string[]; sessionImages: Array<{ asset: { id: string } }>;
     };
     const uploadedId = uploaded.sessionImages[0]!.asset.id;
+    const prepared = prepareNativeImage(context.db, context.db.getConversation(conversationId)!, "edit_image",
+      JSON.stringify({ prompt: "把手改成握着咖啡杯", aspectRatio: "4:3", imageSize: "2K" }), [uploadedId]);
+    expect(prepared).toMatchObject({ args: { size: "2048x1536" }, preview: { model: "gpt-image-2.6-flare-c" } });
+    if ("args" in prepared) expect(prepared.args).not.toHaveProperty("imageSize");
 
     await request(app).post(`/api/conversations/${conversationId}/messages`)
       .send({ text: "把这张图的手改成握着咖啡杯" }).expect(202);
@@ -190,6 +252,10 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     expect(editCall).toBeTruthy();
     // 而且是**原封不动**把上传的那张发出去了（PNG 走透传，不重新编码）
     expect(editCall!.raw.includes(PNG_SIGNATURE)).toBe(true);
+    const body = editCall!.raw.toString("utf8");
+    expect(body).toMatch(/name="size"\r\n\r\n2048x1536/);
+    expect(body).not.toContain('name="imageSize"');
+    expect(body).not.toContain('name="aspectRatio"');
 
     // 改图产出的新图是 generate，上传的那张仍然是 upload，两张都在会话里
     const canvas = (view as { sessionImages: Array<{ asset: { id: string }; source: string }> }).sessionImages;

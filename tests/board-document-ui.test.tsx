@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "../src/client/api";
 import { useBoard } from "../src/client/board/useBoard";
 import { BoardCanvas } from "../src/client/board/BoardCanvas";
+import { BoardWorkspace } from "../src/client/board/BoardWorkspace";
 import { useBoardDocument } from "../src/client/board/useBoardDocument";
 import { createEmptyBoardDoc, DEFAULT_BOARD_VIEWPORT, directUpstreamImages, type BoardView } from "../src/shared/board";
 import type { Asset, Task } from "../src/shared/types";
@@ -18,6 +19,85 @@ function board(id: string, version = 1): BoardView {
     selection: [], uiState: {}, threadId: `thread-${id}`, canUndo: false, canRedo: false,
   };
 }
+
+it.each(["image", "video"] as const)("画布 %s 配置节点从素材库选图后保存参考连线", async (mode) => {
+  vi.useFakeTimers();
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(1000);
+  vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(800);
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    return this.matches(".board-canvas") ? new DOMRect(0, 0, 1000, 800) : new DOMRect(400, 400, 120, 30);
+  });
+  const initial = board("reference");
+  const time = new Date().toISOString();
+  initial.viewport = { x: 12, y: 12, scale: 1 };
+  initial.selection = ["config"];
+  initial.doc.nextRef = 2;
+  initial.doc.nodes = [{ type: "config", id: "config", ref: "n1", title: "配置节点", mode,
+    x: 300, y: 150, width: 330, height: 240, createdAt: time, updatedAt: time,
+    prompt: "测试", count: 1, useUpstreamText: true, status: "idle" }];
+  const asset: Asset = { id: "reference-image", taskId: "upload", fileName: "fixture.png", mimeType: "image/png",
+    url: "/fixture.png", byteSize: 100, createdAt: time, title: "测试参考图" };
+  vi.spyOn(api, "boards").mockResolvedValue([{ id: initial.id, title: initial.title, threadId: initial.threadId,
+    nodeCount: 1, edgeCount: 0, updatedAt: "" }]);
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  vi.spyOn(api, "boardAssets").mockResolvedValue([]);
+  vi.spyOn(api, "libraryPage").mockResolvedValue({ items: [{ assets: [asset] } as Task], hasMore: false });
+  vi.spyOn(api, "capabilities").mockResolvedValue({ manifest: "", aliases: [] });
+  vi.spyOn(api, "settings").mockResolvedValue({
+    assetsDir: "", defaultAssetsDir: "", documentsDir: "", defaultDocumentsDir: "",
+    geminiImageSize: "1K", imageConfirmPolicy: "batch_only",
+    defaultImageAlias: "", defaultVideoAlias: "", defaultMusicAlias: "", defaultSpeechAlias: "", defaultAudioAlias: "",
+  });
+  vi.spyOn(api, "openConversationStream").mockReturnValue(() => {});
+  vi.spyOn(api, "brains").mockResolvedValue([]);
+  vi.spyOn(api, "conversation").mockResolvedValue({
+    id: initial.threadId, title: initial.title, kind: "board", boardId: initial.id,
+    brainChannelId: "", brainModel: "", status: "idle", running: false,
+    videoConfirmPolicy: "always", visionEnabled: true, verbatimPrompt: false,
+    autoContinueCount: 0, taskCount: 0, createdAt: time, updatedAt: time,
+    contextSummary: null, messages: [], canvasAssetIds: [], canvasImages: [], sessionImages: [], mediaAssets: [], storyboardCount: 0,
+    usage: { contextTokens: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, calls: 0 },
+  });
+  const linkAsset = vi.spyOn(api, "linkBoardAsset").mockResolvedValue(asset);
+  const saveBoard = vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 2, doc: input.doc }));
+  const network = vi.fn().mockRejectedValue(new Error("测试未配置的网络请求"));
+  vi.stubGlobal("fetch", network);
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  document.body.append(host);
+  const onToast = vi.fn();
+  const noop = () => {};
+  async function clickButton(name: string) {
+    const button = [...document.querySelectorAll("button")].find((item) =>
+      item.textContent?.trim() === name || item.getAttribute("aria-label") === name);
+    expect(button, name).toBeDefined();
+    await act(async () => { button!.click(); });
+  }
+  try {
+    await act(async () => {
+      root.render(<BoardWorkspace sidebarHost={null} sidebarOpen={false} onOpenMenu={noop} onBoardSelected={noop} onToast={onToast} />);
+    });
+    await clickButton(mode === "image" ? "添加输入" : "参考内容");
+    await clickButton("本地上传或资源库");
+    await clickButton("公共素材");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await clickButton("测试参考图");
+    await clickButton("添加引用");
+    await act(async () => { await vi.advanceTimersByTimeAsync(450); });
+    expect(linkAsset).toHaveBeenCalledWith(initial.id, asset.id);
+    expect(onToast).not.toHaveBeenCalledWith("error", expect.any(String));
+    expect(document.querySelector(".board-material-dialog")).toBeNull();
+    const savedDoc = saveBoard.mock.calls.at(-1)?.[1].doc;
+    expect(savedDoc?.nodes).toHaveLength(2);
+    expect(directUpstreamImages(savedDoc!, "config")).toMatchObject([{ type: "image", assetId: asset.id }]);
+    expect(network).not.toHaveBeenCalled();
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});
 
 async function mountBoard(initialId: string) {
   const root = createRoot(document.createElement("div"));

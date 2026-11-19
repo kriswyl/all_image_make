@@ -24,6 +24,7 @@ import type { Express, RequestHandler } from "express";
 import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../../shared/chat-media.js";
 import { mediaUploadExtension } from "../task-media.js";
 import { referenceVideoDuration } from "../reference-video.js";
+import { videoOverviewFramesSchema } from "../../shared/media-review.js";
 
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -96,6 +97,7 @@ const messageCreateSchema = z.object({
    * 上限和画布同一个数：这些图发送前会被并进画布，多出来的本来就进不去。
    */
   assetRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
+  libraryAssetIds: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES + MAX_CHAT_MEDIA_FILES).optional(),
   /** 统一入口里显式指定的视频首尾帧；同一张图不能同时当首帧和尾帧 */
   videoFrames: z.object({
     firstAssetId: z.string().trim().min(1).max(80),
@@ -118,6 +120,14 @@ const confirmSchema = z.object({
 });
 
 export function registerConversationRoutes(app: Express, db: AppDatabase, agent: AgentService, sessionKeys: KeyStore, chatThreadOnly: RequestHandler) {
+  app.post("/api/conversations/:id/video-overview/:requestId", chatThreadOnly, (req, res) => {
+    const frames = videoOverviewFramesSchema.safeParse(req.body);
+    if (!frames.success) return res.status(400).json(fail("INVALID_OVERVIEW_FRAMES", "视频抽帧数据无效。"));
+    const status = agent.videoOverview.submit(routeParam(req.params.id), routeParam(req.params.requestId), frames.data);
+    if (status === "expired") return res.status(409).json(fail("OVERVIEW_REQUEST_EXPIRED", "这次视频抽帧请求已结束。"));
+    if (status === "invalid") return res.status(400).json(fail("INVALID_OVERVIEW_FRAMES", "视频抽帧时间码或图片内容无效。"));
+    return res.json(ok({ accepted: true }));
+  });
   // ── 对话式 Agent（AGENT_PLAN.md §14） ─────────────────────────────────────
 
   /** 能当大脑的渠道：只有对话适配器。前端用它渲染「新建会话」的下拉 */
@@ -277,14 +287,19 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     const id = routeParam(req.params.id);
     const assetId = routeParam(req.params.assetId);
     if (!db.getConversation(id)) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
-    const belongs = db.listConversationAssets(id).some((entry) => entry.asset.id === assetId);
-    if (!belongs) throw new AppError("ASSET_NOT_FOUND", "这张图不属于当前会话", 404);
+    const entry = db.listConversationAssets(id).find(({ asset }) => asset.id === assetId);
+    if (!entry) throw new AppError("ASSET_NOT_FOUND", "这份素材不属于当前会话", 404);
+    if (entry.source === "library" && db.unlinkConversationAsset(id, assetId)) {
+      return res.json(ok(agent.buildView(id)));
+    }
     const asset = db.getAsset(assetId);
-    if (asset && (db.getTaskRow(asset.taskId)?.libraryScope === "public" || db.findBoardAssetRefs(assetId).length > 0 || db.assetHasOtherConversationReferences(assetId, id))) {
+    const task = asset && db.getTaskRow(asset.taskId);
+    const publicAsset = task?.libraryScope === "public" || (task?.libraryScope === "legacy" && db.listLibraryTaskViews().some((item) => item.id === task.id));
+    if (asset && (publicAsset || db.findBoardAssetRefs(assetId).length > 0 || db.assetHasOtherConversationReferences(assetId, id))) {
       throw new AppError("ASSET_SHARED", "该素材也属于公共素材或被画布引用，请先在相应位置处理，避免影响其他作品。", 409);
     }
     const removed = db.deleteConversationAsset(id, assetId);
-    if (!removed) throw new AppError("ASSET_NOT_FOUND", "图片不存在", 404);
+    if (!removed) throw new AppError("ASSET_NOT_FOUND", "素材不存在", 404);
     await removeStoredFiles(removed.files, removed.inputs, db.inputsDir);
     const view = agent.buildView(id);
     if (!view) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
@@ -303,10 +318,35 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     const input = messageCreateSchema.parse(req.body ?? {});
     const limit = conversationImageAttachmentLimit(conversation);
-    if ((input.assetRefs?.length ?? 0) > limit) {
+    const libraryIds = [...new Set(input.libraryAssetIds ?? [])];
+    const localRefs = (input.assetRefs ?? []).filter((assetId) => !libraryIds.includes(assetId));
+    let imageCount = localRefs.length;
+    let mediaCount = 0;
+    if (libraryIds.length) {
+      if (conversation.kind !== "chat") throw new AppError("CONVERSATION_NOT_CHAT", "这个入口只支持普通对话", 400);
+      const existing = new Map(db.listConversationAssets(id).map(({ asset }) => [asset.id, asset]));
+      const assets = libraryIds.map((assetId) => {
+        const current = existing.get(assetId);
+        const asset = current ?? db.getAsset(assetId);
+        if (!asset || !/^(image|video|audio)\//.test(asset.mimeType)) {
+          throw new AppError("ASSET_NOT_FOUND", "素材已不存在，请刷新后重选", 404);
+        }
+        if (asset.mimeType.startsWith("image/")) imageCount++;
+        else mediaCount++;
+        return { current, task: current ? undefined : db.getTaskRow(asset.taskId) };
+      });
+      const publicLegacyIds = new Set(assets.some(({ task }) => task?.libraryScope === "legacy")
+        ? db.listLibraryTaskViews().map(({ id: taskId }) => taskId) : []);
+      if (assets.some(({ current, task }) => !current && task?.libraryScope !== "public" && (!task || !publicLegacyIds.has(task.id)))) {
+        throw new AppError("ASSET_NOT_PUBLIC", "只能使用本会话或公共素材库中的素材", 403);
+      }
+    }
+    if (imageCount > limit) {
       return res.status(400).json(fail("REFERENCE_IMAGE_LIMIT", `当前会话每条消息最多附带 ${limit} 张图片`));
     }
-    agent.startTurn(id, input.text, "user", input.assetRefs ?? [], input.videoFrames);
+    if (mediaCount > MAX_CHAT_MEDIA_FILES) return res.status(400).json(fail("CHAT_MEDIA_LIMIT", `每条消息最多附带 ${MAX_CHAT_MEDIA_FILES} 个音视频文件`));
+    const refs = [...new Set([...(input.assetRefs ?? []), ...libraryIds])];
+    agent.startTurn(id, input.text, "user", refs, input.videoFrames, libraryIds);
     res.status(202).json(ok({ accepted: true }));
   });
 
@@ -391,7 +431,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     // 统一入口和原生生图试用里，附件默认只属于本轮；旧创作模式仍按原行为放进画布
     const attachmentStaysInTurn = conversation.toolScope != null
       || (conversation.chatMode === "chat" && conversation.nativeImagePilot);
-    if (uploaded.length && !attachmentStaysInTurn) db.updateConversation(id, { canvasAssetIds: uploaded });
+    if (uploaded.length && !attachmentStaysInTurn && req.query.keepCanvas !== "1") db.updateConversation(id, { canvasAssetIds: uploaded });
     res.status(201).json(ok({ ...agent.buildView(id), uploadedAssetIds: uploaded }));
   }));
 
@@ -456,6 +496,8 @@ export function registerConversationEvents(app: Express, db: AppDatabase, agent:
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     };
     const unsubscribe = agent.subscribe(id, send);
+    const overview = agent.videoOverview.pending(id);
+    if (overview) send(overview);
     // 心跳：视频任务两轮轮询之间可能十几秒没有事件，中间隔着代理时连接会被掐断
     const heartbeat = setInterval(() => res.write(":ping\n\n"), 15000);
     const close = () => {

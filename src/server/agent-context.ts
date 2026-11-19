@@ -9,6 +9,7 @@ import { resolveAssetRef } from "./agent-tools.js";
 import type { AppDatabase, StoredDocument } from "./db.js";
 import { isImageAsset } from "../shared/types.js";
 import { assetRef, planCalls, type ChatMessage } from "../shared/agent-types.js";
+import { mediaReviewSchema, mediaTime, videoOverviewSchema } from "../shared/media-review.js";
 
 export interface BuiltContext {
   messages: BrainMessage[];
@@ -48,6 +49,7 @@ export function collectTurnAssetIds(db: AppDatabase, conversationId: string, use
   for (let index = anchorIndex - 1; index >= 0; index -= 1) {
     const previous = messages[index]!;
     if (previous.role !== "user") break;
+    if (previous.assetLink) continue;
     // 同一轮里既传了图又传了脚本文档时，两种上传消息会交错；
     // 跳过「只有文档」的那条，别让它把前面的图片挡掉
     if (!previous.assetId && previous.documents.length) continue;
@@ -153,7 +155,7 @@ export function renderDocumentContext(documents: StoredDocument[], plain = false
 
 /** 一条历史消息 → 大脑上下文。返回 null 表示这条不进上下文（系统提示等） */
 export function toBrainMessage(message: ChatMessage, db?: Pick<AppDatabase, "getAsset">): BrainMessage | null {
-  if (message.role === "system") return null;
+  if (message.role === "system" || message.assetLink) return null;
   if (message.role === "user") {
     // 回放时也得让大脑知道这条消息当时带了哪几张图
     const refs = [...(message.assetId ? [message.assetId] : []), ...(message.assetRefs ?? [])];
@@ -211,6 +213,16 @@ export function toPlainChatMessage(message: ChatMessage, db?: Pick<AppDatabase, 
   const result = message.toolResult;
   const status = result?.async ? "任务进行中" : result?.ok ? "操作完成" : message.status === "pending" ? "任务进行中" : "操作失败";
   const text = result?.summary || message.content || message.errorMessage || message.toolName || "操作";
+  if (message.toolName === "media_review") {
+    const overview = videoOverviewSchema.safeParse(result?.data?.videoOverview).data;
+    if (overview) return { role: "assistant", content: `[视频概述 ${assetRef(overview.assetId)} · 时长 ${mediaTime(overview.durationMs)} · 基于 ${overview.timesMs.length} 个画面样本。]` };
+    const review = mediaReviewSchema.safeParse(result?.data?.mediaReview).data;
+    if (review) {
+      const incomplete = review.segments.filter(segment => segment.pending || segment.visualIssue || segment.audioIssue);
+      const ranges = incomplete.slice(0, 12).map(segment => `${mediaTime(segment.startMs, true)}–${mediaTime(segment.endMs, true)}`);
+      return { role: "assistant", content: `[历史素材审阅 ${assetRef(review.assetId)} · ${mediaTime(review.startMs, true)}–${mediaTime(review.endMs, true)}。${ranges.length ? `有缺项的区间：${ranges.join("、")}。` : ""}]` };
+    }
+  }
   const imageId = result?.ok && result.mimeType?.startsWith("image/") ? result.assetId : undefined;
   const imageHint = imageId && (message.toolName === "generate_image" || message.toolName === "edit_image")
     ? "\n如需判断画面是否符合要求，请先调用 view_images 查看这张图片，再描述效果。" : "";

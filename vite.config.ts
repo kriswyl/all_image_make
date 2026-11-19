@@ -21,6 +21,10 @@ export default defineConfig({
       });
     },
   }],
+  optimizeDeps: {
+    // These ESM wrappers can load directly. Native file actions should not depend on a cached optimizer URL.
+    exclude: ["@tauri-apps/plugin-dialog", "@tauri-apps/plugin-fs"],
+  },
   server: {
     proxy: {
       "/api/": apiProxy,

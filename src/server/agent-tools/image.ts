@@ -2,6 +2,7 @@ import { assetRef, type Conversation, type EditImageArgs, type GenerateImageArgs
 import { midjourneyUsableButtons } from "../../shared/midjourney.js";
 import type { GenerationInput } from "../../shared/types.js";
 import { imageReferenceCountError, MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
+import { normalizeAgentImageDimensions } from "../../shared/image-sizes.js";
 import { describeAliasChoice, resolveAlias } from "../capabilities.js";
 import type { AppDatabase, AssetRow } from "../db.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "../diagnose.js";
@@ -110,20 +111,19 @@ export async function generateImage(
    * 之后再回头看「用户当初要了什么」就分不清「他要的」和「我们补的」，
    * 而这两者恰恰是参数核对面板要区分开的东西。
    */
-  const requested: Record<string, unknown> = {
+  const dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, {
     size: args.size,
     aspectRatio: args.aspectRatio,
     imageSize: args.imageSize,
-  };
+  });
+  const requested: Record<string, unknown> = { ...dimensions };
 
   const input: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
     // 原话直发时用用户的原话，不用大脑改写过的版本
     prompt: ctx.verbatimPrompt ?? args.prompt,
-    size: args.size,
-    aspectRatio: args.aspectRatio,
-    imageSize: args.imageSize,
+    ...dimensions,
     count: args.count ?? 1,
     outputFormat: args.outputFormat,
     timeoutMs: IMAGE_TASK_TIMEOUT_MS,

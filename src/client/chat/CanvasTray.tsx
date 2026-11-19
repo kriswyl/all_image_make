@@ -4,7 +4,7 @@
  * 不再单独占一条画布栏：选中的图直接排在输入框的附件区，和 Claude Code 的附件一样。
  * 左键看大图，右键设首帧 / 尾帧，角标写清角色；发送后由 ChatView 清空。
  */
-import { Eye, Trash2, X } from "lucide-react";
+import { AudioLines, Eye, Film, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
@@ -79,22 +79,30 @@ export function CanvasTray({
 
   if (!items.length) return null;
 
+  let photoIndex = 0;
   return (
     <>
       {items.map((item) => {
-        const role = !plain ? roleLabel(item.index) : videoFrames?.firstAssetId === item.asset.id ? "首帧"
+        const isImage = item.asset.mimeType.startsWith("image/");
+        const index = isImage ? photoIndex++ : -1;
+        const role = !isImage ? null : !plain ? roleLabel(index) : videoFrames?.firstAssetId === item.asset.id ? "首帧"
           : videoFrames?.lastAssetId === item.asset.id ? "尾帧" : null;
         return (
           <div key={item.asset.id} className="composer-attachment is-canvas">
             <button
               type="button"
               className="composer-canvas-thumb"
-              title={videoFrames ? `${role ?? "本轮附件"} · 左键看大图，右键设置视频首尾帧` : plain ? "本轮附件 · 点击查看大图" : `${roleLabel(item.index)} · 左键看大图，右键设首帧 / 尾帧`}
+              title={!isImage ? item.asset.title || item.asset.fileName : videoFrames ? `${role ?? "本轮附件"} · 左键看大图，右键设置视频首尾帧`
+                : plain ? "本轮附件 · 点击查看大图" : `${roleLabel(index)} · 左键看大图，右键设首帧 / 尾帧`}
               onClick={() => onPreview(item.asset.id)}
-              onContextMenu={(event) => { event.preventDefault(); if (!plain || videoFrames) openMenu(event, item); }}
+              onContextMenu={(event) => { event.preventDefault(); if (isImage && (!plain || videoFrames)) openMenu(event, { ...item, index }); }}
             >
-              <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" loading="lazy" />
-              {!plain ? <span className="composer-canvas-order">{item.index + 1}</span> : null}
+              {isImage ? <img src={api.assetUrl(item.asset.thumbUrl ?? item.asset.url)} alt="" loading="lazy" />
+                : <span className="composer-linked-media">
+                  {item.asset.mimeType.startsWith("audio/") ? <AudioLines size={20} /> : <Film size={20} />}
+                  <span>{item.asset.title || item.asset.fileName}</span>
+                </span>}
+              {!plain && isImage ? <span className="composer-canvas-order">{index + 1}</span> : null}
               {role ? <span className={`composer-canvas-role is-${role === "首帧" ? "first" : role === "尾帧" ? "last" : "ref"}`}>{role}</span> : null}
             </button>
             <button

@@ -21,15 +21,22 @@ export async function copyTextToClipboard(text: string) {
  * WebView2 / 现代浏览器只稳定支持 PNG 的 ClipboardItem，所以 jpeg/webp 先转 PNG。
  * 复制图片必须由用户手势触发（按钮点击或 Ctrl+C 快捷键），这里只负责写。
  */
-export async function copyImageToClipboard(blob: Blob) {
+export async function copyImageToClipboard(image: Blob | (() => Promise<Blob>)) {
   if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
     throw new Error("当前环境不支持复制图片到剪贴板");
   }
-  const png = blob.type === "image/png" ? blob : await toPng(blob);
-  await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+  // 在点击当下交给剪贴板，原图可以随后读取并转换。
+  const png = typeof image === "function" ? image().then(toPng) : toPng(image);
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+  } catch (error) {
+    void png.catch(() => undefined);
+    throw error;
+  }
 }
 
 async function toPng(blob: Blob): Promise<Blob> {
+  if (blob.type === "image/png") return blob;
   const url = URL.createObjectURL(blob);
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {

@@ -28,6 +28,7 @@ import {
 import type {
   ChatMessage, Conversation, ConversationPatch, ConversationStatus, ConversationUsage, ToolResult,
 } from "../shared/agent-types.js";
+import { CONVERSATION_ASSET_LINK } from "../shared/agent-types.js";
 import type { StoryboardShot } from "../shared/storyboard.js";
 import type { BoardDoc, BoardUiState, BoardViewport } from "../shared/board.js";
 import type { CanvasTemplate, CanvasTemplateSummary } from "../shared/canvas-template.js";
@@ -40,7 +41,7 @@ export type { AssetRow, StoredFileRef } from "./db-assets.js";
 export type { TaskLibraryScope, TaskOrigin, TaskRow } from "./db-tasks.js";
 
 /** 会话产物的来源：正常生成、用户上传、分镜面板提交，或角色/场景设定图 */
-export type ConversationAssetSource = TaskOrigin | "storyboard" | "setting" | "bridge";
+export type ConversationAssetSource = TaskOrigin | "storyboard" | "setting" | "bridge" | "library";
 
 /** 无限画布的一行 + 解析好的文档 / 视口 / 选中状态 */
 export interface BoardRecord {
@@ -1179,7 +1180,7 @@ export class AppDatabase {
       SELECT DISTINCT tasks.id AS id FROM messages
       JOIN assets ON assets.id = messages.asset_id
       JOIN tasks ON tasks.id = assets.task_id
-      WHERE messages.conversation_id = ? AND tasks.origin = 'upload'
+      WHERE messages.conversation_id = ? AND tasks.origin = 'upload' AND COALESCE(messages.tool_name, '') <> '${CONVERSATION_ASSET_LINK}'
       UNION
       SELECT DISTINCT tasks.id AS id FROM conversation_characters c
       JOIN assets ON assets.id = c.asset_id
@@ -1363,6 +1364,23 @@ export class AppDatabase {
     return this.conversationMessages.appendMessage(input);
   }
 
+  unlinkConversationAsset(conversationId: string, assetId: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const removed = this.db.prepare("DELETE FROM messages WHERE conversation_id = ? AND asset_id = ? AND tool_name = ?")
+        .run(conversationId, assetId, CONVERSATION_ASSET_LINK);
+      const conversation = removed.changes ? this.getConversation(conversationId) : null;
+      if (conversation?.canvasAssetIds.includes(assetId)) {
+        this.updateConversation(conversationId, { canvasAssetIds: conversation.canvasAssetIds.filter((id) => id !== assetId) });
+      }
+      this.db.exec("COMMIT");
+      return Boolean(removed.changes);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   recordConversationMediaUploads(conversationId: string, uploads: Array<{ asset: InsertAssetInput; content: string }>) {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1451,12 +1469,14 @@ export class AppDatabase {
   /** 会话里产出过图片的产物，按顺序排列，供「设为当前」回溯（§10.1 规则 3） */
   listConversationAssets(conversationId: string): Array<{ asset: AssetRow; round: number; prompt: string; source: ConversationAssetSource }> {
     const rows = this.db.prepare(`
-      SELECT assets.*, messages.seq AS message_seq, messages.content AS message_content,
+      SELECT assets.*, messages.seq AS message_seq, messages.tool_name AS message_tool,
+             CASE WHEN messages.tool_name = '${CONVERSATION_ASSET_LINK}' THEN tasks.prompt ELSE messages.content END AS message_content,
              COALESCE(tasks.origin, 'generate') AS asset_origin
       FROM messages
       JOIN assets anchor ON anchor.id = messages.asset_id
       -- 一条消息只挂了主产物；音乐一次两首，必须把同一个 task 的其余产物也带进来
       JOIN assets ON assets.task_id = anchor.task_id
+        AND (COALESCE(messages.tool_name, '') <> '${CONVERSATION_ASSET_LINK}' OR assets.id = anchor.id)
       LEFT JOIN tasks ON tasks.id = assets.task_id
       WHERE messages.conversation_id = ? AND messages.asset_id IS NOT NULL
       ORDER BY messages.seq ASC, assets.created_at ASC
@@ -1482,7 +1502,7 @@ export class AppDatabase {
       entries.push({
         asset: this.assets.assetFromRow(row), round, prompt: String(row.message_content ?? ""),
         // 生成的和上传的可预期行为不一样（上传的没有提示词），前端据此加个来源标记
-        source: (row.asset_origin == null ? "generate" : String(row.asset_origin)) as TaskOrigin,
+        source: row.message_tool === CONVERSATION_ASSET_LINK ? "library" : (row.asset_origin ?? "generate") as TaskOrigin,
       });
     }
     /*
@@ -1552,6 +1572,21 @@ export class AppDatabase {
         prompt: "从无限画布加入的参考图",
         source: "bridge",
       });
+    }
+    const libraryRows = this.db.prepare(`
+      SELECT assets.*, messages.seq AS message_seq, COALESCE(tasks.prompt, '') AS task_prompt
+      FROM messages
+      JOIN json_each(messages.tool_args_json, '$.libraryAssetIds') AS refs
+      JOIN assets ON assets.id = refs.value
+      LEFT JOIN tasks ON tasks.id = assets.task_id
+      WHERE messages.conversation_id = ? AND messages.role = 'user'
+      ORDER BY messages.seq ASC, refs.key ASC
+    `).all(conversationId) as DbRow[];
+    for (const row of libraryRows) {
+      const asset = this.assets.assetFromRow(row);
+      if (seen.has(asset.id)) continue;
+      seen.add(asset.id);
+      entries.push({ asset, round: Number(row.message_seq), prompt: String(row.task_prompt), source: "library" });
     }
     return entries;
   }

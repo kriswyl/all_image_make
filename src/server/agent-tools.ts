@@ -38,11 +38,11 @@ const nonEmpty = (max: number) => z.string().trim().min(1).max(max);
 export const generateImageSchema = z.object({
   prompt: nonEmpty(20000),
   modelHint: z.string().trim().max(80).optional(),
-  size: z.string().trim().max(60).optional(),
-  aspectRatio: z.string().trim().max(20).optional(),
+  size: z.string().trim().max(60).optional().describe("OpenAI 图片渠道用宽x高，例如 2048x1536。"),
+  aspectRatio: z.string().trim().max(20).optional().describe("宽高比参数。GPT Image 使用 size；用户未指定比例时留空。"),
   // gemini 系站点只认 `imageSize`，OpenAI 系只认 `size`；两个都留着，由适配器各取所需。
   // 这里用 enum 而不是自由字符串：值和上游一样大小写敏感，写错等于没写。
-  imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
+  imageSize: z.enum(IMAGE_SIZE_VALUES).optional().describe("Gemini 图像渠道使用 1K / 2K / 4K，GPT Image 使用 size。"),
   count: z.coerce.number().int().min(1).max(8).optional(),
   fromScratch: looseBoolean(),
   outputFormat: imageOutputFormatSchema.optional()
@@ -56,8 +56,9 @@ export const editImageSchema = z.object({
   imageRefs: z.array(z.string().trim().min(1).max(80)).max(MAX_IMAGE_GENERATION_REFERENCES).optional(),
   extraReferences: z.array(z.string().trim().min(1).max(80)).max(MAX_EXTRA_REFERENCES).optional(),
   // 改图照样能定输出尺寸：改完的画面未必沿用原图的形状
-  aspectRatio: z.string().trim().max(20).optional(),
-  imageSize: z.enum(IMAGE_SIZE_VALUES).optional(),
+  size: z.string().trim().max(60).optional().describe("OpenAI 图片渠道用宽x高，例如 2048x1536。"),
+  aspectRatio: z.string().trim().max(20).optional().describe("宽高比参数。GPT Image 使用 size；用户未要求改变比例时留空。"),
+  imageSize: z.enum(IMAGE_SIZE_VALUES).optional().describe("Gemini 图像渠道使用 1K / 2K / 4K，GPT Image 使用 size。"),
   outputFormat: imageOutputFormatSchema.optional()
     .describe("输出格式。gif/svg 需要上游模型支持；gif 可用 frame_count / frame_duration_ms 控制帧数与每帧时长，是否多帧最终由模型决定，不要凭后缀判断动没动，需用 view_images 查看帧数和抽样帧。"),
 });

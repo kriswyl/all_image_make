@@ -62,21 +62,27 @@ const markdownComponents: Components = {
  * 所以把图直接摆在气泡里。缩略图 404 就退回原图——缩略图只是省流量，
  * 不该成为用户看不见自己那张图的原因（和 AssetStrip 一样的回退）。
  */
-export function UserBubble({ message, asset, onPreview }: { message: ChatMessage; asset?: Asset; onPreview?: (assetId: string) => void }) {
+export function UserBubble({ message, asset, lookupAsset, onPreview }: {
+  message: ChatMessage; asset?: Asset; lookupAsset?: (assetId: string) => Asset | undefined; onPreview?: (assetId: string) => void;
+}) {
   // 产出/上传的那一张走 assetId，从画布拖进来的那几张走 assetRefs，两者不重叠
-  const media = asset && /^(audio|video)\//.test(asset.mimeType) ? asset : null;
-  const thumbs = [...(message.assetId && !media ? [message.assetId] : []), ...(message.assetRefs ?? [])];
+  const standaloneMedia = asset && /^(audio|video)\//.test(asset.mimeType) ? asset : undefined;
+  const refs = (message.assetRefs ?? []).map((id) => ({ id, asset: lookupAsset?.(id) }));
+  const mediaRefs = refs.flatMap(({ asset: item }) => item && /^(audio|video)\//.test(item.mimeType) ? [item] : []);
+  const media = standaloneMedia ? [standaloneMedia, ...mediaRefs] : mediaRefs;
+  const mediaIds = new Set(media.map(({ id }) => id));
+  const thumbs = [...new Set([...(message.assetId ? [message.assetId] : []), ...refs.map(({ id }) => id)])].filter((id) => !mediaIds.has(id));
   const [mind, setMind] = useState<{ id: string; name: string } | null>(null);
   return (
     <div className="chat-row chat-row-user">
       <div className="chat-bubble chat-bubble-user">
-        {media ? (
-          <button type="button" className="chat-document-chip" onClick={() => onPreview?.(media.id)} title={media.title || media.fileName}>
-            {media.mimeType.startsWith("audio/") ? <Music size={13} /> : <Film size={13} />}
-            <span>{media.title || media.fileName}</span>
+        {media.map((item) => (
+          <button key={item.id} type="button" className="chat-document-chip" onClick={() => onPreview?.(item.id)} title={item.title || item.fileName}>
+            {item.mimeType.startsWith("audio/") ? <Music size={13} /> : <Film size={13} />}
+            <span>{item.title || item.fileName}</span>
             <Play size={12} />
           </button>
-        ) : null}
+        ))}
         {thumbs.length ? (
           <div className="chat-bubble-thumbs">
             {thumbs.map((assetId) => (
@@ -120,7 +126,7 @@ export function UserBubble({ message, asset, onPreview }: { message: ChatMessage
             ))}
           </div>
         ) : null}
-        {media ? null : message.content}
+        {!standaloneMedia && message.content}
         {mind ? <MindPptPreview conversationId={message.conversationId} documentId={mind.id} name={mind.name} onClose={() => setMind(null)} /> : null}
       </div>
     </div>

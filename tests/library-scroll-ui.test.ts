@@ -23,7 +23,7 @@ it("删除素材后刷新已加载的所有分页，列表不会被清空", asyn
   const render = () => root.render(React.createElement(HistoryView, {
     channels: [], tasks: currentTasks, references: {} as never,
     onRefresh: () => { currentTasks = [...currentTasks]; render(); },
-    onDelete: vi.fn(), onDeleteSelected: vi.fn(), onClear: vi.fn(), onOpenAssetSettings: vi.fn(), onDiagnostics: vi.fn(), onToast: vi.fn(),
+    onDelete: vi.fn(), onDeleteSelected: vi.fn(), onClear: vi.fn(), onOpenAssetSettings: vi.fn(), onDiagnostics: vi.fn(), onImageTask: vi.fn(), onToast: vi.fn(),
   }));
   await act(async () => { render(); await new Promise((resolve) => setTimeout(resolve, 10)); });
   await act(async () => { [...container.querySelectorAll("button")].find((button) => button.textContent === "素材")!.click(); await new Promise((resolve) => setTimeout(resolve, 10)); });

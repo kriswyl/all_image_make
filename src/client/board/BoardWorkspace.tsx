@@ -17,7 +17,7 @@ import { extractVideoLastFrame } from "../chat/video-frame";
 import { BoardNodeVersions } from "./BoardNodeVersions";
 import { DiagnosticDialog } from "../dialogs/DiagnosticDialog";
 import {
-  BOARD_LIMITS, createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary,
+  BOARD_LIMITS, createBoardExport, type BoardAgentUiState, type BoardDelta, type BoardNode, type BoardSummary, type ConfigBoardNode,
 } from "../../shared/board";
 import type { Asset, Task } from "../../shared/types";
 import { referenceVideoDurationRange } from "../../shared/video-modes";
@@ -35,11 +35,11 @@ import { BoardTemplateInputDialog, BoardTemplateSaveDialog } from "./BoardWorkfl
 import { StoryboardReview } from "../chat/StoryboardReview";
 import type { CanvasTemplate } from "../../shared/canvas-template";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "./CrossModeBridgeDialog";
-import { BoardInspector, type BoardImageAlias, type BoardVideoAlias } from "./BoardInspector";
+import { BoardInspector } from "./BoardInspector";
+import { boardAudioModels, describeBoardConfigModel, resolveBoardModel, type BoardModelAlias } from "./board-models";
 import { useBoard } from "./useBoard";
 import { planBoardRun } from "./board-run";
 import type { BoardRunStep } from "./board-run";
-import { matchModelAlias } from "../../shared/model-alias";
 import { useBoardRun } from "./useBoardRun";
 import "./board-production.css";
 
@@ -146,9 +146,11 @@ export function BoardWorkspace({
   const [versionNodeId, setVersionNodeId] = useState<string | null>(null);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
   const [extractingFrame, setExtractingFrame] = useState(false);
-  const [imageAliases, setImageAliases] = useState<BoardImageAlias[]>([]);
-  const [videoAliases, setVideoAliases] = useState<BoardVideoAlias[]>([]);
-  const [audioAliases, setAudioAliases] = useState<BoardImageAlias[]>([]);
+  const [imageAliases, setImageAliases] = useState<BoardModelAlias[]>([]);
+  const [videoAliases, setVideoAliases] = useState<BoardModelAlias[]>([]);
+  const [audioAliases, setAudioAliases] = useState<BoardModelAlias[]>([]);
+  const [defaultGeminiSize, setDefaultGeminiSize] = useState<string>();
+  const [textModel, setTextModel] = useState<{ threadId: string; model: string }>();
   const [defaultImageAlias, setDefaultImageAlias] = useState("");
   const [defaultVideoAlias, setDefaultVideoAlias] = useState("");
   const [defaultSpeechAlias, setDefaultSpeechAlias] = useState("");
@@ -272,6 +274,7 @@ export function BoardWorkspace({
       setImageAliases(map("image"));
       setVideoAliases(map("video"));
       setAudioAliases(map("audio"));
+      setDefaultGeminiSize(settings.geminiImageSize);
       setDefaultImageAlias(settings.defaultImageAlias ?? "");
       setDefaultVideoAlias(settings.defaultVideoAlias ?? "");
       setDefaultSpeechAlias(settings.defaultSpeechAlias ?? "");
@@ -643,7 +646,7 @@ export function BoardWorkspace({
       const candidates = step.kind === "image" ? imageAliases : step.kind === "video" ? videoAliases
         : audioAliases.filter((entry) => entry.adapterType === (music ? "suno-music" : "gemini-tts"));
       const fallback = step.kind === "image" ? defaultImageAlias : step.kind === "video" ? defaultVideoAlias : music ? defaultMusicAlias : defaultSpeechAlias;
-      const model = matchModelAlias(candidates, step.model) ?? matchModelAlias(candidates, fallback) ?? candidates[0];
+      const model = resolveBoardModel(candidates, step.model, fallback);
       return model ? { ...step, model: model.alias, modelLabel: model.model, channelId: model.channelId, channelName: model.channelName } : step;
     });
     if (!steps.length) { onToast("error", "所选范围内没有就绪的生成节点，请检查提示词和节点状态"); return; }
@@ -697,6 +700,15 @@ export function BoardWorkspace({
   }, [board, refreshBoards, titleDraft]);
 
   const saveStatus = board.retrying ? "保存失败，重试中" : board.saving ? "保存中" : board.submitting ? "提交中" : null;
+  const describeConfigModel = (node: ConfigBoardNode) => {
+    if (node.mode === "text") {
+      return { model: textModel?.threadId === board.view?.threadId ? textModel?.model : undefined };
+    }
+    const aliases = node.mode === "image" ? imageAliases : node.mode === "video" ? videoAliases : boardAudioModels(audioAliases, node.audioKind);
+    const preferred = node.mode === "image" ? defaultImageAlias : node.mode === "video" ? defaultVideoAlias
+      : node.audioKind === "music" ? defaultMusicAlias : defaultSpeechAlias;
+    return describeBoardConfigModel(node, resolveBoardModel(aliases, node.model, preferred), defaultGeminiSize);
+  };
 
   return (
     <div className="board-workspace">
@@ -774,6 +786,7 @@ export function BoardWorkspace({
         <BoardCanvas
           board={board}
           assets={assets}
+          describeConfigModel={describeConfigModel}
           onPickImage={pickImage}
           onUploadMediaIntoNode={uploadMediaIntoNode}
           onUploadFiles={(files, position) => void handleFiles(files, position)}
@@ -909,6 +922,7 @@ export function BoardWorkspace({
         <BoardAgentPanel
           key={board.view.threadId}
           threadId={board.view.threadId}
+          onModelChange={setTextModel}
           initialUiState={agentUi ?? board.view.uiState.agent}
           onUiStateChange={(agent) => {
             if (!board.view) return;
@@ -973,14 +987,22 @@ export function BoardWorkspace({
       {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId}
         onUseReferenceImage={referenceTargetId ? async (asset) => {
           if (!currentId || !asset.mimeType.startsWith("image/")) return false;
+          const readTarget = () => {
+            const latest = activeViewRef.current;
+            if (latest?.id !== currentId) return null;
+            const target = latest.doc.nodes.find((item) => item.id === referenceTargetId);
+            if (target?.type !== "video" && !(target?.type === "config" && (target.mode === "image" || target.mode === "video"))) {
+              throw new Error("目标节点已删除或切换生成类型，请重新选择。");
+            }
+            return { doc: latest.doc, target };
+          };
           if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后重试");
-          if (activeViewRef.current?.id !== currentId) return false;
+          if (!readTarget()) return false;
           await api.linkBoardAsset(currentId, asset.id);
-          const latest = activeViewRef.current;
-          if (latest?.id !== currentId) return false;
-          const target = latest.doc.nodes.find((item) => item.id === referenceTargetId);
-          if (!(target?.type === "video" || (target?.type === "config" && target.mode === "video"))) throw new Error("视频节点已变更，请重新选择");
-          const inputCount = latest.doc.edges.filter((edge) => edge.kind === "input" && edge.target === target.id).length;
+          const context = readTarget();
+          if (!context) return false;
+          const { doc, target } = context;
+          const inputCount = doc.edges.filter((edge) => edge.kind === "input" && edge.target === target.id).length;
           const added = board.addImageNode(asset, { x: target.x - 400, y: target.y + 180 * inputCount }, undefined, target.id);
           if (!added) return false;
           setAssets((items) => new Map(items).set(asset.id, asset));

@@ -80,10 +80,11 @@ function clampUi(ui: BoardAgentUiState): BoardAgentUiState {
 }
 
 export function BoardAgentPanel({
-  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onImportTemplate,
+  threadId, initialUiState, onUiStateChange, onToast, onBoardDelta, onFrameRequest, onBeforeSend, onImportTemplate, onModelChange,
 }: {
   threadId: string;
   initialUiState?: BoardAgentUiState;
+  onModelChange?: (current: { threadId: string; model: string }) => void;
   onUiStateChange: (state: BoardAgentUiState) => void;
   onToast: Toast;
   onBoardDelta: (delta?: BoardDelta) => void;
@@ -158,6 +159,10 @@ export function BoardAgentPanel({
   }, [threadId]);
 
   useEffect(() => { void load(); }, [load]);
+  const brainModel = view?.brainModel;
+  useEffect(() => {
+    if (brainModel !== undefined) onModelChange?.({ threadId, model: brainModel });
+  }, [brainModel, onModelChange, threadId]);
 
   /**
    * 画布助手用哪个对话模型。

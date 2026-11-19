@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { AlertCircle, Copy, Download, Eye, Image as ImageIcon, RotateCcw, Square, Wand2, X } from "lucide-react";
 import { midjourneyButtonLabel, midjourneyUsableButtons, type MidjourneyButton } from "../../shared/midjourney";
 import type { Asset, Task } from "../../shared/types";
@@ -9,7 +10,10 @@ import { confirmGeneration } from "../generation-confirm";
 import { formatTime, GenerationActivity, StatusBadge, statusLabels, terminalStatuses } from "../task-ui";
 import { MidjourneyActions } from "../ui/MidjourneyActions";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
+import { useAnchoredPanelStyle, usePanelDismiss, type PanelAnchorRect } from "../video/useAnchoredPanel";
+import { ImageActionMenu } from "../ui/ImageActionMenu";
 import { IMAGE_STARTERS } from "./image-starters";
+import { retryImageResult } from "./image-result-actions";
 
 export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, onTask, onSelectTask, onToast, onStarterPrompt }: {
   task: Task | null; tasks: Task[]; references: ReferenceController;
@@ -18,11 +22,13 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
   onStarterPrompt?: (prompt: string) => void;
 }) {
   const busy = task && !terminalStatuses.includes(task.status);
-  const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
   const [actingCustomId, setActingCustomId] = useState<string | null>(null);
+  const [historyMenu, setHistoryMenu] = useState<{ taskId: string; anchor: PanelAnchorRect; trigger: HTMLButtonElement } | null>(null);
+  const historyMenuRef = useRef<HTMLDivElement>(null);
   const midjourneyButtons = task?.model === "mj_upscale"
     ? []
     : midjourneyUsableButtons(task?.remoteMeta?.midjourney?.buttons ?? []);
@@ -34,6 +40,20 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
   const activeAssetBlob = useRef<{ id: string; blob: Blob } | null>(null);
   // 生成中的任务占据固定位置，完成后原位变成缩略图。
   const recentTasks = tasks.slice(0, 12);
+  const historyTask = recentTasks.find(item => item.id === historyMenu?.taskId);
+  const historyAsset = historyTask && terminalStatuses.includes(historyTask.status) ? historyTask.assets[0] : undefined;
+  const historyMenuStyle = useAnchoredPanelStyle(Boolean(historyAsset), historyMenu?.anchor ?? null, 88, 50);
+  const closeHistoryMenu = useCallback(() => {
+    if (historyMenuRef.current?.contains(document.activeElement)) historyMenu?.trigger.focus({ preventScroll: true });
+    setHistoryMenu(null);
+  }, [historyMenu]);
+  usePanelDismiss(Boolean(historyAsset), closeHistoryMenu, historyMenuRef, null, true);
+  useEffect(() => {
+    if (!historyAsset) return;
+    window.addEventListener("scroll", closeHistoryMenu, true);
+    return () => window.removeEventListener("scroll", closeHistoryMenu, true);
+  }, [closeHistoryMenu, historyAsset]);
+
   const activeAsset = task?.assets.find((item) => item.id === selectedAssetId) ?? task?.assets[0] ?? null;
   useEffect(() => { setSelectedAssetId(null); }, [task?.id]);
   useEffect(() => {
@@ -66,12 +86,7 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
     setCopying(true);
     try {
       const cached = activeAssetBlob.current?.id === activeAsset.id ? activeAssetBlob.current.blob : null;
-      const blob = cached ?? await (async () => {
-        const response = await fetch(api.assetUrl(activeAsset.url));
-        if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`);
-        return response.blob();
-      })();
-      await copyImageToClipboard(blob);
+      await copyImageToClipboard(cached ?? (() => api.assetAsFile(activeAsset)));
       onToast("success", "图片已复制到剪贴板");
     } catch (error) {
       onToast("error", error instanceof Error ? error.message : "复制图片失败");
@@ -100,22 +115,33 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
   }
   async function retry() {
     if (!task) return;
-    if (!continueQuery && !confirmGeneration({ kind: "图片生成", model: task.model, channel: task.channelName, retry: true })) return;
-    try {
-      onTask(await (continueQuery ? api.continueTaskQuery(task.id) : api.retry(task.id)));
-      onToast("success", continueQuery ? "已继续查询原任务" : "已重新提交");
-    } catch (error) { onToast("error", error instanceof Error ? error.message : "重试失败"); }
+    await retryImageResult(task, onTask, onToast);
   }
   async function download(asset: Asset) {
-    setDownloadingAssetId(asset.id);
+    if (downloading) return;
+    setDownloading(true);
     try {
       const saved = await api.downloadAsset(asset);
       if (saved) onToast("success", "图片已保存");
     } catch (error) {
       onToast("error", error instanceof Error ? error.message : "下载失败");
     } finally {
-      setDownloadingAssetId(null);
+      setDownloading(false);
     }
+  }
+
+  function openHistoryMenu(event: ReactMouseEvent<HTMLButtonElement>, item: Task) {
+    event.preventDefault();
+    if (!terminalStatuses.includes(item.status) || !item.assets[0]) {
+      closeHistoryMenu();
+      return;
+    }
+    const trigger = event.currentTarget;
+    const rect = trigger.getBoundingClientRect();
+    const fromKeyboard = event.clientX === 0 && event.clientY === 0;
+    const x = fromKeyboard ? rect.left : event.clientX;
+    const y = fromKeyboard ? rect.bottom : event.clientY;
+    setHistoryMenu({ taskId: item.id, trigger, anchor: { left: x, right: x, top: y, bottom: y } });
   }
 
   async function midjourneyAct(button: MidjourneyButton) {
@@ -133,27 +159,12 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
       setActingCustomId(null);
     }
   }
-  /**
-   * 结果操作条。有图时贴在图片底部（overlay），没图时（生成中 / 失败 / 空态）
-   * 退到图片下方一行——否则会压在创作提示或进度上。
-   */
-  function renderResultTools(overlay: boolean) {
-    if (!task) return null;
+  function renderTaskTools() {
+    if (!task || (activeAsset && !busy)) return null;
     return (
-      <div className={`image-result-tools ${overlay ? "is-overlay" : "is-inline"}`} role="group" aria-label="结果操作">
-        {activeAsset ? (
-          <>
-            <button type="button" className="secondary-button" disabled={downloadingAssetId === activeAsset.id} onClick={() => void download(activeAsset)}>
-              {downloadingAssetId === activeAsset.id ? <LoadingIndicator variant="dots" size={24} /> : <Download size={16} />}下载
-            </button>
-            <button type="button" className="secondary-button" disabled={copying} onClick={() => void copyActiveImage()} title="复制图片（Ctrl+C）">
-              {copying ? <LoadingIndicator variant="dots" size={24} /> : <Copy size={16} />}复制
-            </button>
-            <button type="button" className="secondary-button" title="用作参考图" disabled={references.reading} onClick={() => void references.addFromAsset(activeAsset)}><Wand2 size={16} />参考</button>
-          </>
-        ) : null}
+      <div className="image-result-tools is-inline" role="group" aria-label="任务操作">
         {busy ? <button type="button" className="secondary-button" title="取消任务" onClick={() => void cancel()}><Square size={16} />取消</button>
-          : activeAsset || task.status === "failed" || task.status === "cancelled" ? (
+          : task.status === "failed" || task.status === "cancelled" ? (
             <button type="button" className="secondary-button" title={continueQuery ? "继续查询" : "按原参数重新生成"} onClick={() => void retry()}>
               <RotateCcw size={16} />{continueQuery ? "续查" : "重绘"}
             </button>
@@ -169,15 +180,21 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
         <div className="image-result-heading">
           {task ? <><StatusBadge status={task.status} /><span title={`${task.channelName} · ${formatTime(task.createdAt)}`}>{task.model}</span></> : null}
         </div>
-        <div className={`result-stage image-result-stage ${activeAsset ? "has-image" : ""}`}>
-          {activeAsset ? (
-            <>
-              <button className="image-preview-trigger" type="button" onClick={() => setPreviewAsset(activeAsset)} aria-label="放大预览图片">
-                <img src={api.assetUrl(activeAsset.url)} alt="生成结果" />
-              </button>
-              {renderResultTools(true)}
-            </>
-          ) : busy ? (
+        {task && activeAsset ? (
+          <ImageActionMenu key={activeAsset.id} className="result-stage image-result-stage has-image" shortcuts={[
+            { label: "下载", tooltip: "下载原图", icon: Download, disabled: downloading, onSelect: () => void download(activeAsset) },
+            { label: "参考", tooltip: "用作参考图", icon: Wand2, disabled: references.reading, onSelect: () => void references.addFromAsset(activeAsset) },
+          ]} actions={[
+            { label: "复制", tooltip: "复制图片（Ctrl+C）", icon: Copy, disabled: copying, onSelect: () => void copyActiveImage() },
+            ...(!busy ? [{ label: continueQuery ? "续查" : "重绘", tooltip: continueQuery ? "继续查询原任务" : "按原参数重新生成", icon: RotateCcw, onSelect: () => void retry() }] : []),
+            { label: "诊断", icon: Eye, onSelect: () => onDiagnostics(task) },
+          ]}>
+            <button className="image-preview-trigger" type="button" onClick={() => setPreviewAsset(activeAsset)} aria-label="放大预览图片">
+              <img src={api.assetUrl(activeAsset.url)} alt="生成结果" />
+            </button>
+          </ImageActionMenu>
+        ) : <div className="result-stage image-result-stage">
+          {busy ? (
             <div className="task-progress" role="status">
               <GenerationActivity status={task.status} visual />
               <strong>{statusLabels[task.status]}</strong>
@@ -216,8 +233,8 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
               {task?.status === "cancelled" ? <p className="starter-hint">上次任务已取消。</p> : null}
             </div>
           )}
-        </div>
-        {activeAsset ? null : renderResultTools(false)}
+        </div>}
+        {renderTaskTools()}
         {task && task.assets.length > 1 ? (
           <div className="stage-thumbs image-result-candidates" role="group" aria-label="本次生成结果">
             {task.assets.map((asset, index) => (
@@ -258,7 +275,9 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
                 aria-current={item.id === task?.id ? "true" : undefined}
                 title={`${label} · ${formatTime(item.createdAt)}`}
                 aria-label={label}
+                aria-haspopup={!pending && item.assets[0] ? "menu" : undefined}
                 onClick={() => onSelectTask(item)}
+                onContextMenu={(event) => openHistoryMenu(event, item)}
               >
                 {pending ? <LoadingIndicator variant="dots" size={28} />
                   : item.assets[0] ? <ImageThumbnail asset={item.assets[0]} />
@@ -269,6 +288,20 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
           })}
         </div>
       </nav>
+      {historyAsset && historyMenuStyle ? createPortal(
+        <div className="image-history-context-menu" ref={historyMenuRef} style={historyMenuStyle}
+          role="menu" aria-label="生成历史操作" onContextMenu={(event) => event.preventDefault()}>
+          <div className="image-action-row">
+            <button type="button" role="menuitem" autoFocus disabled={downloading} onClick={() => {
+              closeHistoryMenu();
+              void download(historyAsset);
+            }}>
+              <Download size={15} aria-hidden="true" />下载
+            </button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
       {previewAsset ? (
         <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewAsset(null); }}>
           <div className="image-preview">

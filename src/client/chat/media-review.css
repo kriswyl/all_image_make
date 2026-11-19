@@ -1,0 +1,69 @@
+.media-review {
+  margin: 8px 0 4px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.media-review > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.media-review summary::-webkit-details-marker { display: none; }
+.media-review > summary:hover { background: var(--surface-soft); }
+.media-review > summary > span { margin-left: auto; color: var(--muted); font-size: 11px; }
+.media-review > summary::after { content: "⌄"; color: var(--ink-soft); }
+.media-review[open] > summary::after { transform: rotate(180deg); }
+
+.media-review-timeline {
+  margin: 0;
+  padding: 0;
+  max-height: min(420px, 55vh);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.media-review-segment {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.media-review-segment-head {
+  display: flex;
+  gap: 6px 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.media-review-seek {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 4px 7px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.media-review-seek:hover:not(:disabled) { background: var(--surface-hover); }
+.media-review-segment p { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.media-review-segment .media-review-note { color: var(--muted); font-size: 12px; }
+.media-review-dialogue { margin-top: 8px; color: var(--ink-soft); font-size: 12px; }
+.media-review-dialogue summary { cursor: pointer; }
+.media-review-dialogue ul { margin: 6px 0 0; padding: 0; list-style: none; }
+.media-review-dialogue li { display: flex; align-items: baseline; gap: 8px; margin-top: 5px; overflow-wrap: anywhere; }
+.media-review-samples { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
