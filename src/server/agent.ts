@@ -365,6 +365,7 @@ export class AgentService {
       if (plain) {
         return await runNativeTurn({
           db: this.db,
+          sessionKeys: this.sessionKeys,
           brain: this.brain,
           presentations: this.presentations,
           confirmations: this.confirmations,

@@ -2,6 +2,7 @@ import { matchModelAlias } from "../../shared/model-alias";
 import type { BoardAudioKind, ConfigBoardNode } from "../../shared/board";
 import { VIDEO_DEFAULTS } from "../../shared/video-capabilities";
 import { TTS_DEFAULT_VOICE } from "../../shared/tts";
+import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_SIZE } from "../../shared/seedream";
 
 export interface BoardConfigModelSummary {
   model?: string;
@@ -30,6 +31,7 @@ export function describeBoardConfigModel(node: ConfigBoardNode, alias: BoardMode
   switch (node.mode) {
     case "image": {
       const size = alias?.adapterType === "gemini-content" ? node.imageSize ?? defaultImageSize
+        : alias?.adapterType === SEEDREAM_ADAPTER ? (node.size ?? SEEDREAM_DEFAULT_SIZE).replace("x", "×")
         : alias?.adapterType === "openai-images" ? node.size?.replace("x", "×") : undefined;
       return { model: alias?.model, parameters: [size, `${node.count ?? 1} 张`].filter(Boolean).join(" · ") };
     }

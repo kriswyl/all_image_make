@@ -3,9 +3,42 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
+import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
 import { expect, it, vi } from "vitest";
 import type { Diagnostic } from "../src/shared/types";
+import { sendPreparedRequest } from "../src/server/adapters";
 import { createApp } from "../src/server/app";
+
+it("honors a configured request deadline beyond the transport header and body timeouts", async () => {
+  const server = http.createServer((_req, res) => {
+    const headersTimer = setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("{");
+      const bodyTimer = setTimeout(() => res.end('"data":[]}'), 1750);
+      res.once("close", () => clearTimeout(bodyTimer));
+    }, 1750);
+    res.once("close", () => clearTimeout(headersTimer));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const previous = getGlobalDispatcher();
+  const shortTimeouts = new Agent({ headersTimeout: 40, bodyTimeout: 40 });
+  setGlobalDispatcher(shortTimeouts);
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("mock unavailable");
+    const url = `http://127.0.0.1:${address.port}/v1/images/generations`;
+    await expect(fetch(url, { signal: AbortSignal.timeout(5000) })).rejects.toMatchObject({ cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+    await expect(sendPreparedRequest({
+      url, method: "POST", headers: { "Content-Type": "application/json" }, body: { prompt: "test" },
+      allowPrivateNetwork: true, timeoutMs: 15 * 60_000,
+    })).resolves.toMatchObject({ status: 200, payload: { data: [] } });
+  } finally {
+    setGlobalDispatcher(previous);
+    await shortTimeouts.destroy();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 10_000);
 
 it.each([
   { scenario: "no headers", phase: "upstream", errorCode: "REQUEST_TIMEOUT", httpStatus: null },

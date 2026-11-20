@@ -25,7 +25,8 @@ import "./image-workbench.css";
 import { SelectMenu, type SelectOption } from "../ui/SelectMenu";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
-import { DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, type Channel, type Task } from "../../shared/types";
+import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_SIZE, SEEDREAM_DEFAULT_WATERMARK, SEEDREAM_RATIOS, SEEDREAM_SIZES, SEEDREAM_SIZE_HINT, seedreamSize } from "../../shared/seedream";
+import { DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, type Channel, type GenerationInput, type Task } from "../../shared/types";
 import type { InpaintMaskController, ReferenceController, Toast } from "../app-shared";
 
 const openAiSizeGroups = OPENAI_SIZE_GROUPS;
@@ -44,6 +45,8 @@ const responseFormatOptions: SelectOption[] = [
 const aspectRatioOptions: SelectOption[] = ["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
   .map((value) => ({ value, label: value === "auto" ? "自动" : value }));
 const imageSizeOptions: SelectOption[] = ["auto", "1K", "2K", "4K"].map((value) => ({ value, label: value === "auto" ? "自动" : value }));
+const seedreamSizeOptions: SelectOption[] = [...SEEDREAM_SIZES.map(value => ({ value, label: value })), { value: "custom", label: "自定义" }];
+const seedreamRatioOptions = aspectRatioOptions.filter(option => option.value === "auto" || SEEDREAM_RATIOS.some(ratio => ratio === option.value));
 const mjVersionOptions: SelectOption[] = [
   { value: "", label: "默认" }, { value: "8.2", label: "8.2" }, { value: "7", label: "7" }, { value: "6.1", label: "6.1" }, { value: "6", label: "6" },
 ];
@@ -105,6 +108,8 @@ export function GenerateView(props: {
   const [style, setStyle] = useScopedPersistentState<"auto" | "vivid" | "natural">(draftScope, "style", "auto");
   const [responseFormat, setResponseFormat] = useScopedPersistentState<"auto" | "url" | "b64_json">(draftScope, "responseFormat", "auto");
   const [imageSize, setImageSize] = useScopedPersistentState(draftScope, "imageSize", "auto");
+  const [seedreamQuality, setSeedreamQuality] = useScopedPersistentState<string>(draftScope, "seedreamQuality", SEEDREAM_DEFAULT_SIZE);
+  const [watermark, setWatermark] = useScopedPersistentState(draftScope, "seedreamWatermark", SEEDREAM_DEFAULT_WATERMARK);
   const [temperature, setTemperature] = useScopedPersistentState(draftScope, "temperature", "");
   const [topP, setTopP] = useScopedPersistentState(draftScope, "topP", "");
   const [topK, setTopK] = useScopedPersistentState(draftScope, "topK", "");
@@ -135,6 +140,7 @@ export function GenerateView(props: {
   const referenceLimit = imageReferenceLimit(adapterType, props.selectedModel);
   const referenceError = imageReferenceCountError(adapterType, props.selectedModel, referenceImages.length);
   const isOpenAi = adapterType === "openai-images" || adapterType === "openai-chat-image" || adapterType === "generic-json";
+  const isSeedream = adapterType === SEEDREAM_ADAPTER;
   const isMidjourney = adapterType === "midjourney";
   const supportsNegativePrompt = modelSupportsNegativePrompt(props.selectedModel);
   // 不再按模型名硬禁用：自定义模型 ID 也能选，能否生成由上游决定。
@@ -171,7 +177,9 @@ export function GenerateView(props: {
   }, [submitting, readingImage, references]);
   useImagePaste(pasteImages, !submitting && !readingImage && !maskEditorOpen);
 
-  const quickSummary = isOpenAi
+  const quickSummary = isSeedream
+    ? (seedreamQuality === "custom" ? [`${customWidth}×${customHeight}`, count + " 张"] : [aspectRatio === "auto" ? "自动比例" : aspectRatio, seedreamQuality, count + " 张"])
+    : isOpenAi
     ? [openAiSizeOptions.find(option => option.value === size)?.label ?? size, "质量 " + (qualityOptions.find(option => option.value === quality)?.label ?? quality), outputFormat.toUpperCase(), count + " 张"]
     : isMidjourney
       ? [aspectRatio === "auto" ? "自动比例" : aspectRatio, mjVersion ? "v" + mjVersion : "默认版本"]
@@ -187,16 +195,21 @@ export function GenerateView(props: {
     const missing = invalidImageMention(prompt, referenceImages.length);
     if (missing) return props.onToast("error", "无法使用 " + missing + "，请移除它或重新引用可用的参考图");
     let requestedSize = size === "auto" ? undefined : size;
-    if (size === "custom") {
+    if (isSeedream) {
+      try {
+        requestedSize = seedreamSize(seedreamQuality === "custom" ? { size: `${customWidth}x${customHeight}` }
+          : { imageSize: seedreamQuality, aspectRatio });
+      } catch (error) { return props.onToast("error", error instanceof Error ? error.message : SEEDREAM_SIZE_HINT); }
+    } else if (size === "custom") {
       requestedSize = customSize(customWidth, customHeight);
       if (!requestedSize) return props.onToast("error", "自定义尺寸须为 16 的倍数，最长边不超过 3840，比例不超过 3:1，总像素为 655360 到 8294400");
     }
-    if (outputFormat === "gif") {
+    if (!isSeedream && outputFormat === "gif") {
       const budget = gifBudgetMessage(requestedSize, frameCount);
       if (budget) return props.onToast("error", budget);
     }
     let rawParameters: Record<string, unknown>;    try {
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(isSeedream ? "{}" : raw);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
       rawParameters = parsed;
     } catch {
@@ -205,18 +218,18 @@ export function GenerateView(props: {
     if (!confirmGeneration({ kind: "图片生成", model: props.selectedModel, channel: channel.name, detail: `请求数量：${count} 张` })) return;
     setSubmitting(true);
     try {
-      const task = await api.generate({
+      const input: GenerationInput = {
         channelId: channel.id, model: props.selectedModel, prompt: prompt.trim(),
-        negativePrompt: supportsNegativePrompt ? negativePrompt.trim() || undefined : undefined,
+        negativePrompt: !isSeedream && supportsNegativePrompt ? negativePrompt.trim() || undefined : undefined,
         // 尺寸只有 OpenAI 系适配器认（`openAiImageParameters`）；gemini 和视频渠道收到它只会
         // 丢掉，然后在新加的「请求参数」里留一条扎眼的「未发出」——那是我们自己多发的，
         // 不该让用户以为是他的配置有问题
-        size: isOpenAi ? requestedSize : undefined,
-        aspectRatio: aspectRatio === "auto" ? undefined : aspectRatio,
+        size: isOpenAi || isSeedream ? requestedSize : undefined,
+        aspectRatio: isSeedream || aspectRatio === "auto" ? undefined : aspectRatio,
         midjourneyVersion: isMidjourney ? mjVersion || undefined : undefined,
         count,
         quality: quality === "auto" ? undefined : quality,
-        outputFormat,
+        outputFormat: isSeedream ? undefined : outputFormat,
         frameCount: outputFormat === "gif" ? frameCount : undefined,
         frameDurationMs: outputFormat === "gif" ? frameDurationMs : undefined,
         background: background === "auto" ? undefined : background,
@@ -230,11 +243,21 @@ export function GenerateView(props: {
         maxOutputTokens: adapterType === "gemini-content" ? optionalNumber(maxOutputTokens) : undefined,
         responseModalities: adapterType === "gemini-content" ? responseModalities.split(",") as Array<"TEXT" | "IMAGE"> : undefined,
         seed: adapterType === "gemini-content" ? optionalNumber(seed) : undefined,
+        watermark: isSeedream ? watermark : undefined,
         timeoutMs: timeoutSeconds * 1000,
         rawParameters,
-      }, referenceImages.map((item) => item.file), activeMask?.file);
-      props.onTask(task);
-      props.onToast("success", "任务已提交");
+      };
+      const files = referenceImages.map(item => item.file);
+      if (isSeedream && count > 1) {
+        const { tasks, failures } = await api.generateImageBatch(input, files);
+        [...tasks].reverse().forEach(props.onTask);
+        props.onToast(failures.length ? "error" : "success", failures.length
+          ? `已提交 ${tasks.length} 张；${failures.map(failure => `第 ${failure.index} 张：${failure.message}`).join("；")}`
+          : `已提交 ${tasks.length} 个单图任务`);
+      } else {
+        props.onTask(await api.generate(input, files, activeMask?.file));
+        props.onToast("success", "任务已提交");
+      }
     } catch (error) { props.onToast("error", error instanceof Error ? error.message : "提交失败"); }
     finally { setSubmitting(false); }
   }
@@ -321,6 +344,16 @@ export function GenerateView(props: {
                 </summary>
                 <div className="image-parameter-panel">
                   <div className="image-quick-params" role="group" aria-label="常用参数">
+                    {isSeedream ? <>
+                      {seedreamQuality !== "custom" ? <label><span>宽高比</span>
+                        <SelectMenu value={aspectRatio} options={seedreamRatioOptions} onChange={setAspectRatio} ariaLabel="宽高比" className="param-select" />
+                      </label> : null}
+                      <label><span>清晰度</span>
+                        <SelectMenu value={seedreamQuality} options={seedreamSizeOptions} onChange={setSeedreamQuality} ariaLabel="清晰度" className="param-select" />
+                      </label>
+                      <label><span>数量</span><input type="number" min={1} max={8} step={1} value={count}
+                        onChange={event => setCount(Math.max(1, Math.min(8, Math.floor(Number(event.target.value)))))} /></label>
+                    </> : null}
                     {isOpenAi ? <>
                       <label><span>尺寸</span>
                         <SelectMenu value={size} options={openAiSizeOptions} onChange={setSize} ariaLabel="尺寸" className="param-select" minWidth={220} />
@@ -358,10 +391,18 @@ export function GenerateView(props: {
                       <span aria-hidden="true">x</span>
                       <label><span>高度</span><input type="number" min={64} max={3840} step={16} value={customHeight} onChange={(event) => setCustomHeight(event.target.value)} /></label>
                     </div> : null}
+                  {isSeedream && seedreamQuality === "custom" ? <div className="custom-size-fields image-custom-size" aria-label="自定义尺寸">
+                    <label><span>宽度</span><input type="number" min={1} step={1} value={customWidth} onChange={event => setCustomWidth(event.target.value)} /></label>
+                    <span aria-hidden="true">×</span>
+                    <label><span>高度</span><input type="number" min={1} step={1} value={customHeight} onChange={event => setCustomHeight(event.target.value)} /></label>
+                  </div> : null}
                   {/* 高级参数：默认折叠 */}
                   <details className="advanced-panel image-advanced">
                     <summary><Settings2 size={16} /><span>高级参数</span><ChevronRight className="details-chevron" size={16} /></summary>
                     <div className="advanced-body">
+                      {isSeedream ? <label className="field-block"><span>AI 生成水印</span>
+                        <input type="checkbox" checked={watermark} onChange={event => setWatermark(event.target.checked)} />
+                      </label> : null}
                       {isMidjourney ? (
                         <p className="mode-hint">
                           提示词支持 Midjourney 原生参数（如 <code>--ar 16:9</code>、<code>--v 7</code>、<code>--no text</code>）；
@@ -396,9 +437,9 @@ export function GenerateView(props: {
                         </div>
                       ) : null}
 
-                      {!isMidjourney && supportsNegativePrompt ? (
+                      {!isSeedream && !isMidjourney && supportsNegativePrompt ? (
                         <label className="field-block"><span>负面提示词</span><input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="可选" /></label>
-                      ) : !isMidjourney ? <div className="field-block"><span>负面提示词</span><small>当前模型不支持这个字段，已停止发送，避免请求被上游拒绝。</small></div> : null}
+                      ) : !isSeedream && !isMidjourney ? <div className="field-block"><span>负面提示词</span><small>当前模型不支持这个字段，已停止发送，避免请求被上游拒绝。</small></div> : null}
                       {isOpenAi ? <>
                         <div className="parameter-subtitle">OpenAI Images</div>
                         <div className="parameter-grid">
@@ -444,8 +485,8 @@ export function GenerateView(props: {
                           />
                         </label>
                       </div>
-                      <div className="parameter-subtitle">高级 JSON</div>
-                      <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} />
+                      {!isSeedream ? <><div className="parameter-subtitle">高级 JSON</div>
+                        <textarea className="json-input" spellCheck={false} value={raw} onChange={(event) => setRaw(event.target.value)} /></> : null}
                     </div>
                   </details>
                 </div>

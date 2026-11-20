@@ -47,6 +47,7 @@ export async function generateBoardImage(input: {
   const background = input.overrides?.background ?? config.background;
   const outputFormat = input.overrides?.outputFormat ?? config.outputFormat;
   const moderation = input.overrides?.moderation ?? config.moderation;
+  const watermark = input.overrides?.watermark ?? config.watermark;
   const generation: GenerationInput = {
     channelId: channel.id,
     model: resolution.model,
@@ -61,6 +62,7 @@ export async function generateBoardImage(input: {
     ...(background ? { background } : {}),
     ...(outputFormat ? { outputFormat } : {}),
     ...(moderation ? { moderation } : {}),
+    ...(watermark === undefined ? {} : { watermark }),
     timeoutMs: resolveBoardTimeoutMs("image", input.overrides?.timeoutSeconds ?? config.timeoutSeconds),
   };
 

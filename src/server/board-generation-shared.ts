@@ -11,6 +11,7 @@ import type { GenerationInput, Task } from "../shared/types.js";
 import { MAX_INLINE_MEDIA_CHARS } from "../shared/types.js";
 import { readReferenceVideoAsset, type ReferenceVideoUpload } from "./reference-video.js";
 import { prepareImageBytes, REFERENCE_PROFILE } from "./vision.js";
+import { submitImageTasks } from "./image-batch.js";
 
 export async function loadBoardImageReferences(db: AppDatabase, doc: BoardDoc, nodeId: string, adapter: string, model: string) {
   const referenceNodes = directUpstreamImages(doc, nodeId);
@@ -83,13 +84,8 @@ export async function submitBoardImages(
   count: number,
 ) {
   // 渠道可能忽略 n 或 candidateCount。每个槽位提交一次，单次只请求一张。
-  const requests = await Promise.allSettled(Array.from({ length: count }, () =>
-    runner.create({ ...generation, count: 1 }, references)));
-  const first = requests.find((request) => request.status === "fulfilled");
-  if (!first) {
-    const failure = requests[0];
-    throw failure?.status === "rejected" ? failure.reason : new Error("没有提交图片生成任务");
-  }
+  const requests = await submitImageTasks(runner, generation, references, count);
+  const first = requests.find((request) => request.status === "fulfilled")!;
   return {
     firstTask: first.value,
     slots: requests.map((request) => request.status === "fulfilled"

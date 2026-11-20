@@ -81,7 +81,7 @@ export function handleTaskEvent(host: TaskEventHost, event: TaskEvent): void {
       ? `配音完成${produced.duration ? `，约 ${produced.duration.toFixed(1)} 秒` : ""}，已保存 ${assetRef(produced.id)}。`
       : kind === "audio"
         ? `${label}生成完成，共 ${producedAssets.length} ${label === "音效" ? "条" : "首"}${titles.length ? `：${titles.join(" / ")}` : ""}。${event.task.remoteMeta?.suno?.warning ?? ""}`
-      : `${label}生成完成（${event.task.model}），产物 ${assetRef(produced.id)}${produced.duration ? `，约 ${produced.duration} 秒` : ""}。`
+      : `${label}生成完成（${event.task.model}），产物 ${assetRef(produced.id)}${produced.duration ? `，约 ${produced.duration} 秒` : ""}。${event.task.remoteMeta?.seedream?.warning ? `${event.task.remoteMeta.seedream.warning}。` : ""}`
     : `${label}生成失败：${event.task.errorMessage ?? event.task.errorCode ?? "上游没有返回结果"}`;
   // async 标记只在「等任务」时有意义；落库时丢掉，免得回放给大脑时它以为还没做完
   const previous = pending.toolResult ?? { ok: false, summary: "" };

@@ -10,6 +10,7 @@ import type { AppDatabase, StoredDocument } from "./db.js";
 import { isImageAsset } from "../shared/types.js";
 import { assetRef, planCalls, type ChatMessage } from "../shared/agent-types.js";
 import { mediaReviewSchema, mediaTime, videoOverviewSchema } from "../shared/media-review.js";
+import { chatWebToolResultSchema, isChatWebTool } from "../shared/chat-web.js";
 
 export interface BuiltContext {
   messages: BrainMessage[];
@@ -213,6 +214,11 @@ export function toPlainChatMessage(message: ChatMessage, db?: Pick<AppDatabase, 
   const result = message.toolResult;
   const status = result?.async ? "任务进行中" : result?.ok ? "操作完成" : message.status === "pending" ? "任务进行中" : "操作失败";
   const text = result?.summary || message.content || message.errorMessage || message.toolName || "操作";
+  if (message.toolName && isChatWebTool(message.toolName)) {
+    const evidence = chatWebToolResultSchema.safeParse(result?.data?.web).data;
+    const links = evidence?.sources.map(source => source.url) ?? [];
+    if (links.length) return { role: "assistant", content: `[${text}\n历史网页来源：${links.join("\n")}]` };
+  }
   if (message.toolName === "media_review") {
     const overview = videoOverviewSchema.safeParse(result?.data?.videoOverview).data;
     if (overview) return { role: "assistant", content: `[视频概述 ${assetRef(overview.assetId)} · 时长 ${mediaTime(overview.durationMs)} · 基于 ${overview.timesMs.length} 个画面样本。]` };

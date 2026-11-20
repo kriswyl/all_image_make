@@ -4,12 +4,14 @@ import type { BrainRunner } from "./agent-brain.js";
 import { MAX_PARSE_RETRY, MAX_ROUNDS, MAX_VISION_READS_PER_ROUND } from "./agent-constants.js";
 import { EMPTY_REPLY_CORRECTION, IDENTITY_CORRECTION, looksLikeIdentityDrift, type BuiltContext } from "./agent-context.js";
 import { materializeLegacyCall, previewLegacyConfirmation } from "./agent-legacy-calls.js";
-import { extractPlanText, parsePlan, repairPlan, resolveBatch, salvagePlan } from "./agent-plan.js";
+import { asNumber, asString, extractPlanText, parsePlan, repairPlan, resolveBatch, salvagePlan } from "./agent-plan.js";
 import type { ToolContext, ToolOutcome } from "./agent-tools.js";
 import { observeBoardImages, observeImages } from "./agent-vision.js";
 import type { TurnTrigger } from "./agent.js";
 import type { BrainMessage } from "./brain.js";
 import type { AppDatabase } from "./db.js";
+import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
+import { SEEDREAM_ADAPTER } from "../shared/seedream.js";
 
 interface LegacyTurnHost {
   db: AppDatabase;
@@ -250,7 +252,16 @@ export class AgentLegacyTurnRunner {
     // §13 / §16：确认闸门。链条上的视频、以及超额度的任何生成都先问一句。
     // 闸门看的是 `resolveBatch` 之后**真正要跑的那几个**——卡片上问 N 张、
     // 实际提交 M 张是这里最不能出的错
-    const resolvedBatch = resolveBatch(planCalls(plan));
+    const planned = planCalls(plan);
+    const requestedBatch = planned.some(call => call.tool === "generate_image" && (asNumber(call.args.count) ?? 1) > 1);
+    const aliases = requestedBatch ? buildCapabilityAliases(this.host.db.listChannels()) : [];
+    const resolvedBatch = resolveBatch(planned.flatMap(call => {
+      const count = asNumber(call.args.count) ?? 1;
+      if (call.tool !== "generate_image" || !Number.isInteger(count) || count < 2 || count > 8) return [call];
+      const target = resolveAlias(aliases, asString(call.args.modelHint), "image", this.host.defaultAliases().image);
+      if (!target || this.host.db.getChannel(target.channelId)?.adapterType !== SEEDREAM_ADAPTER) return [call];
+      return Array.from({ length: count }, () => ({ ...call, args: { ...call.args, count: 1, modelHint: target.alias } }));
+    }));
     // 把「这一轮附带的图」固化成显式 imageRefs / mode：
     // 确认卡审批、跨轮续跑时附件集合已经没了，参数里必须已经写清楚用哪几张
     const calls = resolvedBatch.calls.map((call) =>

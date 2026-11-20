@@ -56,6 +56,7 @@ const conversationCreateSchema = z.object({
 });
 
 const conversationPatchSchema = z.object({
+  webEnabled: z.boolean().optional(),
   contextBudget: z.number().int().min(4000).max(2000000).optional(),
   chatAutoContinueLimit: z.number().int().min(0).max(100).optional(),
   chatToolRoundLimit: z.number().int().min(1).max(100).optional(),

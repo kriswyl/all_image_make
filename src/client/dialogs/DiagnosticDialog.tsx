@@ -51,6 +51,7 @@ export function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () =>
   }, [task]);
 
   const terminal = terminalStatuses.includes(currentTask.status);
+  const seedream = currentTask.remoteMeta?.seedream;
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="modal diagnostic-modal" role="dialog" aria-modal="true" aria-label="请求诊断">
       <div className="modal-header">
@@ -61,6 +62,11 @@ export function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () =>
         <StatusBadge status={currentTask.status} /><span>{currentTask.model}</span><code title={currentTask.id}>{currentTask.id.slice(0, 8)}</code>
         <span>创建 {time(currentTask.createdAt)}</span>
         {currentTask.finishedAt ? <span>结束 {time(currentTask.finishedAt)}</span> : null}
+        {seedream?.returnedModel ? <span>上游模型 {seedream.returnedModel}</span> : null}
+        {seedream ? <span>参考图：{seedream.acceptedReferences ?? "未回传"}/{seedream.requestedReferences}</span> : null}
+        {seedream?.generatedImages !== undefined ? <span>上游生成 {seedream.generatedImages} 张</span> : null}
+        {seedream?.outputTokens !== undefined ? <span>输出 {seedream.outputTokens} tokens</span> : null}
+        {seedream?.warning ? <p className="diagnostic-task-error" role="status">{seedream.warning}</p> : null}
         {currentTask.errorMessage ? <p className="diagnostic-task-error"><strong>{currentTask.errorCode || "任务失败"}</strong>{currentTask.errorMessage}</p> : null}
       </div>
       <div className="diagnostic-list">

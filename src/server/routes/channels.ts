@@ -15,9 +15,10 @@ import { VIDEO_CONFIRM_POLICIES, IMAGE_CONFIRM_POLICIES } from "../../shared/age
 import { referenceVideoUpload } from "./uploads.js";
 import { publicChannel, readGeminiImageSize, resolveChannelKey } from "./channel-config.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
+import { chatWebSettingsPatchSchema, readChatWebSettings, updateChatWebSettings } from "../web-settings.js";
 import type { Express } from "express";
 
-const adapterTypes = ["openai-images", "openai-chat-image", "gemini-content", "generic-json", ...VIDEO_ADAPTER_TYPES, "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
+const adapterTypes = ["openai-images", "seedream-image", "openai-chat-image", "gemini-content", "generic-json", ...VIDEO_ADAPTER_TYPES, "suno-music", "gemini-tts", "midjourney", "openai-chat"] as const;
 
 const authTypes = ["bearer", "x-api-key", "query", "custom-header", "none"] as const;
 
@@ -63,6 +64,13 @@ const settingsSchema = z.object({
 });
 
 export function registerChannelRoutes(app: Express, db: AppDatabase, sessionKeys: KeyStore) {
+  app.get("/api/settings/web", (_req, res) => res.json(ok(readChatWebSettings(db, sessionKeys))));
+  app.patch("/api/settings/web", (req, res) => {
+    const parsed = chatWebSettingsPatchSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(fail("INVALID_WEB_SETTINGS", "联网服务设置无效"));
+    res.json(ok(updateChatWebSettings(db, sessionKeys, parsed.data)));
+  });
+
   app.get("/api/settings", (_req, res) => {
     res.json(ok({
       assetsDir: db.assetsDir,

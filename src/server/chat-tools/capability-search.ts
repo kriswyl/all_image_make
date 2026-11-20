@@ -35,6 +35,7 @@ const GROUP_LABELS: Record<ChatToolGroup, string> = {
   media: "视频画面概述",
   templates: "画布模板与分镜",
   utility: "画布指针与提示词",
+  web: "搜索网页与读取链接",
 };
 
 const GROUP_HINTS: Record<Exclude<ChatToolGroup, "core">, RegExp> = {
@@ -45,6 +46,7 @@ const GROUP_HINTS: Record<Exclude<ChatToolGroup, "core">, RegExp> = {
   media: /(视频|原片|全片|短片|概述|大概讲了什么)/i,
   templates: /(模板|分镜|工作流|流程图)/i,
   utility: /(设为画布|设为参考|提示词|润色|优化提示词)/i,
+  web: /(https?:\/\/|联网|网页|链接|搜索|查找|核实|查证|search|browse)/i,
 };
 
 export interface InitialToolContext {
@@ -116,7 +118,7 @@ export function createCapabilitySearchTool(registry: ChatToolRegistry): ChatTool
       }).slice(0, 8);
 
       if (!candidates.length) {
-        const catalog = CHAT_TOOL_GROUPS.filter((group) => group !== "core")
+        const catalog = [...new Set(registry.all().map(tool => tool.group ?? "core"))].filter(group => group !== "core")
           .map((group) => `${group}=${GROUP_LABELS[group]}`).join("；");
         return {
           ok: true,

@@ -17,6 +17,7 @@ import {
   VIDEO_CAPABILITIES, VIDEO_DEFAULTS, VIDEO_MODE_LABELS, videoModeLabel, type VideoAdapter,
 } from "../../shared/video-capabilities";
 import { OPENAI_SIZE_PRESETS } from "../../shared/image-sizes";
+import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_SIZE, SEEDREAM_DEFAULT_WATERMARK, SEEDREAM_RATIOS, SEEDREAM_SIZES, SEEDREAM_SIZE_HINT } from "../../shared/seedream";
 import { CHANNEL_FIELD_SUPPORT, unsupportedLabels } from "../../shared/channel-fields";
 import { IMAGE_OUTPUT_FORMATS, type ImageOutputFormat } from "../../shared/image-formats";
 import { imageReferenceCountError, imageReferenceLimit } from "../../shared/image-reference-limits";
@@ -234,9 +235,11 @@ export function BoardInspector({
     : isText ? "描述要生成的文本，例如一段旁白或分镜对白。"
       : isVideo ? "描述视频里的动作、镜头和画面变化…" : "描述要生成的内容，或连接上游文本作为提示词");
   const imageFields = CHANNEL_FIELD_SUPPORT[effectiveAliasInfo?.adapterType as AdapterType];
+  const isSeedream = isImage && effectiveAliasInfo?.adapterType === SEEDREAM_ADAPTER;
+  const seedreamCustom = isGenerator && isSeedream && Boolean(node.size) && !SEEDREAM_SIZES.some(value => value === node.size);
   const supportsImageRatio = Boolean(imageFields?.aspectRatio);
   const imageRatio = isGenerator && supportsImageRatio ? (node.aspectRatio ?? node.ratio ?? "") : "";
-  const ratios: readonly string[] = imageRatio && !IMAGE_RATIOS.some((ratio) => ratio === imageRatio)
+  const ratios: readonly string[] = isSeedream ? SEEDREAM_RATIOS : imageRatio && !IMAGE_RATIOS.some((ratio) => ratio === imageRatio)
     ? [...IMAGE_RATIOS, imageRatio] : IMAGE_RATIOS;
   const referenceIds = new Set(upstreamLinks.map(({ node: source }) => source.id));
   const videoAdapter = effectiveAliasInfo?.adapterType;
@@ -255,8 +258,8 @@ export function BoardInspector({
   }) : [];
   const parameterLabel = !isGenerator || isText ? "参数"
     : isImage ? [
-      imageRatio,
-      sizeMode === "gemini" ? node.imageSize : sizeMode === "size" ? node.size : undefined,
+      !seedreamCustom && imageRatio,
+      isSeedream ? node.size || SEEDREAM_DEFAULT_SIZE : sizeMode === "gemini" ? node.imageSize : sizeMode === "size" ? node.size : undefined,
       `${imageCount} 张`,
     ].filter(Boolean).join(" · ")
       : isVideo ? videoParameterValues.join(" · ")
@@ -847,7 +850,17 @@ export function BoardInspector({
                           </div>
                         </fieldset>
                       )}
-                      {imageFields?.size && (
+                      {isSeedream ? <fieldset className="board-parameter-group">
+                        <legend>清晰度</legend>
+                        <div className="board-parameter-choices">
+                          {SEEDREAM_SIZES.map(value => <button key={value} type="button" aria-pressed={(node.size || SEEDREAM_DEFAULT_SIZE) === value}
+                            onClick={() => onUpdateNode(node.id, { size: value, imageSize: undefined })}>{value}</button>)}
+                        </div>
+                        <label className="board-field"><span>自定义宽×高</span>
+                          <input value={seedreamCustom ? node.size : ""} placeholder="例如 1536x1024" title={SEEDREAM_SIZE_HINT}
+                            onChange={event => onUpdateNode(node.id, { size: event.target.value || undefined, imageSize: undefined })} />
+                        </label>
+                      </fieldset> : imageFields?.size && (
                         <label className="board-field">
                           <span>输出尺寸</span>
                           <input list="board-image-sizes" value={node.size ?? ""} placeholder="自动，或输入宽 × 高"
@@ -870,7 +883,7 @@ export function BoardInspector({
                           </div>
                         </fieldset>
                       )}
-                      {supportsImageRatio && (
+                      {supportsImageRatio && !seedreamCustom && (
                         <fieldset className="board-parameter-group">
                           <legend>比例</legend>
                           <div className="board-parameter-ratios">
@@ -916,7 +929,7 @@ export function BoardInspector({
                             </div>
                           );
                         })()}
-                        <label className="board-field">
+                        {!isSeedream ? <label className="board-field">
                           <span>负向提示词（可选）</span>
                           <textarea
                             rows={3}
@@ -925,8 +938,12 @@ export function BoardInspector({
                             placeholder="不希望出现的元素，例如：文字、水印、多余手指"
                             onChange={(event) => onUpdateNode(node.id, { negativePrompt: event.target.value || undefined } as Partial<BoardNode>)}
                           />
-                        </label>
+                        </label> : <label className="board-switch">
+                          <input type="checkbox" checked={node.watermark ?? SEEDREAM_DEFAULT_WATERMARK}
+                            onChange={event => onUpdateNode(node.id, { watermark: event.target.checked })} />AI 生成水印
+                        </label>}
                         <div className="board-inspector-grid">
+                          {!isSeedream ? <>
                           {supportsImageRatio && <label className="board-field">
                             <span>自定义比例</span>
                             <input value={imageRatio} maxLength={20} placeholder="例如 3:2"
@@ -999,6 +1016,7 @@ export function BoardInspector({
                               <option value="auto">auto</option>
                             </select>
                           </label>
+                          </> : null}
                           <label className="board-field">
                             <span>超时（秒）</span>
                             <input
@@ -1011,7 +1029,7 @@ export function BoardInspector({
                             />
                           </label>
                         </div>
-                        <p className="board-inspector-hint">不同渠道支持度不同：不支持的高级参数会被适配器忽略。</p>
+                        {!isSeedream ? <p className="board-inspector-hint">不同渠道支持度不同：不支持的高级参数会被适配器忽略。</p> : null}
                       </details>
                     </>
                   )}

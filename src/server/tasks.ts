@@ -6,6 +6,8 @@ import { DEFAULT_IMAGE_SIZE, MAX_INLINE_MEDIA_CHARS, normalizeImageSize, VIDEO_M
 import { isImageAdapter } from "../shared/kinds.js";
 import type { GenerationInput, RequestDiagnosticTrace, Task } from "../shared/types.js";
 import type { SunoTaskMeta } from "../shared/suno.js";
+import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_WATERMARK, seedreamSize } from "../shared/seedream.js";
+import { seedreamResultMeta } from "./seedream-result.js";
 import type { AppDatabase, DbChannel } from "./db.js";
 import type { TaskPatch, TaskRow } from "./db-tasks.js";
 import {
@@ -218,6 +220,15 @@ export class TaskRunner {
         400,
       );
     }
+    if (channel.adapterType === SEEDREAM_ADAPTER) {
+      if ((input.count ?? 1) !== 1) throw new AppError("IMAGE_BATCH_REQUIRED", "豆包生图每次请求只生成一张，请使用单图拆单批量入口", 400);
+      try { input.size = seedreamSize({ ...input, aspectRatio: normalizeAspectFields(channel.adapterType, input).aspectRatio }); }
+      catch (error) { throw new AppError("INVALID_IMAGE_SIZE", error instanceof Error ? error.message : "豆包生图尺寸无效", 400); }
+      input.aspectRatio = undefined;
+      input.ratio = undefined;
+      input.imageSize = undefined;
+      input.watermark ??= SEEDREAM_DEFAULT_WATERMARK;
+    }
     // 补默认值要早于落库：落进 tasks.input 的那份才是重试 / 崩溃恢复会重放的
     input.imageSize = resolveImageSize(channel.adapterType, input.imageSize, this.db.getSetting("geminiImageSize"));
     const id = crypto.randomUUID();
@@ -281,7 +292,9 @@ export class TaskRunner {
       }
       const prepared = buildGenerationRequest(channel, input, key);
       const effectiveBody = requestForDiagnostic(prepared).body ?? {};
-      this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1 });
+      this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1,
+        ...(channel.adapterType === SEEDREAM_ADAPTER ? { remoteMeta: "{}" } : {}),
+      });
       phase = "upstream";
       const result = await this.sendWithDiagnostic(taskId, prepared, isImageAdapter(channel.adapterType)).catch(error => {
         const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url") || input.minimaxVideoMedia?.some(item => item.type === "video"));
@@ -319,6 +332,10 @@ export class TaskRunner {
       }
       phase = "result";
       phaseStartedAt = Date.now();
+      if (channel.adapterType === SEEDREAM_ADAPTER) {
+        const references = input.referenceImages?.length ?? (input.referenceImage ? 1 : 0);
+        this.updateTask(taskId, { remoteMeta: JSON.stringify({ seedream: seedreamResultMeta(result.payload, references) }) });
+      }
       await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt);
       this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
     } catch (error) {
@@ -796,7 +813,9 @@ export function normalizeError(error: unknown) {
 }
 
 function normalizeSubmissionError(error: unknown, receivedHeaders: boolean) {
-  if (error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name)) {
+  const causeCode = requestCauseCode(error);
+  if ((error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name))
+    || causeCode === "UND_ERR_HEADERS_TIMEOUT" || causeCode === "UND_ERR_BODY_TIMEOUT") {
     return new AppError("REQUEST_TIMEOUT", receivedHeaders ? "已收到上游 HTTP 响应头，读取响应内容超时"
       : "本地等待超时，未收到上游 HTTP 响应。上游可能仍在处理，请先核对渠道记录", 504);
   }
@@ -807,9 +826,13 @@ function normalizeSubmissionError(error: unknown, receivedHeaders: boolean) {
   return normalizeError(error);
 }
 
-function diagnosticError(error: AppError, original: unknown): NonNullable<RequestDiagnosticTrace["error"]> {
+function requestCauseCode(original: unknown) {
   const cause = original instanceof Error && original.cause && typeof original.cause === "object" && "code" in original.cause
     ? original.cause.code : undefined;
-  const causeCode = typeof cause === "string" && /^[A-Z][A-Z0-9_]{1,60}$/.test(cause) ? cause : undefined;
+  return typeof cause === "string" && /^[A-Z][A-Z0-9_]{1,60}$/.test(cause) ? cause : undefined;
+}
+
+function diagnosticError(error: AppError, original: unknown): NonNullable<RequestDiagnosticTrace["error"]> {
+  const causeCode = requestCauseCode(original);
   return { code: error.code, message: error.message, ...(causeCode ? { causeCode } : {}) };
 }

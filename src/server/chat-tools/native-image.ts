@@ -148,7 +148,9 @@ export function prepareNativeImage(db: AppDatabase, conversation: Conversation, 
   if (referenceError) return { error: referenceError } as const;
   const prompt = conversation.verbatimPrompt ? db.lastUserText(conversation.id) ?? args.prompt : args.prompt;
   const { size, aspectRatio, imageSize, ...rest } = args;
-  const dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, { size, aspectRatio, imageSize });
+  let dimensions;
+  try { dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, { size, aspectRatio, imageSize }); }
+  catch (error) { return { error: error instanceof Error ? error.message : "图片尺寸无效" } as const; }
   const sizeLabel = [dimensions.size, dimensions.aspectRatio, dimensions.imageSize].filter(Boolean).join(" / ");
   const references = editing
     ? `底图：${assetRef(imageRefs[0]!)}。${extraReferences.length ? ` 额外参考图：${extraReferences.map(assetRef).join("、")}。` : ""}`

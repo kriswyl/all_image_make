@@ -1,3 +1,5 @@
+import { seedreamModelLabel } from "./seedream.js";
+
 function loose(value: string) {
   return value.toLowerCase().replace(/[\s\-_.]/g, "");
 }
@@ -10,5 +12,9 @@ export function matchModelAlias<T extends { alias: string; model: string }>(cand
   return candidates.find((item) => item.alias === normalized)
     ?? candidates.find((item) => loose(item.alias) === looseHint)
     ?? candidates.find((item) => item.alias.replace(/-\d+$/, "") === normalized.replace(/-\d+$/, ""))
+    ?? (/豆包|seedream/i.test(normalized) ? candidates.find((item) => {
+      const label = seedreamModelLabel(item.model);
+      return label && loose(label).includes(looseHint);
+    }) : undefined)
     ?? candidates.find((item) => loose(item.alias).includes(looseHint) || loose(item.model).includes(looseHint));
 }

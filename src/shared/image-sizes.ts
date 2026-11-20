@@ -14,6 +14,7 @@ export const OPENAI_SIZE_GROUPS = [
 export const OPENAI_SIZE_PRESETS: readonly string[] = OPENAI_SIZE_GROUPS.flatMap((group) => [...group.sizes]);
 import { CHANNEL_FIELD_SUPPORT, isGptImage2Model } from "./channel-fields.js";
 import type { AdapterType } from "./types.js";
+import { SEEDREAM_ADAPTER, seedreamSize } from "./seedream.js";
 
 
 const GPT_IMAGE_RATIOS = new Set(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21"]);
@@ -26,6 +27,7 @@ interface ImageDimensions {
 
 /** Convert the Agent's generic image fields once the target model is resolved. */
 export function normalizeAgentImageDimensions(adapter: AdapterType, model: string, dimensions: ImageDimensions): ImageDimensions {
+  if (adapter === SEEDREAM_ADAPTER) return { size: seedreamSize(dimensions) };
   if (!CHANNEL_FIELD_SUPPORT[adapter]?.size || !isGptImage2Model(model) || dimensions.size
     || (!dimensions.aspectRatio && !dimensions.imageSize)) return dimensions;
   const ratio = dimensions.aspectRatio?.replace(/\s/g, "") || "1:1";

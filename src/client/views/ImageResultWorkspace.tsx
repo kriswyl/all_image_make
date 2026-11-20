@@ -180,6 +180,7 @@ export function ImageResultWorkspace({ task, tasks, references, onDiagnostics, o
         <div className="image-result-heading">
           {task ? <><StatusBadge status={task.status} /><span title={`${task.channelName} · ${formatTime(task.createdAt)}`}>{task.model}</span></> : null}
         </div>
+        {task?.remoteMeta?.seedream?.warning ? <div className="image-result-warning" role="status">{task.remoteMeta.seedream.warning}</div> : null}
         {task && activeAsset ? (
           <ImageActionMenu key={activeAsset.id} className="result-stage image-result-stage has-image" shortcuts={[
             { label: "下载", tooltip: "下载原图", icon: Download, disabled: downloading, onSelect: () => void download(activeAsset) },

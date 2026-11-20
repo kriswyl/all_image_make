@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { usesPlainChat, type ChatToolScope, type ConversationView } from "../../shared/agent-types";
+import { ChatWebSettings } from "./ChatWebSettings";
 
 /** 保留原始聊天记录；这里只查看发送给模型的历史摘要。 */
 export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChange, onChatLimitsChange, onBoardLimitsChange, onToolScopeChange, onVisionChange, onCompress, compressing, disabled }: {
@@ -20,6 +21,7 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const [open, setOpen] = useState(false);
+  const [webSettingsOpen, setWebSettingsOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(view.contextBudget ?? 350000));
   const [continuationValue, setContinuationValue] = useState(String(view.chatAutoContinueLimit ?? 20));
@@ -98,6 +100,11 @@ export function ContextSummaryControl({ view, onBudgetChange, onAutoContinueChan
           <span>允许助手看图</span>
           <input type="checkbox" checked={view.visionEnabled} disabled={disabled} onChange={event => onVisionChange(event.target.checked)} />
         </label> : null}
+        {onToolScopeChange && view.toolScope === "all" ? <div className="chat-web-settings-entry">
+          <button type="button" className="secondary-button compact" aria-expanded={webSettingsOpen}
+            onClick={() => setWebSettingsOpen(value => !value)}>联网服务</button>
+          {webSettingsOpen ? <ChatWebSettings disabled={disabled} /> : null}
+        </div> : null}
         <p>保留原始记录和最近对话；较早内容可能被概括。预算为估算输入 token，不包含模型输出。</p>
         <label>输入预算
           <input type="number" min={4000} max={2000000} step={1000}

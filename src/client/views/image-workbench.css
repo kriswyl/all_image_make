@@ -107,6 +107,12 @@
   background: var(--surface);
   overflow: visible;
 }
+.image-result-warning {
+  padding: 5px 9px;
+  border-radius: 8px;
+  color: var(--warning);
+  font-size: 12px;
+}
 
 .image-preview-trigger {
   position: absolute;

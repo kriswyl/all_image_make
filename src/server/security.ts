@@ -2,6 +2,7 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { Dispatcher1Wrapper, getGlobalDispatcher } from "undici";
 
 export function loadEnvFiles() {
   const files = [path.resolve(".env"), path.resolve("..", ".env")];
@@ -50,11 +51,24 @@ export function joinEndpoint(baseUrl: string, endpoint: string) {
   return `${base}${pathPart}`;
 }
 
-export async function safeFetch(input: string, init: RequestInit, options: { allowPrivateNetwork?: boolean; maxRedirects?: number } = {}) {
+export async function safeFetch(input: string, init: RequestInit, options: {
+  allowPrivateNetwork?: boolean;
+  maxRedirects?: number;
+  timeoutMs?: number;
+} = {}) {
+  const deadline = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs);
+  const signal = init.signal && deadline ? AbortSignal.any([init.signal, deadline]) : init.signal ?? deadline;
+  // 复用当前连接池，由同一个 AbortSignal 约束整次请求，避免 Undici 默认超时提前截断。
+  const dispatcher = deadline && new Dispatcher1Wrapper(getGlobalDispatcher().compose(
+    dispatch => (options, handler) => dispatch({ ...options, headersTimeout: 0, bodyTimeout: 0 }, handler),
+  ));
   let current = input;
   for (let attempt = 0; attempt <= (options.maxRedirects ?? 3); attempt += 1) {
     await assertSafeUrl(current, options.allowPrivateNetwork);
-    const response = await fetch(current, { ...init, redirect: "manual", signal: init.signal ?? AbortSignal.timeout(180000) });
+    const request: RequestInit & { dispatcher?: Dispatcher1Wrapper } = {
+      ...init, redirect: "manual", signal: signal ?? AbortSignal.timeout(180000), ...(dispatcher ? { dispatcher } : {}),
+    };
+    const response = await fetch(current, request);
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
     const location = response.headers.get("location");
     if (!location) return response;

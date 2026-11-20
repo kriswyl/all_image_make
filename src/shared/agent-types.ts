@@ -70,6 +70,8 @@ export const AGENT_TOOL_NAMES = [
   "edit_image",
   "view_images",
   "media_review",
+  "web_search",
+  "read_web_page",
   "set_canvas",
   "optimize_prompt",
   "generate_video",
@@ -115,6 +117,8 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   edit_image: "修改图片",
   view_images: "查看图片",
   media_review: "视频概述",
+  web_search: "搜索网页",
+  read_web_page: "读取网页",
   set_canvas: "切换画布",
   optimize_prompt: "优化提示词",
   generate_video: "生成视频",
@@ -581,6 +585,7 @@ export interface Conversation {
   videoConfirmPolicy: VideoConfirmPolicy;
   /** §11.7 看图改开关，关掉就完全退化成盲改 */
   visionEnabled: boolean;
+  webEnabled?: boolean;
   /**
    * 原话直发：大脑必须**逐字**使用用户那句话当提示词，不许增删改写。
    *
@@ -733,6 +738,7 @@ export interface ConversationInput {
 }
 
 export interface ConversationPatch {
+  webEnabled?: boolean;
   contextBudget?: number;
   chatAutoContinueLimit?: number;
   chatToolRoundLimit?: number;

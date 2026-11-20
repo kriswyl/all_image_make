@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isChatWebTool } from "../shared/chat-web.js";
 import { usesNativeCreativeTools, type AgentStreamEvent, type ChatMessage, type Conversation, type ToolResult } from "../shared/agent-types.js";
 import { isVisionError } from "./agent-brain-errors.js";
 import type { BrainRunner } from "./agent-brain.js";
@@ -13,14 +14,17 @@ import { initialToolGroups } from "./chat-tools/capability-search.js";
 import type { VideoOverviewFrames } from "../shared/media-review.js";
 import { parseNativeTurnCheckpoint, type NativeTurnCheckpoint } from "./chat-tools/checkpoint.js";
 import { compactNativeToolReads } from "./chat-tools/context.js";
+import { webToolInstructions } from "./chat-tools/web.js";
 import { nativeImageSpecs, nativeImageViewSpec, requestsDirectSingleImage, type NativeMediaConfirmation } from "./chat-tools/native-image.js";
 import type { ChatTool, ChatToolResult, PreparedToolConfirmation } from "./chat-tools/registry.js";
 import type { AppDatabase } from "./db.js";
+import type { KeyStore } from "./key-store.js";
 import type { PresentationCoordinator } from "./presentation-coordinator.js";
 import { protocolErrorFeature, readToolProtocol } from "./tool-protocol.js";
 
 interface NativeTurnHost {
   db: AppDatabase;
+  sessionKeys: KeyStore;
   brain: Pick<BrainRunner, "buildBrainMessages" | "callBrainRaw" | "degradeVision">;
   presentations: Pick<PresentationCoordinator, "registerDocumentTools" | "scheduleChecks">;
   confirmations: Pick<AgentConfirmationService, "approve">;
@@ -74,12 +78,14 @@ export async function runNativeTurn(
   const attachmentMessage = recoveredUser ?? userMessage;
   const turnVideoIds = attachmentMessage ? collectTurnAssetIds(db, conversationId, attachmentMessage.seq, { preferDeclared: true })
     .filter(id => db.getAsset(id)?.mimeType.startsWith("video/")) : [];
+  const priorWebCalls = checkpoint?.messages.reduce((count, message) => count + (message.role === "assistant"
+    ? message.tool_calls?.filter(call => isChatWebTool(call.function.name)).length ?? 0 : 0), 0) ?? 0;
   const registry = createNativeToolRegistry({
-    db, presentations, defaultAliases: host.defaultAliases,
+    db, sessionKeys: host.sessionKeys, presentations, defaultAliases: host.defaultAliases,
     toolContext: () => host.toolContext(turnConversation, controller),
   }, {
     conversationId, turnConversation, text, userMessage, recoveredUser, resume,
-    signal: controller.signal, callWithBudget, nativeCreative, turnAttachmentIds, turnVideoFrames, turnVideoIds,
+    signal: controller.signal, callWithBudget, nativeCreative, priorWebCalls, turnAttachmentIds, turnVideoFrames, turnVideoIds,
     readVideoOverviewFrames: host.readVideoOverviewFrames,
     canReviewWithModel: () => budget.brainCalls + 1 < budget.maxBrainCalls
       && budget.elapsedMs < (turnConversation.chatTurnMinutes ?? 30) * 60_000
@@ -95,6 +101,7 @@ export async function runNativeTurn(
     hasImages: db.canvasImages(turnConversation).length > 0
       || db.listConversationAssets(conversationId).some(entry => entry.asset.mimeType.startsWith("image/")),
   });
+  if (registry.get("web_search")) initialGroups.add("web");
   // 旧断点没有 activeTools：当时还没有能力组，恢复成全量工具，保持原签名可继续。
   const restoredSpecs = checkpoint
     ? (checkpoint.activeTools
@@ -118,6 +125,8 @@ export async function runNativeTurn(
   if (checkpoint && (checkpoint.channelId !== turnConversation.brainChannelId || !channelVersion || checkpoint.channelVersion !== channelVersion || checkpoint.model !== turnConversation.brainModel || ![toolSignature, previousToolSignature, legacyToolSignature].includes(checkpoint.toolSignature))) throw new Error("模型、渠道配置或可用工具已改变，无法安全自动恢复；请检查已完成的操作后继续。");
   const lastPlan = db.listMessages(conversationId).filter((message) => message.role === "tool" && message.toolName === "plan_update" && message.status === "ok").at(-1);
   const context: BrainMessage[] = [{ role: "system", content: `复杂任务应分步规划、使用工具并检查结果；仅在实际完成后声称完成。${lastPlan?.content ? `\n本会话最近的任务计划（可能属于之前的任务，仅在相关时参考）：\n${lastPlan.content}` : ""}` }];
+  context.push({ role: "system", content: toolSpecs.some(spec => isChatWebTool(spec.function.name)) ? webToolInstructions
+    : "本轮没有网页搜索和读取网页工具。不可声称已联网或已打开链接；需要联网时，说明可在支持工具调用的对话中开启联网。" });
   let plainMessages = checkpoint?.messages ?? [...context, ...built.messages];
   if (toolsRejected && turnConversation.toolScope !== "conversation") plainMessages.push({ role: "system", content: "此渠道配置和模型已明确拒绝原生工具，本轮仅文字回答，不能声称创建文件或提交生成任务。用户可在模型设置重新测试工具能力。" });
   const previousCalls = new Map<string, ChatToolResult>(checkpoint?.previousCalls ?? []);
@@ -167,7 +176,9 @@ export async function runNativeTurn(
       if (current?.brainChannelId === turnConversation.brainChannelId && current.brainModel === turnConversation.brainModel) {
         db.updateConversation(conversationId, { toolsUnsupported: true });
       }
-      plainMessages = [...context, ...built.messages, { role: "system", content: "本轮工具不可用。只能回答文字，不能声称创建或修改了文件。" }];
+      toolSpecs = [];
+      toolSignature = toolSignatureOf(toolSpecs);
+      plainMessages = [context[0]!, ...built.messages, { role: "system", content: "本轮工具不可用。只能回答文字，不能声称已联网、已打开链接或已创建或修改文件。" }];
       result = await callWithBudget(plainMessages, { plain: true });
     } else {
       if (!built.visionAttached || !isVisionError(error)) throw error;
@@ -266,6 +277,7 @@ export async function runNativeTurn(
             else if (typeof value === "number" && Number.isFinite(value)) visibleArgs[key] = value;
           }
           if (call.name === "plan_update" && Array.isArray(values.steps)) visibleArgs.steps = values.steps.length;
+          if (tool && isChatWebTool(call.name) && typeof values.query === "string") visibleArgs.query = values.query.slice(0, 200);
         }
       } catch { /* Invalid arguments are reported by the tool. */ }
       const pending = db.startNativeToolCall(conversationId, toolName, visibleArgs, call.id, call.name, createHash("sha256").update(call.arguments).digest("hex"));

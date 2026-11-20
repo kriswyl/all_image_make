@@ -2925,6 +2925,23 @@ html.tauri-window.is-maximized .ink-onboarding {
 .board-agent-panel .context-summary-panel { width: 260px; max-height: 210px; overflow: auto; right: -42px; }
 
 .context-summary-panel > small { display: block; margin-top: 8px; color: var(--muted); line-height: 1.5; }
+.chat-view .context-summary-panel { max-height: min(580px, 72vh); overflow: auto; }
+.chat-web-settings-entry { margin: 10px 0; }
+.chat-web-settings fieldset { min-width: 0; margin: 8px 0 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.chat-web-settings label:not(.chat-web-key) { justify-content: space-between; }
+.chat-web-settings select { width: auto; height: 29px; font-size: 12px; }
+.chat-web-settings .chat-web-key { align-items: stretch; flex-direction: column; }
+.chat-web-settings .chat-web-key input { width: 100%; }
+.chat-web-settings small { color: var(--muted); }
+.chat-web-settings-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.tool-card-web { display: grid; gap: 6px; font-size: 12px; }
+.tool-card-web-service, .tool-card-web-attempts, .tool-card-web-sources small { color: var(--muted); }
+.tool-card-web-attempts, .tool-card-web-sources { margin: 0; padding-inline-start: 18px; }
+.tool-card-web-sources li { padding-block: 6px; overflow-wrap: anywhere; }
+.tool-card-web-sources a { display: inline-flex; align-items: center; gap: 5px; color: var(--ink); text-decoration: underline; }
+.tool-card-web-sources a svg { flex-shrink: 0; }
+.tool-card-web-sources small { display: block; }
+.tool-card-web-sources p { margin: 3px 0 0; }
 .context-compress-button { width: 100%; justify-content: center; }
 
 .context-compress-progress { color: var(--ink); white-space: nowrap; }

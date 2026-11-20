@@ -13,7 +13,7 @@
  */
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import {
-  Brain, Film, Images, ListTree, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Film, Globe, Images, ListTree, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -108,6 +108,7 @@ export function ChatView({
   const attachmentLimit = conversationImageAttachmentLimit(view);
   const unified = view?.toolScope != null;
   const [changingScope, setChangingScope] = useState(false);
+  const [changingWeb, setChangingWeb] = useState(false);
   // 发送时要在同一次事件里读到「刚上传 / 刚并入」的画布，不等 React 下一次渲染
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -488,6 +489,13 @@ export function ChatView({
       if (!unified) setChatAssetIds([]);
       if (scope !== "all") setChatVideoFrames(null);
     } finally { setChangingScope(false); }
+  }
+
+  async function toggleWeb() {
+    if (!view || changingWeb) return;
+    setChangingWeb(true);
+    try { await patch({ webEnabled: !view.webEnabled }); }
+    finally { setChangingWeb(false); }
   }
 
   /**
@@ -1169,7 +1177,7 @@ export function ChatView({
 
             <Composer
               running={running || compressing}
-              uploading={uploading || changingScope}
+              uploading={uploading || changingScope || changingWeb}
               imageVisionWarning={!view.visionEnabled ? "本会话已关闭看图，可在「对话设置」开启。"
                 : view.visionBlocked ? "当前模型不接受图片输入，可切换到支持看图的模型。" : undefined}
               placeholder={plainChat ? "聊聊你的想法，或提出问题…" : canvasImages.length
@@ -1180,6 +1188,11 @@ export function ChatView({
               leftSlot={(
                 <>
                   {view.toolScope === "conversation" ? <span className="chat-control">工具已关闭</span> : null}
+                  {view.toolScope === "all" && !view.toolsUnsupported ? <button type="button"
+                    className={`chat-control chat-toggle${view.webEnabled ? " is-on" : ""}`}
+                    aria-pressed={Boolean(view.webEnabled)} disabled={running || uploading || compressing || changingScope || changingWeb}
+                    title={view.webEnabled ? "已开启搜索和读取公开网页，点击关闭" : "开启搜索和读取公开网页"}
+                    onClick={() => void toggleWeb()}><Globe size={13} />联网</button> : null}
                   {!plainChat ? <>
                   {/*
                     「原话直发」：平时大脑会把口语扩写成完整画面（默认就该这样，效果更好），

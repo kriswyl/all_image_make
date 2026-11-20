@@ -4,6 +4,7 @@ export type ToastKind = "success" | "error";
 
 export const adapterLabels: Record<AdapterType, string> = {
   "openai-images": "OpenAI Images",
+  "seedream-image": "豆包 Seedream 生图",
   "openai-chat-image": "OpenAI Chat Image",
   "gemini-content": "Gemini Content",
   midjourney: "Midjourney",

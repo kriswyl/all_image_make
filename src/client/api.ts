@@ -1,6 +1,6 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
+import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageBatchResult, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
 import type {
   AgentStreamEvent, ChatVideoFrames, ConversationInput, ConversationPatch, ConversationSummary, ConversationView,
 } from "../shared/agent-types";
@@ -12,12 +12,22 @@ import type { StoryboardMediaRole, StoryboardPreviewBoard, StoryboardProduction,
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 import type { PresentationVersionReport } from "../shared/presentation-report";
 import type { VideoOverviewFrames } from "../shared/media-review";
+import type { ChatWebSettings, ChatWebSettingsPatch } from "../shared/chat-web";
 import { withReferenceMediaType } from "./media-files";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
     ? "http://127.0.0.1:17892"
     : "");
+
+function imageGenerationBody(input: GenerationInput, references: File[], mask?: File | null) {
+  if (!references.length && !mask) return JSON.stringify(input);
+  const body = new FormData();
+  body.append("payload", JSON.stringify({ ...input, referenceImages: undefined, referenceImage: undefined, maskImage: undefined }));
+  references.forEach(file => body.append("referenceImages", file, file.name));
+  if (mask) body.append("mask", mask, mask.name);
+  return body;
+}
 
 function apiUrl(url: string) {
   return `${apiBase}${url}`;
@@ -138,14 +148,10 @@ export const api = {
    * 服务端会明确拒绝「只有蒙版没有底图」，但不该在这之前把蒙版悄悄丢掉。
    */
   generate: (input: GenerationInput, referenceFiles: File[] = [], maskFile?: File | null) => {
-    if (!referenceFiles.length && !maskFile) return request<Task>("/api/generations", { method: "POST", body: JSON.stringify(input) });
-    const formData = new FormData();
-    const payload = { ...input, referenceImages: undefined, referenceImage: undefined, maskImage: undefined };
-    formData.append("payload", JSON.stringify(payload));
-    referenceFiles.forEach((file) => formData.append("referenceImages", file, file.name));
-    if (maskFile) formData.append("mask", maskFile, maskFile.name);
-    return request<Task>("/api/generations", { method: "POST", body: formData });
+    return request<Task>("/api/generations", { method: "POST", body: imageGenerationBody(input, referenceFiles, maskFile) });
   },
+  generateImageBatch: (input: GenerationInput, referenceFiles: File[] = []) =>
+    request<ImageBatchResult>("/api/generations/image-batch", { method: "POST", body: imageGenerationBody(input, referenceFiles) }),
   task: (id: string) => request<Task>(`/api/generations/${id}`),
   tasks: () => request<Task[]>("/api/generations"),
   library: () => request<Task[]>("/api/library"),
@@ -186,6 +192,8 @@ export const api = {
   cleanStaleTasks: () => request<{ deleted: number; kept: number }>("/api/generations/stale", { method: "DELETE" }),
   diagnostics: (id: string) => request<Diagnostic[]>(`/api/generations/${id}/diagnostics`),
   settings: () => request<Settings>("/api/settings"),
+  chatWebSettings: () => request<ChatWebSettings>("/api/settings/web"),
+  updateChatWebSettings: (settings: ChatWebSettingsPatch) => request<ChatWebSettings>("/api/settings/web", { method: "PATCH", body: JSON.stringify(settings) }),
   /** assetsDir 传空串表示恢复默认目录；默认模型 alias 传空串表示「不指定，用类目第一个」 */
   updateSettings: (input: {
     assetsDir?: string;

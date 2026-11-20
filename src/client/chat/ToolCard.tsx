@@ -15,6 +15,8 @@ import { PresentationFileReport } from "./PresentationFileReport";
 import { WorkflowProgress } from "./WorkflowProgress";
 import { MediaReviewCard, VideoOverviewCard } from "./MediaReviewCard";
 import { mediaReviewSchema, videoOverviewSchema } from "../../shared/media-review";
+import { chatWebToolResultSchema, isChatWebTool } from "../../shared/chat-web";
+import { WebSources } from "./WebSources";
 import { presentationReportSchema } from "../../shared/presentation-report";
 import { confirmGeneration } from "../generation-confirm";
 import { ASSET_DRAG_TYPE } from "../useFileDrop";
@@ -43,6 +45,8 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   edit_image: Sparkles,
   view_images: Eye,
   media_review: Film,
+  web_search: Search,
+  read_web_page: FileText,
   set_canvas: Layers,
   optimize_prompt: Wand2,
   generate_video: Film,
@@ -157,8 +161,9 @@ export function ToolCard({
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [mjBusy, setMjBusy] = useState(false);
   const tool = message.toolName ?? "reply";
+  const webTool = isChatWebTool(tool);
   const Icon = TOOL_ICONS[tool] ?? Sparkles;
-  const payload = result?.toolResult ?? (tool === "media_review" ? message.toolResult : null);
+  const payload = result?.toolResult ?? (tool === "media_review" || webTool ? message.toolResult : null);
   const [resumingQuery, setResumingQuery] = useState(false);
   const pausedTaskId = payload?.error === "VIDEO_TIMEOUT" ? result?.taskId : null;
   const querying = resumingQuery || Boolean(pausedTaskId && progress?.status === "running");
@@ -183,11 +188,12 @@ export function ToolCard({
   const presentation = presentationReportSchema.safeParse(payload?.data?.presentation).data;
   const mediaReview = tool === "media_review" ? mediaReviewSchema.safeParse(payload?.data?.mediaReview).data : undefined;
   const videoOverview = tool === "media_review" ? videoOverviewSchema.safeParse(payload?.data?.videoOverview).data : undefined;
+  const webEvidence = webTool ? chatWebToolResultSchema.safeParse(payload?.data?.web).data : undefined;
   const failed = !paused && ((result && result.status === "error") || payload?.ok === false);
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
-  const nativeTool = ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update", "media_review"].includes(tool);
+  const nativeTool = webTool || ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update", "media_review"].includes(tool);
   const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数", page: "页码" };
   const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;
@@ -278,6 +284,7 @@ export function ToolCard({
    * 压成单行——胶囊是一行高的东西，多行会把「他说了什么」挤没。
    */
   const pillArg = (prompt
+    ?? (webTool && typeof args.query === "string" ? args.query : null)
     ?? (typeof args.assetId === "string" ? assetRef(args.assetId) : null)
     // 无限画布工具的 result.content 就是整段总结，放进胶囊会和下面正文重复两遍
     ?? (tool.startsWith("board_") ? "" : result?.content)
@@ -345,6 +352,7 @@ export function ToolCard({
 
         {open ? (
           <div className="tool-card-body">
+            {webEvidence ? <WebSources evidence={webEvidence} failed={Boolean(failed)} onError={() => onToast?.("error", "无法打开来源链接")} /> : null}
             {prompt ? <div className="tool-card-prompt">{prompt}</div> : null}
             {nativeArgs.length ? <dl className="tool-card-detail">{nativeArgs.map(([key, value]) => <div key={key}><dt>{nativeArgLabels[key]}</dt><dd>{String(value)}</dd></div>)}</dl> : null}
             {detail.length ? (

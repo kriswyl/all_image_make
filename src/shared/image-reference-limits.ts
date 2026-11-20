@@ -1,6 +1,9 @@
+import { SEEDREAM_ADAPTER, SEEDREAM_MODELS, SEEDREAM_REFERENCE_LIMIT } from "./seedream.js";
+
 export const DEFAULT_IMAGE_REFERENCE_LIMIT = 8;
 
 const imageReferenceFamilies = [
+  { adapter: SEEDREAM_ADAPTER, max: SEEDREAM_REFERENCE_LIMIT, models: [...SEEDREAM_MODELS, "doubao-seedream-5-5-261028"] },
   { adapter: "openai-images", max: 16, models: [
     "gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare",
     "gpt-image-2.6-sunburst", "gpt-image-2.6-flare",

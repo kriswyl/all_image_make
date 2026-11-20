@@ -1,6 +1,7 @@
 import type { AdapterType, AuthType, Channel, ChannelInput } from "./types.js";
 import { defaultEndpointFor } from "./adapter-endpoints.js";
 import { SUNO_DAMOBI_MODEL } from "./suno.js";
+import { SEEDREAM_ADAPTER, SEEDREAM_MODELS } from "./seedream.js";
 
 /**
  * 服务商预设：一个站点下若干「渠道单元」。
@@ -149,6 +150,22 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         models: GEMINI_MODELS,
       },
     ],
+  },
+  {
+    id: "tiantoken-seedream",
+    label: "词元流墟-豆包生图",
+    baseUrl: "https://api.tiantoken.com",
+    logo: "/logo-tiantoken.svg",
+    units: [{
+      id: "seedream",
+      label: "豆包 Seedream 生图",
+      description: "Seedream 5.5 / 5.0 Pro，支持多参考图",
+      adapterType: SEEDREAM_ADAPTER,
+      authType: "bearer",
+      channelName: "{provider}",
+      secretEnv: "TIANTOKEN_SEEDREAM_API_KEY",
+      models: [...SEEDREAM_MODELS],
+    }],
   },
   {
     id: "tiantoken-midjourney",

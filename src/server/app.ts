@@ -11,6 +11,7 @@ import { APP_VERSION } from "../shared/app-config.js";
 import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
 import { AppDatabase } from "./db.js";
 import { KeyStore } from "./key-store.js";
+import { TAVILY_KEY_ID } from "./web-settings.js";
 import { TaskRunner, normalizeError } from "./tasks.js";
 import { AgentService } from "./agent.js";
 import { publicChannel } from "./routes/channel-config.js";
@@ -74,7 +75,7 @@ export function createApp(options: { dataDir?: string } = {}) {
   const db = new AppDatabase(options.dataDir);
   const wpsPreviews = getWpsPreviewJobs(db);
   const sessionKeys = new KeyStore(db.dataDir);
-  sessionKeys.retainOnly(db.listChannels().map((channel) => channel.id));
+  sessionKeys.retainOnly([TAVILY_KEY_ID, ...db.listChannels().map((channel) => channel.id)]);
   const runner = new TaskRunner(db, sessionKeys);
   const agent = new AgentService(db, runner, sessionKeys);
   const context: AppContext = { db, sessionKeys, runner, agent };

@@ -25,6 +25,7 @@ describe("model catalog", () => {
       "tiantoken-gpt:gpt",
       "tiantoken-gpt-c:gpt-c",
       "tiantoken-gemini:gemini",
+      "tiantoken-seedream:seedream",
       "tiantoken-midjourney:midjourney",
       "tiantoken-wan-video:wan-video",
       "tiantoken-grok-video:grok-video",
@@ -36,7 +37,8 @@ describe("model catalog", () => {
       "tiantoken-chat:chat",
     ]);
     expect(MODEL_GROUPS.every((group) => !group.key.startsWith("vectorengine"))).toBe(true);
-    expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(4);
+    // 生图：gpt、gpt-c、gemini、豆包 Seedream、midjourney
+    expect(MODEL_GROUPS.filter((group) => group.kind === "image")).toHaveLength(5);
     expect(MODEL_GROUPS.filter((group) => group.kind === "video")).toHaveLength(5);
     // 音乐和语音不再合并在「音频」里：Suno 一节、Gemini TTS 一节
     expect(MODEL_GROUPS.filter((group) => group.kind === "music")).toHaveLength(1);

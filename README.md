@@ -8,7 +8,7 @@
 
 ChatCanvas 是一个集成 **AI 助手、文档处理和无限画布** 的本地桌面客户端。使用自己配置的对话和生成渠道，在同一会话里制作 PPT、编辑表格，或生成图片、视频、音乐和配音。任务记录和生成文件保存在本机。
 
-各版本改动见 [更新日志](CHANGELOG.md)，代码结构见 [项目框架](docs/architecture.md)，构建和发布步骤见 [打包文档](PACKAGING.md)。
+各版本改动见 [更新日志](CHANGELOG.md)，代码结构见 [项目框架](docs/architecture.md)，构建和发布步骤见 [打包文档](PACKAGING.md)。模型调用上游的接口 / 请求头 / 请求体格式见 [模型请求接口参考（按适配器）](docs/model-api-reference.md) 和 [按模型名速查](docs/model-api-by-model.md)。
 
 > 品牌名是 **ChatCanvas / 语布**，`productName` 从 2.2.1 起也改成了 `ChatCanvas`。数据目录由 bundle identifier（`com.imagerelay.studio`）决定，改名不受影响；2.2.0 及更早的安装叫 `ezcanvas`，升级到 2.2.1 后会有一次新旧两套安装并存，手动卸载旧的 `ezcanvas` 即可。
 

@@ -9,6 +9,7 @@ import { frameParameters, gifBudgetMessage } from "../shared/image-formats.js";
 import { validateSeedanceMedia } from "../shared/seedance-capabilities.js";
 import { TTS_DEFAULT_VOICE, splitTtsDialogue } from "../shared/tts.js";
 import { defaultEndpointFor } from "../shared/adapter-endpoints.js";
+import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_WATERMARK, seedreamSize } from "../shared/seedream.js";
 import { isSunoV6Version, SUNO_DAMOBI_MODEL, SUNO_TARGET_DURATIONS, SUNO_V6_DEFAULT } from "../shared/suno.js";
 import { assertEndpoint, joinEndpoint, redactHeaders, safeFetch } from "./security.js";
 
@@ -260,7 +261,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     input = { ...input, aspectRatio: aspect.aspectRatio, ratio: aspect.ratio };
   }
   const references = referenceImages(input);
-  if (input.outputFormat === "gif") {
+  if (input.outputFormat === "gif" && channel.adapterType !== SEEDREAM_ADAPTER) {
     // 不再按模型名硬拦截：中转站的自定义 gpt-image-2.x ID 也应能发 GIF；
     // 是否支持由上游决定。这里只挡「一定会失败」的 sprite sheet 尺寸组合，避免白花钱。
     const budget = gifBudgetMessage(input.size, input.frameCount ?? 9);
@@ -273,6 +274,9 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     if (problem) throw new Error(problem);
   }
   let endpoint = channel.endpoint || defaultEndpoint(channel.adapterType);
+  if (channel.adapterType === SEEDREAM_ADAPTER && /\/edits\/?$/i.test(endpoint)) {
+    throw new Error("豆包 Seedream 请配置 images/generations，edits 端点会忽略参考图");
+  }
   if (references.length && channel.adapterType === "openai-images"
     && (!channel.endpoint || channel.endpoint === defaultEndpoint(channel.adapterType))) {
     endpoint = "/v1/images/edits";
@@ -596,6 +600,12 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
         ...(Object.keys(metadata).length ? { metadata } : {}),
       };
     }
+  } else if (channel.adapterType === SEEDREAM_ADAPTER) {
+    body = compact({
+      model: input.model, prompt: input.prompt, size: seedreamSize(input),
+      watermark: input.watermark ?? SEEDREAM_DEFAULT_WATERMARK, response_format: input.responseFormat ?? "url",
+      image: references.length === 1 ? imageDataUrl(references[0]!) : references.length ? references.map(imageDataUrl) : undefined,
+    });
   } else if (channel.adapterType === "openai-images" && references.length) {
     /**
      * 显式蒙版优先于 `rawParameters.mask`。
@@ -773,7 +783,7 @@ export function buildGenerationRequest(channel: DbChannel, input: GenerationInpu
     background: input.background,
     outputFormat: input.outputFormat,
     moderation: input.moderation,
-    count: input.count,
+    count: channel.adapterType === SEEDREAM_ADAPTER ? undefined : input.count,
   });
   if (input.negativePrompt && !modelSupportsNegativePrompt(input.model) && !ignoredFields.includes("负面提示词")) ignoredFields.push("负面提示词");
   return {
@@ -795,7 +805,7 @@ export function normalizeTimeout(timeoutMs: number | undefined, fallback = DEFAU
 
 
 export function buildConnectionTestRequest(channel: DbChannel, key: string): PreparedRequest {
-  const endpoint = channel.adapterType === "gemini-content" ? "/v1beta/models" : channel.adapterType.startsWith("openai-") ? "/v1/models" : "/";
+  const endpoint = channel.adapterType === "gemini-content" ? "/v1beta/models" : channel.adapterType.startsWith("openai-") || channel.adapterType === SEEDREAM_ADAPTER ? "/v1/models" : "/";
   const headers: Record<string, string> = { Accept: "application/json" };
   let url = joinEndpoint(channel.baseUrl, endpoint);
   url = applyAuth(url, headers, channel, key);
@@ -823,8 +833,7 @@ export async function sendPreparedRequest(request: PreparedRequest, options: {
     method: request.method,
     headers: request.headers,
     body: request.formData ?? (request.body ? JSON.stringify(request.body) : undefined),
-    ...(request.timeoutMs ? { signal: AbortSignal.timeout(request.timeoutMs) } : {}),
-  }, { allowPrivateNetwork: request.allowPrivateNetwork });
+  }, { allowPrivateNetwork: request.allowPrivateNetwork, timeoutMs: request.timeoutMs });
   const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
   const responseDetails = { status: response.status, ...(requestId ? { requestId: requestId.slice(0, 256) } : {}) };
   options.onResponse?.(responseDetails);

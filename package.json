@@ -1,6 +1,6 @@
 {
   "name": "image-relay-studio",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -58,6 +58,7 @@
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "undici": "8.12.3",
     "wpsjs-rpc-sdk-new": "1.1.0",
     "zod": "^4.0.17"
   },

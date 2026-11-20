@@ -1,5 +1,6 @@
 import { composeConfigPrompt, directInputLinks, directUpstreamImages, type BoardNode } from "../shared/board.js";
 import { imageReferenceCountError } from "../shared/image-reference-limits.js";
+import { SEEDREAM_ADAPTER, seedreamSize } from "../shared/seedream.js";
 import type { AppDatabase, BoardRecord } from "./db.js";
 import { unsupportedLabels } from "../shared/channel-fields.js";
 import { resolveAlias, type CapabilityAlias } from "./capabilities.js";
@@ -57,6 +58,10 @@ export function inspectBoardGeneration(db: AppDatabase, board: BoardRecord, alia
     if (kind === "image" && channel && resolved) {
       const error = imageReferenceCountError(channel.adapterType, resolved.model, directUpstreamImages(board.doc, node.id).length);
       if (error) errors.push(error);
+      if (channel.adapterType === SEEDREAM_ADAPTER) {
+        try { seedreamSize({ size: node.size, imageSize: node.imageSize, aspectRatio: node.aspectRatio ?? node.ratio }); }
+        catch (error) { errors.push(error instanceof Error ? error.message : "豆包生图尺寸无效"); }
+      }
     }
     if (kind === "video" && resolved) {
       if (channel) {

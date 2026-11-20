@@ -28,6 +28,7 @@ describe("provider presets", () => {
       "tiantoken-gpt",
       "tiantoken-gpt-c",
       "tiantoken-gemini",
+      "tiantoken-seedream",
       "tiantoken-midjourney",
       "tiantoken-wan-video",
       "tiantoken-grok-video",
@@ -50,6 +51,15 @@ describe("provider presets", () => {
     expect(chat.units[0].models).toEqual(["deepseek-v4.1-flash-1017", "gemini-3.8-flash", "gpt-6.1-sol", "claude-sonnet-5-5"]);
     // 大脑默认路径必须和 openai-chat 服务端默认值一致，否则渠道建出来会打错地址
     expect(chat.units[0].endpoint ?? adapterDefaultEndpoint("openai-chat").endpoint).toBe("/v1/chat/completions");
+  });
+
+  it("routes both Seedream models to the JSON generations endpoint", () => {
+    const preset = findProviderPreset("tiantoken-seedream")!;
+    const [draft] = buildChannelDrafts(preset, [selectionFor(preset, "seedream")]);
+    expect(draft?.input).toMatchObject({
+      adapterType: "seedream-image", baseUrl: "https://api.tiantoken.com", endpoint: "/v1/images/generations",
+      models: ["doubao-seedream-5-5", "doubao-seedream-5-0-pro-260628"], secretEnv: "TIANTOKEN_SEEDREAM_API_KEY",
+    });
   });
 
   it("points video presets at tiantoken relay", () => {

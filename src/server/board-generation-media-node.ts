@@ -76,6 +76,7 @@ export async function generateBoardMediaNode(input: {
     const background = overrides.background ?? node.background;
     const outputFormat = overrides.outputFormat ?? node.outputFormat;
     const moderation = overrides.moderation ?? node.moderation;
+    const watermark = overrides.watermark ?? node.watermark;
     const batch = await submitBoardImages(runner, {
       channelId: channel.id,
       model: resolution.model,
@@ -90,6 +91,7 @@ export async function generateBoardMediaNode(input: {
       ...(background ? { background } : {}),
       ...(outputFormat ? { outputFormat } : {}),
       ...(moderation ? { moderation } : {}),
+      ...(watermark === undefined ? {} : { watermark }),
       timeoutMs: resolveBoardTimeoutMs("image", overrides.timeoutSeconds ?? node.timeoutSeconds),
     }, references, imageCount);
     task = batch.firstTask;
@@ -112,6 +114,7 @@ export async function generateBoardMediaNode(input: {
       ...(background ? { background } : {}),
       ...(outputFormat ? { outputFormat } : {}),
       ...(moderation ? { moderation } : {}),
+      ...(watermark === undefined ? {} : { watermark }),
     };
   } else if (node.type === "video") {
     const aliases = buildCapabilityAliases(db.listChannels());

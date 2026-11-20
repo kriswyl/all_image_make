@@ -7,6 +7,7 @@ import type { MidjourneyMeta } from "./midjourney.js";
 import type { ImageOutputFormat } from "./image-formats.js";
 import { taskKindOf as taskKindOfFromKinds } from "./kinds.js";
 import { MAX_IMAGE_GENERATION_REFERENCES } from "./image-reference-limits.js";
+import type { SeedreamTaskMeta } from "./seedream.js";
 
 export {
   AUDIO_ADAPTER_TYPES,
@@ -32,6 +33,7 @@ export {
 
 export type AdapterType =
   | "openai-images"
+  | "seedream-image"
   | "openai-chat-image"
   | "gemini-content"
   | "generic-json"
@@ -406,6 +408,11 @@ export interface Asset {
   createdAt: string;
 }
 
+export interface ImageBatchResult {
+  tasks: Task[];
+  failures: { index: number; message: string }[];
+}
+
 export interface Task {
   id: string;
   origin?: "generate" | "upload";
@@ -429,7 +436,7 @@ export interface Task {
   errorCode: string | null;
   errorMessage: string | null;
   /** 上游任务的附加元数据，包括 Midjourney 操作和 Suno 成品信息 */
-  remoteMeta?: { midjourney?: MidjourneyMeta; suno?: SunoTaskMeta } | null;
+  remoteMeta?: { midjourney?: MidjourneyMeta; suno?: SunoTaskMeta; seedream?: SeedreamTaskMeta } | null;
   assets: Asset[];
   /**
    * 提交时的参数快照（脱敏）。来自任务落库的 `input_json`，之后改表单不会影响它；

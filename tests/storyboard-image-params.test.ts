@@ -19,4 +19,13 @@ describe("分镜参考图参数", () => {
     expect(() => imageGenerationParameters("openai-images", { ...defaultImageDraft, size: "大图" })).toThrow("尺寸");
     expect(() => imageGenerationParameters("midjourney", { ...defaultImageDraft, raw: "[]" })).toThrow("JSON 对象");
   });
+  it("分镜豆包使用共享尺寸，并传递水印和拆单数量", () => {
+    expect(imageGenerationParameters("seedream-image", { ...defaultImageDraft, seedreamTier: "1.5K",
+      seedreamRatio: "9:16", count: "4", raw: '{"n":8}' })).toEqual({
+      size: "1152x2048", watermark: false, count: 4, timeoutMs: 300000,
+    });
+    expect(imageGenerationParameters("seedream-image", { ...defaultImageDraft, seedreamWatermark: "true" }).watermark).toBe(true);
+    expect(() => imageGenerationParameters("seedream-image", { ...defaultImageDraft, seedreamTier: "custom",
+      seedreamCustomSize: "512x512" })).toThrow("总像素");
+  });
 });

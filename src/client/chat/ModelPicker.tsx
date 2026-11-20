@@ -9,6 +9,7 @@ import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ModelLogo, type ModelKind } from "./ModelLogo";
+import { seedreamModelLabel } from "../../shared/seedream";
 
 export interface ModelOption {
   /** 提交给服务端的值 */
@@ -135,7 +136,7 @@ export function ModelPicker({
         title={current ? `${current.channelName} · ${current.model}` : placeholder}
       >
         {current ? <ModelLogo model={current.model} kind={kind} size={15} /> : null}
-        <span className="model-picker-label">{current ? current.model : placeholder}</span>
+        <span className="model-picker-label">{current ? seedreamModelLabel(current.model) ?? current.model : placeholder}</span>
         <ChevronDown size={13} className="model-picker-chevron" />
       </button>
 
@@ -165,7 +166,7 @@ export function ModelPicker({
               <span className="model-picker-option-logo">
                 <ModelLogo model={item.model} kind={kind} size={16} />
               </span>
-              <span className="model-picker-option-name" title={item.model}>{item.model}</span>
+              <span className="model-picker-option-name" title={item.model}>{seedreamModelLabel(item.model) ?? item.model}</span>
               <span className="model-picker-option-channel">{item.channelName}</span>
               {item.value === value ? <Check size={13} className="model-picker-check" /> : null}
             </button>

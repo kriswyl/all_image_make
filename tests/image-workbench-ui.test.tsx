@@ -33,6 +33,51 @@ const imageChannel: Channel = {
 };
 const mjChannel: Channel = { ...imageChannel, id: "mj", name: "Midjourney", adapterType: "midjourney", models: ["mj_imagine"] };
 
+it("豆包工作台按共享规格提交尺寸和参考图，并注册每个单图任务", async () => {
+  const channel: Channel = { ...imageChannel, id: "seedream", adapterType: "seedream-image", models: ["doubao-seedream-5-5"] };
+  const model = channel.models[0]!;
+  const scope = `vector-image:generation-draft:${channel.adapterType}:${channel.id}:${model}:`;
+  localStorage.setItem("vector-image:generation-draft:prompt", JSON.stringify("组合参考图"));
+  localStorage.setItem(scope + "count", "4");
+  localStorage.setItem(scope + "aspectRatio", JSON.stringify("16:9"));
+  localStorage.setItem(scope + "watermark", "true");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const images = Array.from({ length: 10 }, (_, index) => ({ file: new File(["image"], `ref-${index}.png`), previewUrl: `blob:ref-${index}` }));
+  const noop = () => {};
+  const references: ReferenceController = {
+    images, reading: false, select: noop, dropFiles: noop, remove: noop, clear: noop, addFromAsset: async () => {},
+  };
+  const created = Array.from({ length: 4 }, (_, index) => task(`seedream-${index}`, channel, []));
+  const onTask = vi.fn();
+  const submit = vi.spyOn(api, "generateImageBatch").mockResolvedValue({ tasks: created, failures: [] });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    act(() => root.render(<GenerateView channels={[channel]} selectedChannelId={channel.id} selectedModel={model}
+      tasks={[]} activeTask={null} references={references} inpaint={{ mask: null, apply: noop, clear: noop }}
+      onChannelChange={noop} onModelChange={noop} onTask={onTask} onSelectTask={noop} onAddChannel={noop}
+      onConfigureChannel={noop} onToast={noop} onDiagnostics={noop} />));
+    expect(host.querySelector('[aria-label="参考图 10/10"]')).not.toBeNull();
+    expect(host.querySelector(".header-model-picker .model-picker-label")?.textContent).toBe("豆包 Seedream 5.5");
+    expect(host.querySelector('[aria-label="清晰度"]')?.textContent).toContain("2K");
+    expect(host.querySelector('[aria-label="质量"]')).toBeNull();
+    await act(async () => { host.querySelector<HTMLButtonElement>(".image-submit")!.click(); });
+    expect(submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      model, count: 4, size: "2816x1584", watermark: false, timeoutMs: 300000,
+    }), images.map(image => image.file));
+    expect(onTask.mock.calls.map(([item]) => item.id)).toEqual([...created].reverse().map(item => item.id));
+    const watermark = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(watermark.checked).toBe(false);
+    act(() => { watermark.click(); });
+    await act(async () => { host.querySelector<HTMLButtonElement>(".image-submit")!.click(); });
+    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ watermark: true }), images.map(image => image.file));
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+  }
+});
+
 it("图片菜单由更多按钮切换，鼠标离开时保持，可用外点、Escape 和动作收起", () => {
   vi.useFakeTimers();
   const host = document.createElement("div");

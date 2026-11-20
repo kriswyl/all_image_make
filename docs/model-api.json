@@ -1,0 +1,1042 @@
+[
+  {
+    "model": "gpt-image-2",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.5-sunburst",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.5-sunburst",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.5-flare",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.5-flare",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.6-flare",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.6-flare",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "frame_count": 9,
+      "frame_duration_ms": 200,
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.6-sunburst",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.6-sunburst",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "frame_count": 9,
+      "frame_duration_ms": 200,
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2-c",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2-c",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.5-sunburst-c",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.5-sunburst-c",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.5-flare-c",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.5-flare-c",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.6-flare-c",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.6-flare-c",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "frame_count": 9,
+      "frame_duration_ms": 200,
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gpt-image-2.6-sunburst-c",
+    "endpoint": "/v1/images/generations",
+    "requestBody": {
+      "model": "gpt-image-2.6-sunburst-c",
+      "prompt": "一只坐在月球上的猫",
+      "size": "1024x1024",
+      "n": 1,
+      "quality": "auto",
+      "output_format": "png",
+      "frame_count": 9,
+      "frame_duration_ms": 200,
+      "background": "auto",
+      "moderation": "auto",
+      "response_format": "url",
+      "style": "auto",
+      "stream": false
+    },
+    "responseBody": {
+      "created": 1750667997,
+      "data": [
+        { "b64_json": "<base64 图片数据>" }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.1-flash-image",
+    "endpoint": "/v1beta/models/gemini-3.1-flash-image:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.1-flash-image-preview",
+    "endpoint": "/v1beta/models/gemini-3.1-flash-image-preview:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.1-flash-lite-image",
+    "endpoint": "/v1beta/models/gemini-3.1-flash-lite-image:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3-pro-image",
+    "endpoint": "/v1beta/models/gemini-3-pro-image:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3-pro-image-preview",
+    "endpoint": "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-nano-banana-2.1",
+    "endpoint": "/v1beta/models/gemini-nano-banana-2.1:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-nano-banana-2.1-preview",
+    "endpoint": "/v1beta/models/gemini-nano-banana-2.1-preview:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "inlineData": { "mimeType": "image/png", "data": "<裸 base64，无 data: 前缀>" } },
+            { "text": "把背景换成星空" }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "topP": 0.9,
+        "topK": 40,
+        "maxOutputTokens": 8192,
+        "responseModalities": ["IMAGE"],
+        "seed": 123,
+        "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "image/png", "data": "<base64 图片数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "mj_imagine",
+    "endpoint": "/mj/submit/imagine",
+    "requestBody": {
+      "prompt": "一只戴墨镜的猫 --ar 16:9 --v 6 --no blurry"
+    },
+    "responseBody": {
+      "code": 1,
+      "description": "提交成功",
+      "result": "<任务id>"
+    }
+  },
+  {
+    "model": "mj_edits",
+    "endpoint": "/mj/submit/edits",
+    "requestBody": {
+      "prompt": "把这只猫变成宇航员 --ar 16:9",
+      "image": "data:image/png;base64,<base64 图片数据>"
+    },
+    "responseBody": {
+      "code": 1,
+      "description": "提交成功",
+      "result": "<任务id>"
+    }
+  },
+  {
+    "model": "mj_upscale",
+    "endpoint": "/mj/submit/action",
+    "requestBody": {
+      "taskId": "<父任务id>",
+      "customId": "<按钮 customId>"
+    },
+    "responseBody": {
+      "code": 1,
+      "description": "提交成功",
+      "result": "<任务id>"
+    }
+  },
+  {
+    "model": "mj_variation",
+    "endpoint": "/mj/submit/action",
+    "requestBody": {
+      "taskId": "<父任务id>",
+      "customId": "<按钮 customId>"
+    },
+    "responseBody": {
+      "code": 1,
+      "description": "提交成功",
+      "result": "<任务id>"
+    }
+  },
+  {
+    "model": "mj_reroll",
+    "endpoint": "/mj/submit/action",
+    "requestBody": {
+      "taskId": "<父任务id>",
+      "customId": "<按钮 customId>"
+    },
+    "responseBody": {
+      "code": 1,
+      "description": "提交成功",
+      "result": "<任务id>"
+    }
+  },
+  {
+    "model": "wan3.0-video",
+    "endpoint": "/api/v1/services/aigc/video-generation/video-synthesis",
+    "requestBody": {
+      "model": "wan3.0-video",
+      "input": {
+        "prompt": "一只猫走过街道",
+        "media": [
+          { "type": "first_frame", "url": "data:image/png;base64,..." },
+          { "type": "reference_image", "url": "https://..." },
+          { "type": "reference_video", "url": "https://..." }
+        ]
+      },
+      "parameters": {
+        "resolution": "720P",
+        "ratio": "16:9",
+        "duration": "5",
+        "audio": true,
+        "prompt_extend": true,
+        "seed": 123,
+        "watermark": false
+      }
+    },
+    "responseBody": {
+      "output": {
+        "task_id": "<任务id>",
+        "task_status": "PENDING"
+      },
+      "request_id": "<请求id>"
+    }
+  },
+  {
+    "model": "grok-imagine-video",
+    "endpoint": "/v1/videos/generations",
+    "requestBody": {
+      "model": "grok-imagine-video",
+      "prompt": "海浪拍打岩石",
+      "duration": 8,
+      "resolution": "720p",
+      "aspect_ratio": "16:9",
+      "reference_images": [
+        { "url": "data:image/png;base64,..." }
+      ]
+    },
+    "responseBody": {
+      "request_id": "<任务id>"
+    }
+  },
+  {
+    "model": "grok-imagine-video-1.5-preview",
+    "endpoint": "/v1/videos/generations",
+    "requestBody": {
+      "model": "grok-imagine-video-1.5-preview",
+      "prompt": "海浪拍打岩石",
+      "duration": 8,
+      "resolution": "720p",
+      "aspect_ratio": "16:9",
+      "reference_images": [
+        { "url": "data:image/png;base64,..." }
+      ]
+    },
+    "responseBody": {
+      "request_id": "<任务id>"
+    }
+  },
+  {
+    "model": "grok-imagine-video-1.5",
+    "endpoint": "/v1/videos/generations",
+    "requestBody": {
+      "model": "grok-imagine-video-1.5",
+      "prompt": "海浪拍打岩石",
+      "duration": 8,
+      "resolution": "720p",
+      "aspect_ratio": "16:9",
+      "reference_images": [
+        { "url": "data:image/png;base64,..." }
+      ]
+    },
+    "responseBody": {
+      "request_id": "<任务id>"
+    }
+  },
+  {
+    "model": "sd-2.5",
+    "endpoint": "/api/v3/contents/generations/tasks",
+    "requestBody": {
+      "model": "sd-2.5",
+      "content": [
+        { "type": "text", "text": "一只猫奔跑" },
+        { "type": "image_url", "image_url": { "url": "https://..." }, "role": "first_frame" },
+        { "type": "video_url", "video_url": { "url": "https://..." }, "role": "reference_video" },
+        { "type": "audio_url", "audio_url": { "url": "data:audio/mp3;base64,..." }, "role": "reference_audio" }
+      ],
+      "resolution": "720p",
+      "ratio": "16:9",
+      "duration": 5,
+      "generate_audio": false,
+      "seed": 123,
+      "watermark": false
+    },
+    "responseBody": {
+      "id": "cgt-<任务id>",
+      "status": "queued"
+    }
+  },
+  {
+    "model": "sd-2.0",
+    "endpoint": "/api/v3/contents/generations/tasks",
+    "requestBody": {
+      "model": "sd-2.0",
+      "content": [
+        { "type": "text", "text": "一只猫奔跑" },
+        { "type": "image_url", "image_url": { "url": "https://..." }, "role": "first_frame" }
+      ],
+      "resolution": "720p",
+      "ratio": "16:9",
+      "duration": 5,
+      "generate_audio": false,
+      "seed": 123,
+      "watermark": false
+    },
+    "responseBody": {
+      "id": "cgt-<任务id>",
+      "status": "queued"
+    }
+  },
+  {
+    "model": "sd-2.0-fast",
+    "endpoint": "/api/v3/contents/generations/tasks",
+    "requestBody": {
+      "model": "sd-2.0-fast",
+      "content": [
+        { "type": "text", "text": "一只猫奔跑" },
+        { "type": "image_url", "image_url": { "url": "https://..." }, "role": "first_frame" }
+      ],
+      "resolution": "720p",
+      "ratio": "16:9",
+      "duration": 5,
+      "generate_audio": false,
+      "seed": 123,
+      "watermark": false
+    },
+    "responseBody": {
+      "id": "cgt-<任务id>",
+      "status": "queued"
+    }
+  },
+  {
+    "model": "sd-2.0-mini",
+    "endpoint": "/api/v3/contents/generations/tasks",
+    "requestBody": {
+      "model": "sd-2.0-mini",
+      "content": [
+        { "type": "text", "text": "一只猫奔跑" },
+        { "type": "image_url", "image_url": { "url": "https://..." }, "role": "first_frame" }
+      ],
+      "resolution": "720p",
+      "ratio": "16:9",
+      "duration": 5,
+      "generate_audio": false,
+      "seed": 123,
+      "watermark": false
+    },
+    "responseBody": {
+      "id": "cgt-<任务id>",
+      "status": "queued"
+    }
+  },
+  {
+    "model": "kling-3.0",
+    "endpoint": "/text-to-video/kling-3.0",
+    "requestBody": {
+      "prompt": "一只猫走进城市",
+      "contents": [
+        { "type": "image", "url": "https://..." },
+        { "type": "video", "url": "https://..." }
+      ],
+      "settings": {
+        "resolution": "720p",
+        "duration": 5,
+        "aspect_ratio": "16:9",
+        "audio": "off",
+        "multi_shot": true
+      },
+      "options": {
+        "watermark_info": { "enabled": false }
+      }
+    },
+    "responseBody": {
+      "data": { "id": "task_<任务id>" },
+      "request_id": "<请求id>"
+    }
+  },
+  {
+    "model": "kling-3.0-turbo",
+    "endpoint": "/text-to-video/kling-3.0-turbo",
+    "requestBody": {
+      "prompt": "一只猫走进城市",
+      "contents": [
+        { "type": "image", "url": "https://..." }
+      ],
+      "settings": {
+        "resolution": "720p",
+        "duration": 5,
+        "aspect_ratio": "16:9",
+        "audio": "off",
+        "multi_shot": true
+      },
+      "options": {
+        "watermark_info": { "enabled": false }
+      }
+    },
+    "responseBody": {
+      "data": { "id": "task_<任务id>" },
+      "request_id": "<请求id>"
+    }
+  },
+  {
+    "model": "kling-3.0-omni",
+    "endpoint": "/omni-video/kling-3.0-omni",
+    "requestBody": {
+      "prompt": "一只猫走进城市",
+      "contents": [
+        { "type": "image", "url": "https://..." },
+        { "type": "video", "url": "https://..." }
+      ],
+      "settings": {
+        "resolution": "720p",
+        "duration": 5,
+        "aspect_ratio": "16:9",
+        "audio": "off",
+        "multi_shot": true
+      },
+      "options": {
+        "watermark_info": { "enabled": false }
+      }
+    },
+    "responseBody": {
+      "data": { "id": "task_<任务id>" },
+      "request_id": "<请求id>"
+    }
+  },
+  {
+    "model": "MiniMax-H3",
+    "endpoint": "/v1/video/generations",
+    "requestBody": {
+      "model": "MiniMax-H3",
+      "prompt": "一只猫在雨中",
+      "duration": 5,
+      "images": ["<base64 或 URL>"],
+      "metadata": {
+        "resolution": "768P",
+        "ratio": "16:9",
+        "videos": ["https://..."],
+        "audios": ["data:audio/mp3;base64,..."],
+        "first_frame": "data:image/jpeg;base64,...",
+        "last_frame": "data:image/jpeg;base64,..."
+      }
+    },
+    "responseBody": {
+      "id": "<任务id>"
+    }
+  },
+  {
+    "model": "suno_damobi_music",
+    "endpoint": "/api/queue/makeAiMusic",
+    "requestBody": {
+      "gpt_description_prompt": "一首轻快的电子音乐",
+      "mv": "chirp-hawk",
+      "make_instrumental": false,
+      "mode": "inspiration"
+    },
+    "responseBody": {
+      "code": 200,
+      "data": [148787578, 148787581],
+      "success": true
+    }
+  },
+  {
+    "model": "gemini-3.8-flash-tts",
+    "endpoint": "/v1beta/models/gemini-3.8-flash-tts:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "text": "欢迎收听本期节目。", "speechMetadata": { "style": "温柔" } }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "responseModalities": ["AUDIO"],
+        "speechConfig": {
+          "languageCode": "zh-CN",
+          "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Kore" } }
+        }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "audio/wav", "data": "<base64 音频数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.8-flash-lite-tts",
+    "endpoint": "/v1beta/models/gemini-3.8-flash-lite-tts:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "text": "欢迎收听本期节目。", "speechMetadata": { "style": "温柔" } }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "responseModalities": ["AUDIO"],
+        "speechConfig": {
+          "languageCode": "zh-CN",
+          "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Kore" } }
+        }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "audio/wav", "data": "<base64 音频数据>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.1-flash-tts-preview",
+    "endpoint": "/v1beta/models/gemini-3.1-flash-tts-preview:generateContent",
+    "requestBody": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            { "text": "欢迎收听本期节目。", "speechMetadata": { "style": "温柔" } }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "responseModalities": ["AUDIO"],
+        "speechConfig": {
+          "languageCode": "zh-CN",
+          "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Kore" } }
+        }
+      }
+    },
+    "responseBody": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              { "inlineData": { "mimeType": "audio/l16; rate=24000; channels=1", "data": "<base64 PCM 数据，服务端补 WAV 头>" } }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "deepseek-v4.1-flash-1017",
+    "endpoint": "/v1/chat/completions",
+    "requestBody": {
+      "model": "deepseek-v4.1-flash-1017",
+      "messages": [
+        { "role": "system", "content": "<系统提示>" },
+        { "role": "user", "content": [{ "type": "text", "text": "..." }] },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            { "id": "call_1", "type": "function", "function": { "name": "generate_image", "arguments": "{}" } }
+          ]
+        },
+        { "role": "tool", "tool_call_id": "call_1", "content": "成功：..." }
+      ],
+      "stream": true,
+      "max_tokens": 16384,
+      "tools": [
+        { "type": "function", "function": { "name": "...", "description": "...", "parameters": {} } }
+      ],
+      "tool_choice": "auto"
+    },
+    "responseBody": {
+      "id": "chatcmpl-<id>",
+      "object": "chat.completion.chunk",
+      "created": 1750667997,
+      "model": "deepseek-v4.1-flash-1017",
+      "choices": [
+        { "index": 0, "delta": { "role": "assistant", "content": "你好" }, "finish_reason": null }
+      ]
+    }
+  },
+  {
+    "model": "gemini-3.8-flash",
+    "endpoint": "/v1/chat/completions",
+    "requestBody": {
+      "model": "gemini-3.8-flash",
+      "messages": [
+        { "role": "system", "content": "<系统提示>" },
+        { "role": "user", "content": [{ "type": "text", "text": "..." }] }
+      ],
+      "stream": true,
+      "max_tokens": 16384,
+      "tools": [
+        { "type": "function", "function": { "name": "...", "description": "...", "parameters": {} } }
+      ],
+      "tool_choice": "auto"
+    },
+    "responseBody": {
+      "id": "chatcmpl-<id>",
+      "object": "chat.completion.chunk",
+      "created": 1750667997,
+      "model": "gemini-3.8-flash",
+      "choices": [
+        { "index": 0, "delta": { "role": "assistant", "content": "你好" }, "finish_reason": null }
+      ]
+    }
+  },
+  {
+    "model": "gpt-6.1-sol",
+    "endpoint": "/v1/chat/completions",
+    "requestBody": {
+      "model": "gpt-6.1-sol",
+      "messages": [
+        { "role": "system", "content": "<系统提示>" },
+        { "role": "user", "content": [{ "type": "text", "text": "..." }] }
+      ],
+      "stream": true,
+      "max_tokens": 16384,
+      "tools": [
+        { "type": "function", "function": { "name": "...", "description": "...", "parameters": {} } }
+      ],
+      "tool_choice": "auto"
+    },
+    "responseBody": {
+      "id": "chatcmpl-<id>",
+      "object": "chat.completion.chunk",
+      "created": 1750667997,
+      "model": "gpt-6.1-sol",
+      "choices": [
+        { "index": 0, "delta": { "role": "assistant", "content": "你好" }, "finish_reason": null }
+      ]
+    }
+  },
+  {
+    "model": "claude-sonnet-5-5",
+    "endpoint": "/v1/chat/completions",
+    "requestBody": {
+      "model": "claude-sonnet-5-5",
+      "messages": [
+        { "role": "system", "content": "<系统提示>" },
+        { "role": "user", "content": [{ "type": "text", "text": "..." }] }
+      ],
+      "stream": true,
+      "max_tokens": 16384,
+      "tools": [
+        { "type": "function", "function": { "name": "...", "description": "...", "parameters": {} } }
+      ],
+      "tool_choice": "auto"
+    },
+    "responseBody": {
+      "id": "chatcmpl-<id>",
+      "object": "chat.completion.chunk",
+      "created": 1750667997,
+      "model": "claude-sonnet-5-5",
+      "choices": [
+        { "index": 0, "delta": { "role": "assistant", "content": "你好" }, "finish_reason": null }
+      ]
+    }
+  }
+]

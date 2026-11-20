@@ -57,6 +57,7 @@ const BRANDS: Brand[] = [
   { test: /grok/i, kind: "chat", logo: grokLogo, name: "xAI Grok" },
 
   // 生成类
+  { test: /seedream/i, kind: "image", logo: doubaoLogo, name: "豆包 Seedream" },
   { test: /gpt-image|dall-?e|gpt-4o-image|sora/i, logo: openaiLogo, name: "OpenAI" },
   { test: /gemini|imagen|nano-?banana/i, logo: geminiLogo, name: "Google Gemini" },
   { test: /grok/i, logo: grokLogo, name: "xAI Grok" },

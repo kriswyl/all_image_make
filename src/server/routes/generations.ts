@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { MINIMAX_REFERENCE_LIMITS } from "../../shared/video-capabilities.js";
-import { taskKindFor } from "../../shared/kinds.js";
+import { isImageAdapter, taskKindFor } from "../../shared/kinds.js";
 import { imageOutputFormatSchema, MAX_FRAME_COUNT, MAX_FRAME_DURATION_MS, MIN_FRAME_COUNT, MIN_FRAME_DURATION_MS } from "../../shared/image-formats.js";
 import type { GenerationInput } from "../../shared/types.js";
 import { MAX_MEDIA_URL_CHARS, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
@@ -17,6 +17,7 @@ import { detachAssetFromBoards } from "../board.js";
 import { referenceImageMimeTypes, referenceVideoUpload } from "./uploads.js";
 import { removeStoredFiles } from "./files.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
+import { submitImageTasks } from "../image-batch.js";
 import type { Express } from "express";
 
 const MAX_REFERENCE_BASE64_CHARS = Math.ceil(MAX_REFERENCE_IMAGE_BYTES / 3) * 4;
@@ -277,7 +278,7 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     res.status(202).json(ok(task));
   }));
 
-  app.post("/api/generations", referenceUpload.fields([
+  app.post(["/api/generations", "/api/generations/image-batch"], referenceUpload.fields([
     { name: "referenceImages", maxCount: MAX_IMAGE_GENERATION_REFERENCES },
     { name: "mask", maxCount: 1 },
   ]), asyncHandler(async (req, res) => {
@@ -285,7 +286,7 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
       const uploadedFiles = files.referenceImages ?? [];
       const maskFiles = files.mask ?? [];
       let body = req.body;
-      if (typeof req.body.payload === "string") {
+      if (typeof req.body?.payload === "string") {
         try { body = JSON.parse(req.body.payload); }
         catch { throw new AppError("INVALID_INPUT", "生成参数不是有效的 JSON", 400); }
       }
@@ -306,6 +307,19 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
       }) as GenerationInput;
       if (!input.prompt.trim() && input.musicMode !== "sound" && input.musicMode !== "mashup") {
         throw new AppError("INVALID_INPUT", "提示词不能为空", 400);
+      }
+      if (req.path.toLowerCase().replace(/\/$/, "") === "/api/generations/image-batch") {
+        const channel = db.getChannel(input.channelId);
+        if (!channel || !isImageAdapter(channel.adapterType)) throw new AppError("INVALID_CHANNEL", "请选择可用的图片生成渠道", 400);
+        if (maskUpload || input.maskImage) throw new AppError("INVALID_INPUT", "蒙版重绘请使用单张提交", 400);
+        const results = await submitImageTasks(runner, input, uploadedImages, input.count ?? 1);
+        res.status(202).json(ok({
+          tasks: results.flatMap(result => result.status === "fulfilled" ? [result.value] : []),
+          failures: results.flatMap((result, index) => result.status === "rejected"
+            ? [{ index: index + 1, message: result.reason instanceof AppError ? result.reason.message : "任务提交失败" }]
+            : []),
+        }));
+        return;
       }
       const task = await runner.create(input, uploadedImages, maskUpload);
       res.status(202).json(ok(task));

@@ -12,6 +12,7 @@ import type { AdapterType, TaskKind } from "../shared/types.js";
 import { channelKindOf } from "../shared/kinds.js";
 import { isMidjourneyActionModel } from "../shared/midjourney.js";
 import { OPENAI_SIZE_PRESETS } from "../shared/image-sizes.js";
+import { SEEDREAM_ADAPTER, SEEDREAM_RATIOS, SEEDREAM_SIZES } from "../shared/seedream.js";
 import { imageReferenceLimit } from "../shared/image-reference-limits.js";
 import { matchModelAlias } from "../shared/model-alias.js";
 import { CHANNEL_FIELD_SUPPORT } from "../shared/channel-fields.js";
@@ -138,6 +139,10 @@ function imageTraits(adapterType: AdapterType, model: string): string {
   const parts: string[] = [];
   const references = imageReferenceLimit(adapterType, model);
   parts.push(`参考图≤${references.max} 张${references.source === "default" ? "（应用默认）" : references.source === "channel-alias" ? "（按对应型号提交，实际由渠道决定）" : ""}`);
+  if (adapterType === SEEDREAM_ADAPTER) {
+    parts.push(`尺寸(size)=${SEEDREAM_SIZES.join("|")} 或宽x高；画幅(aspectRatio)=${SEEDREAM_RATIOS.join("|")}；图生图=✔；多张按独立单图提交`);
+    return parts.join("  ");
+  }
   if (support.size) parts.push(`尺寸(size)=${OPENAI_SIZE_PRESETS.join("|")}，也可直接写「宽x高」`);
   if (support.imageSize) parts.push("尺寸(imageSize)=1K|2K|4K");
   const aspects = IMAGE_ASPECTS[adapterType];

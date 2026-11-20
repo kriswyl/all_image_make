@@ -46,6 +46,7 @@ export const CHANNEL_FIELD_SUPPORT: Partial<Record<AdapterType, Partial<Record<G
     size: "param", quality: "param", style: "param", background: "param",
     outputFormat: "param", moderation: "param", negativePrompt: "param", count: "param",
   },
+  "seedream-image": { size: "param", imageSize: "param", aspectRatio: "param", watermark: "param" },
   "openai-chat-image": {
     size: "param", quality: "param", style: "param", background: "param",
     outputFormat: "param", moderation: "param", negativePrompt: "param", count: "param",

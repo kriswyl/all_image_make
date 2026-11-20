@@ -14,9 +14,13 @@ import { createPlanTool } from "./chat-tools/planning.js";
 import { ChatToolRegistry, type ChatTool } from "./chat-tools/registry.js";
 import type { AppDatabase } from "./db.js";
 import type { PresentationCoordinator } from "./presentation-coordinator.js";
+import type { KeyStore } from "./key-store.js";
+import { readChatWebSettings, TAVILY_KEY_ID } from "./web-settings.js";
+import { createWebTools } from "./chat-tools/web.js";
 
 interface NativeToolsHost {
   db: AppDatabase;
+  sessionKeys: KeyStore;
   presentations: Pick<PresentationCoordinator, "registerDocumentTools" | "scheduleChecks">;
   defaultAliases(): { image?: string; video?: string };
   toolContext(): ToolContext;
@@ -24,6 +28,7 @@ interface NativeToolsHost {
 
 type NativeToolsTurn = Parameters<PresentationCoordinator["registerDocumentTools"]>[1] & {
   nativeCreative: boolean;
+  priorWebCalls: number;
   turnAttachmentIds: string[];
   turnVideoIds: string[];
   readVideoOverviewFrames(assetId: string): Promise<VideoOverviewFrames>;
@@ -32,7 +37,7 @@ type NativeToolsTurn = Parameters<PresentationCoordinator["registerDocumentTools
 };
 
 export function createNativeToolRegistry(
-  { db, presentations, defaultAliases, toolContext }: NativeToolsHost,
+  { db, sessionKeys, presentations, defaultAliases, toolContext }: NativeToolsHost,
   turn: NativeToolsTurn,
 ): ChatToolRegistry {
   const { conversationId, turnConversation, nativeCreative, turnAttachmentIds, turnVideoFrames } = turn;
@@ -48,6 +53,11 @@ export function createNativeToolRegistry(
   presentations.registerDocumentTools(registry, turn);
   registry.register(createPlanTool());
   registry.register(createCapabilitySearchTool(registry));
+  if (turnConversation.kind === "chat" && turnConversation.toolScope === "all" && turnConversation.webEnabled && !turnConversation.toolsUnsupported) {
+    for (const tool of createWebTools(readChatWebSettings(db, sessionKeys), sessionKeys.get(TAVILY_KEY_ID), turn.signal, turn.priorWebCalls)) {
+      registry.register(tool);
+    }
+  }
   if (nativeCreative) {
     registry.register(createVideoOverviewTool({
       db, conversation: turnConversation, attachments: turn.turnVideoIds, signal: turn.signal,

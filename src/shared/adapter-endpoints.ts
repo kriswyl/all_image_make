@@ -10,6 +10,7 @@ import type { AdapterType } from "./types.js";
 export function defaultEndpointFor(adapterType: AdapterType): string {
   switch (adapterType) {
     case "openai-images": return "/v1/images/generations";
+    case "seedream-image": return "/v1/images/generations";
     case "openai-chat-image": return "/v1/chat/completions";
     case "openai-chat": return "/v1/chat/completions";
     case "gemini-content": return "/v1beta/models/{model}:generateContent";

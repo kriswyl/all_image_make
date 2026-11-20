@@ -5,7 +5,8 @@ import { AlertCircle, Check, Copy, Download, FileText, Film, Info, Maximize2, Mu
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage } from "../../shared/agent-types";
 import type { Asset } from "../../shared/types";
-import { api } from "../api";
+import { api, isTauriRuntime } from "../api";
+import { openExternal } from "../external";
 import { MindPptPreview } from "./MindPptPreview";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import ReactMarkdown from "react-markdown";
@@ -159,7 +160,11 @@ export function AssistantBubble({
     a({ href, children, node: _node, ...props }) {
       const target = typeof href === "string" ? href : "";
       const fileId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target) ? target : null;
-      if (!fileId) return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+      if (!fileId) return <a {...props} href={href} target="_blank" rel="noreferrer" onClick={event => {
+        if (!isTauriRuntime() || !/^https?:\/\//i.test(target)) return;
+        event.preventDefault();
+        void openExternal(target).catch(() => onToast?.("error", "无法打开链接"));
+      }}>{children}</a>;
       return <a {...props} href={target} className="chat-file-link" title="下载会话文件" onClick={(event) => {
         event.preventDefault();
         void (async () => {

@@ -14,7 +14,7 @@ export interface PreparedToolConfirmation {
  * 组是**暴露策略**，不是权限；服务端仍会用完整 schema 校验。
  * 模型需要当前没有的组时调用 capability_search，下一轮再注入。
  */
-export const CHAT_TOOL_GROUPS = ["core", "docs", "image", "video", "audio", "media", "templates", "utility"] as const;
+export const CHAT_TOOL_GROUPS = ["core", "docs", "image", "video", "audio", "media", "templates", "utility", "web"] as const;
 export type ChatToolGroup = (typeof CHAT_TOOL_GROUPS)[number];
 export type ExecutionKind = "sync" | "task" | "workflow";
 export type ExecutionState = "completed" | "failed" | "paused" | "cancelled" | "awaiting_confirmation" | "waiting_task" | "waiting_workflow" | "waiting_dependency" | "unknown_submit" | "cancel_requested";

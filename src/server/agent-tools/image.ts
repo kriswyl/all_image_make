@@ -3,6 +3,7 @@ import { midjourneyUsableButtons } from "../../shared/midjourney.js";
 import type { GenerationInput } from "../../shared/types.js";
 import { imageReferenceCountError, MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
 import { normalizeAgentImageDimensions } from "../../shared/image-sizes.js";
+import { SEEDREAM_ADAPTER } from "../../shared/seedream.js";
 import { describeAliasChoice, resolveAlias } from "../capabilities.js";
 import type { AppDatabase, AssetRow } from "../db.js";
 import { auditParameters, isParameterRejection, planParameterSalvage } from "../diagnose.js";
@@ -111,11 +112,12 @@ export async function generateImage(
    * 之后再回头看「用户当初要了什么」就分不清「他要的」和「我们补的」，
    * 而这两者恰恰是参数核对面板要区分开的东西。
    */
-  const dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, {
-    size: args.size,
-    aspectRatio: args.aspectRatio,
-    imageSize: args.imageSize,
-  });
+  let dimensions;
+  try {
+    dimensions = normalizeAgentImageDimensions(channel.adapterType, resolution.model, {
+      size: args.size, aspectRatio: args.aspectRatio, imageSize: args.imageSize,
+    });
+  } catch (error) { return failResult(describeError(error), "INVALID_IMAGE_SIZE"); }
   const requested: Record<string, unknown> = { ...dimensions };
 
   const input: GenerationInput = {
@@ -125,7 +127,7 @@ export async function generateImage(
     prompt: ctx.verbatimPrompt ?? args.prompt,
     ...dimensions,
     count: args.count ?? 1,
-    outputFormat: args.outputFormat,
+    outputFormat: channel.adapterType === SEEDREAM_ADAPTER ? undefined : args.outputFormat,
     timeoutMs: IMAGE_TASK_TIMEOUT_MS,
   };
 
@@ -190,6 +192,7 @@ export async function generateImage(
         task.assets.length > 1 ? `，共 ${task.assets.length} 张` : "",
         "，已放进素材库（不会自动占用画布）。",
         salvageNote ? `${salvageNote}。` : "",
+        task.remoteMeta?.seedream?.warning ? `${task.remoteMeta.seedream.warning}。` : "",
       ].join("");
       // MJ 的四宫格结果带 U/V/R 按钮；塞进卡片 data，用户能在对话里直接继续操作
       const midjourneyButtons = midjourneyUsableButtons(task.remoteMeta?.midjourney?.buttons ?? []);
