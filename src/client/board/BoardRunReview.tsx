@@ -13,7 +13,7 @@ export function BoardRunReview({ steps, onStart, onClose }: { steps: BoardRunSte
       onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
       <header className="modal-header"><div><ListChecks size={17} /><h2>核对运行计划</h2></div><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={17} /></button></header>
       <div className="modal-body">
-        <p className="board-command-empty">{order.length} 个节点，最多 {total} 次生成请求。请确认模型和渠道，实际费用以渠道为准。参考视频可能上传至所用渠道。</p>
+        <p className="board-command-empty">{order.length} 个节点，最多 {total} 次生成请求。请确认模型和渠道，实际费用以渠道为准。{order.some((step) => step.kind === "video") ? "参考视频和体积较大的参考图可能上传至渠道素材服务。" : ""}</p>
         <label className="board-template-slot"><span>每渠道同时运行的节点</span><select autoFocus value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>
           {[1, 2, 4].map((count) => <option key={count} value={count}>{count} 项</option>)}</select></label>
         <div className="board-run-review-list">{order.map((step, index) => <article key={step.nodeId}>

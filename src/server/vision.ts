@@ -146,7 +146,7 @@ async function loadWebpDecoder() {
   return decodeWebp;
 }
 
-async function decode(bytes: Buffer) {
+export async function decodeRasterImage(bytes: Buffer) {
   try {
     if (detectImageMime(bytes) === "image/webp") {
       const decodeWebp = await (webpDecoder ??= loadWebpDecoder());
@@ -168,7 +168,7 @@ async function decode(bytes: Buffer) {
 export async function writeThumbnail(db: Pick<AppDatabase, "thumbsDir">, assetId: string, source: Buffer): Promise<string | null> {
   // Jimp 不认 SVG；没有缩略图时前端直接显示原文件（<img> 能渲染 SVG），不做假占位图。
   if (isSvgBytes(source)) return null;
-  const image = await decode(source);
+  const image = await decodeRasterImage(source);
   if (!image) return null;
   try {
     image.scaleToFit({ w: THUMB_MAX_EDGE, h: THUMB_MAX_EDGE });
@@ -309,7 +309,7 @@ export async function prepareImageBytes(db: AppDatabase, asset: AssetRow, profil
     return { bytes: original, mimeType: actualMime, fileName: asset.fileName };
   }
 
-  const image = await decode(original);
+  const image = await decodeRasterImage(original);
   if (!image) return null;
   const stem = asset.fileName.replace(/\.[^.]+$/, "").slice(0, 80) || "reference";
   // 先按 profile 定下画幅，再逐步降质量；一轮不行就缩画幅，最多试四次

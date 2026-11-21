@@ -14,6 +14,7 @@ import { VideoResultPanel } from "./video/VideoResultPanel";
 import { buildKlingMedia, buildMinimaxMedia, buildSeedanceMedia, buildWanMedia, mediaDuration } from "./video/media-builders";
 import type { MediaBucketsController } from "./hooks/useMediaBuckets";
 import { MINIMAX_REFERENCE_LIMITS, VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
+import { supportsVideoReferenceImageUpload } from "../shared/video-reference-image-policy";
 import {
   applySnapshotToDraft, defaultVideoDraft, draftKey, reconcileVideoDraft, type VideoDraft,
 } from "../shared/video-draft";
@@ -313,7 +314,12 @@ export function VideoGenerateView(props: {
       const durationLabel = spec && !spec.durationEditable
         ? "由参考视频决定"
         : draft.duration === -1 ? "智能" : `${draft.duration} 秒`;
-      const detail = `时长：${durationLabel} · 分辨率：${draft.resolution || "默认"}`;
+      const imageUpload = bucket.images.length && supportsVideoReferenceImageUpload(channel, props.selectedModel)
+        && (adapterType !== "minimax-video" || resolved.mode === "reference");
+      const detail = [`时长：${durationLabel} · 分辨率：${draft.resolution || "默认"}`,
+        ...(uploadVideos.length ? ["参考视频会上传至渠道素材服务。"] : []),
+        ...(imageUpload ? ["请求体过大时，参考图可能上传至渠道素材服务并通过链接访问。"] : []),
+      ].join("\n");
       if (!confirmGeneration({ kind: "视频生成", model: props.selectedModel, channel: channel.name, detail })) return;
 
       const input: GenerationInput = {

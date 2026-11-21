@@ -220,6 +220,7 @@ export function ConfirmCard({
               </div>
             ) : null}
             {preview.videoUploadTarget ? <div className="confirm-card-meta">确认后，所选原视频会上传至渠道的素材服务，上传后可能通过公网链接访问。</div> : null}
+            {preview.videoImageUploadPossible ? <div className="confirm-card-meta">请求体过大时，参考图可能上传至渠道素材服务并通过链接访问。</div> : null}
             <div className="confirm-card-meta">
               {preview.mode
                 ? videoModeLabel(preview.mode as ConversationVideoMode, preview.adapterType)

@@ -1,7 +1,9 @@
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Jimp, JimpMime } from "jimp";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -217,9 +219,10 @@ describe("generation API", () => {
     }).expect(201);
     const channelId = channelResponse.body.data.id as string;
 
-    // 两张 600KB 的图合计约 1.2M 字符，压在 1.4M 的中转站预算内，
-    // 用来确认 express / zod 这一层不会拦下正常的 base64 素材
-    const pngBase64 = "A".repeat(600_000);
+    const pixels = randomBytes(440 * 360 * 4);
+    for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+    const frame = await new Jimp({ width: 440, height: 360, data: pixels }).getBuffer(JimpMime.png);
+    const pngBase64 = frame.toString("base64");
     const createResponse = await request(app).post("/api/generations").send({
       channelId,
       model: "wan3.0-video",
@@ -1167,6 +1170,49 @@ describe("history cleanup, custom asset directory and restart recovery", () => {
     expect((await request(app).post(continuation).expect(202)).body.data.id).toBe(created.id);
     expect(submits).toBe(1);
     expect(polls).toBe(2);
+  });
+
+  it("recovers a Wan video after a lost submission response without sending another generation request", async () => {
+    const hits: string[] = [];
+    const remoteId = "task_wan_finished";
+    let origin = "";
+    origin = await startMock((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === "POST") { req.resume(); req.on("end", () => res.destroy()); return; }
+      if (req.url === `/api/v1/tasks/${remoteId}` && req.headers.authorization === "Bearer local-test-key") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: { task_id: remoteId, task_status: "SUCCEEDED", video_url: `${origin}/out.mp4` } }));
+        return;
+      }
+      if (req.url === "/out.mp4") { res.writeHead(200, { "Content-Type": "video/mp4" }); res.end("fake-mp4-bytes"); return; }
+      res.writeHead(404, { "Content-Type": "application/json" }); res.end("{}");
+    });
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "chatcanvas-wan-recovery-"));
+    const { app, context } = createApp({ dataDir });
+    cleanups.push(() => { context.agent.dispose(); context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
+    const channel = (await request(app).post("/api/channels").send({
+      name: "Wan recovery", baseUrl: origin, adapterType: "wan-video", authType: "bearer", authHeaderName: "",
+      secretEnv: "", endpoint: "", models: ["wan3.0-video"], allowPrivateNetwork: true, enabled: true, apiKey: "local-test-key",
+    }).expect(201)).body.data;
+    const input = { channelId: channel.id, model: "wan3.0-video", prompt: "find my video" };
+    const created = (await request(app).post("/api/generations").send(input).expect(202)).body.data;
+    await expect(context.runner.waitFor(created.id)).resolves.toMatchObject({ status: "failed", errorCode: "SUBMISSION_UNKNOWN", canRecoverVideo: true });
+
+    // v2.4.3 写的是 REQUEST_NETWORK_ERROR，升级后仍能找回旧记录。
+    context.db.updateTask(created.id, { errorCode: "REQUEST_NETWORK_ERROR" });
+    await request(app).post(`/api/generations/${created.id}/retry`).expect(409);
+    await request(app).post(`/api/generations/${created.id}/recover-video`).send({ remoteTaskId: "../invalid" }).expect(400);
+    await request(app).post(`/api/generations/${created.id}/recover-video`).send({ remoteTaskId: "task_missing" }).expect(404);
+    expect(context.db.getTaskRow(created.id)).toMatchObject({ remoteTaskId: null, status: "failed", attemptCount: 1 });
+    await request(app).post(`/api/generations/${created.id}/recover-video`).send({ remoteTaskId: remoteId }).expect(202);
+    await expect(context.runner.waitFor(created.id, { timeoutMs: 5000 })).resolves.toMatchObject({ status: "succeeded", progress: 100, attemptCount: 1 });
+    expect(context.db.getTaskRow(created.id)?.remoteTaskId).toBe(remoteId);
+    expect(context.db.listAssets(created.id)).toHaveLength(1);
+    expect(hits).toEqual([
+      "POST /api/v1/services/aigc/video-generation/video-synthesis", "GET /api/v1/tasks/task_missing",
+      `GET /api/v1/tasks/${remoteId}`, "GET /out.mp4",
+    ]);
   });
 
   it("resumes polling a video task after a restart instead of failing it, even with a trailing-slash Base URL", async () => {

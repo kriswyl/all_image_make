@@ -508,6 +508,7 @@ export interface ConfirmPreview {
    */
   videoInputs?: ConfirmVideoInput[];
   videoUploadTarget?: { channelId: string; channelVersion: string };
+  videoImageUploadPossible?: boolean;
   /**
    * @deprecated 老卡片的首帧引用。新卡片请用 `videoInputs`。
    * 保留它是为了让升级前已经待确认的卡片照常显示、照常能确认。

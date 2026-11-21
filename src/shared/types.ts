@@ -435,6 +435,7 @@ export interface Task {
   attemptCount: number;
   errorCode: string | null;
   errorMessage: string | null;
+  canRecoverVideo?: boolean;
   /** 上游任务的附加元数据，包括 Midjourney 操作和 Suno 成品信息 */
   remoteMeta?: { midjourney?: MidjourneyMeta; suno?: SunoTaskMeta; seedream?: SeedreamTaskMeta } | null;
   assets: Asset[];
@@ -458,6 +459,17 @@ export function taskKind(task: Task, channels: Channel[]) {
   return taskKindOfFromKinds(task, channels);
 }
 
+export interface VideoReferenceImageTrace {
+  index: number;
+  role: string;
+  transport: "inline" | "uploaded" | "url";
+  originalBytes?: number;
+  fileBytes?: number;
+  width?: number;
+  height?: number;
+  uploadFallback?: boolean;
+}
+
 export interface RequestDiagnosticTrace {
   phase: "prepare" | "upstream" | "response_body" | "parse_result" | "download_result" | "save_result" | "service_restart";
   outcome: "pending" | "succeeded" | "failed";
@@ -466,6 +478,7 @@ export interface RequestDiagnosticTrace {
   finishedAt?: string;
   timeoutMs?: number;
   upstreamRequestId?: string;
+  referenceImages?: { beforeBytes: number; requestBytes: number; images: VideoReferenceImageTrace[] };
   error?: { code: string; message: string; causeCode?: string };
 }
 

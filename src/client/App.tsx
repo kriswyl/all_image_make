@@ -110,6 +110,9 @@ export function App() {
    */
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [diagnosticTask, setDiagnosticTask] = useState<Task | null>(null);
+  const onVideoRecovered = useCallback((task: Task) => {
+    setTasks((current) => current.map((item) => item.id === task.id ? task : item));
+  }, []);
   /**
    * 对话里的「诊断」也走应用内弹窗。
    *
@@ -1002,7 +1005,7 @@ export function App() {
       {editorChannel !== undefined ? (
         <ChannelDialog channel={editorChannel} onClose={() => setEditorChannel(undefined)} onSaved={handleChannelSaved} />
       ) : null}
-      {diagnosticTask ? <DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} /> : null}
+      {diagnosticTask ? <DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} onVideoRecovered={onVideoRecovered} /> : null}
       {clearRequest ? (
         <ClearHistoryDialog
           mode={clearRequest.mode}

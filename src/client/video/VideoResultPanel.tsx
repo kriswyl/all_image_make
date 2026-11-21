@@ -231,6 +231,11 @@ export function VideoResultPanel({ task, tasks, hidden = false, onDiagnostics, o
 
   async function retry(item: Task) {
     setMenuTaskId(null);
+    if (item.canRecoverVideo) {
+      setOpenTaskId(null);
+      onDiagnostics(item);
+      return;
+    }
     const continueQuery = item.errorCode === "VIDEO_TIMEOUT";
     if (!continueQuery && !confirmGeneration({ kind: "视频生成", model: item.model, channel: item.channelName, retry: true })) return;
     try {
@@ -392,7 +397,7 @@ export function VideoResultPanel({ task, tasks, hidden = false, onDiagnostics, o
             </button>
           ) : null}
           <button type="button" role="menuitem" onClick={() => void retry(menuTask)}>
-            <RotateCcw size={14} />{menuTask.errorCode === "VIDEO_TIMEOUT" ? "继续查询" : "重生成"}
+            <RotateCcw size={14} />{menuTask.canRecoverVideo ? "找回视频" : menuTask.errorCode === "VIDEO_TIMEOUT" ? "继续查询" : "重生成"}
           </button>
           {menuTask.inputParameters ? (
             <button type="button" role="menuitem" onClick={() => { setMenuTaskId(null); onReuse(menuTask); }}>
@@ -603,7 +608,7 @@ function RecordDialog(props: {
             </button>
           ) : null}
           <button type="button" className="secondary-button" onClick={props.onRetry}>
-            <RotateCcw size={15} />{task.errorCode === "VIDEO_TIMEOUT" ? "继续查询" : "重生成"}
+            <RotateCcw size={15} />{task.canRecoverVideo ? "找回视频" : task.errorCode === "VIDEO_TIMEOUT" ? "继续查询" : "重生成"}
           </button>
           <button type="button" className="secondary-button" onClick={props.onDiagnostics}>
             <Eye size={15} />诊断

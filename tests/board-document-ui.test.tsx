@@ -112,6 +112,35 @@ async function mountBoard(initialId: string) {
   return { show, get state() { return state; }, toast, unmount: () => act(() => root.unmount()) };
 }
 
+it("重新打开画布时找回已同步的视频并保留原节点位置", async () => {
+  vi.useFakeTimers();
+  const initial = board("recover");
+  const at = new Date().toISOString();
+  initial.doc.nextRef = 3;
+  initial.doc.nodes = [
+    { id: "config", ref: "n1", type: "config", title: "配置", x: 0, y: 0, width: 320, height: 200, createdAt: at, updatedAt: at,
+      mode: "video", prompt: "原提示词", count: 1, useUpstreamText: true, status: "failed", lastTaskId: "old-task" },
+    { id: "video", ref: "n2", type: "video", title: "视频", x: 320, y: 20, width: 320, height: 200, createdAt: at, updatedAt: at,
+      source: "generated", status: "failed", assetId: null, taskId: "old-task" },
+  ];
+  vi.spyOn(api, "board").mockResolvedValue(initial);
+  vi.spyOn(api, "task").mockResolvedValue({ id: "old-task", status: "succeeded", assets: [
+    { id: "video-asset", taskId: "old-task", fileName: "result.mp4", mimeType: "video/mp4", url: "/sample.mp4", byteSize: 42, createdAt: at },
+  ] } as Task);
+  const save = vi.spyOn(api, "saveBoard").mockImplementation(async (_id, input) => ({ ...initial, version: 2, doc: input.doc }));
+  const toast = vi.fn();
+  const root = createRoot(document.createElement("div"));
+  function Harness() { useBoard(initial.id, toast); return null; }
+  try {
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(save.mock.calls[0]?.[1].doc.nodes).toMatchObject([
+      { id: "config", status: "succeeded", prompt: "原提示词" },
+      { id: "video", status: "succeeded", taskId: "old-task", assetId: "video-asset", x: 320, y: 20 },
+    ]);
+  } finally { act(() => root.unmount()); }
+});
+
 it("保存期间继续编辑，后续保存使用已确认的版本和最新文档", async () => {
   vi.useFakeTimers();
   const initial = board("a");

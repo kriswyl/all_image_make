@@ -12,6 +12,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { Jimp, JimpMime } from "jimp";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BATCHABLE_TOOLS, extractPlanText, looksLikeIdentityDrift, parsePlan, resolveBatch } from "../src/server/agent";
@@ -643,9 +644,10 @@ it.each(["正常完成", "期间发送新消息", "收尾前重启", "切换仅�
   ], { native: true, video: true });
   const base = `/api/conversations/${mock.conversationId}`;
   await request(mock.app).patch(base).send(changedScope ? { toolScope: "all" } : { chatMode: "chat", nativeImagePilot: true, videoConfirmPolicy: "never" }).expect(200);
+  const frame = await new Jimp({ width: 300, height: 300, color: 0x5c81aaff }).getBuffer(JimpMime.png);
   const upload = (await request(mock.app).post(`${base}/uploads`)
-    .attach("images", Buffer.from(pngBase64, "base64"), "first.png")
-    .attach("images", Buffer.from(pngBase64, "base64"), "last.png").expect(201)).body.data;
+    .attach("images", frame, "first.png")
+    .attach("images", frame, "last.png").expect(201)).body.data;
   const assetRefs = upload.sessionImages.map((entry: { asset: { id: string } }) => entry.asset.id);
   const videoFrames = changedScope ? { firstAssetId: assetRefs[1], lastAssetId: assetRefs[0] } : undefined;
   if (changedScope) {

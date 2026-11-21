@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { Jimp, JimpMime } from "jimp";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -113,9 +114,9 @@ async function startMock(plan: unknown | unknown[]) {
 }
 
 /** 传 N 张图进会话，返回它们的 assetId（按上传顺序） */
-async function uploadImages(app: ReturnType<typeof createApp>["app"], conversationId: string, count: number) {
+async function uploadImages(app: ReturnType<typeof createApp>["app"], conversationId: string, count: number, bytes = pngBytes) {
   let call = request(app).post(`/api/conversations/${conversationId}/uploads`);
-  for (let index = 0; index < count; index += 1) call = call.attach("images", pngBytes, `图${index + 1}.png`);
+  for (let index = 0; index < count; index += 1) call = call.attach("images", bytes, `图${index + 1}.png`);
   const body = (await call.expect(201)).body.data as { canvasAssetIds: string[] };
   return body.canvasAssetIds;
 }
@@ -274,7 +275,8 @@ describe("画布一组图，真的整组发出去", () => {
       tool: "generate_video", args: { prompt: "动起来", mode: "first-frame" }, say: "生成视频。",
     };
     const mock = await startMock(plan);
-    const uploaded = await uploadImages(mock.app, mock.conversationId, 3);
+    const frame = await new Jimp({ width: 480, height: 360, color: 0x2389aaff }).getBuffer(JimpMime.png);
+    const uploaded = await uploadImages(mock.app, mock.conversationId, 3, frame);
     plan.args.imageRefs = [uploaded[1]!.slice(0, 4)];
 
     await request(mock.app).post(`/api/conversations/${mock.conversationId}/messages`).send({ text: "让第二张动起来" }).expect(202);
@@ -288,7 +290,7 @@ describe("画布一组图，真的整组发出去", () => {
     expect(mock.videoHits).toHaveLength(1);
     const sent = JSON.parse(mock.videoHits[0]!.toString("utf8")) as { input: { media: Array<{ type: string; url: string }> } };
     expect(sent.input.media).toHaveLength(1);
-    expect(sent.input.media[0]!.url).toContain(pngBase64.slice(0, 40));
+    expect(sent.input.media[0]!.url).toBe(`data:image/png;base64,${frame.toString("base64")}`);
 
     // 工具结果里要留下「这次用了哪一张」，而不是笼统一句「用主图」
     const row = mock.context.db.listMessages(mock.conversationId)

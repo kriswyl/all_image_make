@@ -5,6 +5,7 @@
  */
 import type { AppDatabase } from "./db.js";
 import { buildCapabilityAliases, resolveAlias } from "./capabilities.js";
+import { supportsVideoReferenceImageUpload } from "../shared/video-reference-image-policy.js";
 import type { VideoSelection } from "./agent-tools.js";
 import { asBool, asNumber, asString } from "./agent-plan.js";
 import type {
@@ -168,6 +169,9 @@ export function buildConfirmPreview(
     })() : {}),
     ...(videoInputs !== undefined ? { videoInputs } : {}),
     ...(channel && selection?.videos?.length ? { videoUploadTarget: { channelId: channel.id, channelVersion: channel.updatedAt } } : {}),
+    ...(channel && aliasResolution && selection?.assets.length
+      && (channel.adapterType !== "minimax-video" || selection.mode === "reference")
+      && supportsVideoReferenceImageUpload(channel, aliasResolution.model) ? { videoImageUploadPossible: true } : {}),
     ...(videoInputs?.length
       ? { referenceAssetId: videoInputs[0]!.assetId, referenceCount: videoInputs.length }
       : imageUsesCanvas

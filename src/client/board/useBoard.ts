@@ -758,6 +758,52 @@ export function useBoard(
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [loadingTaskKey, reconcileTasks]);
 
+  const openedBoardId = view?.id;
+  const hasFailedVideo = view?.doc.nodes.some((node) => node.type === "video" && node.status === "failed" && node.taskId);
+  useEffect(() => {
+    if (!openedBoardId || !hasFailedVideo) return;
+    let closed = false;
+    let syncing = false;
+    const applyRecovered = (task: Task) => {
+      const current = viewRef.current;
+      if (closed || current?.id !== openedBoardId || task.status !== "succeeded") return;
+      const video = task.assets.find((asset) => asset.mimeType.startsWith("video/"));
+      if (!video || !current.doc.nodes.some((node) => node.type === "video" && node.status === "failed" && node.taskId === task.id)) return;
+      const at = now();
+      applyLocal((doc) => ({
+        ...doc,
+        nodes: doc.nodes.map((node) => {
+          if (node.type === "video" && node.status === "failed" && node.taskId === task.id) {
+            return { ...node, assetId: video.id, source: "generated", status: "succeeded", error: undefined, updatedAt: at };
+          }
+          if (node.type === "config" && node.status === "failed" && node.lastTaskId === task.id) {
+            return { ...node, status: "succeeded", error: undefined, updatedAt: at };
+          }
+          return node;
+        }),
+      }), "generate:recover", true);
+    };
+    const sync = async () => {
+      if (syncing) return;
+      syncing = true;
+      const ids = new Set(viewRef.current?.doc.nodes.flatMap((node) =>
+        node.type === "video" && node.status === "failed" && node.taskId ? [node.taskId] : []));
+      try {
+        for (const id of ids) {
+          if (closed || viewRef.current?.id !== openedBoardId) return;
+          const task = await api.task(id).catch(() => null);
+          if (task) applyRecovered(task);
+        }
+      } finally {
+        syncing = false;
+      }
+    };
+    const unsubscribe = typeof EventSource === "undefined" ? undefined
+      : api.openTaskStream({ onTask: applyRecovered, onOpen: () => void sync(), onError: () => undefined });
+    void sync();
+    return () => { closed = true; unsubscribe?.(); };
+  }, [openedBoardId, hasFailedVideo, applyLocal, viewRef]);
+
   const cancelTask = useCallback(async (taskId: string) => {
     const boardId = boardIdRef.current;
     if (!boardId) return;

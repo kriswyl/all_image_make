@@ -99,11 +99,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function imageDataUrl(input: NonNullable<GenerationInput["referenceImage"]>) {
+export function imageDataUrl(input: NonNullable<GenerationInput["referenceImage"]>) {
   return `data:${input.mimeType};base64,${input.base64}`;
 }
 
-function referenceImages(input: GenerationInput) {
+export function referenceImages(input: GenerationInput) {
   return input.referenceImages?.length ? input.referenceImages : input.referenceImage ? [input.referenceImage] : [];
 }
 

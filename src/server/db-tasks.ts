@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { AdapterType, Diagnostic, RequestDiagnosticTrace, Task, TaskKind, TaskStatus } from "../shared/types.js";
-import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, taskKindFor } from "../shared/kinds.js";
+import { AUDIO_ADAPTER_TYPES, VIDEO_ADAPTER_TYPES, isVideoAdapter, taskKindFor } from "../shared/kinds.js";
 import { summarizeTaskInput } from "../shared/video-snapshot.js";
 import { auditParameters } from "./diagnose.js";
 import type { AssetRepository } from "./db-assets.js";
@@ -47,6 +47,11 @@ export type CreateTaskInput = {
 };
 
 export type TaskPatch = Partial<Pick<TaskRow, "status" | "progress" | "remoteTaskId" | "remotePollAfter" | "remoteMeta" | "effectiveJson" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "finishedAt">>;
+
+export function canRecoverVideoSubmission(task: TaskRow, adapterType = task.channelAdapterType): boolean {
+  return task.status === "failed" && !task.remoteTaskId && isVideoAdapter(adapterType ?? "") &&
+    ["SUBMISSION_UNKNOWN", "REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(task.errorCode ?? "");
+}
 export type TaskKey = Pick<TaskRow, "id" | "channelId">;
 
 export type DiagnosticResult = { response: unknown; httpStatus?: number | null; durationMs?: number | null; trace?: RequestDiagnosticTrace };
@@ -285,6 +290,7 @@ export class TaskRepository {
       inputParameters: summarizeTaskInput(input),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
+      ...(canRecoverVideoSubmission(task) ? { canRecoverVideo: true } : {}),
       ...(task.remoteMeta ? { remoteMeta: parseJson<NonNullable<Task["remoteMeta"]>>(task.remoteMeta, {}) } : {}),
       assets: this.assets.listAssets(task.id).map((asset) => this.assets.assetView(asset)),
       createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,

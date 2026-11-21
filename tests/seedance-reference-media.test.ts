@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
+import { Jimp, JimpMime } from "jimp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp, type AppContext } from "../src/server/app";
@@ -27,7 +28,7 @@ async function startMock(handler: http.RequestListener) {
 /** 最小的 MP4 / MP3 头，够通过签名校验即可。 */
 const mp4 = Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
 const mp3 = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb]);
-const TINY_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const TINY_PNG = `data:image/png;base64,${(await new Jimp({ width: 300, height: 300, color: 0x714168ff }).getBuffer(JimpMime.png)).toString("base64")}`;
 
 async function makeApp(prefix: string) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));

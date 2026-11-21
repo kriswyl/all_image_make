@@ -1,8 +1,11 @@
 import type { VideoDraft } from "../../shared/video-draft";
 import type { MinimaxMediaInput, KlingMediaInput, SeedanceMediaInput, SeedanceMediaRole, VideoMediaInput } from "../../shared/types";
+import { MAX_INLINE_MEDIA_CHARS } from "../../shared/types";
 import { validateSeedanceMedia } from "../../shared/seedance-capabilities";
+import { videoReferenceImagePolicy } from "../../shared/video-reference-image-policy";
 import type { VideoModeSpec } from "../../shared/video-modes";
 import type { MediaBucket } from "../hooks/useMediaBuckets";
+import { referenceImageMimeType } from "../app-shared";
 
 /**
  * 把「创作框里的草稿」拼成各家接口的素材数组。
@@ -23,12 +26,24 @@ export interface MediaBuildContext {
   inlineAudio: boolean;
 }
 
-export async function buildWanMedia({ spec, bucket }: MediaBuildContext): Promise<VideoMediaInput[] | string> {
+function readManagedVideoImage(bucket: MediaBucket, minEdge = 1) {
+  const files = [...bucket.images, ...bucket.audios];
+  const estimatedBytes = files.reduce((sum, { file }) => sum + 4 * Math.ceil(file.size / 3) + 64, 0);
+  return (file: File) => {
+    const mime = referenceImageMimeType(file);
+    const source = mime && mime !== file.type ? new File([file], file.name, { type: mime }) : file;
+    // 通常交原图给服务端统一处理。接近本地请求保护值时，先控制客户端传输体积。
+    return estimatedBytes >= MAX_INLINE_MEDIA_CHARS - 256 * 1024 ? fileToVideoDataUrl(source, minEdge) : fileToDataUrl(source);
+  };
+}
+
+export async function buildWanMedia({ spec, bucket, model }: MediaBuildContext): Promise<VideoMediaInput[] | string> {
   const media: VideoMediaInput[] = [];
+  const readImage = readManagedVideoImage(bucket, videoReferenceImagePolicy("wan-video", model)?.minEdge);
   for (const [index, item] of bucket.images.entries()) {
     const type = spec.imageRepeatable ? spec.imageSlots[0] : spec.imageSlots[index];
     if (!type) return `${spec.label}最多接受 ${spec.imageSlots.length} 张图片`;
-    media.push({ type: type as VideoMediaInput["type"], url: await fileToVideoDataUrl(item.file) });
+    media.push({ type: type as VideoMediaInput["type"], url: await readImage(item.file) });
   }
   if (spec.imageSlots.length && !spec.imageRepeatable && bucket.images.length < spec.imageSlots.length) {
     return `${spec.label}需要 ${spec.imageSlots.length} 张图片`;
@@ -56,10 +71,11 @@ export async function buildSeedanceMedia({ spec, bucket, model, inlineAudio }: M
   }
 
   const media: SeedanceMediaInput[] = [];
+  const readImage = readManagedVideoImage(bucket, videoReferenceImagePolicy("seedance-video", model)?.minEdge);
   for (const [index, item] of bucket.images.entries()) {
     const role = spec.imageRepeatable ? slots[0] : slots[index];
     if (!role) return `${spec.label}最多 ${slots.length} 张图片`;
-    media.push({ type: "image_url", url: await fileToVideoDataUrl(item.file), role: role as SeedanceMediaRole });
+    media.push({ type: "image_url", url: await readImage(item.file), role: role as SeedanceMediaRole });
   }
   if (inlineAudio) {
     for (const audio of bucket.audios) {
@@ -82,10 +98,11 @@ export async function buildKlingMedia({ spec, bucket, draft }: MediaBuildContext
     return `${spec.label}最多 ${slots.length} 张图片`;
   }
   const media: KlingMediaInput[] = [];
+  const readImage = readManagedVideoImage(bucket);
   for (const [index, item] of bucket.images.entries()) {
     const type = spec.imageRepeatable ? slots[0] : slots[index];
     if (!type) return `${spec.label}最多 ${slots.length} 张图片`;
-    media.push({ type: type as KlingMediaInput["type"], url: await fileToVideoDataUrl(item.file) });
+    media.push({ type: type as KlingMediaInput["type"], url: await readImage(item.file) });
   }
   if (spec.needsReferenceVideo) {
     if (!bucket.videos.length) return `${spec.label}需要上传一段参考视频`;
@@ -96,14 +113,15 @@ export async function buildKlingMedia({ spec, bucket, draft }: MediaBuildContext
   return media;
 }
 
-export async function buildMinimaxMedia({ spec, bucket }: MediaBuildContext): Promise<MinimaxMediaInput[]> {
+export async function buildMinimaxMedia({ spec, bucket, model }: MediaBuildContext): Promise<MinimaxMediaInput[]> {
   const media: MinimaxMediaInput[] = [];
+  const readImage = readManagedVideoImage(bucket, videoReferenceImagePolicy("minimax-video", model)?.minEdge);
   for (const [index, item] of bucket.images.entries()) {
     const type = spec.imageSlots[spec.imageRepeatable ? 0 : index];
     if (type !== "first_frame" && type !== "last_frame" && type !== "reference_image") {
       throw new Error(`${spec.label}最多接受 ${spec.imageSlots.length} 张图片`);
     }
-    media.push({ type, url: await fileToVideoDataUrl(item.file) });
+    media.push({ type, url: await readImage(item.file) });
   }
   if (spec.acceptsReferenceAudio) {
     for (const { file } of bucket.audios) media.push({ type: "audio", url: await fileToDataUrl(file) });
@@ -145,20 +163,20 @@ const VIDEO_IMAGE_QUALITY = 0.85;
 /** 小于这个体积的图原样发送，省掉一次无谓的有损重编码 */
 const VIDEO_IMAGE_PASSTHROUGH_BYTES = 320 * 1024;
 
-export async function fileToVideoDataUrl(file: File): Promise<string> {
+async function fileToVideoDataUrl(file: File, minEdge: number): Promise<string> {
   if (file.size <= VIDEO_IMAGE_PASSTHROUGH_BYTES) return fileToDataUrl(file);
   try {
-    return await downscaleToJpeg(file);
+    return await downscaleToJpeg(file, minEdge);
   } catch {
     // 解码不了就退回原图，交给服务端的体积校验给出明确报错
     return fileToDataUrl(file);
   }
 }
 
-async function downscaleToJpeg(file: File): Promise<string> {
+async function downscaleToJpeg(file: File, minEdge: number): Promise<string> {
   const bitmap = await createImageBitmap(file);
   try {
-    const scale = Math.min(1, VIDEO_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const scale = Math.min(1, Math.max(VIDEO_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height), minEdge / Math.min(bitmap.width, bitmap.height)));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(bitmap.width * scale));
     canvas.height = Math.max(1, Math.round(bitmap.height * scale));

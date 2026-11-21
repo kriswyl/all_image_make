@@ -3,13 +3,13 @@ import { normalizeAspectFields } from "../shared/channel-fields.js";
 import { VIDEO_DEFAULTS } from "../shared/video-capabilities.js";
 import crypto from "node:crypto";
 import { DEFAULT_IMAGE_SIZE, MAX_INLINE_MEDIA_CHARS, normalizeImageSize, VIDEO_MEDIA_FIELDS } from "../shared/types.js";
-import { isImageAdapter } from "../shared/kinds.js";
+import { isImageAdapter, isVideoAdapter } from "../shared/kinds.js";
 import type { GenerationInput, RequestDiagnosticTrace, Task } from "../shared/types.js";
 import type { SunoTaskMeta } from "../shared/suno.js";
 import { SEEDREAM_ADAPTER, SEEDREAM_DEFAULT_WATERMARK, seedreamSize } from "../shared/seedream.js";
 import { seedreamResultMeta } from "./seedream-result.js";
 import type { AppDatabase, DbChannel } from "./db.js";
-import type { TaskPatch, TaskRow } from "./db-tasks.js";
+import { canRecoverVideoSubmission, type TaskPatch, type TaskRow } from "./db-tasks.js";
 import {
   RemoteApiError,
   applyAuth,
@@ -33,6 +33,7 @@ import { AppError } from "./app-error.js";
 import { uploadReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
 import { TaskInputFiles, type MaskImageUpload, type ReferenceImageUpload, type StoredGenerationInput } from "./task-input-files.js";
 import { TaskOutputFiles } from "./task-output-files.js";
+import { isVideoBodySizeRejection, prepareVideoReferenceImages } from "./video-reference-images.js";
 
 export type { MaskImageUpload, ReferenceImageUpload } from "./task-input-files.js";
 export { audioExtension, audioExtensionForMime, extensionForMime, matchesImageSignature, videoExtensionForMime, wavDurationSeconds } from "./task-media.js";
@@ -265,6 +266,9 @@ export class TaskRunner {
       if (!current || current.status === "cancelled") return;
       const key = this.resolveKey(channel);
       this.updateTask(taskId, { status: "validating", startedAt: task.startedAt ?? new Date().toISOString(), errorCode: null, errorMessage: null });
+      const preparing = () => this.db.getTaskRow(taskId)?.status === "validating";
+      let imagePlan = await prepareVideoReferenceImages(channel, input, preparing);
+      if (!preparing()) return;
       for (const stored of storedVideos) {
         const file = await this.inputFiles.readReferenceVideo(stored);
         const url = await uploadReferenceMedia(channel, this.sessionKeys, file, "video");
@@ -290,26 +294,55 @@ export class TaskRunner {
         }
         input.seedanceVideoMedia = [...(input.seedanceVideoMedia ?? []), { type: "audio_url", url, role: "reference_audio" }];
       }
-      const prepared = buildGenerationRequest(channel, input, key);
-      const effectiveBody = requestForDiagnostic(prepared).body ?? {};
-      this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: task.attemptCount + 1,
-        ...(channel.adapterType === SEEDREAM_ADAPTER ? { remoteMeta: "{}" } : {}),
-      });
-      phase = "upstream";
-      const result = await this.sendWithDiagnostic(taskId, prepared, isImageAdapter(channel.adapterType)).catch(error => {
+      const fitted = await imagePlan?.fit(key, this.sessionKeys, preparing);
+      if (!preparing()) return;
+      let attemptCount = task.attemptCount;
+      const send = (prepared: ReturnType<typeof buildGenerationRequest>, imageTrace?: RequestDiagnosticTrace["referenceImages"]) => {
+        const effectiveBody = requestForDiagnostic(prepared).body ?? {};
+        this.updateTask(taskId, { status: "submitting", effectiveJson: JSON.stringify(effectiveBody), attemptCount: ++attemptCount,
+          ...(channel.adapterType === SEEDREAM_ADAPTER ? { remoteMeta: "{}" } : {}),
+        });
+        phase = "upstream";
+        return this.sendWithDiagnostic(taskId, prepared, isImageAdapter(channel.adapterType), imageTrace);
+      };
+      const submit = async () => {
+        try {
+          return await send(fitted?.request ?? buildGenerationRequest(channel, input, key), fitted?.trace);
+        } catch (error) {
+          if (!imagePlan || !isVideoBodySizeRejection(error) || this.db.getTaskRow(taskId)?.status !== "submitting") throw error;
+          phase = "prepare";
+          phaseStartedAt = Date.now();
+          this.updateTask(taskId, { status: "validating" });
+          const fallback = await imagePlan.fit(key, this.sessionKeys, preparing, true);
+          if (!preparing()) return;
+          if (!fallback) {
+            phase = "upstream";
+            throw new AppError("UPSTREAM_BODY_TOO_LARGE", "渠道拒绝了过大的请求，请减少参考素材体积后再提交", 413);
+          }
+          return send(fallback.request, fallback.trace);
+        } finally {
+          imagePlan = undefined;
+        }
+      };
+      const result = await submit().catch(error => {
+        if (isVideoAdapter(channel.adapterType) && isVideoBodySizeRejection(error)) {
+          throw new AppError("UPSTREAM_BODY_TOO_LARGE", "渠道拒绝了过大的请求，请减少参考素材体积后再提交", 413);
+        }
         const hasExternalVideo = !storedVideos.length && (input.wanVideoMedia?.some(item => item.type === "reference_video") || input.klingVideoMedia?.some(item => item.type === "video") || input.seedanceVideoMedia?.some(item => item.type === "video_url") || input.minimaxVideoMedia?.some(item => item.type === "video"));
         if (hasExternalVideo && error instanceof RemoteApiError && /expired|过期/i.test(error.message)) {
           throw new AppError("REFERENCE_VIDEO_URL_EXPIRED", "参考视频链接已过期，请在视频生成页重新选择原视频或填写新链接", 400);
         }
         const transportInterrupted = error instanceof AppError && ["REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(error.code);
-        if ((task.agentOperationId || channel.adapterType === "suno-music") && transportInterrupted) {
+        const videoGatewayInterrupted = isVideoAdapter(channel.adapterType) && error instanceof RemoteApiError
+          && (error.status === 502 || error.status === 504 || (error.status === 500 && /(?:502 Bad Gateway|504 Gateway Time-?out)/i.test(error.message)));
+        if (videoGatewayInterrupted || ((task.agentOperationId || channel.adapterType === "suno-music" || isVideoAdapter(channel.adapterType)) && transportInterrupted)) {
           throw new AppError("SUBMISSION_UNKNOWN", "生成请求在返回结果前断开，上游可能已接收，请先到渠道核对任务", 409);
         }
         throw error;
       });
 
       // 用户在请求飞行中点了停止：结果不再落库，也不要把它改回 succeeded
-      if (this.db.getTaskRow(taskId)?.status !== "submitting") return;
+      if (!result || this.db.getTaskRow(taskId)?.status !== "submitting") return;
 
       // 异步厂商（视频 / 音乐）：提交响应里拿远端 id，交给统一的轮询器
       const spec = asyncProviderSpec(channel.adapterType);
@@ -372,6 +405,9 @@ export class TaskRunner {
 
   async retry(taskId: string) {
     const task = this.requireTask(taskId);
+    if (canRecoverVideoSubmission(task, this.db.getChannel(task.channelId)?.adapterType)) {
+      throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对。已有任务 ID 可在请求诊断中找回视频", 409);
+    }
     if (task.errorCode === "SUBMISSION_UNKNOWN") throw new AppError("SUBMISSION_UNKNOWN", "上游可能已接收该任务，请先到渠道核对提交结果", 409);
     if (!isTerminalStatus(task.status)) throw new AppError("TASK_IN_FLIGHT", "任务正在处理，请等待结果", 409);
     if (task.errorCode === "VIDEO_TIMEOUT") return this.continuePolling(taskId);
@@ -401,6 +437,47 @@ export class TaskRunner {
     return this.db.getTaskView(taskId)!;
   }
 
+  async recoverVideoSubmission(taskId: string, remoteTaskId: string): Promise<Task> {
+    const task = this.requireTask(taskId);
+    const channel = this.requireChannel(task.channelId);
+    if (!canRecoverVideoSubmission(task, channel.adapterType) || this.running.has(taskId)) {
+      throw new AppError("TASK_NOT_RESUMABLE", "当前任务无法绑定上游任务 ID", 409);
+    }
+    if (remoteTaskId.length > 200 || !/^[a-z0-9_-]+(?::[a-z0-9_-]+)*$/i.test(remoteTaskId)) {
+      throw new AppError("REMOTE_TASK_ID_INVALID", "请输入渠道后台的完整任务 ID", 400);
+    }
+    const spec = asyncProviderSpec(channel.adapterType);
+    if (!channel.enabled || !spec) {
+      throw new AppError("CHANNEL_UNSUPPORTED", "原视频渠道不可用，请检查渠道配置", 400);
+    }
+    const key = this.resolveKey(channel);
+    const url = joinEndpoint(channel.baseUrl, spec.pollPath(remoteTaskId));
+    const headers = videoPollHeaders(channel, key);
+    this.running.add(taskId);
+    try {
+      const initial = await readVideoPoll(url, headers, channel, 30_000);
+      const status = spec.extractStatus(initial.payload);
+      const hasResult = spec.extractResults(initial.payload).some((result) => result.strong);
+      if (initial.response.status === 404 || status.status === "expired" || (status.status === "unknown" && !hasResult)) {
+        throw new AppError("REMOTE_TASK_NOT_FOUND", "原渠道查不到此任务，请核对任务 ID，或在平台直接下载已生成的视频", 404);
+      }
+      if (!initial.response.ok) throw new AppError("VIDEO_POLL_FAILED", `查询上游任务失败（HTTP ${initial.response.status}）`, 502);
+      if (!status.status && !hasResult) {
+        throw new AppError("VIDEO_POLL_FAILED", "原渠道未返回可识别的任务状态，请核对任务 ID", 502);
+      }
+      if (this.db.getChannel(channel.id)?.updatedAt !== channel.updatedAt || !canRecoverVideoSubmission(this.requireTask(taskId), channel.adapterType)) {
+        throw new AppError("TASK_NOT_RESUMABLE", "任务状态已变化，请刷新后查看", 409);
+      }
+      this.running.delete(taskId);
+      void this.resumePolling(taskId, remoteTaskId, channel, spec, key, initial);
+      return this.db.getTaskView(taskId)!;
+    } catch (error) {
+      this.running.delete(taskId);
+      if (error instanceof AppError) throw error;
+      throw normalizeSubmissionError(error, false);
+    }
+  }
+
   /**
    * 进程重启时收拾残留的进行中任务。
    *
@@ -410,10 +487,10 @@ export class TaskRunner {
    */
   async resume() {
     for (const task of this.db.listPendingTasks()) {
-      const channel = task.remoteTaskId ? this.db.getChannel(task.channelId) : null;
-      const spec = channel ? asyncProviderSpec(channel.adapterType) : null;
+      const channel = this.db.getChannel(task.channelId);
+      const spec = channel && task.remoteTaskId ? asyncProviderSpec(channel.adapterType) : null;
       if (!channel || !spec) {
-        if ((task.agentOperationId || task.channelAdapterType === "suno-music") && task.status === "submitting") {
+        if ((task.agentOperationId || channel?.adapterType === "suno-music" || isVideoAdapter(channel?.adapterType ?? "")) && task.status === "submitting") {
           this.recordDiagnosticFailure(task.id, "service_restart", Date.now(), new AppError("SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果"), undefined);
           this.markFailed(task.id, "SUBMISSION_UNKNOWN", "服务重启时未能核实上游提交结果，请先到渠道核对任务");
         } else {
@@ -427,11 +504,11 @@ export class TaskRunner {
     }
   }
 
-  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel, spec: AsyncProviderSpec, key?: string) {
+  private async resumePolling(taskId: string, remoteTaskId: string, channel: DbChannel, spec: AsyncProviderSpec, key?: string, initial?: VideoPollResponse) {
     if (this.running.has(taskId)) return;
     this.running.add(taskId);
     try {
-      await this.pollAsyncTask(taskId, remoteTaskId, channel, key ?? this.resolveKey(channel), spec, { immediate: true });
+      await this.pollAsyncTask(taskId, remoteTaskId, channel, key ?? this.resolveKey(channel), spec, { immediate: true, initial });
     } catch (error) {
       const current = this.db.getTaskRow(taskId);
       if (current && !["succeeded", "failed", "cancelled", "expired"].includes(current.status)) {
@@ -459,10 +536,12 @@ export class TaskRunner {
     }
   }
 
-  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>, checkErrorEnvelope = false) {
+  private async sendWithDiagnostic(taskId: string, prepared: ReturnType<typeof buildGenerationRequest>, checkErrorEnvelope = false,
+    imageTrace?: RequestDiagnosticTrace["referenceImages"]) {
     const started = Date.now();
     const trace: RequestDiagnosticTrace = {
       phase: "upstream", outcome: "pending", startedAt: new Date(started).toISOString(), timeoutMs: prepared.timeoutMs,
+      ...(imageTrace ? { referenceImages: imageTrace } : {}),
     };
     let diagnosticId: string | undefined;
     let httpStatus: number | undefined;
@@ -527,7 +606,7 @@ export class TaskRunner {
     channel: DbChannel,
     key: string,
     spec: AsyncProviderSpec,
-    options: { immediate?: boolean } = {},
+    options: { immediate?: boolean; initial?: VideoPollResponse } = {},
   ) {
     this.updateTask(localTaskId, { status: "running", remoteTaskId, errorCode: null, errorMessage: null, finishedAt: null });
     if (channel.adapterType === "suno-music") {
@@ -538,9 +617,7 @@ export class TaskRunner {
     // 否则 Base URL 填成 https://api.x.com/ 时会「提交成功、轮询 404」
     const url = joinEndpoint(channel.baseUrl, spec.pollPath(remoteTaskId));
 
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
-    else if (channel.authType === "x-api-key") headers[channel.authHeaderName || "x-api-key"] = key;
+    const headers = videoPollHeaders(channel, key);
 
     // 只为最近一次查询保留完整响应，较早的查询写状态摘要。
     let pending: { index: number; payload: unknown; httpStatus: number; durationMs: number } | null = null;
@@ -559,7 +636,7 @@ export class TaskRunner {
     const deadline = Date.now() + spec.polling.windowMs;
     const initialDelay = POLL_DELAY_OVERRIDE_MS ?? spec.polling.initialMs;
     const resumeDelay = (this.db.getTaskRow(localTaskId)?.remotePollAfter ?? 0) - Date.now();
-    let delayMs = Math.max(resumeDelay, options.immediate ? 0 : initialDelay);
+    let delayMs = options.initial ? 0 : Math.max(resumeDelay, options.immediate ? 0 : initialDelay);
     let temporaryFailures = 0;
 
     try {
@@ -568,14 +645,10 @@ export class TaskRunner {
         if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
         if (Date.now() >= deadline) break;
 
-        let response: Response;
-        let payload: unknown;
-        const startedAt = Date.now();
+        let entry: VideoPollResponse;
         try {
-          const signal = AbortSignal.timeout(Math.max(1, Math.min(30_000, deadline - startedAt)));
-          response = await safeFetch(url, { method: "GET", headers, signal }, { allowPrivateNetwork: channel.allowPrivateNetwork });
-          // 网关出错时多半回的是 HTML，强行 json() 会抛 SyntaxError 掩盖真实状态码
-          payload = await response.json().catch(() => null);
+          entry = poll === 0 && options.initial ? options.initial
+            : await readVideoPoll(url, headers, channel, Math.max(1, Math.min(30_000, deadline - Date.now())));
         } catch (error) {
           if (error instanceof TypeError || error instanceof Error && /^(TimeoutError|AbortError)$/.test(error.name)) {
             temporaryFailures += 1;
@@ -585,6 +658,7 @@ export class TaskRunner {
           throw new AppError("VIDEO_POLL_FAILED", error instanceof Error ? error.message : "轮询任务状态失败", 502);
         }
         if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
+        const { response, payload, durationMs } = entry;
 
         // 上一次轮询既然不是终点，就降级成一条状态摘要
         if (pending) {
@@ -601,7 +675,7 @@ export class TaskRunner {
             durationMs: pending.durationMs,
           });
         }
-        pending = { index: poll + 1, payload, httpStatus: response.status, durationMs: Date.now() - startedAt };
+        pending = { index: poll + 1, payload, httpStatus: response.status, durationMs };
 
         if (response.status === 404) {
           throw new AppError("REMOTE_TASK_NOT_FOUND", "上游已找不到该任务，可能已过期或被清理", 502);
@@ -796,6 +870,23 @@ function truncatePayload(payload: unknown) {
   if (json === undefined) return null;
   if (json.length <= 50000) return payload;
   return { truncated: true, preview: json.slice(0, 50000) };
+}
+
+interface VideoPollResponse { response: Response; payload: unknown; durationMs: number }
+
+function videoPollHeaders(channel: DbChannel, key: string): Record<string, string> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (channel.authType === "bearer") headers.Authorization = `Bearer ${key}`;
+  else if (channel.authType === "x-api-key") headers[channel.authHeaderName || "x-api-key"] = key;
+  return headers;
+}
+
+async function readVideoPoll(url: string, headers: Record<string, string>, channel: DbChannel, timeoutMs: number): Promise<VideoPollResponse> {
+  const startedAt = Date.now();
+  const response = await safeFetch(url, { method: "GET", headers, signal: AbortSignal.timeout(timeoutMs) }, { allowPrivateNetwork: channel.allowPrivateNetwork });
+  // 保留网关 HTML 错误的 HTTP 状态，不把它误判成 JSON 解析错误。
+  const payload: unknown = await response.json().catch(() => null);
+  return { response, payload, durationMs: Date.now() - startedAt };
 }
 
 /** 统计走内联 data URI 的视频素材字符数：公网/oss 地址不计入请求体，忽略 */

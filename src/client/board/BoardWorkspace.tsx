@@ -549,7 +549,13 @@ export function BoardWorkspace({
       } catch (error) { onToast("error", error instanceof Error ? error.message : "读取素材失败"); return; }
     }
     const hasReferenceVideo = kind === "video" && board.view?.doc.edges.some((edge) => edge.kind === "input" && edge.target === nodeId && board.view?.doc.nodes.some((item) => item.id === edge.source && item.type === "video" && item.assetId));
-    const detail = hasReferenceVideo ? "参考视频将上传到渠道图床，上传后可通过公网访问。" : count > 1 ? `将提交 ${count} 次独立生图请求` : undefined;
+    const hasReferenceImage = kind === "video" && board.view?.doc.edges.some((edge) => edge.kind === "input" && edge.target === nodeId
+      && board.view?.doc.nodes.some((item) => item.id === edge.source && item.type === "image" && item.assetId));
+    const detail = [
+      ...(hasReferenceVideo ? ["参考视频将上传到渠道图床，上传后可通过公网访问。"] : []),
+      ...(hasReferenceImage ? ["支持图床的渠道可能将体积较大的参考图上传至渠道素材服务。"] : []),
+      ...(count > 1 ? [`将提交 ${count} 次独立生图请求`] : []),
+    ].join("\n") || undefined;
     if (!confirmGeneration({ kind: `${label}生成`, model, detail })) return;
     const inPlace = target.type !== "config";
     const result = await board.generate(nodeId);
@@ -629,6 +635,7 @@ export function BoardWorkspace({
   const retryBoardTask = useCallback(async (taskId: string) => {
     try {
       const task = await api.task(taskId);
+      if (task.canRecoverVideo) { setDiagnosticTask(task); return; }
       if (confirmGeneration({ kind: "生成", model: task.model, channel: task.channelName, retry: true })) await board.retryTask(taskId);
     } catch (error) { onToast("error", error instanceof Error ? error.message : "读取任务失败"); }
   }, [board, onToast]);
@@ -679,7 +686,8 @@ export function BoardWorkspace({
     for (const id of taskIds) {
       try {
         const task = await api.task(id);
-        if (taskIds.length === 1 || !["SUBMISSION_UNKNOWN", "REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(task.errorCode ?? "")) safe.push(id);
+        if (task.canRecoverVideo && taskIds.length === 1) { setDiagnosticTask(task); return; }
+        if (!task.canRecoverVideo && (taskIds.length === 1 || !["SUBMISSION_UNKNOWN", "REQUEST_TIMEOUT", "REQUEST_NETWORK_ERROR"].includes(task.errorCode ?? ""))) safe.push(id);
       } catch (error) { onToast("error", error instanceof Error ? error.message : "任务读取失败"); }
     }
     if (safe.length < taskIds.length) onToast("error", "未确认上游结果的请求已跳过，请查看诊断后单独确认重试");

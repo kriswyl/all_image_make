@@ -163,6 +163,9 @@ export const api = {
   cancel: (id: string) => request<Task>(`/api/generations/${id}/cancel`, { method: "POST" }),
   retry: (id: string) => request<Task>(`/api/generations/${id}/retry`, { method: "POST" }),
   continueTaskQuery: (id: string) => request<Task>(`/api/generations/${id}/continue-query`, { method: "POST" }),
+  recoverVideo: (id: string, remoteTaskId: string) => request<Task>(`/api/generations/${id}/recover-video`, {
+    method: "POST", body: JSON.stringify({ remoteTaskId }),
+  }),
   midjourneyAction: (id: string, customId: string, label?: string) =>
     request<Task>(`/api/generations/${id}/action`, {
       method: "POST",

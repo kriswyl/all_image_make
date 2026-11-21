@@ -423,6 +423,11 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     res.status(202).json(ok(runner.continuePolling(routeParam(req.params.id))));
   });
 
+  app.post("/api/generations/:id/recover-video", asyncHandler(async (req, res) => {
+    const { remoteTaskId } = z.object({ remoteTaskId: z.string().trim().min(1).max(200) }).parse(req.body);
+    res.status(202).json(ok(await runner.recoverVideoSubmission(routeParam(req.params.id), remoteTaskId)));
+  }));
+
   /**
    * Midjourney 的后续动作：把结果卡片上的 U1 / V2 / 重绘按钮变成一条新任务。
    * customId 是上游任务的按钮凭证，不能由前端自己拼；只接受父任务成功后的按钮。

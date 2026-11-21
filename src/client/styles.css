@@ -1167,6 +1167,12 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .diagnostic-task-error { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 2px 0; color: var(--coral-ink); font-size: 12px; overflow-wrap: anywhere; }
 .diagnostic-task-error strong, .diagnostic-task-error code { font: 11px/1.5 monospace; }
 .diagnostic-list { padding: 16px 18px 22px; overflow: auto; }
+.diagnostic-recovery { display: grid; gap: 7px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-xs); }
+.diagnostic-recovery > label { color: var(--ink); font-size: 13px; font-weight: 600; }
+.diagnostic-recovery > p { margin: 0; color: var(--muted); font-size: 12px; }
+.diagnostic-recovery > p[role="alert"] { color: var(--coral-ink); }
+.diagnostic-recovery > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.diagnostic-recovery input { flex: 1 1 220px; min-width: 0; }
 .diagnostic-entry { margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--radius-xs); overflow: hidden; }
 .diagnostic-entry header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 38px; padding: 5px 12px; color: var(--muted); background: var(--surface-soft); border-bottom: 1px solid var(--line); font-size: 11px; }
 .diagnostic-entry header strong { color: var(--ink); font-size: 12px; }
@@ -1175,6 +1181,7 @@ label small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .diagnostic-trace dl > div { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .diagnostic-trace dt { color: var(--muted); }
 .diagnostic-trace dd { margin: 0; overflow-wrap: anywhere; }
+.diagnostic-media { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .diagnostic-entry h3 { margin: 13px 13px 7px; color: var(--muted); font-size: 10px; text-transform: uppercase; }
 .diagnostic-entry pre { max-height: 250px; margin: 0 12px 14px; padding: 12px; overflow: auto; color: var(--ink); background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-control); font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 

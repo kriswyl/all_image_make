@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Activity, X } from "lucide-react";
 import { api } from "../api";
 import { LoadingScreen, StatusBadge, formatTime, terminalStatuses } from "../task-ui";
@@ -18,16 +18,25 @@ function time(value: string) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
-export function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () => void }) {
+function kib(bytes: number) {
+  return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
+export function DiagnosticDialog({ task, onClose, onVideoRecovered }: { task: Task; onClose: () => void; onVideoRecovered?: (task: Task) => void }) {
   const [currentTask, setCurrentTask] = useState(task);
   const [items, setItems] = useState<Diagnostic[] | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [recovered, setRecovered] = useState<Task | null>(null);
+  const [remoteTaskId, setRemoteTaskId] = useState("");
+  const [recovering, setRecovering] = useState(false);
+  const [recoveryError, setRecoveryError] = useState("");
+  const observedTask = recovered?.id === task.id ? recovered : task;
 
   useEffect(() => {
     let stopped = false;
     let timer: number | undefined;
-    let latest = task;
-    setCurrentTask(task);
+    let latest = observedTask;
+    setCurrentTask(observedTask);
     setItems(null);
     setLoadError("");
     async function refresh() {
@@ -48,9 +57,27 @@ export function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () =>
     }
     void refresh();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [task]);
+  }, [observedTask]);
+
+  async function recoverVideo(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const remoteId = remoteTaskId.trim();
+    if (!remoteId || recovering) return;
+    setRecovering(true);
+    setRecoveryError("");
+    try {
+      setRecovered(await api.recoverVideo(currentTask.id, remoteId));
+    } catch (error) {
+      setRecoveryError(error instanceof Error ? error.message : "查询原任务失败");
+    } finally {
+      setRecovering(false);
+    }
+  }
 
   const terminal = terminalStatuses.includes(currentTask.status);
+  useEffect(() => {
+    if (recovered?.id === currentTask.id && currentTask.status === "succeeded") onVideoRecovered?.(currentTask);
+  }, [currentTask, recovered, onVideoRecovered]);
   const seedream = currentTask.remoteMeta?.seedream;
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="modal diagnostic-modal" role="dialog" aria-modal="true" aria-label="请求诊断">
@@ -70,6 +97,16 @@ export function DiagnosticDialog({ task, onClose }: { task: Task; onClose: () =>
         {currentTask.errorMessage ? <p className="diagnostic-task-error"><strong>{currentTask.errorCode || "任务失败"}</strong>{currentTask.errorMessage}</p> : null}
       </div>
       <div className="diagnostic-list">
+        {currentTask.canRecoverVideo ? <form className="diagnostic-recovery" onSubmit={recoverVideo}>
+          <label htmlFor={`remote-task-${currentTask.id}`}>找回已生成的视频</label>
+          <p>从原渠道后台复制对应的任务 ID。只查询和保存原任务结果。</p>
+          <div>
+            <input id={`remote-task-${currentTask.id}`} aria-label="上游任务 ID" placeholder="上游任务 ID" value={remoteTaskId} maxLength={200}
+              spellCheck={false} autoComplete="off" disabled={recovering} onChange={(event) => setRemoteTaskId(event.target.value)} />
+            <button type="submit" className="secondary-button" disabled={!remoteTaskId.trim() || recovering}>{recovering ? "正在查询…" : "查询原任务"}</button>
+          </div>
+          {recoveryError ? <p className="diagnostic-task-error" role="alert">{recoveryError}</p> : null}
+        </form> : null}
         {loadError ? <p className="diagnostic-task-error" role="alert">{loadError}</p> : null}
         {items === null && !loadError ? <LoadingScreen compact /> : items?.length ? items.map((item) => <DiagnosticEntry key={item.id} item={item} terminal={terminal} />)
           : !loadError ? <div className="table-empty"><Activity size={28} /><span>{terminal ? "暂无诊断记录" : "等待请求记录"}</span></div> : null}
@@ -102,6 +139,18 @@ function DiagnosticEntry({ item, terminal }: { item: Diagnostic; terminal: boole
       </dl>
       {trace.error ? <p className="diagnostic-task-error"><strong>{trace.error.code}</strong>{trace.error.message}
         {trace.error.causeCode ? <code>{trace.error.causeCode}</code> : null}</p> : null}
+      {trace.referenceImages ? <div className="diagnostic-media">
+        <div>请求体 {kib(trace.referenceImages.requestBytes)}{trace.referenceImages.beforeBytes !== trace.referenceImages.requestBytes
+          ? `（分流前 ${kib(trace.referenceImages.beforeBytes)}）` : ""}</div>
+        {trace.referenceImages.images.map((image) => <div key={image.index}>
+          {image.role === "first_frame" ? "首帧" : image.role === "last_frame" ? "尾帧" : image.role === "image" ? "角色图" : `参考图 ${image.index}`}
+          {" · "}{image.transport === "uploaded" ? "渠道图床" : image.transport === "inline" ? "内联" : "原素材地址"}
+          {image.width && image.height ? ` · ${image.width}×${image.height}` : ""}
+          {image.fileBytes ? ` · ${kib(image.fileBytes)}` : ""}
+          {image.originalBytes && image.originalBytes !== image.fileBytes ? `（原图 ${kib(image.originalBytes)}）` : ""}
+          {image.uploadFallback ? " · 上传失败后改用内联" : ""}
+        </div>)}
+      </div> : null}
     </div> : null}
     {compact ? <p className="diagnostic-compact">{pollSummary(item.response)}<small>中间轮询只保留状态摘要，完整响应见最后一次</small></p> : <>
       {item.request !== null ? <><h3>请求</h3><pre>{JSON.stringify(item.request, null, 2)}</pre></> : null}

@@ -149,6 +149,18 @@ export async function uploadReferenceMedia(
   const label = kind === "audio" ? "音频" : "视频";
   if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", "该渠道未配置视频上传服务", 400);
   validateReferenceMedia(file, kind);
+  return uploadReferenceFile(channel, keys, file, label);
+}
+
+export async function uploadVideoReferenceImage(channel: DbChannel, keys: KeyStore, file: ReferenceMediaUpload): Promise<string> {
+  const url = await uploadReferenceFile(channel, keys, file, "图片");
+  const parsed = await assertSafeUrl(url, channel.allowPrivateNetwork);
+  if (parsed.username || parsed.password) throw new AppError("UPLOAD_FAILED", "图片上传服务返回了无效的素材地址", 502);
+  return url;
+}
+
+async function uploadReferenceFile(channel: DbChannel, keys: KeyStore, file: ReferenceMediaUpload, label: string): Promise<string> {
+  if (!channel.uploadEndpoint) throw new AppError("UPLOAD_UNSUPPORTED", `该渠道未配置${label}上传服务`, 400);
   await assertSafeUrl(channel.uploadEndpoint, channel.allowPrivateNetwork);
   const headers = new Headers();
   for (const [name, value] of Object.entries(channel.uploadHeaders ?? {})) {
