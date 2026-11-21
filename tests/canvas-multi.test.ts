@@ -114,7 +114,7 @@ async function startMock(plan: unknown | unknown[]) {
 }
 
 /** 传 N 张图进会话，返回它们的 assetId（按上传顺序） */
-async function uploadImages(app: ReturnType<typeof createApp>["app"], conversationId: string, count: number, bytes = pngBytes) {
+async function uploadImages(app: ReturnType<typeof createApp>["app"], conversationId: string, count: number, bytes: Buffer<ArrayBufferLike> = pngBytes) {
   let call = request(app).post(`/api/conversations/${conversationId}/uploads`);
   for (let index = 0; index < count; index += 1) call = call.attach("images", bytes, `图${index + 1}.png`);
   const body = (await call.expect(201)).body.data as { canvasAssetIds: string[] };
