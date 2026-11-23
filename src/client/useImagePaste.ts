@@ -34,6 +34,7 @@ export function useImagePaste(onImages: (files: File[]) => void, enabled = true)
   useEffect(() => {
     if (!enabled) return;
     const onPaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented) return;
       const images = imageFilesFromClipboard(event.clipboardData);
       if (!images.length) return;
       event.preventDefault();

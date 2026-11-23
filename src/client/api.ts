@@ -12,6 +12,7 @@ import type { StoryboardMediaRole, StoryboardPreviewBoard, StoryboardProduction,
 import type { StylePreset, StylePresetInput } from "../shared/style-presets";
 import type { PresentationVersionReport } from "../shared/presentation-report";
 import type { VideoOverviewFrames } from "../shared/media-review";
+import type { VideoTaskReuse } from "../shared/video-reuse";
 import type { ChatWebSettings, ChatWebSettingsPatch } from "../shared/chat-web";
 import { withReferenceMediaType } from "./media-files";
 
@@ -113,6 +114,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  videoTaskReuse: (id: string, signal?: AbortSignal) => request<VideoTaskReuse>(`/api/generations/${encodeURIComponent(id)}/video-reuse`, { signal }),
+  async videoTaskReuseFile(id: string, index: number, signal: AbortSignal) {
+    const response = await fetch(apiUrl(`/api/generations/${encodeURIComponent(id)}/video-reuse/${index}`), { signal });
+    if (!response.ok) throw new Error("原素材无法读取，请选择文件");
+    return response.blob();
+  },
   createHtmlPreview: (html: string) => request<{ id: string }>("/api/html-previews", { method: "POST", body: JSON.stringify({ html }) }),
   generateWithReferenceVideo: (input: GenerationInput, file: File) => {
     const form = new FormData();
@@ -268,6 +275,9 @@ export const api = {
     body: JSON.stringify(patch),
   }),
   deleteConversation: (id: string) => request<{ deleted: true }>(`/api/conversations/${id}`, { method: "DELETE" }),
+  trashedConversations: () => request<import("../shared/agent-types").TrashedConversation[]>("/api/conversations/trash"),
+  restoreConversation: (id: string) => request<{ restored: true }>(`/api/conversations/trash/${id}/restore`, { method: "POST" }),
+  purgeConversation: (id: string) => request<{ deleted: true }>(`/api/conversations/trash/${id}`, { method: "DELETE" }),
   /**
    * 发一条消息。**立即返回**，模型输出走 `openConversationStream`。
    * 卡在这里等会撞上前端自己的超时——一趟生图几十秒，连接等不起。
@@ -365,6 +375,12 @@ export const api = {
     }
     const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }));
     const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
+  },
+  conversationDocumentAsFile: async (id: string, documentId: string, fileName: string, signal?: AbortSignal) => {
+    const response = await fetch(apiUrl(`/api/conversations/${id}/documents/items/${documentId}/file`), signal ? { signal } : undefined);
+    if (!response.ok) throw new Error(`读取文档失败：HTTP ${response.status}`);
+    const blob = await response.blob();
+    return new File([blob], fileName, { type: "application/octet-stream" });
   },
   uploadConversationDocuments: (id: string, documents: Array<{ name: string; content: string }>) =>
     request<ConversationView>(`/api/conversations/${id}/documents`, {
@@ -623,9 +639,9 @@ export const api = {
     }),
 
   assetUrl: (url: string) => apiUrl(url),
-  assetAsFile: async (asset: Asset) => {
-    const response = await fetch(apiUrl(asset.url));
-    if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`);
+  assetAsFile: async (asset: Pick<Asset, "url" | "mimeType" | "fileName">, signal?: AbortSignal) => {
+    const response = await fetch(apiUrl(asset.url), signal ? { signal } : undefined);
+    if (!response.ok) throw new Error(`读取素材失败：HTTP ${response.status}`);
     const blob = await response.blob();
     const type = blob.type || asset.mimeType || "image/png";
     return new File([blob], asset.fileName, { type });

@@ -25,6 +25,7 @@ import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MED
 import { mediaUploadExtension } from "../task-media.js";
 import { referenceVideoDuration } from "../reference-video.js";
 import { videoOverviewFramesSchema } from "../../shared/media-review.js";
+import { purgeConversationTrashItem, purgeExpiredConversationTrash } from "../conversation-trash.js";
 
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -199,6 +200,28 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     res.status(201).json(ok(agent.buildView(conversation.id)));
   });
 
+  app.get("/api/conversations/trash", asyncHandler(async (_req, res) => {
+    await purgeExpiredConversationTrash(db);
+    res.json(ok(db.listTrashedConversations()));
+  }));
+
+  app.post("/api/conversations/trash/:id/restore", (req, res) => {
+    const id = routeParam(req.params.id);
+    const restored = db.restoreTrashedConversation(id);
+    if (!restored && db.getConversation(id)?.kind !== "chat") {
+      throw new AppError("CONVERSATION_NOT_IN_TRASH", "会话已过期或已永久删除", 404);
+    }
+    if (restored) agent.settleFinishedTasks(id);
+    res.json(ok({ restored: true }));
+  });
+
+  app.delete("/api/conversations/trash/:id", asyncHandler(async (req, res) => {
+    if (!await purgeConversationTrashItem(db, routeParam(req.params.id))) {
+      throw new AppError("CONVERSATION_NOT_IN_TRASH", "最近删除中找不到这条会话", 404);
+    }
+    res.json(ok({ deleted: true }));
+  }));
+
   app.get("/api/conversations/:id", (req, res) => {
     const view = agent.buildView(routeParam(req.params.id));
     if (!view) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
@@ -256,21 +279,18 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     res.json(ok(agent.buildView(updated!.id)));
   });
 
-  app.delete("/api/conversations/:id", asyncHandler(async (req, res) => {
+  app.delete("/api/conversations/:id", (req, res) => {
     const id = routeParam(req.params.id);
     const conversation = db.getConversation(id);
-    if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
     // 无限画布线程跟着板走，不能从对话删除入口删
-    if (conversation.kind !== "chat") {
+    if (conversation && conversation.kind !== "chat") {
       return res.status(400).json(fail("CONVERSATION_NOT_CHAT", "无限画布请从无限画布入口删除", crypto.randomUUID()));
     }
-    // 正在跑的一轮先掐掉，否则它会把消息写回一张已经删掉的会话
-    agent.interrupt(id);
-    // 上传的图不属于生成历史，没人引用了就得连文件一起清掉（生成的产物不动）
-    const removed = db.deleteConversation(id);
-    await removeStoredFiles(removed.assets, [], db.inputsDir);
-    res.json(ok({ deleted: true }));
-  }));
+    if (agent.isRunning(id)) throw new AppError("TURN_IN_FLIGHT", "会话仍在处理，请先停止当前回复或等它结束", 409);
+    const trashed = db.moveConversationToTrash(id);
+    if (!trashed) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    res.json(ok({ deleted: true, ...trashed }));
+  });
 
   /**
    * 发一条消息并开始这一轮。
@@ -412,6 +432,10 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
       const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
       // 和生成产物走同一个缩略图出口：画布徽章、「本会话的图」都要用它
       const thumbPath = await writeThumbnail(db, assetId, file.buffer);
+      if (!db.getConversation(id)) {
+        await removeStoredFiles([{ baseDir, relativePath: fileName }, ...(thumbPath ? [{ baseDir: db.thumbsDir, relativePath: thumbPath }] : [])], [], db.inputsDir);
+        throw new AppError("CONVERSATION_NOT_FOUND", "会话已移到最近删除", 404);
+      }
       db.createTask({
         id: taskId, channelId: "", model: "", prompt: "上传图片",
         input: {}, origin: "upload", libraryScope: "conversation", ownerConversationId: id, status: "succeeded",

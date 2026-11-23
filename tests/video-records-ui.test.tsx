@@ -236,7 +236,7 @@ it("记录区只有网格一种视角：没有网格/列表切换，列数按可
     .toMatch(/^repeat\(\d+, minmax\(0, 1fr\)\)$/);
 });
 
-it("卡片菜单给出播放/下载/重生成/复用参数/诊断/删除，点复用参数回到创作框", async () => {
+it("卡片菜单提供以此任务新建入口", async () => {
   await mount([done]);
   await act(async () => {
     (container.querySelector(".record-more") as HTMLButtonElement).click();
@@ -244,9 +244,9 @@ it("卡片菜单给出播放/下载/重生成/复用参数/诊断/删除，点�
   const menu = document.querySelector(".record-menu") as HTMLElement;
   expect(menu).toBeTruthy();
   expect([...menu.querySelectorAll("button")].map((node) => node.textContent))
-    .toEqual(["播放", "下载", "重生成", "复用参数", "查看诊断", "删除历史"]);
+    .toEqual(["播放", "下载", "重生成", "以此任务新建", "查看诊断", "删除历史"]);
 
-  const reuse = [...menu.querySelectorAll("button")].find((node) => node.textContent === "复用参数") as HTMLButtonElement;
+  const reuse = [...menu.querySelectorAll("button")].find((node) => node.textContent === "以此任务新建") as HTMLButtonElement;
   await act(async () => { reuse.click(); });
   expect(reused.map((item) => item.id)).toEqual(["done-1"]);
   expect(document.querySelector(".record-menu")).toBeNull();
@@ -285,7 +285,7 @@ it("点卡片打开大播放器，能关掉；生成中的卡片打开是进度�
   const dialog = document.querySelector(".record-dialog") as HTMLElement;
   expect(dialog).toBeTruthy();
   expect(dialog.querySelector("video")?.getAttribute("src")).toContain("done-1.mp4");
-  expect(dialog.textContent).toContain("复用参数");
+  expect(dialog.textContent).toContain("以此任务新建");
   await act(async () => { (dialog.querySelector(".record-dialog-close") as HTMLButtonElement).click(); });
   expect(document.querySelector(".record-dialog")).toBeNull();
 

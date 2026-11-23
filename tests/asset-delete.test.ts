@@ -51,6 +51,7 @@ describe("素材库删除图片", () => {
     await request(app).post(`/api/boards/${board.id}/bridge/assets`).send({ items: [{ assetId }] }).expect(200);
     await request(app).delete(`/api/conversations/${conversationId}/assets/${assetId}`).expect(409);
     await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+    await request(app).delete(`/api/conversations/trash/${conversationId}`).expect(200);
     expect(db.getAsset(assetId)).not.toBeNull();
     expect(db.findBoardAssetRefs(assetId).some((ref) => ref.boardId === board.id)).toBe(true);
   });
@@ -88,6 +89,7 @@ describe("素材库删除图片", () => {
     db.appendMessage({ conversationId, role: "assistant", content: "结果", taskId });
     expect((await request(app).get("/api/library").expect(200)).body.data.some((task: { id: string }) => task.id === taskId)).toBe(false);
     await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+    await request(app).delete(`/api/conversations/trash/${conversationId}`).expect(200);
     expect((await request(app).get("/api/library").expect(200)).body.data.some((task: { id: string }) => task.id === taskId)).toBe(false);
   });
   it("删掉任务、消息引用、画布和分镜 / 设定图指针", async () => {

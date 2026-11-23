@@ -19,6 +19,8 @@ vi.mock("../src/client/api", () => ({
     polishPrompt: vi.fn(),
     generate: vi.fn(),
     generateWithReferenceMedia: vi.fn(),
+    videoTaskReuse: vi.fn(),
+    videoTaskReuseFile: vi.fn(),
   },
 }));
 
@@ -32,7 +34,7 @@ vi.mock("../src/client/video/media-builders", async (importOriginal) => {
 import { VideoGenerateView } from "../src/client/VideoGenerateView";
 import { api } from "../src/client/api";
 import { useMediaBuckets } from "../src/client/hooks/useMediaBuckets";
-import type { Channel } from "../src/shared/types";
+import type { Channel, Task } from "../src/shared/types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,7 +78,7 @@ let lastToast: { kind: string; message: string } | null = null;
 function resetToast() { lastToast = null; }
 function takeToast() { return lastToast?.message ?? ""; }
 
-function Harness(props: { channelId: string; model: string }) {
+function Harness(props: { channelId: string; model: string; tasks?: Task[] }) {
   const media = useMediaBuckets(() => undefined);
   const channel = props.channelId === "wan-upload" ? wanUploadChannel
     : props.channelId === "wan" ? wanChannel
@@ -90,7 +92,7 @@ function Harness(props: { channelId: string; model: string }) {
       selectedChannelId={props.channelId}
       selectedModel={props.model}
       activeTask={null}
-      tasks={[]}
+      tasks={props.tasks ?? []}
       media={media}
       onChannelChange={() => undefined}
       onModelChange={() => undefined}
@@ -105,7 +107,7 @@ function Harness(props: { channelId: string; model: string }) {
   );
 }
 
-async function render(props: { channelId: string; model: string }) {
+async function render(props: { channelId: string; model: string; tasks?: Task[] }) {
   root = createRoot(container);
   await act(async () => { root!.render(<Harness {...props} />); await Promise.resolve(); });
 }
@@ -788,6 +790,55 @@ it("MiniMax H3 默认 768P，首尾帧按角色随 JSON 发送", async () => {
   } finally {
     confirm.mockRestore();
   }
+});
+
+it("从历史补齐尾帧后按原角色还原，点击生成前不提交", async () => {
+  const snapshot = { prompt: "保持原构图", mode: "first-last-frame", resolution: "720p", duration: 5, imageCount: 0, media: [] };
+  const original: Task = {
+    id: "history", channelId: "seedance", channelName: "Seedance", model: "sd-2.5", prompt: snapshot.prompt,
+    status: "failed", progress: null, effectiveParameters: null, attemptCount: 1, errorCode: "FAILED", errorMessage: null,
+    assets: [], createdAt: "2026-11-21T00:00:00.000Z", startedAt: null, finishedAt: null, inputParameters: snapshot,
+  };
+  vi.mocked(api.videoTaskReuse).mockResolvedValue({
+    snapshot, inlineAudio: false, timeoutMs: 800_000, rawParameters: {}, omittedRawFields: [],
+    slots: [
+      { index: 0, kind: "image", role: "last_frame", available: false, name: "last.png", reason: "本地原文件已丢失" },
+      { index: 1, kind: "image", role: "first_frame", available: true, name: "first.png", mimeType: "image/png" },
+    ],
+  });
+  const fetchFile = vi.mocked(api.videoTaskReuseFile).mockClear().mockResolvedValue(new Blob(["first"], { type: "image/png" }));
+  const generate = vi.mocked(api.generate).mockClear().mockResolvedValue(original);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    await render({ channelId: "seedance", model: "sd-2.5", tasks: [original] });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".record-more")!.click(); });
+    const menu = document.querySelector(".record-menu")!;
+    await act(async () => { [...menu.querySelectorAll("button")].find((item) => item.textContent === "以此任务新建")!.click(); });
+    const dialog = document.querySelector(".video-reuse-dialog")!;
+    const apply = dialog.querySelector<HTMLButtonElement>(".primary-button")!;
+    expect(dialog.textContent).toContain("尾帧 · last.png");
+    expect(apply.disabled).toBe(true);
+    expect(fetchFile.mock.calls.map((call) => call[1])).toEqual([1]);
+    const picker = dialog.querySelector<HTMLInputElement>("input[type=file]")!;
+    Object.defineProperty(picker, "files", { value: [new File(["last"], "replacement.png", { type: "image/png" })] });
+    await act(async () => { picker.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(apply.disabled).toBe(false);
+    await act(async () => { apply.click(); });
+    expect(document.querySelector(".video-reuse-dialog")).toBeNull();
+    expect(promptText()).toBe(snapshot.prompt);
+    expect(generate).not.toHaveBeenCalled();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".vstudio-send")!.click();
+      await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    });
+    expect(generate.mock.calls[0]![0]).toMatchObject({
+      seedanceVideoMode: "first-last-frame", timeoutMs: 800_000,
+      seedanceVideoMedia: [
+        { role: "first_frame", url: "data:image/png;base64,Zmlyc3Q=" },
+        { role: "last_frame", url: "data:image/png;base64,bGFzdA==" },
+      ],
+    });
+  } finally { confirm.mockRestore(); }
 });
 
 it("Grok 提交时把参考图当通用 referenceImages 带上，不再报「没有可用的生成方式」", async () => {

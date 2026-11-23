@@ -717,6 +717,18 @@ export class AppDatabase {
     return this.conversations.listConversations();
   }
 
+  listTrashedConversations() { return this.conversations.listTrashed(); }
+
+  expiredConversationTrashIds() { return this.conversations.expiredTrashIds(); }
+
+  moveConversationToTrash(id: string) { return this.conversations.moveToTrash(id); }
+
+  restoreTrashedConversation(id: string) { return this.conversations.restoreFromTrash(id); }
+
+  purgeTrashedConversation(id: string) {
+    return this.conversations.getTrashed(id) ? this.deleteConversation(id) : null;
+  }
+
   /**
    * 把卡在 `running` 的会话收回 `idle`，返回改动了几条。
    *
@@ -1156,7 +1168,7 @@ export class AppDatabase {
    * 但自己上传的图不属于历史，会话一没就没人能引用它了，所以跟着一起清盘：
    * 否则素材目录里会静默地留下一堆永远看不见的文件。
    */
-  deleteConversation(id: string): { assets: StoredFileRef[] } {
+  deleteConversation(id: string): { assets: StoredFileRef[]; inputs: string[] } {
     // 无限画布线程的生命周期跟着板走，不能从对话删除入口直接删
     const kindRow = this.db.prepare("SELECT kind FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
     if (kindRow && String(kindRow.kind) === "board") {
@@ -1165,6 +1177,7 @@ export class AppDatabase {
     // 只移除本会话的文档工作区；旧版本可能分布在多个已切换过的 base_dir。
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("文档目录路径无效");
     const workspaceRoots = new Set<string>([this.currentDocumentsDir, this.defaultDocumentsDir]);
+    const workspaceTargets: string[] = [];
     for (const row of this.db.prepare("SELECT DISTINCT base_dir FROM workspace_documents WHERE conversation_id = ? AND base_dir IS NOT NULL AND base_dir != ''").all(id) as DbRow[]) workspaceRoots.add(String(row.base_dir));
     for (const rootRaw of workspaceRoots) {
       const workspaceRoot = path.resolve(rootRaw);
@@ -1174,8 +1187,25 @@ export class AppDatabase {
       if (fs.lstatSync(workspaceRoot).isSymbolicLink()) throw new Error("文档目录不安全");
       if (!fs.existsSync(workspaceTarget)) continue;
       if (fs.lstatSync(workspaceTarget).isSymbolicLink()) throw new Error("会话文档目录不安全");
-      fs.rmSync(workspaceTarget, { recursive: true, force: true });
+      workspaceTargets.push(workspaceTarget);
     }
+    this.db.exec("BEGIN IMMEDIATE");
+    let removed: ReturnType<AppDatabase["deleteConversationRecords"]>;
+    try {
+      removed = this.deleteConversationRecords(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    for (const workspaceTarget of workspaceTargets) {
+      try { fs.rmSync(workspaceTarget, { recursive: true, force: true }); }
+      catch (error) { console.warn(`清理会话 ${id} 的文档目录失败`, error); }
+    }
+    return removed;
+  }
+
+  private deleteConversationRecords(id: string) {
     const uploads = this.db.prepare(`
       SELECT DISTINCT tasks.id AS id FROM messages
       JOIN assets ON assets.id = messages.asset_id
@@ -1204,11 +1234,14 @@ export class AppDatabase {
     `).all(id, id, id, id, id) as DbRow[];
 
     const assets: StoredFileRef[] = [];
+    const inputs: string[] = [];
     for (const row of uploads) {
       const taskId = String(row.id);
       const task = this.getTaskRow(taskId);
       if (task?.libraryScope === "public" || this.listAssets(taskId).some((asset) => this.findBoardAssetRefs(asset.id).length > 0 || this.assetHasOtherConversationReferences(asset.id, id))) continue;
-      assets.push(...this.deleteTask(taskId).assets);
+      const removed = this.deleteTask(taskId);
+      assets.push(...removed.assets);
+      inputs.push(...removed.inputs);
     }
     this.db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversation_documents WHERE conversation_id = ?").run(id);
@@ -1225,7 +1258,7 @@ export class AppDatabase {
     this.db.prepare("DELETE FROM presentation_family_refs WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM document_publish_log WHERE conversation_id = ?").run(id);
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
-    return { assets };
+    return { assets, inputs };
   }
 
   // ── 无限画布（FREE_CANVAS_PLAN.md） ─────────────────────────────────────────

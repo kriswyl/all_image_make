@@ -47,6 +47,13 @@ export interface MediaBucketsController {
   removeVideo: (key: string, id: string) => void;
   addAudio: (key: string, file: File, duration: number, limit: number) => boolean;
   removeAudio: (key: string, id: string) => void;
+  replace: (key: string, media: ReplacementMedia) => void;
+}
+
+export interface ReplacementMedia {
+  images: File[];
+  videos: Array<{ file: File; duration: number }>;
+  audios: Array<{ file: File; duration: number }>;
 }
 
 export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) => void): MediaBucketsController {
@@ -168,6 +175,16 @@ export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) 
     patch(key, (current) => ({ ...current, audios: current.audios.filter((item) => item.id !== id) }));
   }
 
+  function replace(key: string, media: ReplacementMedia) {
+    const previous = get(key);
+    const images = media.images.map((file) => ({ file, previewUrl: createUrl(file) }));
+    const videos = media.videos.map((entry) => ({ ...entry, id: crypto.randomUUID(), previewUrl: createUrl(entry.file) }));
+    const audios = media.audios.map((entry) => ({ ...entry, id: crypto.randomUUID() }));
+    commit(key, { images, videos, audios });
+    previous.images.forEach((item) => releaseUrl(item.previewUrl));
+    previous.videos.forEach((item) => releaseUrl(item.previewUrl));
+  }
+
   return {
     reading,
     get,
@@ -181,5 +198,6 @@ export function useMediaBuckets(onToast: (kind: Toast["kind"], message: string) 
     removeVideo,
     addAudio,
     removeAudio,
+    replace,
   };
 }

@@ -454,7 +454,7 @@ export class AgentService {
     return recoverStaleConversations(this.taskEventHost());
   }
 
-  private settleFinishedTasks(conversationId: string) {
+  settleFinishedTasks(conversationId: string) {
     settleFinishedTasks(this.taskEventHost(), conversationId);
   }
 

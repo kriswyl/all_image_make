@@ -48,6 +48,8 @@ it("普通聊天原生调用工具并在聊天中保存可下载文件", async (
     await request(app).delete(`/api/conversations/${id}/documents/files/${tree.data!.fileId}`).expect(200);
     expect(context.db.getWorkspaceDocument(id, tree.data!.fileId)).toBeNull();
     await request(app).delete(`/api/conversations/${id}`).expect(200);
+    expect((await fs.stat(path.join(dir, "documents", id))).isDirectory()).toBe(true);
+    await request(app).delete(`/api/conversations/trash/${id}`).expect(200);
     await expect(fs.stat(path.join(dir, "documents", id))).rejects.toThrow();
   } finally { context.db.close(); await fs.rm(dir, { recursive: true, force: true }); await new Promise<void>((resolve) => mock.close(() => resolve())); }
 }, 20000);

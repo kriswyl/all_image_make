@@ -3,6 +3,7 @@ import { createApp } from "./app.js";
 import { loadEnvFiles } from "./security.js";
 import { getWpsPreviewJobs } from "./wps-preview.js";
 import { cleanupExpiredCandidates, reconcileCandidates } from "./document-publish.js";
+import { purgeExpiredConversationTrash } from "./conversation-trash.js";
 
 loadEnvFiles();
 
@@ -28,7 +29,11 @@ const server = app.listen(port, "127.0.0.1", () => {
   const orphanRefs = context.db.specs.releaseOrphanPausedRefs();
   if (orphanRefs) console.log(`释放了 ${orphanRefs} 条已无断点的家族保护引用`);
   // 低频清理跑在同一进程里，不引入独立常驻进程；unref 保证不阻止退出。
-  const sweep = setInterval(() => cleanupExpiredCandidates(context.db), 6 * 60 * 60 * 1000);
+  void purgeExpiredConversationTrash(context.db);
+  const sweep = setInterval(() => {
+    cleanupExpiredCandidates(context.db);
+    void purgeExpiredConversationTrash(context.db);
+  }, 6 * 60 * 60 * 1000);
   sweep.unref();
 });
 

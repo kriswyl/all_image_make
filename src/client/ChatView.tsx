@@ -13,7 +13,7 @@
  */
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import {
-  Brain, Film, Globe, Images, ListTree, MessageSquarePlus, PenLine, Plus, Trash2, Wand2, X,
+  Brain, Copy, Film, Globe, Images, ListTree, MessageSquarePlus, PenLine, Plus, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -32,10 +32,15 @@ import { Composer, isImageFile, isScriptDocument } from "./chat/Composer";
 import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../shared/chat-media";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
+import { DeleteConversationDialog } from "./chat/DeleteConversationDialog";
+import { ConversationTrashDialog } from "./chat/ConversationTrashDialog";
+import type { Toast } from "./app-shared";
 import { AssistantBubble, StreamingBubble, SystemNote, UserBubble } from "./chat/MessageBubble";
 import { ModelPanel } from "./chat/ModelPanel";
 import { ModelPicker, type ModelOption } from "./chat/ModelPicker";
-import { buildRows } from "./chat/rows";
+import { buildRows, type Row } from "./chat/rows";
+import { formatChatForClipboard, formatMessageForClipboard } from "./chat/copy-chat";
+import { copyTextToClipboard } from "./clipboard";
 import { ToolCard } from "./chat/ToolCard";
 import { useConversationStream } from "./chat/useConversationStream";
 import { AssetLibrary } from "./chat/AssetLibrary";
@@ -97,7 +102,7 @@ export function ChatView({
   onConfigureChannel?: (channel: Channel) => void;
   /** 工具卡片里的「诊断」：打开应用内诊断弹窗（Tauri 里 window.open 会被拦掉） */
   onDiagnostics?: (taskId: string) => void;
-  onToast: (kind: "ok" | "error", text: string) => void;
+  onToast: (kind: "ok" | "error", text: string, action?: Toast["action"]) => void;
 }) {
   const brains = useMemo(() => channels.filter((channel) => isChatAdapter(channel.adapterType) && channel.enabled), [channels]);
 
@@ -143,6 +148,8 @@ export function ChatView({
   const [uploading, setUploading] = useState(false);
   /** 会话列表的右键菜单：位置固定在视口里，避免被侧栏滚动裁掉 */
   const [convMenu, setConvMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const convMenuRef = useRef<HTMLDivElement>(null);
@@ -237,7 +244,7 @@ export function ChatView({
     document.addEventListener("mousedown", closeOnOutside);
     return () => document.removeEventListener("mousedown", closeOnOutside);
   }, []);
-  const toast = useCallback((kind: "ok" | "error", text: string) => onToastRef.current(kind, text), []);
+  const toast = useCallback((kind: "ok" | "error", text: string, action?: Toast["action"]) => onToastRef.current(kind, text, action), []);
 
   /**
    * 侧栏的「新对话」：点一下要真的开一条新会话，而不是切回上次那条。
@@ -847,15 +854,25 @@ export function ChatView({
     await send(text, merged);
   }
 
+  function requestConversationDeletion(id: string) {
+    setConvMenu(null);
+    const item = list.find((conversation) => conversation.id === id);
+    if (item) setDeleteTarget({ id, title: item.title || DEFAULT_CONVERSATION_TITLE });
+  }
+
   async function removeConversation(id: string) {
-    try {
-      await api.deleteConversation(id);
-      const next = await reloadList();
-      if (id === activeId) setActiveId(next[0]?.id ?? null);
-      void api.capabilities().then((caps) => setCapabilities(caps.aliases)).catch(() => undefined);
-    } catch (error) {
-      toastError(error);
-    }
+    await api.deleteConversation(id);
+    setList((current) => current.filter((item) => item.id !== id));
+    const next = await reloadList();
+    setActiveId((current) => current === id ? next[0]?.id ?? null : current);
+    toast("ok", "已移到最近删除", { label: "撤销", run: () => { void restoreConversation(id).catch(toastError); } });
+  }
+
+  async function restoreConversation(id: string) {
+    await api.restoreConversation(id);
+    await reloadList();
+    setActiveId(id);
+    toast("ok", "已恢复会话");
   }
 
   /** 右键会话行：显示应用内菜单，而不是 WebView 自带的「返回 / 刷新 / 检查」 */
@@ -987,6 +1004,32 @@ export function ChatView({
     }
   }
 
+  async function copyMessages(messages: ChatMessage[], wholeConversation = false) {
+    try {
+      const text = wholeConversation
+        ? formatChatForClipboard(messages, (id) => assetsById.get(id), view ?? undefined)
+        : formatMessageForClipboard(messages, (id) => assetsById.get(id));
+      if (!text) return;
+      await copyTextToClipboard(text);
+      toast("ok", wholeConversation ? "已复制会话" : "已复制消息");
+    } catch {
+      toast("error", "无法写入剪贴板，请重试");
+    }
+  }
+
+  function withMessageCopy(row: Row, content: React.ReactNode) {
+    const result = row.kind === "tool" ? row.result : null;
+    const messages = result && result.id !== row.message.id ? [row.message, result] : [row.message];
+    const copyable = Boolean(formatMessageForClipboard(messages, (id) => assetsById.get(id)));
+    return <div key={row.message.id} className={`chat-copyable-row${row.kind === "user" ? " is-user" : ""}`}>
+      {content}
+      <div className="chat-message-actions">
+        {copyable ? <button type="button" className="chat-message-copy" aria-label="复制" data-tooltip="复制这条消息"
+          onClick={() => void copyMessages(messages)}><Copy size={12} /></button> : null}
+      </div>
+    </div>;
+  }
+
   return (
     <div className="chat-view">
       {/*
@@ -1003,7 +1046,8 @@ export function ChatView({
         filter={sidebarFilter}
         onSelect={setActiveId}
         onCreate={() => void createConversation()}
-        onDelete={(id) => void removeConversation(id)}
+        onOpenTrash={() => setTrashOpen(true)}
+        onDelete={requestConversationDeletion}
         onContextMenu={openConversationMenu}
         onRenameChange={setRenameDraft}
         onRenameCommit={(id) => void commitRenameConversation(id)}
@@ -1024,17 +1068,17 @@ export function ChatView({
             type="button"
             role="menuitem"
             className="danger"
-            onClick={() => {
-              const id = convMenu.id;
-              setConvMenu(null);
-              void removeConversation(id);
-            }}
+            onClick={() => requestConversationDeletion(convMenu.id)}
           >
             删除会话
           </button>
         </div>,
         document.body,
       ) : null}
+
+      {deleteTarget ? <DeleteConversationDialog title={deleteTarget.title}
+        onClose={() => setDeleteTarget(null)} onConfirm={() => removeConversation(deleteTarget.id)} /> : null}
+      {trashOpen ? <ConversationTrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreConversation} /> : null}
 
       <section className="chat-main">
         {!view ? (
@@ -1073,6 +1117,8 @@ export function ChatView({
               />
               {/* 头部只留「这个会话是什么」；模型、确认策略这些「我这次要用什么」都在输入框那一行 */}
               <div className="chat-header-controls">
+                <button type="button" className="chat-control chat-toggle" aria-label="复制整个会话" data-tooltip="复制整个会话"
+                  disabled={!view.messages.length} onClick={() => void copyMessages(view.messages, true)}><Copy size={13} /></button>
                 <button
                   type="button"
                   className="chat-control chat-toggle"
@@ -1111,16 +1157,16 @@ export function ChatView({
               ) : null}
 
               {rows.map((row) => {
-                if (row.kind === "user") return <UserBubble key={row.message.id} message={row.message}
+                if (row.kind === "user") return withMessageCopy(row, <UserBubble message={row.message}
                   asset={row.message.assetId ? assetsById.get(row.message.assetId) : undefined}
-                  lookupAsset={(id) => assetsById.get(id)} onPreview={setPreview} />;
-                if (row.kind === "note") return <SystemNote key={row.message.id} message={row.message} />;
+                  lookupAsset={(id) => assetsById.get(id)} onPreview={setPreview} />);
+                if (row.kind === "note") return withMessageCopy(row, <SystemNote message={row.message} />);
                 if (row.kind === "assistant") {
                   // 「还没被回答的那一条」才给按钮：翻回去看老记录时，那些选项早就失效了
                   const options = row.message.id === lastAnswerableId ? readAskOptions(row.message) : [];
-                  return (
+                  if (!row.message.content?.trim() && !options.length) return null;
+                  return withMessageCopy(row,
                     <AssistantBubble
-                      key={row.message.id}
                       message={row.message}
                       options={options}
                       disabled={running}
@@ -1131,9 +1177,8 @@ export function ChatView({
                 }
                 if (row.kind === "confirm") {
                   // 卡片上的参数是用户能改的；改完随确认一起提交
-                  return (
+                  return withMessageCopy(row,
                     <ConfirmCard
-                      key={row.message.id}
                       message={row.message}
                       preview={row.preview}
                       busy={busy || running || compressing}
@@ -1143,9 +1188,8 @@ export function ChatView({
                   );
                 }
                 const taskId = row.result?.taskId ?? null;
-                return (
+                return withMessageCopy(row,
                   <ToolCard
-                    key={row.message.id}
                     message={row.message}
                     result={row.result}
                     progress={taskId ? progress[taskId] : undefined}
@@ -1176,6 +1220,7 @@ export function ChatView({
             </div>
 
             <Composer
+              conversationId={view.id}
               running={running || compressing}
               uploading={uploading || changingScope || changingWeb}
               imageVisionWarning={!view.visionEnabled ? "本会话已关闭看图，可在「对话设置」开启。"

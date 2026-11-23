@@ -18,6 +18,7 @@ import { referenceImageMimeTypes, referenceVideoUpload } from "./uploads.js";
 import { removeStoredFiles } from "./files.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
 import { submitImageTasks } from "../image-batch.js";
+import { describeVideoTaskReuse, readVideoTaskReuseFile } from "../video-task-reuse.js";
 import type { Express } from "express";
 
 const MAX_REFERENCE_BASE64_CHARS = Math.ceil(MAX_REFERENCE_IMAGE_BYTES / 3) * 4;
@@ -410,6 +411,18 @@ export function registerGenerationRoutes(app: Express, db: AppDatabase, runner: 
     if (!task) return res.status(404).json(fail("TASK_NOT_FOUND", "任务不存在"));
     res.json(ok(task));
   });
+
+  app.get("/api/generations/:id/video-reuse", asyncHandler(async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(ok(await describeVideoTaskReuse(db, routeParam(req.params.id))));
+  }));
+
+  app.get("/api/generations/:id/video-reuse/:index", asyncHandler(async (req, res) => {
+    const index = z.coerce.number().int().min(0).max(100).parse(req.params.index);
+    const file = await readVideoTaskReuseFile(db, routeParam(req.params.id), index);
+    res.set({ "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Disposition": "attachment" });
+    res.type(file.mimeType).send(file.bytes);
+  }));
 
   app.post("/api/generations/:id/cancel", (req, res, next) => {
     try { res.json(ok(runner.cancel(routeParam(req.params.id)))); } catch (error) { next(error); }

@@ -436,6 +436,7 @@ export interface Task {
   errorCode: string | null;
   errorMessage: string | null;
   canRecoverVideo?: boolean;
+  upstreamTaskId?: string;
   /** 上游任务的附加元数据，包括 Midjourney 操作和 Suno 成品信息 */
   remoteMeta?: { midjourney?: MidjourneyMeta; suno?: SunoTaskMeta; seedream?: SeedreamTaskMeta } | null;
   assets: Asset[];

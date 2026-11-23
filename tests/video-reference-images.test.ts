@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Jimp, JimpMime } from "jimp";
@@ -7,6 +7,7 @@ import request from "supertest";
 import { expect, it, vi } from "vitest";
 import { createApp } from "../src/server/app";
 import type { AdapterType } from "../src/shared/types";
+import { storeInlineVideoImages } from "../src/server/task-video-images";
 
 const asPng = (bytes: Buffer) => `data:image/png;base64,${bytes.toString("base64")}`;
 const small = await new Jimp({ width: 300, height: 300, color: 0x2389aaff }).getBuffer(JimpMime.png);
@@ -20,6 +21,53 @@ const tooLarge = {
   message: JSON.stringify({ error: { message: "read request body failed: http: request body too large" }, request_id: "trace-1" }),
   data: null,
 };
+
+it("video reuse reads retained frame and multipart files independently without submitting upstream", async () => {
+  await fixture(async ({ app, context, model, channelId, bodies, uploads }) => {
+    const id = randomUUID();
+    const fields = await storeInlineVideoImages({
+      seedanceVideoMedia: [
+        { type: "image_url", role: "last_frame", url: asPng(large) },
+        { type: "image_url", role: "first_frame", url: asPng(small) },
+      ],
+    }, (file, bytes) => writeFile(path.join(context.db.inputsDir, file), bytes), id);
+    context.db.createTask({ id, model, channelId, prompt: "首尾帧", status: "failed", input: {
+      ...fields, prompt: "首尾帧", seedanceVideoMode: "first-last-frame", duration: 5, resolution: "720p", timeoutMs: 800_000,
+    } });
+    await rm(path.join(context.db.inputsDir, `${id}-video-image-1.bin`));
+    const reuse = (await request(app).get(`/api/generations/${id}/video-reuse`).expect(200)).body.data;
+    expect(reuse).toMatchObject({
+      snapshot: { mode: "first-last-frame", duration: 5, resolution: "720p" }, timeoutMs: 800_000,
+      slots: [{ role: "last_frame", available: false }, { role: "first_frame", available: true }],
+    });
+    await request(app).get(`/api/generations/${id}/video-reuse/0`).expect(404);
+    const first = await request(app).get(`/api/generations/${id}/video-reuse/1`).expect("Content-Type", /image\/png/).expect(200);
+    expect(first.body).toEqual(small);
+
+    const referenceId = randomUUID();
+    const video = `${referenceId}-reference-1.mp4`;
+    const audio = `${referenceId}-reference-audio-1.mp3`;
+    await writeFile(path.join(context.db.inputsDir, video), mp4);
+    await writeFile(path.join(context.db.inputsDir, audio), "sample");
+    context.db.createTask({ id: referenceId, model, channelId, prompt: "参考", status: "succeeded", input: {
+      prompt: "参考", seedanceVideoMode: "reference",
+      seedanceVideoMedia: [{ type: "image_url", role: "reference_image", url: "https://example.invalid/ref.png" }],
+      referenceVideos: [{ relativePath: video, mimeType: "video/mp4", fileName: "scene.mp4" }],
+      referenceAudios: [{ relativePath: audio, mimeType: "audio/mpeg", fileName: "speech.mp3" }],
+    } });
+    const refs = (await request(app).get(`/api/generations/${referenceId}/video-reuse`).expect(200)).body.data;
+    expect(refs.slots).toMatchObject([
+      { role: "reference_image", available: false },
+      { kind: "video", name: "scene.mp4", available: true },
+      { kind: "audio", name: "speech.mp3", available: true },
+    ]);
+    expect(JSON.stringify(refs)).not.toContain("example.invalid");
+    await request(app).get(`/api/generations/${referenceId}/video-reuse/1`).expect("Content-Type", /video\/mp4/).expect(200);
+    await request(app).get(`/api/generations/${referenceId}/video-reuse/2`).expect("Content-Type", /audio\/mpeg/).expect(200);
+    expect(bodies).toEqual([]);
+    expect(uploads).toEqual([]);
+  }, { seedance: true });
+});
 
 async function fixture(run: (mock: ReturnType<typeof createApp> & {
   channelId: string; model: string; bodies: Array<Record<string, unknown>>; uploads: Array<{ type: string; size: number }>;

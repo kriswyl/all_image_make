@@ -1,6 +1,10 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatToolScope, Conversation, ConversationKind, ConversationPatch, ConversationStatus, ConversationUsage, VideoConfirmPolicy } from "../shared/agent-types.js";
+import { CONVERSATION_TRASH_DAYS, type TrashedConversation } from "../shared/agent-types.js";
 import { canvasIdsFromRow, now, stringArrayFromJson, type DbRow } from "./db-row.js";
+
+const trashRetentionMs = CONVERSATION_TRASH_DAYS * 24 * 60 * 60 * 1000;
+const trashCutoff = () => new Date(Date.now() - trashRetentionMs).toISOString();
 
 export type CreateConversationInput = {
   title: string; brainChannelId: string; brainModel: string;
@@ -39,14 +43,45 @@ export class ConversationRepository {
   }
 
   getConversation(id: string): Conversation | null {
-    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as DbRow | undefined;
+    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ? AND deleted_at IS NULL").get(id) as DbRow | undefined;
     return row ? this.conversationFromRow(row) : null;
   }
 
   listConversations(): Conversation[] {
     // 无限画布的 Agent 线程也是 conversation，但它是板的一部分，不能混进对话侧栏
-    const rows = this.db.prepare("SELECT * FROM conversations WHERE kind = 'chat' ORDER BY updated_at DESC").all() as DbRow[];
+    const rows = this.db.prepare("SELECT * FROM conversations WHERE kind = 'chat' AND deleted_at IS NULL ORDER BY updated_at DESC").all() as DbRow[];
     return rows.map((row) => this.conversationFromRow(row));
+  }
+
+  private trashFromRow(row: DbRow): TrashedConversation {
+    const deletedAt = String(row.deleted_at);
+    return { id: String(row.id), title: String(row.title), deletedAt, expiresAt: new Date(Date.parse(deletedAt) + trashRetentionMs).toISOString() };
+  }
+
+  getTrashed(id: string): TrashedConversation | null {
+    const row = this.db.prepare("SELECT id, title, deleted_at FROM conversations WHERE id = ? AND kind = 'chat' AND deleted_at IS NOT NULL").get(id) as DbRow | undefined;
+    return row ? this.trashFromRow(row) : null;
+  }
+
+  listTrashed(): TrashedConversation[] {
+    const rows = this.db.prepare("SELECT id, title, deleted_at FROM conversations WHERE kind = 'chat' AND deleted_at > ? ORDER BY deleted_at DESC, id").all(trashCutoff()) as DbRow[];
+    return rows.map((row) => this.trashFromRow(row));
+  }
+
+  expiredTrashIds(): string[] {
+    const rows = this.db.prepare("SELECT id FROM conversations WHERE kind = 'chat' AND deleted_at <= ?").all(trashCutoff()) as DbRow[];
+    return rows.map((row) => String(row.id));
+  }
+
+  moveToTrash(id: string): TrashedConversation | null {
+    this.db.prepare(`UPDATE conversations SET deleted_at = ?, status = CASE WHEN status IN ('running', 'waiting_task') THEN 'idle' ELSE status END
+      WHERE id = ? AND kind = 'chat' AND deleted_at IS NULL`).run(now(), id);
+    return this.getTrashed(id);
+  }
+
+  restoreFromTrash(id: string): boolean {
+    return Boolean(this.db.prepare("UPDATE conversations SET deleted_at = NULL, updated_at = ? WHERE id = ? AND kind = 'chat' AND deleted_at > ?")
+      .run(now(), id, trashCutoff()).changes);
   }
 
   /**
@@ -60,7 +95,7 @@ export class ConversationRepository {
     // 放进这个清理里，用户新建一块板再点「新对话」就会把板的线程删掉。
     const rows = this.db.prepare(
       `SELECT conversations.id AS id FROM conversations
-       WHERE conversations.kind = 'chat'
+       WHERE conversations.kind = 'chat' AND conversations.deleted_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id)`,
     ).all() as DbRow[];
     return rows.map((row) => String(row.id));
@@ -113,7 +148,7 @@ export class ConversationRepository {
     if (!fields.length) return this.getConversation(id);
     fields.push("updated_at = ?");
     values.push(now(), id);
-    this.db.prepare(`UPDATE conversations SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    this.db.prepare(`UPDATE conversations SET ${fields.join(", ")} WHERE id = ? AND deleted_at IS NULL`).run(...values);
     return this.getConversation(id);
   }
 
@@ -177,7 +212,7 @@ export class ConversationRepository {
   /** 视频任务完成后靠它找回会话（§9.1）；一个任务只会属于一个会话 */
   findConversationByTask(taskId: string): Conversation | null {
     const row = this.db.prepare(
-      "SELECT conversations.* FROM conversations JOIN messages ON messages.conversation_id = conversations.id WHERE messages.task_id = ? ORDER BY messages.seq DESC LIMIT 1",
+      "SELECT conversations.* FROM conversations JOIN messages ON messages.conversation_id = conversations.id WHERE messages.task_id = ? AND conversations.deleted_at IS NULL ORDER BY messages.seq DESC LIMIT 1",
     ).get(taskId) as DbRow | undefined;
     return row ? this.conversationFromRow(row) : null;
   }

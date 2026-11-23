@@ -140,6 +140,24 @@ export function registerDocumentRoutes(app: Express, db: AppDatabase, agent: Age
   app.delete("/api/wps-preview/:id", (req, res) => {
     wpsPreviews.close(routeParam(req.params.id), previewSecret(req)); res.json(ok({ closed: true }));
   });
+  /**
+   * 把会话里上传过的文档原样取回。复制消息时只带引用，粘贴回输入框时靠这个接口还原本体。
+   * 文本类存的是 content，Office/PDF/XMind 存的是原始字节。
+   */
+  app.get("/api/conversations/:id/documents/items/:documentId/file", (req, res) => {
+    const conversationId = routeParam(req.params.id);
+    const document = db.getConversationDocument(routeParam(req.params.documentId));
+    if (!document || document.conversationId !== conversationId) {
+      throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不属于当前会话", 404);
+    }
+    const bytes = db.getConversationDocumentFile(document.id)
+      ?? (/\.(txt|md|markdown|csv|json)$/i.test(document.fileName) ? Buffer.from(document.content, "utf8") : null);
+    if (!bytes) throw new AppError("DOCUMENT_NOT_FOUND", "附件原文件不可用，请重新上传", 404);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(document.fileName)}`);
+    res.send(bytes);
+  });
+
   app.post("/api/conversations/:id/documents/upload", binaryDocumentUpload.single("file"), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
     const file = req.file;

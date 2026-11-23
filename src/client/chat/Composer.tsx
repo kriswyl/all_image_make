@@ -15,7 +15,7 @@
  */
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { ArrowUp, CornerDownLeft, FileText, Film, Music, Plus, Square, X } from "lucide-react";
-import type { ReactNode } from "react";
+import type { ClipboardEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
 import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
@@ -25,6 +25,8 @@ import { useFileDrop } from "../useFileDrop";
 import { useImagePaste } from "../useImagePaste";
 import { CanvasTray, type CanvasTrayItem } from "./CanvasTray";
 import type { ChatVideoFrames } from "../../shared/agent-types";
+import { api } from "../api";
+import { readChatReferences } from "./video-clipboard";
 
 /**
  * 待发附件。只放**本地文件**：
@@ -53,6 +55,7 @@ export function isImageFile(file: File): boolean {
 }
 
 export function Composer({
+  conversationId,
   running,
   uploading,
   disabled,
@@ -74,6 +77,7 @@ export function Composer({
   onSetCanvasFirst,
   onSetCanvasLast,
 }: {
+  conversationId: string;
   running: boolean;
   /** 图正在上传：按钮转圈，这期间不许再放进来 */
   uploading?: boolean;
@@ -108,10 +112,12 @@ export function Composer({
   const [text, setText] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [reject, setReject] = useState<string | null>(null);
+  const [readingMedia, setReadingMedia] = useState(false);
+  const mediaRequest = useRef<AbortController | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // 一轮正在跑的时候不让传：画布会在中途被换掉，大脑看到的和用户以为的对不上
-  const blocked = running || Boolean(disabled) || Boolean(uploading);
+  const blocked = running || Boolean(disabled) || Boolean(uploading) || readingMedia;
   const hasMedia = pending.some(item => item.kind === "audio" || item.kind === "video");
   const selectedImageCount = canvasItems.filter(({ asset }) => asset.mimeType.startsWith("image/")).length;
   const selectedMediaCount = canvasItems.length - selectedImageCount;
@@ -120,6 +126,13 @@ export function Composer({
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
   useEffect(() => () => { pendingRef.current.forEach((item) => { if (item.url) URL.revokeObjectURL(item.url); }); }, []);
+  useEffect(() => {
+    setReadingMedia(false);
+    return () => {
+      mediaRequest.current?.abort();
+      mediaRequest.current = null;
+    };
+  }, [conversationId]);
 
   function addFiles(files: File[], assetIds: string[] = []) {
     const images = files.filter(isImageFile);
@@ -176,6 +189,69 @@ export function Composer({
   const { active, dropProps } = useFileDrop(!blocked, addFiles);
   // Ctrl+V 和拖拽/选文件走同一条路：先挂成待发附件，点发送才真的上传
   useImagePaste((files) => addFiles(files), !blocked);
+
+  function insertPastedText(value: string) {
+    if (!value) return;
+    const area = areaRef.current;
+    const start = area?.selectionStart ?? text.length;
+    const end = area?.selectionEnd ?? start;
+    setText((current) => {
+      const from = Math.min(start, current.length);
+      const to = Math.min(end, current.length);
+      return `${current.slice(0, from)}${value}${current.slice(to)}`;
+    });
+  }
+
+  /**
+   * 粘贴一条被复制的消息。
+   *
+   * 复制时图片/视频/音频会写成 chatcanvas://asset/... 引用；这里把引用还原成原文件，
+   * 图片直接进待发附件，正文插回输入框。没有引用的普通粘贴交给 useImagePaste / 浏览器。
+   */
+  async function pasteClipboard(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const pasted = event.clipboardData.getData("text/plain");
+    const { media, documents, text: remainder } = readChatReferences(pasted);
+    if (!media.length && !documents.length) return;
+    event.preventDefault();
+    if (blocked || mediaRequest.current) return;
+
+    const controller = new AbortController();
+    mediaRequest.current = controller;
+    setReadingMedia(true);
+    setReject(null);
+    insertPastedText(remainder);
+    try {
+      const files: File[] = [];
+      for (const reference of media) {
+        try {
+          const file = await api.assetAsFile(reference, controller.signal);
+          if (controller.signal.aborted) return;
+          if (!isImageFile(file) && !chatMediaMime(file)) throw new Error(`${reference.fileName} 不是可发送的图片或音视频`);
+          files.push(file);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          setReject(error instanceof Error ? error.message : `读取 ${reference.fileName} 失败`);
+        }
+      }
+      for (const reference of documents) {
+        try {
+          const file = await api.conversationDocumentAsFile(reference.conversationId, reference.documentId, reference.fileName, controller.signal);
+          if (controller.signal.aborted) return;
+          if (!isScriptDocument(file)) throw new Error(`${reference.fileName} 不是可发送的文档`);
+          files.push(file);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          setReject(error instanceof Error ? error.message : `读取 ${reference.fileName} 失败`);
+        }
+      }
+      if (files.length) addFiles(files);
+    } finally {
+      if (mediaRequest.current === controller) {
+        mediaRequest.current = null;
+        setReadingMedia(false);
+      }
+    }
+  }
 
   function submit() {
     const value = text.trim();
@@ -249,6 +325,7 @@ export function Composer({
           maxLength={20000}
           disabled={disabled}
           placeholder={placeholder ?? "与助手协作：说你想画什么，或者要改哪张图…"}
+          onPaste={(event) => void pasteClipboard(event)}
           onChange={(event) => {
             setText(event.target.value);
             // 跟着内容长高，最多 40vh 后自己出滚动条
@@ -332,7 +409,8 @@ export function Composer({
         <div className="composer-hint-right">
           {statusSlot}
           {uploading ? <span className="composer-hint-run">正在上传附件…</span>
-            : running ? <span className="composer-hint-run">助手正在处理…</span> : null}
+            : running ? <span className="composer-hint-run">助手正在处理…</span>
+              : readingMedia ? <span className="composer-hint-run" role="status">正在读取附件…</span> : null}
         </div>
       </div>
       {reject ? <div className="composer-reject" role="alert">{reject}</div> : null}

@@ -16,11 +16,15 @@ export function resolveDocumentId(db: AppDatabase, conversationId: string, id: s
   if (db.getWorkspaceDocument(conversationId, id)) return id;
   const upload = db.getConversationDocument(id);
   if (upload?.conversationId === conversationId) return id;
-  const ids = [...new Set([
-    ...db.listWorkspaceDocuments(conversationId).map(item => item.id),
-    ...db.listConversationDocuments(conversationId).map(item => item.id),
-  ])];
-  const matches = ids.filter(item => item.startsWith(id));
+  const files = [
+    ...db.listWorkspaceDocuments(conversationId).map(item => ({ id: item.id, name: item.name })),
+    ...db.listConversationDocuments(conversationId).map(item => ({ id: item.id, name: item.fileName })),
+  ];
+  // 旧对话里模型只见过「上传了文件 A.txt」，可能直接把文件名当 fileId 传进来。
+  // 同名文件有多个时不猜，保持原值让工具给出明确错误，避免读错文件。
+  const byName = files.filter(item => item.name.toLowerCase() === id.toLowerCase());
+  if (byName.length === 1) return byName[0]!.id;
+  const matches = [...new Set(files.map(item => item.id))].filter(item => item.startsWith(id));
   return matches.length === 1 ? matches[0]! : id;
 }
 

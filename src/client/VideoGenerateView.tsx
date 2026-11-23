@@ -15,6 +15,8 @@ import { buildKlingMedia, buildMinimaxMedia, buildSeedanceMedia, buildWanMedia, 
 import type { MediaBucketsController } from "./hooks/useMediaBuckets";
 import { MINIMAX_REFERENCE_LIMITS, VIDEO_CAPABILITIES, type VideoAdapter } from "../shared/video-capabilities";
 import { supportsVideoReferenceImageUpload } from "../shared/video-reference-image-policy";
+import type { VideoTaskReuse } from "../shared/video-reuse";
+import { VideoTaskReuseDialog, type ReuseFile } from "./video/VideoTaskReuseDialog";
 import {
   applySnapshotToDraft, defaultVideoDraft, draftKey, reconcileVideoDraft, type VideoDraft,
 } from "../shared/video-draft";
@@ -65,6 +67,7 @@ export function VideoGenerateView(props: {
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [readingVideo, setReadingVideo] = useState(false);
+  const [reuseTask, setReuseTask] = useState<Task | null>(null);
   /**
    * 展开创作框 = 专注编辑：输入框吃掉工作区，创作记录让位（暂时隐藏）。
    * 状态放在这一层，是因为「谁让位」由页面决定，创作框自己不该管记录区。
@@ -366,23 +369,65 @@ export function VideoGenerateView(props: {
     }
   }
 
-  /** 复用历史任务的参数：提示词、数值与公网地址回填，图片素材需重选 */
-  function reuseParameters(task: Task) {
-    const snapshot = task.inputParameters;
-    if (!snapshot) return;
-    // 历史任务存的是具体模式（文生/参考/首帧/首尾帧），先折回合并入口
-    const targetMode = studioModeForConcrete(snapshot.mode);
-    const targetSpec = modes.find((item) => item.id === targetMode) ?? spec;
-    const targetKey = draftKey(adapterType, targetSpec?.id);
-    const base = drafts[targetKey] ?? defaultVideoDraft(adapterType, targetSpec?.id);
-    const result = applySnapshotToDraft(base, snapshot);
-    setDrafts((current) => ({ ...current, [targetKey]: result.draft }));
-    if (targetSpec && adapterType && targetSpec.id !== spec?.id) {
-      setModeByAdapter((current) => ({ ...current, [adapterType]: targetSpec.id }));
+  function applyReuse(task: Task, data: VideoTaskReuse, entries: ReuseFile[]) {
+    const originalChannel = props.channels.find((item) => item.id === task.channelId && item.enabled && item.models.includes(task.model));
+    if (!originalChannel) return props.onToast("error", "原视频渠道或模型不可用，请检查渠道设置");
+    const adapter = originalChannel.adapterType;
+    const images = entries.filter(({ slot }) => slot.kind === "image");
+    const videos = entries.filter(({ slot }) => slot.kind === "video");
+    const audios = entries.filter(({ slot }) => slot.kind === "audio");
+    const hasFrames = images.some(({ slot }) => slot.role === "first_frame" || slot.role === "last_frame");
+    const targetMode = studioModeForConcrete(data.snapshot.mode) ?? (hasFrames ? "frames" : "prompt");
+    const targetSpec = videoModesFor(adapter, task.model).find((item) => item.id === targetMode)
+      ?? studioAssetSpec(adapter, task.model);
+    const resolved = resolveStudioMode(adapter, task.model, targetSpec?.id, { images: images.length, video: Boolean(videos.length), audio: Boolean(audios.length) });
+    if (!targetSpec || !resolved || (data.snapshot.mode && data.snapshot.mode !== resolved.mode)) {
+      return props.onToast("error", "原生成方式与当前模型或素材组合不匹配");
     }
-    props.onToast("success", result.droppedMedia
-      ? `参数已回填；${result.droppedMedia} 个素材需要重新上传（图片 / 参考视频 / 参考音频）`
-      : "参数已回填到创作框");
+    const slots = resolved.spec.imageSlots;
+    if (!resolved.spec.imageRepeatable) images.sort((a, b) => slots.indexOf(a.slot.role) - slots.indexOf(b.slot.role));
+    if (images.length < (resolved.spec.imageMin ?? 0) || images.length > maxImagesForMode(adapter, task.model, resolved.spec.id)
+      || images.some(({ slot }, index) => slot.role !== slots[resolved.spec.imageRepeatable ? 0 : index])) {
+      return props.onToast("error", "参考图角色无法与当前模式匹配，请核对原任务的首帧、尾帧或角色图");
+    }
+    const limits = referenceMediaLimits(adapter, task.model, resolved.spec, Boolean(originalChannel.uploadEndpoint?.trim()));
+    const combinationError = referenceMediaCombinationError(limits, { images: images.length, videos: videos.length, audios: audios.length });
+    if ((resolved.spec.needsReferenceVideo && !videos.length) || videos.length > limits.videos || audios.length > limits.audios || combinationError) {
+      return props.onToast("error", combinationError ?? "原渠道当前无法接受这些参考视频或音频，请检查上传设置");
+    }
+    const { min, max } = referenceVideoDurationRange(targetSpec.id, data.orientation, adapter);
+    if (videos.some(({ duration = 0 }) => duration < min || duration > max)) {
+      return props.onToast("error", `请更换不符合当前模式时长要求（${min}–${max} 秒）的参考视频`);
+    }
+    if (adapter === "minimax-video" && videos.some(({ file }) => file!.size > MINIMAX_REFERENCE_LIMITS.videoBytes)) {
+      return props.onToast("error", "MiniMax H3 参考视频不能超过 50 MB，请更换超限文件");
+    }
+    const audioMin = adapter === "seedance-video" ? 1.8 : adapter === "minimax-video" ? MINIMAX_REFERENCE_LIMITS.minClipSeconds : 0;
+    if (audios.some(({ duration = 0 }) => duration <= 0 || duration < audioMin || duration > 15)) {
+      return props.onToast("error", `请更换不符合当前模式时长要求（${audioMin}–15 秒）的参考音频`);
+    }
+    if (adapter === "minimax-video" && audios.some(({ file }) => !/\.(mp3|wav)$/i.test(file!.name))) {
+      return props.onToast("error", "MiniMax H3 参考音频仅支持 MP3 或 WAV，请更换文件");
+    }
+    const targetKey = draftKey(adapter, targetSpec.id);
+    const base = defaultVideoDraft(adapter, targetSpec.id);
+    const { draft: restoredDraft } = applySnapshotToDraft(base, data.snapshot);
+    setDrafts((current) => ({ ...current, [targetKey]: { ...restoredDraft,
+      timeoutSeconds: data.timeoutMs ? data.timeoutMs / 1000 : base.timeoutSeconds,
+      orientation: data.orientation ?? base.orientation, multiShot: data.multiShot ?? base.multiShot,
+      inlineAudio: data.inlineAudio, raw: JSON.stringify(data.rawParameters, null, 2),
+    } }));
+    props.media.replace(targetKey, {
+      images: images.map(({ file }) => file!),
+      videos: videos.map(({ file, duration }) => ({ file: file!, duration: duration ?? 0 })),
+      audios: audios.map(({ file, duration }) => ({ file: file!, duration: duration ?? 0 })),
+    });
+    if (task.channelId !== props.selectedChannelId) props.onChannelChange(task.channelId);
+    props.onModelChange(task.model);
+    setModeByAdapter((current) => ({ ...current, [adapter]: targetSpec.id }));
+    setReuseTask(null);
+    setNotice(null);
+    props.onToast("success", entries.length ? `已带回参数和 ${entries.length} 项参考素材` : "已将原任务参数填入创作框");
   }
 
   return (
@@ -481,7 +526,7 @@ export function VideoGenerateView(props: {
                 onDiagnostics={props.onDiagnostics}
                 onTask={props.onTask}
                 onSelectTask={props.onSelectTask}
-                onReuse={reuseParameters}
+                onReuse={setReuseTask}
                 onDelete={props.onDelete}
                 onToast={props.onToast}
               />
@@ -489,6 +534,8 @@ export function VideoGenerateView(props: {
           </div>
         </div>
       )}
+      {reuseTask ? <VideoTaskReuseDialog key={reuseTask.id} task={reuseTask} onClose={() => setReuseTask(null)}
+        onApply={(data, files) => applyReuse(reuseTask, data, files)} /> : null}
     </div>
   );
 }

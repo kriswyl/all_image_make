@@ -92,7 +92,7 @@ https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json
 不要改成 `releases/latest/download/`：只要最新那个 Release 恰好缺 Windows 资产，全体用户的检查更新就会一起 404。
 
 ```powershell
-npm run version:set -- 2.4.6
+npm run version:set -- 2.4.7
 npm test
 git add -A
 git commit -m "Release 2.4.0: ..."

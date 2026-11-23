@@ -692,6 +692,15 @@ export interface ConversationSummary extends Conversation {
   messageCount: number;
 }
 
+export const CONVERSATION_TRASH_DAYS = 30;
+
+export interface TrashedConversation {
+  id: string;
+  title: string;
+  deletedAt: string;
+  expiresAt: string;
+}
+
 /** §14 SSE 事件协议 */
 export type AgentStreamEvent =
   | import("./media-review.js").VideoOverviewRequest

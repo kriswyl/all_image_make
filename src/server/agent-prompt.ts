@@ -18,7 +18,7 @@ export function buildSystemPrompt(
   /** 本会话里带 Suno ID 的歌曲，翻唱/混音用 */
   songs: Array<{ id: string; title?: string | null; tags?: string | null; channelName?: string }> = [],
   /** 本会话上传过的脚本文档（全文只在当轮上下文里） */
-  documents: Array<{ fileName: string; charCount: number }> = [],
+  documents: Array<{ id?: string; fileName: string; charCount: number }> = [],
 ): string {
   const canvasLine = canvasImages.length
     ? canvasImages.map((item, index) => (index === 0 ? `${assetRef(item.id)}（画布第 1 张）` : assetRef(item.id))).join("、")
@@ -27,7 +27,7 @@ export function buildSystemPrompt(
     ? songs.map((song) => `${assetRef(song.id)}《${song.title || "未命名"}》${song.channelName ? `［${song.channelName}］` : ""}${song.tags ? `（${song.tags.slice(0, 60)}）` : ""}`).join("、")
     : "没有（翻唱/混音前要先有一首带 Suno ID 的歌）";
   const documentLine = documents.length
-    ? documents.map((document) => `《${document.fileName}》${document.charCount.toLocaleString()} 字`).join("、")
+    ? documents.map((document) => `《${document.fileName}》${document.charCount.toLocaleString()} 字${document.id ? `[文件 ID：${document.id}]` : ""}`).join("、")
     : "没有";
   return [
     "你是「语布」里的创作助手。用户用自然语言说想要什么图片、视频或音乐，你负责把它变成可执行的生成任务。",

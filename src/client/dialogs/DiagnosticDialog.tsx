@@ -1,18 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Activity, X } from "lucide-react";
+import { Activity, Copy, X } from "lucide-react";
 import { api } from "../api";
+import { copyTextToClipboard } from "../clipboard";
 import { LoadingScreen, StatusBadge, formatTime, terminalStatuses } from "../task-ui";
-import type { Diagnostic, RequestDiagnosticTrace, Task } from "../../shared/types";
+import type { Diagnostic, Task } from "../../shared/types";
+import { diagnosticOutcome, formatDiagnosticCopy, phaseLabels, type DiagnosticCopyOptions } from "./diagnostic-copy";
 
-const phaseLabels: Record<RequestDiagnosticTrace["phase"], string> = {
-  prepare: "本地请求准备",
-  upstream: "上游请求",
-  response_body: "读取上游响应",
-  parse_result: "解析产物",
-  download_result: "下载产物",
-  save_result: "检查与保存产物",
-  service_restart: "本地服务重启",
-};
+const defaultCopyOptions: DiagnosticCopyOptions = { prompt: false, mediaLinks: false, response: false };
 
 function time(value: string) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -30,7 +24,21 @@ export function DiagnosticDialog({ task, onClose, onVideoRecovered }: { task: Ta
   const [remoteTaskId, setRemoteTaskId] = useState("");
   const [recovering, setRecovering] = useState(false);
   const [recoveryError, setRecoveryError] = useState("");
+  const [copyOptions, setCopyOptions] = useState(defaultCopyOptions);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const observedTask = recovered?.id === task.id ? recovered : task;
+
+  useEffect(() => {
+    setCopyOptions(defaultCopyOptions);
+    setCopyStatus("idle");
+  }, [task.id]);
+
+  async function copySummary() {
+    try {
+      await copyTextToClipboard(formatDiagnosticCopy(currentTask, items, copyOptions));
+      setCopyStatus("copied");
+    } catch { setCopyStatus("failed"); }
+  }
 
   useEffect(() => {
     let stopped = false;
@@ -97,6 +105,29 @@ export function DiagnosticDialog({ task, onClose, onVideoRecovered }: { task: Ta
         {currentTask.errorMessage ? <p className="diagnostic-task-error"><strong>{currentTask.errorCode || "任务失败"}</strong>{currentTask.errorMessage}</p> : null}
       </div>
       <div className="diagnostic-list">
+        <div className="diagnostic-copy" key={task.id}>
+          <div className="diagnostic-copy-row">
+            <button type="button" className="secondary-button" onClick={() => void copySummary()} disabled={items === null && !loadError}>
+              <Copy size={14} />复制诊断摘要
+            </button>
+            <span role="status">{copyStatus === "copied" ? "已复制到剪贴板" : copyStatus === "failed" ? "复制失败，请重试" : ""}</span>
+          </div>
+          <details>
+            <summary>复制选项</summary>
+            <div className="diagnostic-copy-options">
+              {([
+                ["prompt", "包含提示词"], ["mediaLinks", "包含素材地址"], ["response", "包含上游响应"],
+              ] as const).map(([key, label]) => <label key={key}>
+                <input type="checkbox" checked={copyOptions[key]} onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setCopyOptions((current) => ({ ...current, [key]: checked }));
+                  setCopyStatus("idle");
+                }} />{label}
+              </label>)}
+            </div>
+            <p>默认只复制任务状态和各阶段诊断信息。上游响应可能包含业务内容，分享前请核对。</p>
+          </details>
+        </div>
         {currentTask.canRecoverVideo ? <form className="diagnostic-recovery" onSubmit={recoverVideo}>
           <label htmlFor={`remote-task-${currentTask.id}`}>找回已生成的视频</label>
           <p>从原渠道后台复制对应的任务 ID。只查询和保存原任务结果。</p>
@@ -118,8 +149,7 @@ export function DiagnosticDialog({ task, onClose, onVideoRecovered }: { task: Ta
 function DiagnosticEntry({ item, terminal }: { item: Diagnostic; terminal: boolean }) {
   const { trace } = item;
   const compact = item.request === null && !trace;
-  const outcome = trace?.outcome === "pending" ? terminal ? "未记录结束" : "进行中"
-    : trace?.outcome === "failed" ? "失败" : "完成";
+  const outcome = trace ? diagnosticOutcome(trace, terminal) : null;
   return <article className={`diagnostic-entry${compact ? " compact" : ""}`}>
     <header>
       {trace ? <strong>{phaseLabels[trace.phase]} · {outcome}</strong> : null}

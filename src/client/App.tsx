@@ -436,9 +436,10 @@ export function App() {
     setHistorySeenAt(latestTaskActivity);
   }, [view, latestTaskActivity, setHistorySeenAt]);
 
-  function showToast(kind: Toast["kind"], message: string) {
-    setToast({ kind, message });
-    window.setTimeout(() => setToast(null), 3200);
+  function showToast(kind: Toast["kind"], message: string, action?: Toast["action"]) {
+    const next = { kind, message, action };
+    setToast(next);
+    window.setTimeout(() => setToast((current) => current === next ? null : current), action ? 8000 : 3200);
   }
 
   function selectChannel(id: string) {
@@ -869,7 +870,7 @@ export function App() {
             onNewChatHandled={() => setNewChatSignal(0)}
             onConfigureChannel={setEditorChannel}
             onDiagnostics={openDiagnostics}
-            onToast={(kind, text) => showToast(kind === "ok" ? "success" : "error", text)}
+            onToast={(kind, text, action) => showToast(kind === "ok" ? "success" : "error", text, action)}
           />
         ) : null}
         {!loading && view === "board" ? (
@@ -1026,7 +1027,10 @@ export function App() {
           onToast={showToast}
         />
       ) : null}
-      {toast ? <div className={`toast ${toast.kind}`} role="status">{toast.kind === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}{toast.message}</div> : null}
+      {toast ? <div className={`toast ${toast.kind}`} role="status">
+        {toast.kind === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}{toast.message}
+        {toast.action ? <button type="button" className="toast-action" onClick={() => { setToast(null); toast.action?.run(); }}>{toast.action.label}</button> : null}
+      </div> : null}
     </div>
   );
 }

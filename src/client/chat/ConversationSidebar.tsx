@@ -21,6 +21,7 @@ export function ConversationSidebar({
   filter,
   onSelect,
   onCreate,
+  onOpenTrash,
   onDelete,
   onContextMenu,
   onRenameChange,
@@ -35,6 +36,7 @@ export function ConversationSidebar({
   filter: string;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onOpenTrash: () => void;
   onDelete: (id: string) => void;
   onContextMenu: (event: React.MouseEvent, id: string) => void;
   onRenameChange: (value: string) => void;
@@ -157,6 +159,7 @@ export function ConversationSidebar({
           </p>
         )}
       </div>
+      <button type="button" className="sidebar-conv-trash" onClick={onOpenTrash}><Trash2 size={13} />最近删除</button>
     </div>,
         host,
       )}

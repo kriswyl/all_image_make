@@ -401,7 +401,7 @@ export function VideoResultPanel({ task, tasks, hidden = false, onDiagnostics, o
           </button>
           {menuTask.inputParameters ? (
             <button type="button" role="menuitem" onClick={() => { setMenuTaskId(null); onReuse(menuTask); }}>
-              <SlidersHorizontal size={14} />复用参数
+              <SlidersHorizontal size={14} />以此任务新建
             </button>
           ) : null}
           <button type="button" role="menuitem" onClick={() => { setMenuTaskId(null); onDiagnostics(menuTask); }}>
@@ -597,7 +597,7 @@ function RecordDialog(props: {
         {lines.length ? (
           <div className="record-dialog-params">
             {lines.map((line) => <span key={line}>{line}</span>)}
-            <button type="button" onClick={props.onReuse}>复用参数</button>
+            <button type="button" onClick={props.onReuse}>以此任务新建</button>
           </div>
         ) : null}
 

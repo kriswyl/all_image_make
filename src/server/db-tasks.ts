@@ -285,12 +285,12 @@ export class TaskRepository {
     return {
       id: task.id, origin: task.origin, channelId: task.channelId, channelName: task.channelName ?? "已删除渠道", model: task.model, prompt: task.prompt,
       status: task.status, progress: task.progress, effectiveParameters,
-      // 脱敏参数快照：界面展示「本次参数」与「复用参数」都用它，原始 input 里的
-      // base64 图片不会跟着列表一起回传。
+      // 列表使用脱敏快照。历史素材由复用入口单独读取。
       inputParameters: summarizeTaskInput(input),
       ...(parameterNotes.length ? { parameterNotes } : {}),
       attemptCount: task.attemptCount, errorCode: task.errorCode, errorMessage: task.errorMessage,
       ...(canRecoverVideoSubmission(task) ? { canRecoverVideo: true } : {}),
+      ...(task.remoteTaskId ? { upstreamTaskId: task.remoteTaskId } : {}),
       ...(task.remoteMeta ? { remoteMeta: parseJson<NonNullable<Task["remoteMeta"]>>(task.remoteMeta, {}) } : {}),
       assets: this.assets.listAssets(task.id).map((asset) => this.assets.assetView(asset)),
       createdAt: task.createdAt, startedAt: task.startedAt, finishedAt: task.finishedAt,

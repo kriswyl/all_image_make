@@ -110,7 +110,7 @@ export class ConversationMessageRepository {
 
   recoverableNativeTurnIds(): string[] {
     const rows = this.db.prepare(`SELECT c.id FROM conversations c JOIN native_turn_checkpoints n ON n.conversation_id = c.id
-      WHERE c.status = 'running' AND c.kind = 'chat' AND (c.tool_scope = 'all' OR (c.tool_scope IS NULL AND c.chat_mode = 'chat'))
+      WHERE c.status = 'running' AND c.kind = 'chat' AND c.deleted_at IS NULL AND (c.tool_scope = 'all' OR (c.tool_scope IS NULL AND c.chat_mode = 'chat'))
       AND NOT EXISTS (SELECT 1 FROM native_tool_calls t WHERE t.conversation_id = c.id AND t.status = 'running')`).all() as DbRow[];
     return rows.map((row) => String(row.id));
   }

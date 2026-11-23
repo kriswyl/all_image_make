@@ -99,7 +99,7 @@ describe("上下文设置浮层", () => {
 
   it("仅在输入框有图片时显示看图提示", () => {
     const render = (attached: boolean) => act(() => root.render(React.createElement(Composer, {
-      running: false, onSend: vi.fn(), onInterrupt: vi.fn(), imageVisionWarning: "当前模型不接受图片输入",
+      conversationId: "fixture", running: false, onSend: vi.fn(), onInterrupt: vi.fn(), imageVisionWarning: "当前模型不接受图片输入",
       plainAttachments: true,
       canvasItems: attached ? [{ asset: { id: "photo", fileName: "photo.png", mimeType: "image/png", url: "/photo.png" } as Asset, index: 0 }] : [],
     })));
@@ -116,7 +116,7 @@ describe("上下文设置浮层", () => {
   it("选中音视频后可在没有文字时发送", () => {
     const onSend = vi.fn();
     act(() => root.render(React.createElement(Composer, {
-      running: false, onSend, onInterrupt: vi.fn(),
+      conversationId: "fixture", running: false, onSend, onInterrupt: vi.fn(),
     })));
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const send = container.querySelector<HTMLButtonElement>('[aria-label="发送"]')!;

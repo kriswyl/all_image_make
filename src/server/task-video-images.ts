@@ -59,25 +59,27 @@ export async function storeInlineVideoImages(input: VideoMediaFields, write: (na
   };
 }
 
+export async function restoreInlineVideoEntry<T extends MediaEntry>({ inlineImage, inlineAudio, ...item }: StoredEntry<T>, inputsDir: string): Promise<T> {
+  const inline = inlineAudio ?? inlineImage;
+  if (!inline) return item as T;
+  const { relativePath, byteSize, prefix, scheme } = inline;
+  const label = inlineAudio ? "参考音频" : "视频参考图";
+  const code = inlineAudio ? "REFERENCE_AUDIO" : "REFERENCE_IMAGE";
+  if (!storedFileName.test(relativePath)) throw new AppError(`${code}_INVALID`, `${label}路径无效`, 400);
+  const target = path.join(inputsDir, relativePath);
+  const stat = await fs.lstat(target).catch(() => null);
+  if (!stat?.isFile()) throw new AppError(`${code}_MISSING`, `找不到${label}，请重新选择素材`, 400);
+  if (stat.size !== byteSize) throw new AppError(`${code}_INVALID`, `${label}文件不完整，请重新选择素材`, 400);
+  const bytes = await fs.readFile(target).catch(() => null);
+  if (!bytes) throw new AppError(`${code}_MISSING`, `无法读取${label}，请重新选择素材`, 400);
+  return { ...item, url: prefix ? (scheme ?? "data:") + prefix + bytes.toString("base64") : bytes.toString("utf8") } as T;
+}
+
 export async function restoreInlineVideoImages(input: StoredVideoMediaFields, inputsDir: string): Promise<VideoMediaFields> {
   async function restore<T extends MediaEntry>(items?: Array<StoredEntry<T>>) {
     if (!items) return undefined;
-    const restored = [];
-    for (const { inlineImage, inlineAudio, ...item } of items) {
-      const inline = inlineAudio ?? inlineImage;
-      if (!inline) { restored.push(item); continue; }
-      const { relativePath, byteSize, prefix, scheme } = inline;
-      const label = inlineAudio ? "参考音频" : "视频参考图";
-      const code = inlineAudio ? "REFERENCE_AUDIO" : "REFERENCE_IMAGE";
-      if (!storedFileName.test(relativePath)) throw new AppError(`${code}_INVALID`, `${label}路径无效`, 400);
-      const target = path.join(inputsDir, relativePath);
-      const stat = await fs.lstat(target).catch(() => null);
-      if (!stat?.isFile()) throw new AppError(`${code}_MISSING`, `找不到${label}，请重新选择素材`, 400);
-      if (stat.size !== byteSize) throw new AppError(`${code}_INVALID`, `${label}文件不完整，请重新选择素材`, 400);
-      const bytes = await fs.readFile(target).catch(() => null);
-      if (!bytes) throw new AppError(`${code}_MISSING`, `无法读取${label}，请重新选择素材`, 400);
-      restored.push({ ...item, url: prefix ? (scheme ?? "data:") + prefix + bytes.toString("base64") : bytes.toString("utf8") });
-    }
+    const restored: T[] = [];
+    for (const item of items) restored.push(await restoreInlineVideoEntry(item, inputsDir));
     return restored;
   }
   return {

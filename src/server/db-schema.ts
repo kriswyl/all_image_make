@@ -607,6 +607,10 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     if (!conversationColumns.some((col) => col.name === "board_id")) {
       db.exec("ALTER TABLE conversations ADD COLUMN board_id TEXT");
     }
+    if (!conversationColumns.some((col) => col.name === "deleted_at")) {
+      db.exec("ALTER TABLE conversations ADD COLUMN deleted_at TEXT");
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS conversations_deleted_idx ON conversations(deleted_at) WHERE deleted_at IS NOT NULL");
     // 一块板只能有一条 Agent 线程；必须在 kind / board_id 都加完之后再建
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS conversations_board_thread_idx

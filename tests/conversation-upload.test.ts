@@ -300,7 +300,7 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     expect((await request(app).get(`/api/conversations/${conversationId}`).expect(200)).body.data.messages).toHaveLength(0);
   });
 
-  it("删掉会话时上传的图跟着走，磁盘上不留孤儿文件", async () => {
+  it("上传图片保留到会话永久删除，永久删除会清理文件和缩略图", async () => {
     const { app, context, conversationId } = await bootConversation("image-relay-upload-delete-");
     const view = (await upload(app, conversationId).expect(201)).body.data as {
       sessionImages: Array<{ asset: { id: string } }>;
@@ -313,6 +313,10 @@ describe("对话里上传图片（需求.md 问题 4）", () => {
     expect(await fs.stat(thumbAbsolute).then(() => true, () => false)).toBe(true);
 
     await request(app).delete(`/api/conversations/${conversationId}`).expect(200);
+
+    expect(context.db.getAsset(assetId)).not.toBeNull();
+    expect(await fs.stat(absolute).then(() => true, () => false)).toBe(true);
+    await request(app).delete(`/api/conversations/trash/${conversationId}`).expect(200);
 
     expect(context.db.getAsset(assetId)).toBeNull();
     // 记录没了、文件也得没——否则素材目录会静默地一直涨，而用户已经看不见它们了
