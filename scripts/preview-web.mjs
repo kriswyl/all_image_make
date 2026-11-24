@@ -11,12 +11,13 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readBrand } from "./brand.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const candidates = [
   process.env.API_PORT && `http://127.0.0.1:${process.env.API_PORT}`,
-  "http://127.0.0.1:17892",
+  `http://127.0.0.1:${readBrand().desktop.backendPort}`,
   "http://127.0.0.1:17891",
 ].filter(Boolean);
 

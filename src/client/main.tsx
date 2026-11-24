@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
@@ -22,10 +23,45 @@ import "./board/board.css";
 import "./board/board-material.css";
 // 最后加载的全局打磨：字体清晰度、下拉圆角、点击反馈、模型面板排版
 import "./ui-polish.css";
+import "./shell-navigation.css";
 // 沉浸式引导单独一份：它的视觉语言和工作台完全不同，隔离在独立样式文件里
 import "./onboarding.css";
 // 深色主题的令牌与局部补丁，必须最后加载才能盖住上面各组件的浅色字面量
 import "./theme.css";
+
+const brandStyles = document.documentElement.style;
+brandStyles.setProperty("--brand-gradient-light", BRAND.web.lightGradient);
+brandStyles.setProperty("--brand-gradient-dark", BRAND.web.darkGradient);
+brandStyles.setProperty("--brand-mark-url", `url("${BRAND.web.mark}")`);
+
+/**
+ * 品牌主色。
+ *
+ * 用运行时插入的 <style> 而不是内联变量：深色主题的令牌写在
+ * `html[data-theme="dark"]` 里，内联 style 没有 !important 也压不过它，
+ * 但一条更具体的样式表规则可以。插到 head 末尾，保证排在 theme.css 之后。
+ *
+ * `--accent-soft` 用 color-mix 从主色派生，跟着当前主题的 --surface 走，
+ * 不用为每个品牌再维护一套浅底值。
+ */
+const accent = BRAND.web.accent;
+if (accent) {
+  const rule = (selector: string, main: string, contrast: string, softRatio: string) => `
+${selector} {
+  --accent: ${main};
+  --accent-dark: color-mix(in srgb, ${main} 84%, #000);
+  --accent-soft: color-mix(in srgb, ${main} ${softRatio}, var(--surface));
+  --accent-contrast: ${contrast};
+  accent-color: ${main};
+}`;
+  const style = document.createElement("style");
+  style.dataset.brandAccent = BRAND.id;
+  style.textContent = [
+    rule(":root", accent.light, accent.lightContrast, "10%"),
+    rule('html[data-theme="dark"]', accent.dark, accent.darkContrast, "18%"),
+  ].join("\n");
+  document.head.appendChild(style);
+}
 
 initTheme();
 

@@ -14,6 +14,8 @@ import { WpsPreview } from "./WpsPreview";
 import { PresentationFileReport } from "./PresentationFileReport";
 import { WorkflowProgress } from "./WorkflowProgress";
 import { MediaReviewCard, VideoOverviewCard } from "./MediaReviewCard";
+import { WorkspaceSkillDraftCard } from "./WorkspaceSkillDraftCard";
+import type { WorkspaceImageReview, WorkspaceSkillDraft } from "../../shared/local-workspace";
 import { mediaReviewSchema, videoOverviewSchema } from "../../shared/media-review";
 import { chatWebToolResultSchema, isChatWebTool } from "../../shared/chat-web";
 import { WebSources } from "./WebSources";
@@ -60,6 +62,12 @@ const TOOL_ICONS: Record<AgentToolName, typeof ImageIcon> = {
   doc_list: FileText,
   doc_delete: FileText,
   doc_read: FileText,
+  workspace_list: Search,
+  workspace_read: FileText,
+  workspace_use_image: ImageIcon,
+  workspace_review_images: Eye,
+  workspace_load_skill: FileText,
+  workspace_draft_skill: FileText,
   doc_search: FileText,
   doc_create: FileDown,
   doc_edit: FileDown,
@@ -137,6 +145,7 @@ export function ToolCard({
   onToast,
   onImportTemplate,
   onResumePresentation,
+  onWorkspaceSkillSaved,
   presentationActionsEnabled = false,
 }: {
   message: ChatMessage;
@@ -152,6 +161,7 @@ export function ToolCard({
   onDiagnostics?: (taskId: string) => void;
   onToast?: (kind: "ok" | "error", text: string) => void;
   onResumePresentation?: () => void;
+  onWorkspaceSkillSaved?: () => void;
   presentationActionsEnabled?: boolean;
   onImportTemplate?: (templateId: string, name: string, description?: string) => void;
 }) {
@@ -193,7 +203,10 @@ export function ToolCard({
   const detail = resultDetail(tool, payload);
   const paramNotes = readParamNotes(payload?.data);
   const args = message.toolArgs ?? {};
-  const nativeTool = webTool || ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update", "media_review"].includes(tool);
+  const nativeTool = webTool || tool.startsWith("workspace_") || ["doc_list", "doc_delete", "doc_read", "doc_search", "doc_create", "doc_edit", "doc_convert", "presentation_spec_update", "plan_update", "media_review"].includes(tool);
+  const workspaceSkillDraft = result?.toolResult?.data?.workspaceSkillDraft as WorkspaceSkillDraft | undefined;
+  const workspaceImageId = result?.toolResult?.data?.workspaceImageId;
+  const workspaceImageReview = result?.toolResult?.data?.workspaceImageReview as WorkspaceImageReview | undefined;
   const nativeArgLabels: Record<string, string> = { fileId: "文件 ID", to: "目标格式", kind: "文件类型", name: "文件名", offset: "起始位置", limit: "读取行数", steps: "步骤数", page: "页码" };
   const nativeArgs = nativeTool ? Object.entries(args).filter(([key, value]) => key in nativeArgLabels && (typeof value === "string" || typeof value === "number")) : [];
   const prompt = typeof args.prompt === "string" ? args.prompt : null;
@@ -307,7 +320,7 @@ export function ToolCard({
           <span className="tool-pill-status">
             {isPending ? (progress ? <ProgressLabel progress={progress} /> : <LoadingIndicator variant="dots" size={24} />)
               : orphaned || paused ? <AlertCircle size={13} /> : failed ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
-            {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : paused ? "已暂停" : failed ? "失败" : "已完成"}</span> : null}
+            {nativeTool ? <span>{isPending ? "执行中" : orphaned ? "已中断" : paused ? "已暂停" : failed ? workspaceImageReview ? "未看完" : "失败" : "已完成"}</span> : null}
           </span>
           <ChevronDown size={13} className={`tool-pill-chevron ${open ? "flip" : ""}`} />
         </button>
@@ -321,6 +334,18 @@ export function ToolCard({
         {result?.content && result !== message ? <div className="tool-card-result">{result.content}</div> : null}
         {videoOverview ? <VideoOverviewCard overview={videoOverview} onSeek={onPreviewMedia} /> : null}
         {mediaReview ? <MediaReviewCard review={mediaReview} onSeek={onPreviewMedia} /> : null}
+        {workspaceSkillDraft && typeof workspaceSkillDraft.id === "string" ? <WorkspaceSkillDraftCard
+          key={workspaceSkillDraft.id} conversationId={message.conversationId} draft={workspaceSkillDraft} onSaved={onWorkspaceSkillSaved} /> : null}
+        {typeof workspaceImageId === "string" ? <div className="tool-card-template-action">
+          <button type="button" className="secondary-button compact" onClick={() => onPreview?.(workspaceImageId)}><Eye size={13} />查看图片</button>
+        </div> : null}
+        {Array.isArray(workspaceImageReview?.items) ? <details className="workspace-image-review">
+          <summary>逐张记录 · {workspaceImageReview.items.length} 张</summary>
+          <ul>{workspaceImageReview.items.map(({ path, observation, error }) => <li key={path}>
+            <strong>{path}</strong>
+            <span>{observation ?? error ?? "待处理"}</span>
+          </li>)}</ul>
+        </details> : null}
         {pausedTaskId ? <div className="tool-card-template-action"><button type="button" className="secondary-button compact" disabled={querying} onClick={() => void continueQuery(pausedTaskId)}>{querying ? "正在查询…" : "继续查询原任务"}</button></div> : null}
         {presentation && !deletedWorkspaceFile ? <PresentationFileReport key={workspaceFileId ?? result?.id} conversationId={message.conversationId} fileId={workspaceFileId}
           initial={presentation} canUseModel={presentationActionsEnabled} onToast={onToast} /> : null}

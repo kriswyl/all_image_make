@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildGenerationRequest } from "../src/server/adapters";
 import { detectImageMime, isSvgBytes } from "../src/server/vision";
 import { extensionForMime } from "../src/server/tasks";
-import { clampSidebarWidth, sidebarWidthLimit, MIN_WORKSPACE_WIDTH } from "../src/client/layout";
+import { clampSidebarWidth, sidebarWidthLimit, MIN_WORKSPACE_WIDTH, NAVIGATION_RAIL_WIDTH, SIDEBAR_OVERLAY_BREAKPOINT } from "../src/client/layout";
 import {
   DEFAULT_FRAME_COUNT, DEFAULT_FRAME_DURATION_MS, frameParameters, gifBudgetMessage,
   gifSheetFits, IMAGE_OUTPUT_FORMATS, imageOutputFormatSchema,
@@ -29,18 +29,16 @@ const referenceImage = {
 const maskImage = { ...referenceImage, fileName: "source-mask.png" };
 
 describe("① 窄窗口布局：侧栏不能吃掉主区", () => {
-  it("宽窗口允许拖到 420，窄窗口按主区最小宽度收回", () => {
-    expect(sidebarWidthLimit(1600)).toBe(420);
-    expect(clampSidebarWidth(1600, 420)).toBe(420);
-    expect(clampSidebarWidth(900, 420)).toBe(900 - MIN_WORKSPACE_WIDTH); // 280
-    expect(clampSidebarWidth(760, 420)).toBe(190); // 下限兜底
-    // 非法视口（例如 SSR / 旧数据）回落到默认侧栏宽度，不把界面压没
-    expect(clampSidebarWidth(Number.NaN, 420)).toBe(236);
+  it("二级侧栏允许 240 至 300 像素，同屏时为一级导航和主区预留空间", () => {
+    expect(sidebarWidthLimit(1600)).toBe(300);
+    expect(clampSidebarWidth(1600, 420)).toBe(300);
+    expect(clampSidebarWidth(1600, 190)).toBe(240);
+    expect(clampSidebarWidth(960, 300)).toBe(960 - MIN_WORKSPACE_WIDTH - NAVIGATION_RAIL_WIDTH - 22);
+    expect(clampSidebarWidth(1600, Number.NaN)).toBe(260);
   });
-  it("已保存的宽侧栏在窗口变窄时被收回，重新变宽不会自动撑回", () => {
-    const stored = 420;
-    expect(clampSidebarWidth(980, stored)).toBe(360);
-    expect(clampSidebarWidth(1600, clampSidebarWidth(980, stored))).toBe(360);
+  it("临界窗口可用最小侧栏，进入覆盖模式后保留用户的宽度偏好", () => {
+    expect(clampSidebarWidth(SIDEBAR_OVERLAY_BREAKPOINT, 280)).toBe(240);
+    expect(clampSidebarWidth(SIDEBAR_OVERLAY_BREAKPOINT - 1, 280)).toBe(280);
   });
 });
 

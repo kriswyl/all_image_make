@@ -3,8 +3,10 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { ChatView } from "../src/client/ChatView";
+import { WorkspaceSurface } from "../src/client/WorkspaceSurface";
 import { api } from "../src/client/api";
 import type { CanvasAsset, ChatMessage, ConversationSummary, ConversationView } from "../src/shared/agent-types";
+import type { Channel } from "../src/shared/types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -14,7 +16,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-async function mountChat(messages: ChatMessage[] = [], mediaAssets: CanvasAsset[] = []) {
+async function mountChat(messages: ChatMessage[] = [], mediaAssets: CanvasAsset[] = [], project = false, channels: Channel[] = []) {
   // jsdom 没有实现对象 URL，图片附件预览需要一个可用的桩
   if (!URL.createObjectURL) Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:preview" });
   if (!URL.revokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
@@ -22,8 +24,9 @@ async function mountChat(messages: ChatMessage[] = [], mediaAssets: CanvasAsset[
     id: "selected", title: "广告分镜", kind: "chat", boardId: null, brainChannelId: "", brainModel: "",
     canvasAssetIds: [], status: "idle", videoConfirmPolicy: "always", visionEnabled: true, verbatimPrompt: false,
     taskCount: 0, autoContinueCount: 0, createdAt: "", updatedAt: "", lastMessage: "", messageCount: 1, running: false,
+    ...(project ? { workspaceId: "workspace" } : {}),
   };
-  const other = { ...selected, id: "other", title: "保留的对话" };
+  const other = { ...selected, id: "other", title: "保留的对话", workspaceId: undefined };
   const conversation = (summary: ConversationSummary): ConversationView & { running: boolean } => ({
     ...summary, running: false, contextSummary: null, messages, canvasImages: [], sessionImages: [], mediaAssets, storyboardCount: 0,
     usage: { contextTokens: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, calls: 0 },
@@ -31,8 +34,11 @@ async function mountChat(messages: ChatMessage[] = [], mediaAssets: CanvasAsset[
   const list = vi.spyOn(api, "conversations").mockResolvedValue([selected, other]);
   vi.spyOn(api, "conversation").mockImplementation(async (id) => conversation(id === selected.id ? selected : other));
   vi.spyOn(api, "capabilities").mockResolvedValue({ manifest: "", aliases: [] });
+  vi.spyOn(api, "localWorkspaces").mockResolvedValue(project ? [{ id: "workspace", name: "商品图", directory: "D:/projects/shop" }] : []);
+  vi.spyOn(api, "workspaceSkills").mockResolvedValue([{ name: "product-lookbook", description: "制作商品图" }]);
   vi.spyOn(api, "settings").mockRejectedValue(new Error("fixture settings unavailable"));
-  vi.spyOn(api, "openConversationStream").mockReturnValue(() => {});
+  const closeStream = vi.fn();
+  const openStream = vi.spyOn(api, "openConversationStream").mockReturnValue(closeStream);
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
 
   const host = document.createElement("div");
@@ -40,8 +46,11 @@ async function mountChat(messages: ChatMessage[] = [], mediaAssets: CanvasAsset[
   document.body.append(host, sidebar);
   const root = createRoot(host);
   const toast = vi.fn();
-  await act(async () => root.render(<ChatView channels={[]} sidebarHost={sidebar} onToast={toast} />));
-  return { selected, other, list, sidebar, toast, unmount: () => { act(() => root.unmount()); host.remove(); sidebar.remove(); } };
+  const setActive = (active: boolean, sidebarFilter = "") => act(async () => root.render(<WorkspaceSurface view="chat" active={active}>
+    <ChatView channels={channels} sidebarHost={sidebar} sidebarFilter={sidebarFilter} onToast={toast} />
+  </WorkspaceSurface>));
+  await setActive(true);
+  return { selected, other, list, sidebar, toast, setActive, openStream, closeStream, unmount: () => { act(() => root.unmount()); host.remove(); sidebar.remove(); } };
 }
 
 function button(container: ParentNode, text: string) {
@@ -52,7 +61,109 @@ function button(container: ParentNode, text: string) {
 
 const dialog = () => document.querySelector<HTMLElement>('[role="alertdialog"]');
 
-it.each(["侧栏按钮", "右键菜单"])("从%s删除时，先核对会话，取消或按 Esc 都不发送请求", async (entry) => {
+it("工作区三点菜单支持键盘、打开文件夹、新建会话和确认移除", async () => {
+  const { selected, sidebar, unmount } = await mountChat([], [], true, [{
+    id: "brain", name: "Test", baseUrl: "http://127.0.0.1:1", adapterType: "openai-chat", authType: "none",
+    authHeaderName: "", secretEnv: "", endpoint: "/chat", models: ["mock"],
+    allowPrivateNetwork: true, enabled: true, hasKey: false, createdAt: "", updatedAt: "",
+  }]);
+  const create = vi.spyOn(api, "createConversation").mockImplementation(() => api.conversation(selected.id));
+  const reveal = vi.spyOn(api, "revealLocalWorkspace").mockResolvedValue({ opened: "/sample-project" });
+  const remove = vi.spyOn(api, "removeLocalWorkspace").mockResolvedValue({ detached: true });
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const menu = () => document.querySelector<HTMLElement>('[role="menu"][aria-label="工作区操作"]');
+  try {
+    const trigger = button(sidebar, "工作区操作 商品图");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.querySelector(".sidebar-workspace-heading")?.querySelectorAll("button")).toHaveLength(2);
+    await act(async () => trigger.click());
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(button(menu()!, "新建对话"));
+    await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    expect(document.activeElement).toBe(button(menu()!, "打开工作区文件夹"));
+    await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    await act(async () => trigger.click());
+    await act(async () => button(menu()!, "打开工作区文件夹").click());
+    expect(reveal).toHaveBeenCalledExactlyOnceWith("workspace");
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    await act(async () => trigger.click());
+    await act(async () => button(menu()!, "新建对话").click());
+    expect(create).toHaveBeenCalledExactlyOnceWith({ toolScope: "all", workspaceId: "workspace" });
+    await act(async () => trigger.click());
+    await act(async () => button(menu()!, "移除工作区").click());
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await act(async () => trigger.click());
+    await act(async () => button(menu()!, "移除工作区").click());
+    expect(remove).toHaveBeenCalledExactlyOnceWith("workspace");
+    expect(menu()).toBeNull();
+  } finally { unmount(); }
+});
+
+it("最近对话可独立折叠，搜索时展开结果并保留折叠偏好", async () => {
+  const { sidebar, other, selected, setActive, unmount } = await mountChat([], [], true);
+  try {
+    const heading = button(sidebar, "最近对话");
+    expect(heading.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => heading.click());
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.textContent).not.toContain(other.title);
+    expect(sidebar.textContent).toContain(selected.title);
+    await setActive(true, other.title);
+    expect(heading.getAttribute("aria-expanded")).toBe("true");
+    expect(sidebar.textContent).toContain(other.title);
+    await setActive(true);
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    expect(localStorage.getItem("chatcanvas.chat-sidebar.recentCollapsed")).toBe("true");
+    await act(async () => heading.click());
+    expect(sidebar.textContent).toContain(other.title);
+  } finally { unmount(); }
+});
+
+it("切离聊天工作区不会停止会话订阅或清空输入框", async () => {
+  const { setActive, openStream, closeStream, unmount } = await mountChat();
+  try {
+    const area = document.querySelector<HTMLTextAreaElement>(".composer-input")!;
+    expect(openStream).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "保留这段草稿");
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await setActive(false);
+    await setActive(true);
+    expect(document.querySelector(".composer-input")).toBe(area);
+    expect(area.value).toBe("保留这段草稿");
+    expect(openStream).toHaveBeenCalledTimes(1);
+    expect(closeStream).not.toHaveBeenCalled();
+  } finally { unmount(); }
+});
+
+it("侧栏按工作区归类，输入 $ 后走普通聊天发送 Skill 调用", async () => {
+  const { sidebar, selected, unmount } = await mountChat([], [], true);
+  const send = vi.spyOn(api, "sendMessage").mockResolvedValue({ accepted: true });
+  try {
+    expect(sidebar.querySelector(".sidebar-workspace-chats")?.textContent).toContain(selected.title);
+    expect(sidebar.querySelector(".sidebar-workspace-chats")?.textContent).not.toContain("保留的对话");
+    expect(document.querySelector(".chat-workspace-label")?.textContent).toContain("商品图");
+    const area = document.querySelector<HTMLTextAreaElement>(".composer-input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "$pro");
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const menu = document.querySelector(".workspace-skill-suggestions")!;
+    await act(async () => menu.querySelector("button")!.click());
+    expect(area.value).toBe("$product-lookbook ");
+    await act(async () => button(document, "发送").click());
+    expect(send.mock.lastCall?.slice(0, 2)).toEqual([selected.id, "$product-lookbook"]);
+    expect(document.querySelector("input[webkitdirectory]")).toBeNull();
+  } finally { unmount(); }
+});
+
+it.each(["三点菜单", "右键菜单"])("从%s删除时，先核对会话，取消或按 Esc 都不发送请求", async (entry) => {
   const { selected, other, list, sidebar, toast, unmount } = await mountChat();
   const remove = vi.spyOn(api, "deleteConversation").mockImplementation(async () => {
     list.mockResolvedValue([other]);
@@ -64,11 +175,9 @@ it.each(["侧栏按钮", "右键菜单"])("从%s删除时，先核对会话，�
   });
   async function open() {
     const row = sidebar.querySelector(".sidebar-conv")!;
-    if (entry === "侧栏按钮") await act(async () => button(row, "删除会话").click());
-    else {
-      await act(async () => { row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
-      await act(async () => button(document.querySelector('[role="menu"]')!, "删除会话").click());
-    }
+    if (entry === "三点菜单") await act(async () => button(row, "会话操作").click());
+    else await act(async () => { row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    await act(async () => button(document.querySelector('[role="menu"]')!, "删除会话").click());
     expect(dialog()?.textContent).toContain(selected.title);
     expect(dialog()?.textContent).toContain("30 天内");
     expect(document.activeElement).toBe(button(dialog()!, "取消"));
@@ -95,24 +204,34 @@ it.each(["侧栏按钮", "右键菜单"])("从%s删除时，先核对会话，�
   } finally { unmount(); }
 });
 
-it("复制一条消息只带正文和附件名，复制整个会话去掉内部字段", async () => {
-  const user: ChatMessage = { id: "user-1", conversationId: "selected", seq: 1, role: "user", content: "原始正文\n第二行",
+it("复制消息保留类似上传记录的正文，整段会话去掉内部字段", async () => {
+  const user: ChatMessage = { id: "user-1", conversationId: "selected", seq: 1, role: "user", content: "上传了视频 demo.mp4，请帮我找第一帧",
     plan: null, toolName: null, toolArgs: null, toolResult: null, confirm: null, taskId: null, assetId: null,
-    assetRefs: ["asset-1"], documents: [{ id: "doc-1", name: "脚本.md", charCount: 16 }],
+    assetRefs: [], documents: [],
     status: "ok", errorMessage: null, createdAt: "2026-11-21T05:00:00.000Z" };
   const call: ChatMessage = { ...user, id: "call-1", seq: 2, role: "assistant", content: "", assetRefs: [], documents: [],
     toolName: "generate_image", toolArgs: { prompt: "生成提示词", apiKey: "fixture-secret" } };
   const result: ChatMessage = { ...call, id: "result-1", seq: 3, role: "tool", toolArgs: null, content: "生成失败详情",
     taskId: "task-1", status: "error", errorMessage: "渠道暂不可用", toolResult: { ok: false, summary: "上游错误", error: "UPSTREAM_502" } };
+  const notice: ChatMessage = { ...user, id: "note-1", seq: 4, role: "system", content: "已从上次完成的工具步骤继续。" };
+  const attachments: ChatMessage = { ...user, id: "user-2", seq: 5, content: "上传了脚本文档后怎么改？",
+    assetRefs: ["asset-1"], documents: [{ id: "doc-1", name: "脚本.md", charCount: 16 }] };
   const media: CanvasAsset = { round: 1, prompt: "", source: "upload", asset: { id: "asset-1", taskId: "upload", fileName: "参考图.png", mimeType: "image/png",
     url: "/api/assets/asset-1/file", byteSize: 64, createdAt: user.createdAt } };
   const clipboard = vi.fn().mockResolvedValue(undefined);
   const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: clipboard } });
-  const { unmount } = await mountChat([user, call, result], [media]);
+  const { unmount } = await mountChat([user, call, result, notice, attachments], [media]);
   try {
     const rows = [...document.querySelectorAll(".chat-copyable-row")];
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
+    expect(rows[1]!.lastElementChild?.className).toBe("chat-message-actions");
+    const status = rows[1]!.nextElementSibling;
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.textContent).toBe(notice.content);
+    expect(status?.querySelector("button")).toBeNull();
+    await act(async () => button(rows[0]!, "复制").click());
+    expect(clipboard.mock.lastCall?.[0]).toBe(user.content);
     await act(async () => button(rows[1]!, "复制").click());
     const card = clipboard.mock.lastCall?.[0];
     expect(card).toContain("生成失败详情");
@@ -138,22 +257,28 @@ it("复制一条消息只带正文和附件名，复制整个会话去掉内部�
   }
 });
 
-it("复制图文消息再粘贴时，图片还原成附件、正文插回输入框", async () => {
+it.each([false, true])("粘贴图文消息时还原图片并保留部分失败的提示（有缺失=%s）", async (withMissing) => {
   const id = "4a4f0f5e-9a47-4f3f-9f1e-6b6c5d4e3a2b";
+  const missingId = "9ec8e29e-a4b8-4798-872c-63c5dcc28a9d";
   const time = "2026-11-23T01:03:09.196Z";
   const asset = { id, taskId: "upload", title: "参考图.png", fileName: "stored.png", mimeType: "image/png",
     url: `/api/assets/${id}/file`, byteSize: 3, createdAt: time };
   const user: ChatMessage = {
     id: "image-message", conversationId: "selected", seq: 1, role: "user", content: "这是啥？",
-    plan: null, toolName: null, toolArgs: null, toolResult: null, confirm: null, taskId: null, assetId: id, assetRefs: [], documents: [],
+    plan: null, toolName: null, toolArgs: null, toolResult: null, confirm: null, taskId: null, assetId: id, assetRefs: withMissing ? [missingId] : [], documents: [],
     status: "ok", errorMessage: null, createdAt: time,
   };
   const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   const file = new File(["png"], "参考图.png", { type: "image/png" });
-  const readFile = vi.spyOn(api, "assetAsFile").mockResolvedValue(file);
-  const { unmount } = await mountChat([user], [{ round: 1, prompt: "", source: "upload", asset }]);
+  const readFile = vi.spyOn(api, "assetAsFile").mockImplementation(async ({ url }) => {
+    if (url.includes(missingId)) throw new Error("读取素材失败：HTTP 404");
+    return file;
+  });
+  const media: CanvasAsset[] = [{ round: 1, prompt: "", source: "upload", asset }];
+  if (withMissing) media.push({ ...media[0]!, asset: { ...asset, id: missingId, title: "缺失图.png", url: `/api/assets/${missingId}/file` } });
+  const { unmount } = await mountChat([user], media);
   try {
     const row = document.querySelector(".chat-copyable-row")!;
     expect(row.querySelectorAll(".chat-message-copy")).toHaveLength(1);
@@ -170,7 +295,11 @@ it("复制图文消息再粘贴时，图片还原成附件、正文插回输入�
     expect(paste.defaultPrevented).toBe(true);
     expect(input.value).toBe("这是啥？");
     expect(document.querySelector(".composer-attachments img")?.getAttribute("alt")).toBe(asset.title);
-    expect(readFile).toHaveBeenCalledExactlyOnceWith({ url: asset.url, fileName: asset.title, mimeType: "" }, expect.any(AbortSignal));
+    expect(readFile).toHaveBeenCalledWith({ url: asset.url, fileName: asset.title, mimeType: "" }, expect.any(AbortSignal));
+    expect(readFile).toHaveBeenCalledTimes(withMissing ? 2 : 1);
+    const warning = document.querySelector(".composer-reject");
+    if (withMissing) expect(warning?.textContent).toContain("缺失图.png");
+    else expect(warning).toBeNull();
   } finally {
     unmount();
     if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
@@ -289,7 +418,8 @@ it("删除请求进行时防止重复提交，失败后保留会话和错误信�
   let reject!: (error: Error) => void;
   const remove = vi.spyOn(api, "deleteConversation").mockReturnValue(new Promise((_resolve, fail) => { reject = fail; }));
   try {
-    await act(async () => button(sidebar, "删除会话").click());
+    await act(async () => button(sidebar, "会话操作").click());
+    await act(async () => button(document.querySelector('[role="menu"]')!, "删除会话").click());
     const confirm = button(dialog()!, "移到最近删除");
     await act(async () => { confirm.click(); confirm.click(); });
     expect(remove).toHaveBeenCalledExactlyOnceWith(selected.id);

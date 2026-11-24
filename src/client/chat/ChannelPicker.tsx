@@ -9,6 +9,7 @@
  */
 import { Check, ChevronDown, Server } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { BRAND } from "../../shared/brand.generated";
 
 export interface ChannelOption {
   value: string;
@@ -20,6 +21,7 @@ const SITE_LOGOS: Array<{ test: RegExp; src: string; title: string }> = [
   { test: /tiantoken\.com/i, src: "/logo-tiantoken.svg", title: "词元流墟" },
   { test: /vectorengine\.cn/i, src: "/logo-vectorengine.png", title: "向量引擎" },
 ];
+const defaultSite = { host: new URL(BRAND.provider.baseUrl).host, src: BRAND.provider.logo, title: BRAND.provider.name };
 
 function siteOf(baseUrl: string) {
   try { return new URL(baseUrl).host; } catch { return baseUrl; }
@@ -98,7 +100,7 @@ export function ChannelPicker({
 
 /** 渠道站点标识：认不出就留一个中性图标，不猜 */
 export function ChannelLogo({ baseUrl, size = 16 }: { baseUrl: string; size?: number }) {
-  const site = SITE_LOGOS.find((item) => item.test.test(baseUrl));
+  const site = siteOf(baseUrl) === defaultSite.host ? defaultSite : SITE_LOGOS.find((item) => item.test.test(baseUrl));
   if (!site) return <Server size={size} className="channel-logo-fallback" />;
   return (
     <img

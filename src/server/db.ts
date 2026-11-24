@@ -6,6 +6,7 @@ import type { ChannelInput, Diagnostic, Task, Asset, TaskKind } from "../shared/
 import { isImageAsset } from "../shared/types.js";
 import { initializeSchema } from "./db-schema.js";
 import { WorkflowStore } from "./workflow-store.js";
+import { SkillStore } from "./skill-store.js";
 import { ExecutionStore } from "./execution-store.js";
 import { PresentationSpecStore } from "./presentation-spec-store.js";
 import type { CandidateMeta, PendingPublish } from "../shared/document-publish.js";
@@ -19,6 +20,7 @@ import { AssetRepository, type AssetRow, type InsertAssetInput, type StoredFileR
 import { TaskRepository, type CreateTaskInput, type DiagnosticResult, type InsertDiagnosticInput, type LibraryTaskQuery, type TaskKey, type TaskOrigin, type TaskPatch, type TaskRow } from "./db-tasks.js";
 import { canvasIdsFromRow, now, parseJson, stringArrayFromJson, type DbRow } from "./db-row.js";
 import { ConversationRepository, type CreateConversationInput } from "./db-conversations.js";
+import { LocalWorkspaceStore } from "./local-workspaces.js";
 import { ConversationMessageRepository, type AppendMessageInput, type MessagePatch } from "./db-conversation-messages.js";
 import { ConfigurationRepository, type DbChannel } from "./db-config.js";
 import {
@@ -90,6 +92,8 @@ export class AppDatabase {
   private readonly conversations: ConversationRepository;
   private readonly conversationMessages: ConversationMessageRepository;
   readonly workflows: WorkflowStore;
+  readonly skills: SkillStore;
+  readonly localWorkspaces: LocalWorkspaceStore;
   readonly executions: ExecutionStore;
   readonly specs: PresentationSpecStore;
 
@@ -120,6 +124,8 @@ export class AppDatabase {
     initializeLegacyWorkspace(this.db, this.defaultDocumentsDir);
     this.config = new ConfigurationRepository(this.db);
     this.workflows = new WorkflowStore(this.db);
+    this.skills = new SkillStore(this.db);
+    this.localWorkspaces = new LocalWorkspaceStore(this.db);
     this.executions = new ExecutionStore(this.db);
     this.specs = new PresentationSpecStore(this.db);
     this.documents = new DocumentRepository(this.db, () => this.documentsDir, this.specs);
@@ -828,8 +834,8 @@ export class AppDatabase {
    * 新建会话时用它清掉上一条没动过的空壳——点几下「新对话」就堆几条，
    * 侧栏会被一串「新对话」刷屏。空会话没有消息，也就没有产物和上传图，删掉不丢东西。
    */
-  emptyConversationIds(): string[] {
-    return this.conversations.emptyConversationIds();
+  emptyConversationIds(workspaceId?: string): string[] {
+    return this.conversations.emptyConversationIds(workspaceId);
   }
 
   /**
@@ -1212,6 +1218,8 @@ export class AppDatabase {
       JOIN tasks ON tasks.id = assets.task_id
       WHERE messages.conversation_id = ? AND tasks.origin = 'upload' AND COALESCE(messages.tool_name, '') <> '${CONVERSATION_ASSET_LINK}'
       UNION
+      SELECT id FROM tasks WHERE owner_conversation_id = ? AND origin = 'upload'
+      UNION
       SELECT DISTINCT tasks.id AS id FROM conversation_characters c
       JOIN assets ON assets.id = c.asset_id
       JOIN tasks ON tasks.id = assets.task_id
@@ -1231,7 +1239,7 @@ export class AppDatabase {
       JOIN assets ON s.reference_asset_ids LIKE '%' || assets.id || '%'
       JOIN tasks ON tasks.id = assets.task_id
       WHERE s.conversation_id = ? AND tasks.origin = 'upload'
-    `).all(id, id, id, id, id) as DbRow[];
+    `).all(id, id, id, id, id, id) as DbRow[];
 
     const assets: StoredFileRef[] = [];
     const inputs: string[] = [];
@@ -1537,6 +1545,18 @@ export class AppDatabase {
         // 生成的和上传的可预期行为不一样（上传的没有提示词），前端据此加个来源标记
         source: row.message_tool === CONVERSATION_ASSET_LINK ? "library" : (row.asset_origin ?? "generate") as TaskOrigin,
       });
+    }
+    const skillRows = this.db.prepare(`SELECT assets.*,tasks.prompt AS skill_prompt FROM tasks
+      JOIN assets ON assets.task_id=tasks.id
+      WHERE tasks.owner_conversation_id=? AND tasks.agent_operation_id IN (
+        SELECT json_extract(item.value,'$.operationId') FROM skill_runs, json_each(skill_runs.payload, '$.items') AS item
+        WHERE skill_runs.conversation_id=?
+      ) ORDER BY tasks.created_at ASC, assets.created_at ASC`).all(conversationId, conversationId) as DbRow[];
+    for (const row of skillRows) {
+      const asset = this.assets.assetFromRow(row);
+      if (seen.has(asset.id)) continue;
+      seen.add(asset.id);
+      entries.push({ asset, round: ++round, prompt: String(row.skill_prompt ?? ""), source: "generate" });
     }
     /*
      * 分镜产物没有消息行，但必须并进同一份「会话产物」：

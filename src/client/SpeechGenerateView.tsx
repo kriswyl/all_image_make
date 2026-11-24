@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useRef, useState } from "react";
 import {
@@ -169,7 +170,7 @@ export function SpeechGenerateView(props: {
         <div className="empty-page">
           <AudioLines size={34} />
           <h2>尚无语音渠道</h2>
-          <p>在模型设置里添加「词元流墟-语音」并填写密钥</p>
+          <p>在模型设置里添加「{BRAND.provider.name}-语音」并填写密钥</p>
           <button className="primary-button" onClick={props.onAddChannel}><Plus size={17} />添加渠道</button>
         </div>
       ) : (

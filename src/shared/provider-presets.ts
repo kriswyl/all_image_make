@@ -1,3 +1,4 @@
+import { BRAND } from "./brand.generated.js";
 import type { AdapterType, AuthType, Channel, ChannelInput } from "./types.js";
 import { defaultEndpointFor } from "./adapter-endpoints.js";
 import { SUNO_DAMOBI_MODEL } from "./suno.js";
@@ -35,6 +36,7 @@ export interface ProviderPreset {
   label: string;
   baseUrl: string;
   keyHint?: string;
+  keyUrl?: string;
   uploadEndpoint?: string;
   uploadHeaders?: Record<string, string>;
   /** 站点品牌图标（public/ 下的路径）；没有就退回通用 Server 图标 */
@@ -99,9 +101,9 @@ const CHAT_MODELS = [
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
     id: "tiantoken-gpt",
-    label: "词元流墟-gpt生图",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-gpt生图`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "gpt",
@@ -117,9 +119,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-gpt-c",
-    label: "词元流墟-gpt-c生图",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-gpt-c生图`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "gpt-c",
@@ -135,9 +137,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-gemini",
-    label: "词元流墟-gemini生图",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-gemini生图`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "gemini",
@@ -153,9 +155,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-seedream",
-    label: "词元流墟-豆包生图",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-豆包生图`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [{
       id: "seedream",
       label: "豆包 Seedream 生图",
@@ -169,9 +171,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-midjourney",
-    label: "词元流墟-Midjourney",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-Midjourney`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "midjourney",
@@ -187,11 +189,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-wan-video",
-    label: "词元流墟-万相视频",
-    baseUrl: "https://api.tiantoken.com",
-    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    label: `${BRAND.provider.name}-万相视频`,
+    baseUrl: BRAND.provider.baseUrl,
+    uploadEndpoint: BRAND.provider.uploadEndpoint,
     uploadHeaders: { "New-Api-User": "1" },
-    logo: "/logo-tiantoken.svg",
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "wan-video",
@@ -207,9 +209,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-grok-video",
-    label: "词元流墟-grok视频",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-grok视频`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "grok-video",
@@ -225,13 +227,13 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-seedance",
-    label: "词元流墟-seedance视频",
-    baseUrl: "https://api.tiantoken.com",
+    label: `${BRAND.provider.name}-seedance视频`,
+    baseUrl: BRAND.provider.baseUrl,
     // Seedance 的参考视频 / 参考音频与万相、可灵走同一座图床：
     // 本地文件提交时先传这里换公网地址，再进 Seedance 的 video_url / audio_url。
-    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    uploadEndpoint: BRAND.provider.uploadEndpoint,
     uploadHeaders: { "New-Api-User": "1" },
-    logo: "/logo-tiantoken.svg",
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "seedance-video",
@@ -247,11 +249,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-kling-video",
-    label: "词元流墟-可灵视频",
-    baseUrl: "https://api.tiantoken.com",
-    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    label: `${BRAND.provider.name}-可灵视频`,
+    baseUrl: BRAND.provider.baseUrl,
+    uploadEndpoint: BRAND.provider.uploadEndpoint,
     uploadHeaders: { "New-Api-User": "1" },
-    logo: "/logo-tiantoken.svg",
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "kling-video",
@@ -267,11 +269,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-minimax-video",
-    label: "词元流墟-MiniMax视频",
-    baseUrl: "https://api.tiantoken.com",
-    uploadEndpoint: "https://imageproxy.zhongzhuan.chat/api/upload",
+    label: `${BRAND.provider.name}-MiniMax视频`,
+    baseUrl: BRAND.provider.baseUrl,
+    uploadEndpoint: BRAND.provider.uploadEndpoint,
     uploadHeaders: { "New-Api-User": "1" },
-    logo: "/logo-tiantoken.svg",
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "minimax-video",
@@ -287,9 +289,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-suno",
-    label: "词元流墟-音乐",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-音乐`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "suno-music",
@@ -305,9 +307,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-gemini-tts",
-    label: "词元流墟-语音",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-语音`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "gemini-tts",
@@ -323,9 +325,9 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: "tiantoken-chat",
-    label: "词元流墟-对话模型",
-    baseUrl: "https://api.tiantoken.com",
-    logo: "/logo-tiantoken.svg",
+    label: `${BRAND.provider.name}-对话模型`,
+    baseUrl: BRAND.provider.baseUrl,
+    logo: BRAND.provider.logo,
     units: [
       {
         id: "chat",
@@ -363,16 +365,17 @@ export const ONE_KEY_SECRET_ENV = "TIANTOKEN_API_KEY";
  */
 export const ONE_KEY_PRESET: ProviderPreset = {
   id: ONE_KEY_PRESET_ID,
-  label: "词元流墟 · 一 Key 全开",
-  baseUrl: "https://api.tiantoken.com",
-  keyHint: "粘贴你的词元流墟 API Key（全模型通用）",
-  logo: "/logo-tiantoken.svg",
+  label: `${BRAND.provider.name} · 一 Key 全开`,
+  baseUrl: BRAND.provider.baseUrl,
+  keyHint: `粘贴你的${BRAND.provider.name} API Key（全模型通用）`,
+  keyUrl: BRAND.provider.keyUrl ?? undefined,
+  logo: BRAND.provider.logo,
   singleKey: true,
   sharedSecretEnv: ONE_KEY_SECRET_ENV,
   units: PROVIDER_PRESETS.flatMap((preset) => preset.units.map((unit) => ({
     ...unit,
     // 名字要能一眼认出是哪一类模型，否则列表里 12 行全叫「词元流墟」
-    channelName: `词元流墟 · ${unit.label}`,
+    channelName: `${BRAND.provider.name} · ${unit.label}`,
     secretEnv: ONE_KEY_SECRET_ENV,
     ...(preset.uploadEndpoint ? { uploadEndpoint: preset.uploadEndpoint } : {}),
     ...(preset.uploadHeaders ? { uploadHeaders: preset.uploadHeaders } : {}),

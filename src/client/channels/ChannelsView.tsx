@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated";
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, ChevronDown, Plus, QrCode, Server, Settings2, Sparkles, Trash2, X } from "lucide-react";
@@ -63,31 +64,31 @@ export function ChannelsView({ channels, onAdd, onQuickSetup, onEdit, onDelete, 
       <div className="page-header">
         <div><h1>模型设置</h1><span className="page-kicker">MODEL CONFIGURATION</span></div>
         <div className="page-header-actions">
-          <div className="provider-contact" ref={contactRef}>
+          {BRAND.provider.supportQr ? <div className="provider-contact" ref={contactRef}>
             <button
               type="button"
               className="secondary-button"
               aria-expanded={contactOpen}
               onClick={() => setContactOpen((value) => !value)}
             >
-              <QrCode size={16} />词元流墟技术支持
+              <QrCode size={16} />{BRAND.provider.name}技术支持
             </button>
             {contactOpen ? (
-              <div className="provider-contact-popover" role="dialog" aria-label="词元流墟官方联系方式">
+              <div className="provider-contact-popover" role="dialog" aria-label={`${BRAND.provider.name}官方联系方式`}>
                 <div className="provider-contact-head">
-                  <strong>词元流墟官方企业微信</strong>
+                  <strong>{BRAND.provider.name}官方企业微信</strong>
                   <button type="button" className="icon-button compact" title="关闭" onClick={() => setContactOpen(false)}>
                     <X size={14} />
                   </button>
                 </div>
-                <img src="/tiantoken-wechat.png" alt="词元流墟官方企业微信二维码，客服主管泡泡" />
+                <img src={BRAND.provider.supportQr} alt={`${BRAND.provider.name}官方企业微信二维码，客服主管泡泡`} />
                 <p>
                   扫码添加客服「泡泡」 · 成都天相科技
-                  <span>词元流墟官方联系方式，非作者联系方式</span>
+                  <span>{BRAND.provider.name}官方联系方式，非作者联系方式</span>
                 </p>
               </div>
             ) : null}
-          </div>
+          </div> : null}
           {onQuickSetup ? <button className="secondary-button" onClick={onQuickSetup}><Sparkles size={16} />按模型快速配置</button> : null}
           <button className="primary-button" onClick={onAdd}><Plus size={17} />添加渠道</button>
         </div>

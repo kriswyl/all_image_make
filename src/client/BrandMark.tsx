@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 /**
  * 语布的产品标。
  *
@@ -12,12 +13,15 @@
  * 由 `npx tauri icon` 从同一个源生成。
  */
 export function BrandMark({ size = 28 }: { size?: number }) {
+  if (!BRAND.web.monochromeMark) {
+    return <img src={BRAND.web.mark} alt={BRAND.displayName} width={size} height={size} style={{ objectFit: "contain" }} />;
+  }
   return (
     <span
       className="brand-mark-img"
       style={{ width: size, height: size }}
       role="img"
-      aria-label="语布"
+      aria-label={BRAND.displayName}
     />
   );
 }

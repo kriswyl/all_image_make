@@ -22,6 +22,7 @@ import { BoardNodeView, type ConfigNodeConnections } from "./BoardNodeView";
 import type { BoardConfigModelSummary } from "./board-models";
 import { BoardMinimap } from "./BoardMinimap";
 import { useBoardMinimap } from "./useBoardMinimap";
+import { useWorkspaceActive } from "../WorkspaceSurface";
 import { boardFitViewport, clampScale, edgePath, edgeClass, fitBoardImageSize, rectsIntersect, nodesBounds, type ImageDimensions } from "./board-geometry";
 
 interface PositionPatch {
@@ -117,6 +118,7 @@ export function BoardCanvas({
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [spacePressed, setSpacePressed] = useState(false);
+  const workspaceActive = useWorkspaceActive();
   const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [connect, setConnect] = useState<ConnectState | null>(null);
   const [connectMenu, setConnectMenu] = useState<{ x: number; y: number; worldX: number; worldY: number; sourceId: string; sourceType: BoardNode["type"] } | null>(null);
@@ -425,6 +427,11 @@ export function BoardCanvas({
   }, [board]);
 
   useEffect(() => {
+    if (!workspaceActive) {
+      spacePressedRef.current = false;
+      setSpacePressed(false);
+      return;
+    }
     const isEditable = (target: EventTarget | null) => {
       const element = target instanceof HTMLElement ? target : null;
       if (!element) return false;
@@ -433,7 +440,8 @@ export function BoardCanvas({
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isEditable(event.target)) return;
+      if (event.defaultPrevented || isEditable(event.target) || (event.target instanceof Element
+        && event.target.closest(".navigation-rail, .context-sidebar, .titlebar, .sidebar-conv-menu"))) return;
       if (event.key !== "Escape" && event.target instanceof HTMLElement
         && event.target.closest(".board-topbar, .board-selection-tools, .board-node-settings, .board-composer-popover, .vstudio-mention-panel, .board-video-node-menu, .model-picker-menu, .style-preset-dialog")) return;
       if (event.code === "Space") {
@@ -518,7 +526,7 @@ export function BoardCanvas({
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [board, copySelection, pasteClipboard, removeSelected, visibleNodes]);
+  }, [workspaceActive, board, copySelection, pasteClipboard, removeSelected, visibleNodes]);
 
   // 从系统剪贴板粘图片：上传成素材并直接落成节点，位置放在当前视口中心
   useEffect(() => {

@@ -11,6 +11,7 @@ import { channelKindOf, type Channel } from "../../shared/types";
 import type { ModelGroupKind } from "../../shared/model-catalog";
 import { ModelLogo, modelBrand } from "../chat/ModelLogo";
 import { SelectMenu } from "../ui/SelectMenu";
+import { openExternal } from "../external";
 
 type SaveMode = "create" | "skip";
 
@@ -68,6 +69,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
   const [tests, setTests] = useState<Record<string, TestResult>>({});
 
   const preset = providerId ? findProviderPreset(providerId) : undefined;
+  const keyUrl = preset?.keyUrl;
   const singleKey = Boolean(preset?.singleKey);
 
   const selections = useMemo<UnitSelection[]>(() => {
@@ -307,6 +309,7 @@ export function AddChannelWizard({ channels, onClose, onSaved, onRemoved, onCust
                       autoComplete="off"
                     />
                   </label>
+                  {keyUrl ? <button type="button" className="secondary-button" onClick={() => void openExternal(keyUrl)}>去创建 API Key</button> : null}
                   <span className="onekey-key-hint">
                     已有渠道的环境变量 <code className="mono-cell">{ONE_KEY_SECRET_ENV}</code> 也可以留空，服务端会按它兜底。
                   </span>

@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
+import { desktopApiEnv } from "./brand.mjs";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const env = desktopApiEnv();
 const backend = spawn(npm, ["run", "dev:server"], {
   stdio: "inherit",
-  env: { ...process.env, PORT: "17892" },
+  env,
   shell: process.platform === "win32",
 });
 const web = spawn(npm, ["run", "dev:web"], {
   stdio: "inherit",
-  env: { ...process.env, VITE_API_BASE_URL: "http://127.0.0.1:17892" },
+  env,
   shell: process.platform === "win32",
 });
 

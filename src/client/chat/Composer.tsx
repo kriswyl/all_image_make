@@ -17,6 +17,7 @@ import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { ArrowUp, CornerDownLeft, FileText, Film, Music, Plus, Square, X } from "lucide-react";
 import type { ClipboardEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import type { WorkspaceSkillInfo } from "../../shared/local-workspace";
 import { MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types";
 import { MAX_SCRIPT_FILE_BYTES } from "../../shared/storyboard";
 import { BINARY_DOCUMENT_ATTACHMENT, CHAT_DOCUMENT_ATTACHMENT, MAX_BINARY_DOCUMENT_BYTES } from "../../shared/document-formats";
@@ -61,6 +62,7 @@ export function Composer({
   disabled,
   placeholder,
   leftSlot,
+  workspaceSkills = [],
   rightSlot,
   statusSlot,
   onSend,
@@ -85,6 +87,7 @@ export function Composer({
   placeholder?: string;
   /** 左下角：会话级设置（视频确认策略等） */
   leftSlot?: ReactNode;
+  workspaceSkills?: WorkspaceSkillInfo[];
   /** 右下角：模型选择，排在发送键左边 */
   rightSlot?: ReactNode;
   /** 底部状态行的右侧：token 用量 / 上下文大小，和「正在处理」并排 */
@@ -121,6 +124,10 @@ export function Composer({
   const hasMedia = pending.some(item => item.kind === "audio" || item.kind === "video");
   const selectedImageCount = canvasItems.filter(({ asset }) => asset.mimeType.startsWith("image/")).length;
   const selectedMediaCount = canvasItems.length - selectedImageCount;
+  const [hideSkills, setHideSkills] = useState(false);
+  const skillMention = /(?:^|\s)\$([a-z0-9-]*)$/i.exec(text);
+  const matchingSkills = !hideSkills && !blocked && skillMention
+    ? workspaceSkills.filter(({ name }) => name.startsWith(skillMention[1]!.toLowerCase())).slice(0, 8) : [];
 
   // 组件卸载时把没发出去的预览地址收掉，否则每挂一张图就漏一个 blob
   const pendingRef = useRef(pending);
@@ -222,15 +229,16 @@ export function Composer({
     insertPastedText(remainder);
     try {
       const files: File[] = [];
+      const failed: string[] = [];
       for (const reference of media) {
         try {
           const file = await api.assetAsFile(reference, controller.signal);
           if (controller.signal.aborted) return;
           if (!isImageFile(file) && !chatMediaMime(file)) throw new Error(`${reference.fileName} 不是可发送的图片或音视频`);
           files.push(file);
-        } catch (error) {
+        } catch {
           if (controller.signal.aborted) return;
-          setReject(error instanceof Error ? error.message : `读取 ${reference.fileName} 失败`);
+          failed.push(reference.fileName);
         }
       }
       for (const reference of documents) {
@@ -239,18 +247,28 @@ export function Composer({
           if (controller.signal.aborted) return;
           if (!isScriptDocument(file)) throw new Error(`${reference.fileName} 不是可发送的文档`);
           files.push(file);
-        } catch (error) {
+        } catch {
           if (controller.signal.aborted) return;
-          setReject(error instanceof Error ? error.message : `读取 ${reference.fileName} 失败`);
+          failed.push(reference.fileName);
         }
       }
       if (files.length) addFiles(files);
+      if (failed.length) {
+        const warning = `以下附件未能恢复，请重新选择：${failed.join("、")}`;
+        setReject((message) => message ? `${message}。${warning}` : warning);
+      }
     } finally {
       if (mediaRequest.current === controller) {
         mediaRequest.current = null;
         setReadingMedia(false);
       }
     }
+  }
+
+  function useSkill(name: string) {
+    setText((current) => current.replace(/\$[a-z0-9-]*$/i, () => `$${name} `));
+    setHideSkills(true);
+    areaRef.current?.focus();
   }
 
   function submit() {
@@ -274,6 +292,11 @@ export function Composer({
   return (
     <div className={`composer ${active ? "is-drop" : ""}`} {...dropProps}>
       <div className="composer-box">
+        {matchingSkills.length ? <div className="workspace-skill-suggestions" aria-label="工作区 Skills">
+          {matchingSkills.map(({ name, description }) => <button key={name} type="button" onClick={() => useSkill(name)}>
+            <strong>{`$${name}`}</strong><span>{description}</span>
+          </button>)}
+        </div> : null}
         {canvasItems.length || pending.length ? (
           <div className="composer-attachments">
             <CanvasTray
@@ -327,6 +350,7 @@ export function Composer({
           placeholder={placeholder ?? "与助手协作：说你想画什么，或者要改哪张图…"}
           onPaste={(event) => void pasteClipboard(event)}
           onChange={(event) => {
+            setHideSkills(false);
             setText(event.target.value);
             // 跟着内容长高，最多 40vh 后自己出滚动条
             const area = event.currentTarget;
@@ -334,6 +358,16 @@ export function Composer({
             area.style.height = `${Math.min(area.scrollHeight, window.innerHeight * 0.4)}px`;
           }}
           onKeyDown={(event) => {
+            if (matchingSkills.length && (event.key === "Escape" || event.key === "Tab")) {
+              if (event.key === "Tab" && !event.shiftKey) {
+                event.preventDefault();
+                useSkill(matchingSkills[0]!.name);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                setHideSkills(true);
+              }
+              return;
+            }
             if (event.key !== "Enter" || event.shiftKey) return;
             // 中文输入法选词的回车不能当成发送
             if (event.nativeEvent.isComposing) return;

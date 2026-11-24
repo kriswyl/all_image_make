@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Download, ExternalLink, RefreshCw, X } from "lucide-react";
@@ -14,12 +15,13 @@ type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "in
 type CopyState = "idle" | "copied" | "error";
 
 /** 发布页始终指向版本列表，避免未来版本仍跳到旧版本。 */
-const GITEE_RELEASES_URL = "https://gitee.com/cqgsdx_0/chatcanvas-releases/releases";
+const GITEE_RELEASES_URL = BRAND.releasesUrl;
 
 /** 作者联系方式 */
-const AUTHOR_EMAIL = "1413803765@qq.com";
+const AUTHOR_EMAIL = BRAND.support.authorEmail;
 
 function ContactButton({ copied, onClick }: { copied: boolean; onClick: () => void }) {
+  if (!AUTHOR_EMAIL) return null;
   return (
     <button type="button" className="update-secondary" onClick={onClick}>
       {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -29,6 +31,7 @@ function ContactButton({ copied, onClick }: { copied: boolean; onClick: () => vo
 }
 
 function AuthorEmail({ state }: { state: CopyState }) {
+  if (!AUTHOR_EMAIL) return null;
   return (
     <p className={`update-note update-contact ${state === "error" ? "update-error" : ""}`}>
       {state === "error" ? "复制失败，请手动记录： " : "作者邮箱： "}
@@ -97,6 +100,7 @@ export function UpdateStatus() {
   };
 
   const copyAuthorEmail = async () => {
+    if (!AUTHOR_EMAIL) return;
     try {
       await copyTextToClipboard(AUTHOR_EMAIL);
       setCopyState("copied");
@@ -204,7 +208,7 @@ export function UpdateStatus() {
               </div>
               <AuthorEmail state={copyState} />
               {error.includes("内置后端") || error.includes("端口") ? (
-                <p className="update-note">本地服务已停止，请关闭应用后重新打开，或联系作者。</p>
+                <p className="update-note">本地服务已停止，请关闭应用后重新打开{AUTHOR_EMAIL ? "，或联系作者" : ""}。</p>
               ) : null}
             </>
           ) : (

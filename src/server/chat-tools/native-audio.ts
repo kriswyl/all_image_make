@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated.js";
 import { z } from "zod";
 import { buildConfirmPreview } from "../agent-confirm.js";
 import { generateMusicSchema, generateSpeechSchema, prepareMusicInput, prepareSpeechInput, type ToolContext } from "../agent-tools.js";
@@ -28,7 +29,7 @@ export const nativeAudioSpecs = {
     type: "function",
     function: {
       name: "generate_music",
-      description: "生成音乐或音效。只有用户明确要求时单独调用并等待确认。自定义歌词需要 tags。翻唱指定一首已有会话歌曲并提供歌词，省略歌词时沿用原词。混音指定同一渠道的两首不同会话歌曲。音效可设置 tempo、key、loop。词元流墟 v6 创作支持 45/60 秒目标时长，自定义歌词可设置 0 到 1 的 styleWeight 和 weirdness。",
+      description: `生成音乐或音效。只有用户明确要求时单独调用并等待确认。自定义歌词需要 tags。翻唱指定一首已有会话歌曲并提供歌词，省略歌词时沿用原词。混音指定同一渠道的两首不同会话歌曲。音效可设置 tempo、key、loop。${BRAND.provider.name} v6 创作支持 45/60 秒目标时长，自定义歌词可设置 0 到 1 的 styleWeight 和 weirdness。`,
       parameters: z.toJSONSchema(nativeMusicParamsSchema),
     },
   },

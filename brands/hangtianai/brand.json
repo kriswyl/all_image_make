@@ -1,0 +1,58 @@
+{
+  "apiVersion": 1,
+  "id": "hangtianai",
+  "productName": "航天AI",
+  "displayName": "航天AI",
+  "subtitle": null,
+  "assistantName": "航天AI",
+  "slogan": "让创意飞向星辰",
+  "author": "航天AI",
+  "web": {
+    "favicon": "/branding/app-icon.png",
+    "mark": "/branding/brand-mark.png",
+    "monochromeMark": false,
+    "themeColor": "#0b1a2f",
+    "lightThemeColor": "#f7f9fc",
+    "darkThemeColor": "#0a1220",
+    "lightGradient": "linear-gradient(135deg, #a8c8f0 0%, #b9d8f2 26%, #d9c9f0 52%, #f2cfe0 76%, #c9b8f2 100%)",
+    "darkGradient": "linear-gradient(135deg, #6f9fd8 0%, #7fb6dd 26%, #a98fd8 52%, #d19ab8 76%, #b0a0e0 100%)",
+    "accent": {
+      "light": "#1a5fb4",
+      "dark": "#85bdf5",
+      "lightContrast": "#ffffff",
+      "darkContrast": "#0a1729"
+    }
+  },
+  "desktop": {
+    "identifier": "fun.aikeliya.hangtianai",
+    "backendPort": 17893,
+    "icons": [
+      "brand-icons/hangtianai/32x32.png",
+      "brand-icons/hangtianai/128x128.png",
+      "brand-icons/hangtianai/128x128@2x.png",
+      "brand-icons/hangtianai/icon.icns",
+      "brand-icons/hangtianai/icon.ico"
+    ],
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdCREJFQ0M1QTE0NUE2QzYKUldUR3BrV2h4ZXpiZTF3S0E0cW9uL0hxSmRoQ2NFbXgyNitGK2twd204ZEdMeEhuYkt4TUxDZG0K",
+      "endpoints": ["https://gitee.com/cqgsdx_0/hangtianai-releases/releases/download/updater/latest.json"],
+      "releasesUrl": "https://gitee.com/cqgsdx_0/hangtianai-releases/releases",
+      "signingKeyFile": "hangtianai-updater.key",
+      "changelog": "CHANGELOG-hangtianai.md"
+    }
+  },
+  "provider": {
+    "name": "航天AI",
+    "baseUrl": "https://aikeliya.fun",
+    "logo": "/branding/app-icon.png",
+    "loginUrl": "https://aikeliya.fun/login",
+    "keyUrl": "https://aikeliya.fun/console/token",
+    "supportQr": null,
+    "uploadEndpoint": "https://imageproxy.zhongzhuan.chat/api/upload",
+    "referenceImageUploadOrigins": ["https://aikeliya.fun"]
+  },
+  "support": {
+    "authorEmail": null
+  },
+  "wpsAddonId": "HangtianaiPreview"
+}

@@ -8,7 +8,10 @@ import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // 打开素材目录会真的弹文件管理器窗口，测试里换成假的 spawn
-const spawnMock = vi.hoisted(() => vi.fn(() => ({ on: () => undefined, unref: () => undefined })));
+const spawnMock = vi.hoisted(() => vi.fn(() => ({
+  once: (event: string, listener: () => void) => { if (event === "spawn") queueMicrotask(listener); },
+  unref: () => undefined,
+})));
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
 import { createApp, type AppContext } from "../src/server/app";
@@ -78,7 +81,7 @@ describe("generation API", () => {
     expect(snapshot.body.data.status).toBe("cancelled");
   });
 
-  it("only ever reveals the app's own media folders", async () => {
+  it("only ever reveals the app's own storage folders", async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "image-relay-reveal-test-"));
     const { app, context } = createApp({ dataDir });
     cleanups.push(() => { context.db.close(); return fs.rm(dataDir, { recursive: true, force: true }); });
@@ -91,11 +94,38 @@ describe("generation API", () => {
     expect(command).toMatch(/explorer|open|xdg-open/);
     expect(args).toEqual([assetsDir]);
 
-    // kind 只认三个固定值，传路径进来也只会落到素材目录
+    // kind 只认固定值，传路径进来也只会落到素材目录
     const injected = await request(app).post("/api/system/reveal-media").send({ kind: "../../Windows" }).expect(200);
     expect(injected.body.data.opened).toBe(assetsDir);
     const inputs = await request(app).post("/api/system/reveal-media").send({ kind: "inputs" }).expect(200);
     expect(inputs.body.data.opened).toBe(path.join(dataDir, "inputs"));
+    const documents = await request(app).post("/api/system/reveal-media").send({ kind: "documents" }).expect(200);
+    expect(documents.body.data.opened).toBe(path.join(dataDir, "documents"));
+    expect(spawnMock.mock.lastCall).toEqual([command, [path.join(dataDir, "documents")], expect.anything()]);
+  });
+
+  it("只打开已登记且仍有效的本机工作区文件夹", async () => {
+    spawnMock.mockClear();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "chatcanvas-reveal-workspace-"));
+    const project = path.join(root, "商品 图");
+    await fs.mkdir(project);
+    const { app, context } = createApp({ dataDir: path.join(root, "data") });
+    cleanups.push(async () => {
+      context.agent.dispose();
+      context.db.close();
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    const workspace = await context.db.localWorkspaces.add(project);
+    const url = `/api/local-workspaces/${workspace.id}/reveal`;
+    await request(app).post(url).set("Origin", "https://external.example").send({}).expect(403);
+    await request(app).post("/api/local-workspaces/missing/reveal").send({}).expect(404);
+    const response = await request(app).post(url).send({ directory: root }).expect(200);
+    expect(response.body.data.opened).toBe(workspace.directory);
+    expect(spawnMock.mock.lastCall).toEqual([expect.any(String), [workspace.directory], expect.anything()]);
+    await fs.rename(project, path.join(root, "moved"));
+    const invalid = await request(app).post(url).send({}).expect(404);
+    expect(invalid.body.error.code).toBe("WORKSPACE_DIRECTORY_UNAVAILABLE");
+    expect(spawnMock).toHaveBeenCalledOnce();
   });
 
   it("starts a fresh data directory with no channels", async () => {

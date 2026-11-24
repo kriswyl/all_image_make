@@ -50,10 +50,13 @@ export function registerDocumentRoutes(app: Express, db: AppDatabase, agent: Age
     fs.unlinkSync(file.full); db.deleteWorkspaceDocument(conversationId, fileId);
     res.json(ok({ deleted: true }));
   });
-  app.post("/api/conversations/:id/documents/files/:fileId/reveal", (req, res) => {
-    try { const file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); revealFolder(path.dirname(file.full)); res.json(ok({ opened: true })); }
+  app.post("/api/conversations/:id/documents/files/:fileId/reveal", asyncHandler(async (req, res) => {
+    let file: ReturnType<typeof readWorkspaceFile>;
+    try { file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); }
     catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }
-  });
+    await revealFolder(path.dirname(file.full));
+    res.json(ok({ opened: true }));
+  }));
   app.get("/api/conversations/:id/documents/files/:fileId", (req, res) => {
     try { const file = readWorkspaceFile(db, routeParam(req.params.id), routeParam(req.params.fileId)); res.type("application/octet-stream").send(file.bytes); }
     catch { throw new AppError("DOCUMENT_NOT_FOUND", "文件不存在或不可访问", 404); }

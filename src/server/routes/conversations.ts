@@ -6,6 +6,7 @@ import { z } from "zod";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES } from "../../shared/types.js";
 import { MAX_IMAGE_GENERATION_REFERENCES } from "../../shared/image-reference-limits.js";
 import type { AppDatabase } from "../db.js";
+import type { InsertAssetInput } from "../db-assets.js";
 import type { KeyStore } from "../key-store.js";
 import { AppError, extensionForMime, matchesImageSignature, type ReferenceImageUpload } from "../tasks.js";
 import { displayFileName, safeFileName } from "../security.js";
@@ -20,12 +21,14 @@ import { appendConversationCanvasAssets } from "../board.js";
 import { referenceImageMimeTypes } from "./uploads.js";
 import { removeStoredFiles } from "./files.js";
 import { ok, fail, asyncHandler, routeParam } from "./http.js";
+import { requireWorkspaceClient } from "./local-workspaces.js";
 import type { Express, RequestHandler } from "express";
 import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../../shared/chat-media.js";
 import { mediaUploadExtension } from "../task-media.js";
 import { referenceVideoDuration } from "../reference-video.js";
 import { videoOverviewFramesSchema } from "../../shared/media-review.js";
 import { purgeConversationTrashItem, purgeExpiredConversationTrash } from "../conversation-trash.js";
+import { archiveConversationAssets } from "../workspace-assets.js";
 
 /**
  * 对话框里自己上传的图（需求.md 问题 4）。
@@ -46,6 +49,7 @@ const conversationMediaUpload = multer({
 });
 
 const conversationCreateSchema = z.object({
+  workspaceId: z.uuid().optional(),
   title: z.string().trim().max(120).optional(),
   brainChannelId: z.string().uuid().optional(),
   brainModel: z.string().trim().min(1).max(200).optional(),
@@ -174,6 +178,10 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
 
   app.post("/api/conversations", (req, res) => {
     const input = conversationCreateSchema.parse(req.body ?? {}) as ConversationInput;
+    if (input.workspaceId) {
+      requireWorkspaceClient(req);
+      if (!db.localWorkspaces.get(input.workspaceId)) throw new AppError("WORKSPACE_NOT_FOUND", "找不到本地工作区", 404);
+    }
     /*
      * 新建之前先把之前没动过的空会话删掉。
      *
@@ -181,12 +189,13 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
      * 侧栏一屏全是「新对话」）。空会话没有任何消息，也就没有产物、没有上传图，删了不丢东西。
      * 正在跑的那条跳过：一轮开始时会立刻落用户消息，正常情况下这里轮不到它。
      */
-    for (const staleId of db.emptyConversationIds()) {
+    for (const staleId of db.emptyConversationIds(input.workspaceId)) {
       if (agent.isRunning(staleId)) continue;
       db.deleteConversation(staleId);
     }
     const brain = pickBrainChannel(db, input.brainChannelId, input.brainModel);
     const conversation = db.createConversation({
+      workspaceId: input.workspaceId,
       title: input.title?.trim() || DEFAULT_CONVERSATION_TITLE,
       brainChannelId: brain.channelId,
       brainModel: brain.model,
@@ -195,7 +204,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
       visionEnabled: input.visionEnabled ?? readAgentDefaults(db).visionEnabled,
       verbatimPrompt: input.verbatimPrompt ?? false,
       // 新客户端显式创建统一会话。未发送范围的旧客户端仍按渠道配置创建。
-      toolScope: input.toolScope ?? (db.getChannel(brain.channelId)?.unifiedAgentDefault ? "all" : undefined),
+      toolScope: input.toolScope ?? (input.workspaceId || db.getChannel(brain.channelId)?.unifiedAgentDefault ? "all" : undefined),
     });
     res.status(201).json(ok(agent.buildView(conversation.id)));
   });
@@ -337,6 +346,8 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     const id = routeParam(req.params.id);
     const conversation = db.getConversation(id);
     if (!conversation) return res.status(404).json(fail("CONVERSATION_NOT_FOUND", "会话不存在"));
+    if (conversation.workspaceId) requireWorkspaceClient(req);
+    if (db.skills.activeChats.has(id)) throw new AppError("SKILL_ANALYZING", "出图 Agent 正在分析，请稍候", 409);
     const input = messageCreateSchema.parse(req.body ?? {});
     const limit = conversationImageAttachmentLimit(conversation);
     const libraryIds = [...new Set(input.libraryAssetIds ?? [])];
@@ -413,12 +424,14 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
     const id = routeParam(req.params.id);
     const conversation = db.getConversation(id);
     if (!conversation) throw new AppError("CONVERSATION_NOT_FOUND", "会话不存在", 404);
+    if (conversation.workspaceId) requireWorkspaceClient(req);
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) throw new AppError("UPLOAD_EMPTY", "没有收到图片", 400);
     const limit = conversationImageAttachmentLimit(conversation);
     if (files.length > limit) throw new AppError("REFERENCE_IMAGE_LIMIT", `当前会话一次最多上传 ${limit} 张图片`, 400);
 
-    const uploaded: string[] = [];
+    const savedAssets: InsertAssetInput[] = [];
+    const staged = req.query.staged === "1";
     for (const file of files) {
       // 只看 Content-Type 是不够的：改个后缀就能绕过去，字节头才是证据
       if (!matchesImageSignature(file.buffer, file.mimetype as ReferenceImageUpload["mimeType"])) {
@@ -440,17 +453,22 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
         id: taskId, channelId: "", model: "", prompt: "上传图片",
         input: {}, origin: "upload", libraryScope: "conversation", ownerConversationId: id, status: "succeeded",
       });
-      db.insertAsset({
+      const title = displayFileName(file.originalname);
+      const asset = {
         id: assetId, taskId, fileName, mimeType: file.mimetype, byteSize: file.buffer.length,
         relativePath: fileName, baseDir, sha256, thumbPath,
-      });
-      db.appendMessage({
+      };
+      db.insertAsset(asset);
+      if (!staged) db.appendMessage({
         conversationId: id, role: "user",
-        content: `上传了图片 ${displayFileName(file.originalname)}`,
+        content: `上传了图片 ${title}`,
         assetId,
       });
-      uploaded.push(assetId);
+      savedAssets.push({ ...asset, title });
     }
+    await archiveConversationAssets(db, id, "上传", savedAssets);
+    const uploaded = savedAssets.map(asset => asset.id);
+    if (staged) return res.status(201).json(ok({ uploadedAssetIds: uploaded }));
     // 刚传进来的图直接就是当前画布：用户下一步十有八九是「把这张图的手改成握着咖啡杯」。
     // 主图从「最后一张」改成「第一张」——一次传多张时，用户心里排第一的显然是他先选的那张。
     // 统一入口和原生生图试用里，附件默认只属于本轮；旧创作模式仍按原行为放进画布
@@ -462,6 +480,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
 
   app.post("/api/conversations/:id/media", chatThreadOnly, conversationMediaUpload.array("files", MAX_CHAT_MEDIA_FILES), asyncHandler(async (req, res) => {
     const id = routeParam(req.params.id);
+    if (db.getConversation(id)?.workspaceId) requireWorkspaceClient(req);
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) throw new AppError("UPLOAD_EMPTY", "没有收到音频或视频", 400);
 
@@ -494,6 +513,7 @@ export function registerConversationRoutes(app: Express, db: AppDatabase, agent:
       await removeStoredFiles(uploads.map(item => item.asset), [], db.inputsDir);
       throw error;
     }
+    await archiveConversationAssets(db, id, "上传", uploads.map(item => item.asset));
     res.status(201).json(ok(agent.buildView(id)));
   }));
 }

@@ -37,7 +37,7 @@ const entries: Diagnostic[] = [
   },
 ];
 
-it("diagnostic summary copies actionable identifiers and timing with sensitive sections opt-in", async () => {
+it("diagnostic summary selects all four options by default and supports removing them", async () => {
   diagnostics.mockResolvedValue(entries);
   copy.mockResolvedValue(undefined);
   const container = document.createElement("div");
@@ -46,22 +46,27 @@ it("diagnostic summary copies actionable identifiers and timing with sensitive s
   try {
     await act(async () => { root.render(<DiagnosticDialog task={task} onClose={() => undefined} />); });
     const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "复制诊断摘要")!;
+    const details = container.querySelector("details")!;
+    const checkboxes = [...details.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    expect(checkboxes.map(checkbox => checkbox.checked)).toEqual([true, true, true, true]);
     await act(async () => { button.click(); });
     const summary = copy.mock.calls[0]![0] as string;
     for (const fact of [APP_VERSION, task.id, task.channelName, task.model, "未收到 HTTP 响应", "HTTP 400", "302892 ms", "800 秒",
-      "UND_ERR_HEADERS_TIMEOUT", "request-id-123", "relay-error-xyz", "remote-task-xyz"]) expect(summary).toContain(fact);
-    expect(summary).not.toMatch(/私密|上游原文|cdn\.invalid|relay\.invalid|creds|AAAA/);
+      "UND_ERR_HEADERS_TIMEOUT", "request-id-123", "relay-error-xyz", "remote-task-xyz", task.prompt, task.errorMessage,
+      "https://cdn.invalid/reference.png", "上游原文"]) expect(summary).toContain(fact);
+    expect(summary).not.toMatch(/relay\.invalid|creds|AAAA/);
     expect(container.querySelector('[role="status"]')?.textContent).toBe("已复制到剪贴板");
 
-    const details = container.querySelector("details")!;
     await act(async () => {
       details.open = true;
-      details.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
-      button.click();
+      checkboxes.forEach(checkbox => checkbox.click());
     });
     await act(async () => { button.click(); });
-    expect(copy.mock.calls.at(-1)?.[0]).toContain(task.prompt);
-    expect(copy.mock.calls.at(-1)?.[0]).not.toContain("上游原文");
+    expect(copy.mock.calls.at(-1)?.[0]).not.toMatch(/私密|上游原文|cdn\.invalid|relay\.invalid|creds|AAAA/);
+
+    await act(async () => { root.render(<DiagnosticDialog task={{ ...task, id: "next-task" }} onClose={() => undefined} />); });
+    expect([...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].map(checkbox => checkbox.checked))
+      .toEqual([true, true, true, true]);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -76,4 +81,14 @@ it("allows separate media and response opt-ins, keeping credentials out of both"
   expect(everything).toContain("https://cdn.invalid/reference.png");
   expect(everything).toContain("https://cdn.invalid/output.png");
   expect(everything).not.toMatch(/creds|AAAA|relay\.invalid/);
+});
+
+it("carries the upstream failure reason only when error detail is opted in", () => {
+  const plain = formatDiagnosticCopy(task, entries, { prompt: false, mediaLinks: false, response: false });
+  expect(plain).not.toContain("私密失败信息");
+  const detailed = formatDiagnosticCopy(task, entries, { prompt: false, mediaLinks: false, response: false, errorDetail: true });
+  // 任务级原因 + 阶段级原因各一行，5xx 排查就靠这两句
+  expect(detailed).toContain("错误详情 私密失败信息");
+  expect(detailed).toContain("原因 私密失败信息");
+  expect(detailed).not.toMatch(/creds|AAAA/);
 });

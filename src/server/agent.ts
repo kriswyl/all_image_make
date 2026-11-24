@@ -27,6 +27,7 @@ import { PresentationCoordinator } from "./presentation-coordinator.js";
 import type { PresentationAction } from "./presentation-revision.js";
 import { AppError, type TaskRunner } from "./tasks.js";
 import { VideoOverviewRequests } from "./video-overview-requests.js";
+import { archiveConversationAssets } from "./workspace-assets.js";
 
 // 测试和外部调用仍从 `agent.ts` 导入这些纯函数，保留原来的入口
 export {
@@ -361,6 +362,13 @@ export class AgentService {
     }
     this.setStatus(conversationId, "running");
     try {
+      if (turnConversation.workspaceId && libraryAssetIds.length) {
+        const references = libraryAssetIds.flatMap(id => {
+          const asset = this.db.getAsset(id);
+          return asset && this.db.getTaskRow(asset.taskId)?.ownerConversationId !== conversationId ? [asset] : [];
+        });
+        await archiveConversationAssets(this.db, conversationId, "引用", references);
+      }
       if (trigger !== "recovered") await this.brain.prepareCompression(turnConversation, controller, turnAttachmentIds);
       if (plain) {
         return await runNativeTurn({

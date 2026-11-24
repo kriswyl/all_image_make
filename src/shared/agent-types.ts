@@ -84,6 +84,12 @@ export const AGENT_TOOL_NAMES = [
   "doc_list",
   "doc_delete",
   "doc_read",
+  "workspace_list",
+  "workspace_read",
+  "workspace_use_image",
+  "workspace_review_images",
+  "workspace_load_skill",
+  "workspace_draft_skill",
   "doc_search",
   "doc_create",
   "doc_edit",
@@ -131,6 +137,12 @@ export const agentToolLabels: Record<AgentToolName, string> = {
   doc_list: "查看文件",
   doc_delete: "请求删除文件",
   doc_read: "读取文件",
+  workspace_list: "浏览工作区",
+  workspace_read: "读取工作区文件",
+  workspace_use_image: "引用工作区图片",
+  workspace_review_images: "逐张查看工作区图片",
+  workspace_load_skill: "读取 Skill",
+  workspace_draft_skill: "起草 Skill",
   doc_search: "搜索文件",
   doc_create: "创建文件",
   doc_edit: "修改文件",
@@ -572,6 +584,7 @@ export interface Conversation {
   kind: ConversationKind;
   /** 无限画布线程指向的板 id；普通对话为 null */
   boardId: string | null;
+  workspaceId?: string;
   brainChannelId: string;
   brainModel: string;
   /**
@@ -737,6 +750,7 @@ export type AgentStreamEvent =
 
 /** 新建会话时可以指定的东西，全部可选，缺省走设置里的全局默认 */
 export interface ConversationInput {
+  workspaceId?: string;
   title?: string;
   brainChannelId?: string;
   brainModel?: string;

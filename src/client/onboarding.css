@@ -86,7 +86,6 @@
   transition: transform .2s ease, background .2s ease, opacity .2s ease;
 }
 .ink-primary:hover:not(:disabled) { transform: translateY(-1px); background: #303430; }
-.ink-primary:active:not(:disabled) { transform: scale(.98); }
 .ink-primary:disabled { opacity: .3; cursor: not-allowed; }
 .ink-ghost {
   display: inline-flex;

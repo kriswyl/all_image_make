@@ -15,7 +15,7 @@
     // 主 CSS 还没加载，先给画布一个底色；initTheme 会清掉这行内联样式，交还给令牌
     root.style.backgroundColor = dark ? "#0e0e0e" : "#f7f7f8";
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", dark ? "#111111" : "#f7f7f8");
+    if (meta) meta.setAttribute("content", (dark ? meta.dataset.dark : meta.dataset.light) || meta.content);
   } catch (error) {
     document.documentElement.dataset.theme = "light";
   }

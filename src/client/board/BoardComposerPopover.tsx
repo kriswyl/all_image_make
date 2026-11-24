@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useWorkspaceActive } from "../WorkspaceSurface";
 
 export function BoardComposerPopover({ anchor, onClose, label, width: preferredWidth = 384, children }: {
   anchor: HTMLButtonElement | null;
@@ -8,12 +9,13 @@ export function BoardComposerPopover({ anchor, onClose, label, width: preferredW
   width?: number;
   children: ReactNode;
 }) {
+  const active = useWorkspaceActive();
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number }>();
 
   // 画布平移、缩放和节点拖动都会引起父组件重新渲染。
   useLayoutEffect(() => {
-    if (!anchor) return;
+    if (!active || !anchor) return;
     const place = () => {
       const rect = anchor.getBoundingClientRect();
       const canvas = anchor.closest(".board-canvas")?.getBoundingClientRect();
@@ -37,6 +39,7 @@ export function BoardComposerPopover({ anchor, onClose, label, width: preferredW
   });
 
   useLayoutEffect(() => {
+    if (!active) return;
     const dismiss = (event: PointerEvent) => {
       if (!(event.target instanceof Node)) return;
       if (anchor?.contains(event.target) || menuRef.current?.contains(event.target)) return;
@@ -56,9 +59,9 @@ export function BoardComposerPopover({ anchor, onClose, label, width: preferredW
       document.removeEventListener("pointerdown", dismiss, true);
       document.removeEventListener("keydown", escape);
     };
-  }, [anchor, onClose]);
+  }, [active, anchor, onClose]);
 
-  const visible = Boolean(position && position.maxHeight > 0 && position.width > 0);
+  const visible = active && Boolean(position && position.maxHeight > 0 && position.width > 0);
   useLayoutEffect(() => {
     if (visible) menuRef.current?.focus({ preventScroll: true });
   }, [visible]);

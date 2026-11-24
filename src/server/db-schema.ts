@@ -92,6 +92,9 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS local_workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, directory TEXT NOT NULL UNIQUE
+      );
       -- 对话式 Agent（AGENT_PLAN.md §5）。产物不复制，靠 task_id / asset_id 指向现有表
       CREATE TABLE IF NOT EXISTS conversations (
         id                   TEXT PRIMARY KEY,
@@ -100,6 +103,7 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
         kind                 TEXT NOT NULL DEFAULT 'chat',
         -- 无限画布线程指向的板 id；普通对话为 NULL
         board_id             TEXT,
+        workspace_id         TEXT REFERENCES local_workspaces(id) ON DELETE SET NULL,
         brain_channel_id     TEXT NOT NULL,
         brain_model          TEXT NOT NULL,
         -- 已废弃：老版本的单图画布指针。只被下面那次回填读一次，新代码不读也不写。
@@ -397,6 +401,16 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
       );
       CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages(conversation_id, seq);
       CREATE INDEX IF NOT EXISTS messages_task_idx ON messages(task_id);
+      CREATE TABLE IF NOT EXISTS workspace_image_reviews (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES local_workspaces(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workspace_skill_drafts (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES local_workspaces(id) ON DELETE CASCADE,
+        payload TEXT NOT NULL, saved INTEGER NOT NULL DEFAULT 0
+      );
       CREATE INDEX IF NOT EXISTS conversations_updated_idx ON conversations(updated_at DESC);
       -- 一次大脑调用的 token 用量。单独一张表而不是塞进 messages：
       -- 解析重试、身份纠正这些「同一个消息对应的额外调用」也要算进账里，
@@ -606,6 +620,9 @@ export function initializeSchema(db: DatabaseSync, defaultAssetsDir: string): vo
     }
     if (!conversationColumns.some((col) => col.name === "board_id")) {
       db.exec("ALTER TABLE conversations ADD COLUMN board_id TEXT");
+    }
+    if (!conversationColumns.some((col) => col.name === "workspace_id")) {
+      db.exec("ALTER TABLE conversations ADD COLUMN workspace_id TEXT REFERENCES local_workspaces(id) ON DELETE SET NULL");
     }
     if (!conversationColumns.some((col) => col.name === "deleted_at")) {
       db.exec("ALTER TABLE conversations ADD COLUMN deleted_at TEXT");

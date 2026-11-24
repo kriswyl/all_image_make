@@ -79,10 +79,11 @@ export function registerAssetRoutes(app: Express, db: AppDatabase) {
     res.send(bytes);
   }));
 
-  /** 在系统文件管理器里打开素材目录：图片视频都落在应用数据目录里，用户得能直接翻到 */
+  /** 在系统文件管理器里打开应用管理的目录。 */
   app.post("/api/system/reveal-media", asyncHandler(async (req, res) => {
     const requested = String((req.body as { kind?: unknown } | undefined)?.kind ?? "assets");
-    const target = requested === "inputs" ? db.inputsDir : requested === "data" ? db.dataDir : db.assetsDir;
+    const target = requested === "inputs" ? db.inputsDir : requested === "data" ? db.dataDir
+      : requested === "documents" ? db.documentsDir : db.assetsDir;
     await revealFolder(target);
     res.json(ok({ opened: target }));
   }));

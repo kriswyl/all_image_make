@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, Eye, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, Trash2, X } from "lucide-react";
+import { AlertCircle, FolderOpen, Monitor, Moon, RotateCcw, Settings2, Sun, Trash2, X } from "lucide-react";
 import { api, isTauriRuntime } from "../api";
 import { IMAGE_SIZE_VALUES, type ImageSizeValue } from "../../shared/types";
+import { WORKSPACE_MEDIA_DIRECTORY } from "../../shared/local-workspace";
 import { setThemeMode, useTheme, type ThemeMode } from "../theme";
 import type { Toast } from "../app-shared";
 
@@ -112,7 +113,7 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
 
   async function chooseDocuments() {
     try {
-      const picked = await api.pickDirectory();
+      const picked = await api.pickDirectory("选择文档目录");
       if (!picked) return;
       await applyDocuments(picked);
     } catch (error) {
@@ -132,12 +133,13 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
     }
   }
 
-  async function reveal() {
+  async function reveal(kind: "assets" | "documents") {
+    const label = kind === "assets" ? "素材目录" : "文档目录";
     try {
-      const result = await api.revealMedia();
-      onToast("success", `已打开素材目录：${result.opened}`);
+      await api.revealMedia(kind);
+      onToast("success", `已打开${label}`);
     } catch (error) {
-      onToast("error", error instanceof Error ? error.message : "打开素材目录失败");
+      onToast("error", error instanceof Error ? error.message : `打开${label}失败`);
     }
   }
 
@@ -210,15 +212,15 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
           </div>
 
           <div className="settings-section">
-            <h3>素材目录</h3>
-            <p className="modal-lead">生成的图片和视频保存到下面这个目录。{isDefault ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
+            <h3>全局素材目录</h3>
+            <p className="modal-lead">应用在这里保存生成和上传的图片、视频和音频。{assetsDir ? (isDefault ? "当前是默认位置。" : "当前使用自定义位置。") : ""}</p>
             <div className="settings-path">{assetsDir || "（未获取到）"}</div>
             <div className="settings-actions">
               <button className="secondary-button" onClick={() => void choose()} disabled={busy || !canPick}>
                 <FolderOpen size={16} />更改目录
               </button>
-              <button className="secondary-button" onClick={() => void reveal()} disabled={busy}>
-                <Eye size={16} />打开目录
+              <button className="secondary-button" aria-label="打开素材目录" onClick={() => void reveal("assets")} disabled={busy || !assetsDir}>
+                <FolderOpen size={16} />打开目录
               </button>
               <button className="secondary-button" onClick={() => void apply("")} disabled={busy || isDefault}>
                 <RotateCcw size={16} />恢复默认
@@ -227,20 +229,23 @@ export function SettingsDialog({ assetsDir, defaultAssetsDir, dataPath, onClose,
             <div className="modal-note">
               <AlertCircle size={15} />
               <span>
-                {canPick
-                  ? "更改目录只影响之后生成的产物。历史记录里的旧图片、视频仍从原来的目录读取，不会被搬动，也不会失效。"
-                  : "只有桌面版支持用原生对话框选择目录；Web 开发模式下这里不可用。"}
+                更改目录只影响之后写入的新素材，历史素材仍从原位置读取。
+                {!canPick && " 更改目录需使用桌面版。"}
               </span>
             </div>
+            <p className="modal-lead">工作区对话会另外在对应工作区的「{WORKSPACE_MEDIA_DIRECTORY}」中按上传、生成、引用归档。可从工作区的三点菜单打开文件夹。</p>
           </div>
 
           <div className="settings-section">
             <h3>文档目录</h3>
-            <p className="modal-lead">PPT、Markdown、Word 等会话文档保存到下面这个目录。{documentsDir && documentsDir === defaultDocumentsDir ? "当前是默认位置。" : "当前使用自定义位置。"}</p>
+            <p className="modal-lead">PPT、Markdown、Word 等会话文档由应用统一保存在这里。{documentsDir ? (documentsDir === defaultDocumentsDir ? "当前是默认位置。" : "当前使用自定义位置。") : ""}</p>
             <div className="settings-path">{documentsDir || "（未获取到）"}</div>
             <div className="settings-actions">
               <button className="secondary-button" onClick={() => void chooseDocuments()} disabled={busy || !canPick}>
                 <FolderOpen size={16} />更改目录
+              </button>
+              <button className="secondary-button" aria-label="打开文档目录" onClick={() => void reveal("documents")} disabled={busy || !documentsDir}>
+                <FolderOpen size={16} />打开目录
               </button>
               <button className="secondary-button" onClick={() => void applyDocuments("")} disabled={busy || !documentsDir || documentsDir === defaultDocumentsDir}>
                 <RotateCcw size={16} />恢复默认

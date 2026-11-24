@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createZip } from "./zip-archive.mjs";
+import { readBrand } from "./brand.mjs";
 
 const projectDir = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
 const version = String(packageJson.version);
 const artifactDir = path.join(projectDir, "artifacts");
-const zipPath = path.join(artifactDir, `chatcanvas-v${version}-source-with-handoff.zip`);
+const zipPath = path.join(artifactDir, `${readBrand().id}-v${version}-source-with-handoff.zip`);
 
 fs.mkdirSync(artifactDir, { recursive: true });
 fs.rmSync(zipPath, { force: true });
@@ -16,6 +17,8 @@ const excludedPaths = [
   "./artifacts",
   "./data",
   "./dist",
+  "./src/shared/brand.generated.ts",
+  "./src-tauri/tauri.brand.generated.json",
   "./node_modules",
   "./server.err.log",
   "./server.out.log",

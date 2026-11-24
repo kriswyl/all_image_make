@@ -1,6 +1,6 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useEffect, useRef, useState } from "react";
-import { Copy, Download, Eraser, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, Music, RefreshCw, RotateCcw, Settings2, Trash2, Wand2, X } from "lucide-react";
+import { Copy, Download, Ellipsis, Eraser, Eye, Film, FolderOpen, History, Image as ImageIcon, LayoutGrid, Music, RefreshCw, RotateCcw, Settings2, Trash2, Wand2, X } from "lucide-react";
 import { CrossModeBridgeDialog, type BridgeAssetItem } from "../board/CrossModeBridgeDialog";
 import { api } from "../api";
 import { LazyVideoThumb } from "../LazyVideoThumb";
@@ -11,8 +11,10 @@ import type { ReferenceController, Toast } from "../app-shared";
 import { copyImageToClipboard } from "../clipboard";
 import { ImageActionMenu } from "../ui/ImageActionMenu";
 import { retryImageResult } from "./image-result-actions";
+import { useHistoryNavigation, type HistoryNavigation } from "./history-navigation";
+import { useWorkspaceActive } from "../WorkspaceSurface";
 
-export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onImageTask, onUseMusicSource, onToast }: {
+export function HistoryView({ channels, tasks, references, onRefresh, onDelete, onDeleteSelected, onClear, onOpenAssetSettings, onDiagnostics, onImageTask, onUseMusicSource, onToast, navigation, controlsInSidebar = false }: {
   channels: Channel[];
   tasks: Task[];
   references: ReferenceController;
@@ -25,10 +27,16 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   onImageTask: (task: Task) => void;
   onUseMusicSource?: (selection: SunoSourceSelection) => void;
   onToast: (kind: Toast["kind"], message: string) => void;
+  navigation?: HistoryNavigation;
+  controlsInSidebar?: boolean;
 }) {
-  const [filter, setFilter] = useState<"all" | "image" | "video" | "audio">("all");
-  const [mode, setMode] = useState<"assets" | "records">("records");
+  const localNavigation = useHistoryNavigation();
+  const { kind: filter, setKind: setFilter, mode, setMode } = navigation ?? localNavigation;
+  const active = useWorkspaceActive();
   const [query, setQuery] = useState("");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const moreTrigger = useRef<HTMLButtonElement>(null);
   const [visibleCount, setVisibleCount] = useState(60);
   const [library, setLibrary] = useState<Task[]>([]);
   const [loadError, setLoadError] = useState("");
@@ -44,8 +52,32 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   const [bridgeItems, setBridgeItems] = useState<BridgeAssetItem[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (!active) setMoreOpen(false); }, [active]);
   useEffect(() => {
-    if (typeof EventSource === "undefined") return;
+    if (!moreOpen) return;
+    moreRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus({ preventScroll: true });
+    function outside(event: PointerEvent) {
+      if (event.target instanceof Node && !moreRef.current?.contains(event.target)) setMoreOpen(false);
+    }
+    function escape(event: KeyboardEvent) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      setMoreOpen(false);
+      moreTrigger.current?.focus({ preventScroll: true });
+    }
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [moreOpen]);
+  useEffect(() => {
+    setVisibleCount(60);
+    setSelected(new Set());
+  }, [filter, mode]);
+  useEffect(() => {
+    if (!active || typeof EventSource === "undefined") return;
     let timer: number | undefined;
     const refresh = () => {
       window.clearTimeout(timer);
@@ -57,8 +89,9 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       onError: () => undefined,
     }, "library");
     return () => { window.clearTimeout(timer); close(); };
-  }, []);
+  }, [active]);
   useEffect(() => {
+    if (!active) return;
     const current = ++requestId.current;
     const filterKey = JSON.stringify([query, filter, mode]);
     const changingFilter = filterKeyRef.current !== filterKey;
@@ -82,7 +115,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
         .finally(() => { if (current === requestId.current) setLoading(false); });
     }, query ? 250 : 0);
     return () => { window.clearTimeout(timer); requestId.current++; };
-  }, [tasks, query, filter, mode, libraryRevision]);
+  }, [active, tasks, query, filter, mode, libraryRevision]);
   async function loadMore() {
     if (loading || !hasMore) return;
     const current = requestId.current;
@@ -125,13 +158,6 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
   useEffect(() => {
     if (selectAllRef.current) selectAllRef.current.indeterminate = selected.size > 0 && !allFilteredSelected;
   }, [selected, allFilteredSelected]);
-
-  /** 换筛选时清空勾选：勾中的可能已经不在眼前，留着会出现「看不见却被删掉」 */
-  function changeFilter(next: "all" | "image" | "video" | "audio") {
-    setFilter(next);
-    setVisibleCount(60);
-    setSelected(new Set());
-  }
 
   function toggleAll() {
     setSelected(allFilteredSelected ? new Set() : new Set(selectableRecords.map(task => task.id)));
@@ -201,7 +227,7 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       <div className="page-header">
         <div><h1>素材管理</h1><span className="page-kicker">ASSETS & HISTORY</span></div>
         <div className="header-actions">
-          <div className="filter-tabs"><button className={mode === "assets" ? "active" : ""} onClick={() => { setMode("assets"); setVisibleCount(60); setSelected(new Set()); }}>素材</button><button className={mode === "records" ? "active" : ""} onClick={() => { setMode("records"); setVisibleCount(60); setSelected(new Set()); }}>生成记录</button></div>
+          {!controlsInSidebar ? <div className="filter-tabs"><button className={mode === "assets" ? "active" : ""} onClick={() => setMode("assets")}>素材</button><button className={mode === "records" ? "active" : ""} onClick={() => setMode("records")}>生成记录</button></div> : null}
           {selected.size ? (
             <div className="selection-bar">
               <span>已选 <strong>{selected.size}</strong> 条</span>
@@ -211,18 +237,31 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
           ) : null}
           {mode === "records" ? <button className="secondary-button" title="清空对应类型的全部公共生成记录，不受搜索影响" onClick={() => void api.library().then((items) => onClear(filter, items.filter((task) => task.origin !== "upload" && (filter === "all" || taskKind(task, channels) === filter)))).catch((error) => onToast("error", error instanceof Error ? error.message : "加载记录失败"))}><Trash2 size={16} />清空记录</button> : null}
           {mode === "records" ? <button className="secondary-button" title="清理「渠道已删除、产物文件也已丢失」的孤儿记录；还能显示的记录一条都不动" onClick={() => void cleanStale()}><Eraser size={16} />清理失效</button> : null}
-          <button className="secondary-button" title="打开图片与视频的保存目录" onClick={() => void revealMedia()}><FolderOpen size={16} />素材目录</button>
-          <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button>
+          {!controlsInSidebar ? <button className="secondary-button" title="素材目录、gemini 渠道缺省输出尺寸" onClick={onOpenAssetSettings}><Settings2 size={16} />设置</button> : null}
           <button className="icon-button header-icon" title="刷新历史" onClick={onRefresh}><RefreshCw size={17} /></button>
+          <div className="library-more" ref={moreRef}
+            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setMoreOpen(false); }}>
+            <button type="button" ref={moreTrigger} className="icon-button header-icon" aria-label="更多素材操作"
+              aria-haspopup="menu" aria-expanded={moreOpen} data-tooltip="更多素材操作" onClick={() => setMoreOpen(open => !open)}>
+              <Ellipsis size={17} />
+            </button>
+            {moreOpen ? <div className="library-more-popover" role="menu" aria-label="素材操作">
+              <button type="button" className="context-link" role="menuitem" onClick={() => {
+                setMoreOpen(false);
+                moreTrigger.current?.focus({ preventScroll: true });
+                void revealMedia();
+              }}><FolderOpen size={16} />打开素材目录</button>
+            </div> : null}
+          </div>
         </div>
       </div>
       <div className="library-toolbar">
-          <div className="filter-tabs">
-            <button className={filter === "all" ? "active" : ""} onClick={() => changeFilter("all")}>全部</button>
-            <button className={filter === "image" ? "active" : ""} onClick={() => changeFilter("image")}>图片</button>
-            <button className={filter === "video" ? "active" : ""} onClick={() => changeFilter("video")}>视频</button>
-            <button className={filter === "audio" ? "active" : ""} onClick={() => changeFilter("audio")}>音频</button>
-          </div>
+        {!controlsInSidebar ? <div className="filter-tabs">
+          <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部</button>
+          <button className={filter === "image" ? "active" : ""} onClick={() => setFilter("image")}>图片</button>
+          <button className={filter === "video" ? "active" : ""} onClick={() => setFilter("video")}>视频</button>
+          <button className={filter === "audio" ? "active" : ""} onClick={() => setFilter("audio")}>音频</button>
+        </div> : null}
         <input value={query} onChange={(event) => { setQuery(event.target.value); setVisibleCount(60); setSelected(new Set()); }} placeholder="搜索提示词、文件名、模型或渠道" aria-label="搜索素材和记录" />
       </div>
       {loadError ? <p role="alert">素材加载失败：{loadError}</p> : null}
@@ -275,8 +314,8 @@ export function HistoryView({ channels, tasks, references, onRefresh, onDelete, 
       </div>}
       {loading ? <div className="table-empty" role="status"><LoadingIndicator variant="spectrum" /><span>加载中…</span></div> : null}
       {!loading && visibleCount < (mode === "assets" ? filteredAssets.length : filteredRecords.length) ? <button type="button" className="secondary-button" onClick={() => setVisibleCount((count) => count + 60)}>显示更多</button> : !loading && hasMore ? <button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button> : null}
-      {preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onUseMusicSource={onUseMusicSource} onToast={onToast} /> : null}
-      {bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
+      {active && preview ? <HistoryPreview task={preview} initialIndex={previewIndex} channels={channels} references={references} onClose={() => setPreview(null)} onSendToBoard={(asset) => { setPreview(null); setBridgeItems([{ assetId: asset.id, title: asset.title || asset.fileName, prompt: preview.prompt }]); }} onUseMusicSource={onUseMusicSource} onToast={onToast} /> : null}
+      {active && bridgeItems ? <CrossModeBridgeDialog mode="to-board" items={bridgeItems} onClose={() => setBridgeItems(null)} onToast={onToast} /> : null}
     </div>
   );
 }

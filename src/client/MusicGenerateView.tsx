@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -336,7 +337,7 @@ export function MusicGenerateView(props: {
         <div className="empty-page">
           <Music size={34} />
           <h2>尚无音乐渠道</h2>
-          <p>在渠道配置里添加「词元流墟-音乐」并填写密钥</p>
+          <p>在渠道配置里添加「{BRAND.provider.name}-音乐」并填写密钥</p>
           <button className="primary-button" onClick={props.onAddChannel}><Plus size={17} />添加渠道</button>
         </div>
       ) : (

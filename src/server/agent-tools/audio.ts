@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated.js";
 import { assetRef, type GenerateMusicArgs, type GenerateSpeechArgs } from "../../shared/agent-types.js";
 import { formatTtsDialogue, TTS_DEFAULT_VOICE, TTS_VOICES } from "../../shared/tts.js";
 import { isSunoSong, MUSIC_MODE_LABELS, SUNO_DAMOBI_MODEL } from "../../shared/suno.js";
@@ -165,7 +166,7 @@ export async function generateMusic(ctx: ToolContext, args: GenerateMusicArgs): 
 export function prepareSpeechInput(ctx: AudioPreparationContext, args: GenerateSpeechArgs) {
   const ttsAliases = ctx.aliases.filter((item) => item.adapterType === "gemini-tts");
   if (!ttsAliases.length) {
-    return failResult("还没有可用的语音渠道，请先到「模型设置」添加「词元流墟-语音」", "NO_SPEECH_CHANNEL");
+    return failResult(`还没有可用的语音渠道，请先到「模型设置」添加「${BRAND.provider.name}-语音」`, "NO_SPEECH_CHANNEL");
   }
   const hint = args.modelHint?.trim();
   const requested = hint ? ctx.aliases.find((item) => item.alias === hint) : undefined;

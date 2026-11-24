@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated";
 import { APP_VERSION } from "../../shared/app-config";
 import type { Diagnostic, RequestDiagnosticTrace, Task } from "../../shared/types";
 import { statusLabels, terminalStatuses } from "../task-ui";
@@ -16,6 +17,14 @@ export interface DiagnosticCopyOptions {
   prompt: boolean;
   mediaLinks: boolean;
   response: boolean;
+  /**
+   * 上游错误原文。
+   *
+   * 默认不带：中转站的错误信息经常把提示词原样回显，复制出去等于把用户内容贴给别人。
+   * 但排查 HTTP 500 这类「状态码之外什么都没给」的失败时，这一行往往是唯一线索
+   * （例如「当前分组没有该模型的可用渠道」），所以单独给一个开关，勾了才带。
+   */
+  errorDetail?: boolean;
 }
 
 const hidden = "[已隐藏]";
@@ -30,6 +39,19 @@ function token(value: unknown) {
 
 function line(value: string) {
   return value.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+/**
+ * 上游错误原文：行尾压平、抠掉内联 data URI 和密钥，留 1200 字。
+ *
+ * 不截到 200 字是因为「无可用渠道」那类报错后面跟的是一整串分组名单，
+ * 名单恰恰是用户要照着改配置的东西，砍掉就白带了。
+ */
+function errorDetailLine(value: string) {
+  return value.replace(/\s+/g, " ").trim()
+    .replace(inlineMedia, hidden)
+    .replace(/\b(?:Bearer|Basic)\s+[^\s"',;]+|\bsk-[\w-]{8,}/gi, hidden)
+    .slice(0, 1200);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -111,12 +133,14 @@ function mediaLinks(task: Task, items: Diagnostic[]) {
 export function formatDiagnosticCopy(task: Task, items: Diagnostic[] | null, options: DiagnosticCopyOptions) {
   const terminal = terminalStatuses.includes(task.status);
   const lines = [
-    `ChatCanvas v${APP_VERSION} 请求诊断`,
+    `${BRAND.productName} v${APP_VERSION} 请求诊断`,
     `本地任务 ID ${line(task.id)} · ${statusLabels[task.status]} · 执行 ${task.attemptCount} 次`,
     `渠道 ${line(task.channelName)} (${line(task.channelId)}) · 模型 ${line(task.model)}`,
     [`创建 ${line(task.createdAt)}`, task.startedAt && `开始 ${line(task.startedAt)}`, task.finishedAt && `结束 ${line(task.finishedAt)}`].filter(Boolean).join(" · "),
   ];
   if (token(task.errorCode)) lines.push(`任务错误 ${task.errorCode}`);
+  // 中转站可能在失败原因中回显业务内容，由「包含错误详情」控制。
+  if (options.errorDetail && task.errorMessage) lines.push(`错误详情 ${errorDetailLine(task.errorMessage)}`);
   if (token(task.upstreamTaskId)) lines.push(`渠道任务 ID ${task.upstreamTaskId}`);
   lines.push("");
   if (!items?.length) lines.push(items ? "暂无阶段记录" : "诊断记录未读取");
@@ -134,6 +158,7 @@ export function formatDiagnosticCopy(task: Task, items: Diagnostic[] | null, opt
     if (ids.length) lines.push(`   渠道请求或任务 ID ${ids.join(" · ")}`);
     const errors = [token(trace?.error?.code), token(trace?.error?.causeCode)].filter(Boolean);
     if (errors.length) lines.push(`   错误 ${errors.join(" · ")}`);
+    if (options.errorDetail && trace?.error?.message) lines.push(`   原因 ${errorDetailLine(trace.error.message)}`);
     if (trace?.referenceImages) {
       const media = trace.referenceImages;
       lines.push(`   请求体 ${media.requestBytes} 字节（分流前 ${media.beforeBytes}） · ${media.images.length} 张图`);

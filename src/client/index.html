@@ -1,12 +1,11 @@
 <!doctype html>
-<!-- ChatCanvas：图片 / 视频 / 音乐 / 语音 / 可灵工作台 -->
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#202521" />
-    <title>ChatCanvas</title>
-    <link rel="icon" type="image/png" href="/app-icon.png" />
+    <meta name="theme-color" content="__BRAND_THEME_COLOR__" data-light="__BRAND_LIGHT_COLOR__" data-dark="__BRAND_DARK_COLOR__" />
+    <title>__BRAND_TITLE__</title>
+    <link rel="icon" href="__BRAND_FAVICON__" />
     <!--
       首屏防闪白：主题要在 CSS 之前定好。独立文件而不是内联脚本，因为 Tauri 的
       CSP 只允许同源脚本；main.tsx 里的 initTheme 会再做一次并监听系统主题变化。

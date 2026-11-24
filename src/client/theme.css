@@ -48,7 +48,7 @@ html[data-theme="dark"] {
   --tone-pink-soft: rgba(245, 189, 209, .13);
   --tone-cream-soft: rgba(246, 214, 166, .13);
   /* 深色下渐变压暗一点，别在深底上发白光 */
-  --brand-gradient: linear-gradient(135deg, #7fb3e6 0%, #8cc9c0 26%, #d9b87f 52%, #d99cb4 76%, #b0a0e0 100%);
+  --brand-gradient: var(--brand-gradient-dark);
   --spectrum-gradient: linear-gradient(90deg, #6fa8dc, #79c2b6, #d8b276, #d991ab, #a794e0);
 
   /* 语义色提亮一档，深底上才不糊 */

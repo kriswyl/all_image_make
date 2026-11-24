@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated.js";
 import { createHash } from "node:crypto";
 import type { AppDatabase } from "../db.js";
 import { aiPresentationSchema, extractMindImages, parseXmind, renderAiPresentation, type AiPresentation, type DocumentNode, type MindDocument, type MindImage } from "../mind-document.js";
@@ -99,7 +100,7 @@ export async function editPresentationDocument(
   if (edits) throw new Error("PPT 请使用 pages/appendSlides/order/design/objects，不支持对压缩包做文本替换");
   if (!pages && !appendSlides && !order && !design && !objects) throw new Error("请指定要修改的页面、对象或主题");
   const project = await readPresentationProject(file.bytes);
-  if (!project) throw new Error("此 PPT 没有 ChatCanvas 可编辑源方案；可以作为风格参考，不能声称已保真修改外部文件");
+  if (!project) throw new Error(`此 PPT 没有 ${BRAND.productName} 可编辑源方案；可以作为风格参考，不能声称已保真修改外部文件`);
   const baseName = file.name.replace(/^(?:\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z-(?:\d+-)?)+/, "").replace(/(?:-修改版)*\.pptx$/i, "");
   // M2：对象级原位补丁。不重新渲染整稿，非目标部件逐字节保留。
   if (objects) {

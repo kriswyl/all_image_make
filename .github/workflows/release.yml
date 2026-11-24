@@ -77,7 +77,7 @@ jobs:
       # 白白多出一份不会被使用的 .app.tar.gz。
       # --target 会让 prepare-tauri.mjs 按目标架构准备 node sidecar（见 TAURI_ENV_TARGET_TRIPLE）。
       - name: Build dmg (${{ matrix.arch }})
-        run: npx tauri build --target "$TARGET" --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: node scripts/brand.mjs tauri build --target "$TARGET" --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
         env:
           APPLE_SIGNING_IDENTITY: "-"
 
@@ -160,16 +160,17 @@ jobs:
           echo "backend script: $SCRIPT"
           [ -f "$SCRIPT" ] || warn "找不到后端入口，跳过冒烟"
           DATA_DIR="$(mktemp -d)"
+          BRAND_PORT="$(node scripts/brand.mjs port)"
           if [ "$EXPECT_ARCH" = "x86_64" ]; then
             echo "x64：通过 arch -x86_64 借助 Rosetta 执行"
-            PORT=17892 DATA_DIR="$DATA_DIR" arch -x86_64 "$NODE_BIN" "$SCRIPT" &
+            PORT="$BRAND_PORT" DATA_DIR="$DATA_DIR" arch -x86_64 "$NODE_BIN" "$SCRIPT" &
           else
-            PORT=17892 DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
+            PORT="$BRAND_PORT" DATA_DIR="$DATA_DIR" "$NODE_BIN" "$SCRIPT" &
           fi
           NODE_PID=$!
           trap 'kill "$NODE_PID" 2>/dev/null' EXIT
           for i in $(seq 1 40); do
-            if curl -sf http://127.0.0.1:17892/api/health; then
+            if curl -sf "http://127.0.0.1:$BRAND_PORT/api/health"; then
               echo ""
               echo "SMOKE_OK"
               exit 0
@@ -239,7 +240,7 @@ jobs:
           fi
 
       - name: Build NSIS installer + updater artifacts
-        run: npx tauri build --bundles nsis
+        run: node scripts/brand.mjs tauri build --bundles nsis
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -292,7 +293,7 @@ jobs:
       - name: Prepare release notes
         shell: bash
         run: |
-          node -e 'const fs=require("fs"); const v=process.env.RELEASE_TAG; const text=fs.readFileSync("CHANGELOG.md","utf8"); const start=text.indexOf("## "+v+" "); if(start<0) throw Error("Missing changelog for "+v); const tail=text.slice(start); const end=tail.indexOf("\n## ",3); fs.writeFileSync("release-notes.md",end<0?tail:tail.slice(0,end));'
+          node -e 'const fs=require("fs"); const v=process.env.RELEASE_TAG; const text=fs.readFileSync(process.argv[1],"utf8"); const start=text.indexOf("## "+v+" "); if(start<0) throw Error("Missing changelog for "+v); const tail=text.slice(start); const end=tail.indexOf("\n## ",3); fs.writeFileSync("release-notes.md",end<0?tail:tail.slice(0,end));' "$(node scripts/brand.mjs changelog)"
 
       - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2

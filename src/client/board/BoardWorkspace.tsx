@@ -7,6 +7,7 @@
 import { LoadingIndicator } from "../ui/LoadingIndicator";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useWorkspaceActive } from "../WorkspaceSurface";
 import {
   Activity, Clapperboard, Image as ImageIcon, Menu, Plus, Redo2, Search, Trash2, Undo2,
 } from "lucide-react";
@@ -84,12 +85,12 @@ function BoardSidebar({
 }) {
   if (!host) return null;
   return createPortal(
-    <div className="sidebar-group">
+    <div className="sidebar-group sidebar-boards">
+      <div className="context-sidebar-actions">
+        <button type="button" className="context-primary" onClick={onCreate}><Plus size={16} />新建无限画布</button>
+      </div>
       <div className="sidebar-group-title">
-        <span>我的画布</span>
-        <button type="button" className="sidebar-group-add" aria-label="新建无限画布" data-tooltip="新建无限画布" onClick={onCreate}>
-          <Plus size={13} />
-        </button>
+        <span>最近画布</span>
       </div>
       <div className="sidebar-conv-list">
         {loading && !boards.length ? (
@@ -137,6 +138,7 @@ export function BoardWorkspace({
   onOpenMenu: () => void;
   onToast: (kind: "success" | "error", message: string) => void;
 }) {
+  const workspaceActive = useWorkspaceActive();
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(true);
   // 先不拿 localStorage 里的 id 发请求：那个 id 可能已经被删了。
@@ -870,12 +872,12 @@ export function BoardWorkspace({
           })} /> : null}
       </div>
 
-      {reviewProject ? <StoryboardReview id={reviewProject} onClose={() => { setReviewProject(null); if (!productionRun.running) void board.ensureSaved().then((ok) => { if (ok) void board.reload(); }); }}
+      {workspaceActive && reviewProject ? <StoryboardReview id={reviewProject} onClose={() => { setReviewProject(null); if (!productionRun.running) void board.ensureSaved().then((ok) => { if (ok) void board.reload(); }); }}
         onToast={(kind, message) => onToast(kind === "ok" ? "success" : "error", message)}
         onImport={(templateId) => { void board.importTemplate(templateId).then((count) => {
           if (count !== null) { setReviewProject(null); onToast("success", `已导入 ${count} 个分镜节点`); }
         }); }} /> : null}
-      {runDraft && runDraft.boardId === currentId ? <BoardRunReview steps={runDraft.steps} onClose={() => setRunDraft(null)} onStart={(steps, concurrency) => {
+      {workspaceActive && runDraft && runDraft.boardId === currentId ? <BoardRunReview steps={runDraft.steps} onClose={() => setRunDraft(null)} onStart={(steps, concurrency) => {
         productionRun.start(steps, concurrency);
         setRunDraft(null);
         setRunPanelVersion((version) => version + 1);
@@ -950,7 +952,7 @@ export function BoardWorkspace({
         />
       ) : null}
 
-      {bridgeItems?.length ? (
+      {workspaceActive && bridgeItems?.length ? (
         <CrossModeBridgeDialog
           mode="to-canvas"
           items={bridgeItems}
@@ -960,7 +962,7 @@ export function BoardWorkspace({
       ) : null}
 
       <BoardTemplateDrawer
-        open={templateDrawerOpen}
+        open={workspaceActive && templateDrawerOpen}
         onClose={() => setTemplateDrawerOpen(false)}
         onImport={board.importTemplate}
           onConfigure={(id) => {
@@ -974,7 +976,7 @@ export function BoardWorkspace({
       {currentId ? (
         <BoardHistoryDrawer
           key={currentId}
-          open={historyOpen}
+          open={workspaceActive && historyOpen}
           boardId={currentId}
           onClose={() => setHistoryBoardId(null)}
           onRestore={board.restoreVersion}
@@ -982,7 +984,7 @@ export function BoardWorkspace({
         />
       ) : null}
 
-      {versionNodeId && currentId ? <BoardNodeVersions boardId={currentId} nodeId={versionNodeId} onClose={() => setVersionNodeId(null)} onApply={async (task, asset) => {
+      {workspaceActive && versionNodeId && currentId ? <BoardNodeVersions boardId={currentId} nodeId={versionNodeId} onClose={() => setVersionNodeId(null)} onApply={async (task, asset) => {
         const current = board.view?.doc.nodes.find((item) => item.id === versionNodeId);
         if (!current || current.type === "text" || current.type === "config" || current.status === "loading") throw new Error("节点不存在或正在生成");
         if (!await board.ensureSaved()) throw new Error("画布尚未保存，请稍后重试");
@@ -991,8 +993,8 @@ export function BoardWorkspace({
         board.updateNode(versionNodeId, { assetId: asset.id, taskId: task.id, status: "succeeded" } as Partial<BoardNode>);
         onToast("success", "已切换节点素材；提示词和参数保持当前设置");
       }} /> : null}
-      {diagnosticTask ? createPortal(<DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} />, document.body) : null}
-      {assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId}
+      {workspaceActive && diagnosticTask ? createPortal(<DiagnosticDialog task={diagnosticTask} onClose={() => setDiagnosticTask(null)} />, document.body) : null}
+      {workspaceActive && assetDrawerOpen ? <BoardMaterialDialog board={board} currentId={currentId} boardAssets={boardAssets} assetSearch={assetSearch} setAssetSearch={setAssetSearch} assetType={assetType} setAssetType={setAssetType} setAssets={setAssets} targetNodeId={assetTargetId}
         onUseReferenceImage={referenceTargetId ? async (asset) => {
           if (!currentId || !asset.mimeType.startsWith("image/")) return false;
           const readTarget = () => {

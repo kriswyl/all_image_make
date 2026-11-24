@@ -5,6 +5,8 @@ data/
 *.log
 artifacts/
 tmp-runtime-data/
+src/shared/brand.generated.ts*
+src-tauri/tauri.brand.generated.json*
 
 # 本地 Agent 记忆与工作笔记，不入库
 .workbuddy/

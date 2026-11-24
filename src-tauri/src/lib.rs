@@ -19,7 +19,16 @@ use tauri_plugin_shell::{
   ShellExt,
 };
 
-const BACKEND_PORT: u16 = 17892;
+const BACKEND_PORT: u16 = {
+  let bytes = env!("BRAND_BACKEND_PORT").as_bytes();
+  let mut port = 0;
+  let mut i = 0;
+  while i < bytes.len() {
+    port = port * 10 + (bytes[i] - b'0') as u16;
+    i += 1;
+  }
+  port
+};
 const BACKEND_START_TIMEOUT_MS: u64 = 30_000;
 const SIDECAR_NOT_EXITED: i32 = i32::MIN;
 
@@ -370,13 +379,17 @@ fn report_startup_failure(app: &tauri::AppHandle, error: String) {
   log::error!("backend startup failed: {error}");
   let handle = app.clone();
   thread::spawn(move || {
+    let product = handle.config().product_name.as_deref().unwrap_or(&handle.package_info().name);
+    let identifier = &handle.config().identifier;
+    let mac_app = format!("/Applications/{product}.app");
+    let mac_app = if mac_app.contains(' ') { format!("\"{mac_app}\"") } else { mac_app };
     handle
       .dialog()
       .message(format!(
-        "后端服务启动失败，应用即将退出。\n\n原因：{error}\n\n排查建议：\n1. macOS：若正从安装镜像（DMG）直接运行，请先把应用拖入「应用程序」文件夹再打开；并在「终端」执行 xattr -cr /Applications/ChatCanvas.app 后重试\n2. 查看详细日志：macOS 在 ~/Library/Logs/com.imagerelay.studio/，Windows 在 %LOCALAPPDATA%\\com.imagerelay.studio\\logs\\"
+        "后端服务启动失败，应用即将退出。\n\n原因：{error}\n\n排查建议：\n1. macOS：若正从安装镜像（DMG）直接运行，请先把应用拖入「应用程序」文件夹再打开；并在「终端」执行 xattr -cr {mac_app} 后重试\n2. 查看详细日志：macOS 在 ~/Library/Logs/{identifier}/，Windows 在 %LOCALAPPDATA%\\{identifier}\\logs\\"
       ))
       .kind(MessageDialogKind::Error)
-      .title("ChatCanvas 启动失败")
+      .title(format!("{product} 启动失败"))
       .blocking_show();
     handle.exit(1);
   });

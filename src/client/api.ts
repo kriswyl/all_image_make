@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import type { ApiResponse, Asset, BootstrapData, Channel, ChannelInput, ClearScope, Diagnostic, GenerationInput, ImageBatchResult, ImageSizeValue, Settings, Task, TaskKind } from "../shared/types";
@@ -14,11 +15,13 @@ import type { PresentationVersionReport } from "../shared/presentation-report";
 import type { VideoOverviewFrames } from "../shared/media-review";
 import type { VideoTaskReuse } from "../shared/video-reuse";
 import type { ChatWebSettings, ChatWebSettingsPatch } from "../shared/chat-web";
+import type { ImageSkillChat, ImageSkillChatInput, ImageSkillRun, SampleField, SavedImageSkill } from "../shared/skills";
+import type { LocalWorkspace, WorkspaceSkillInfo } from "../shared/local-workspace";
 import { withReferenceMediaType } from "./media-files";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL
   || (typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
-    ? "http://127.0.0.1:17892"
+    ? `http://127.0.0.1:${BRAND.backendPort}`
     : "");
 
 function imageGenerationBody(input: GenerationInput, references: File[], mask?: File | null) {
@@ -113,7 +116,50 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return payload.data;
 }
 
+function skillPath(conversationId: string) {
+  return `/api/conversations/${encodeURIComponent(conversationId)}/skills/sample-image-batch`;
+}
+
 export const api = {
+  localWorkspaces: () => request<LocalWorkspace[]>("/api/local-workspaces"),
+  addLocalWorkspace: (directory: string) => request<LocalWorkspace>("/api/local-workspaces", { method: "POST", body: JSON.stringify({ directory }) }),
+  removeLocalWorkspace: (id: string) => request<{ detached: boolean }>(`/api/local-workspaces/${encodeURIComponent(id)}`, { method: "DELETE", body: "{}" }),
+  revealLocalWorkspace: (id: string) => request<{ opened: string }>(`/api/local-workspaces/${encodeURIComponent(id)}/reveal`, { method: "POST", body: "{}" }),
+  workspaceSkills: (id: string) => request<WorkspaceSkillInfo[]>(`/api/local-workspaces/${encodeURIComponent(id)}/skills`),
+  workspaceSkillDraftStatus: (id: string, draftId: string) =>
+    request<{ path: string | null }>(`/api/conversations/${encodeURIComponent(id)}/workspace-skills/${encodeURIComponent(draftId)}`),
+  saveWorkspaceSkillDraft: (id: string, draftId: string) =>
+    request<{ path: string }>(`/api/conversations/${encodeURIComponent(id)}/workspace-skills/${encodeURIComponent(draftId)}/save`, { method: "POST", body: "{}" }),
+  savedSkills: () => request<SavedImageSkill[]>("/api/skills/saved"),
+  imageSkillChat: (id: string) => request<ImageSkillChat | null>(`${skillPath(id)}/chat`),
+  exitImageSkillChat: (id: string) => request<null>(`${skillPath(id)}/chat`, { method: "DELETE" }),
+  sendImageSkillChat: (id: string, input: ImageSkillChatInput) => request<ImageSkillChat>(`${skillPath(id)}/chat`, {
+    method: "POST", body: JSON.stringify(input),
+  }),
+  saveImageSkill: (id: string, runId: string, name: string, rules: string) => request<SavedImageSkill>(
+    `${skillPath(id)}/runs/${encodeURIComponent(runId)}/save-skill`, { method: "POST", body: JSON.stringify({ name, rules }) },
+  ),
+  async downloadImageSkill(id: string) {
+    const url = apiUrl(`/api/skills/saved/${encodeURIComponent(id)}/SKILL.md`);
+    if (isTauriRuntime()) {
+      const target = await save({ defaultPath: "SKILL.md", filters: [{ name: "Markdown", extensions: ["md"] }] });
+      if (!target) return false;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("无法下载 Skill");
+      await writeFile(target, new Uint8Array(await response.arrayBuffer()));
+    } else {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "SKILL.md";
+      link.click();
+    }
+    return true;
+  },
+  skillRun: (id: string, runId: string) => request<ImageSkillRun>(`${skillPath(id)}/runs/${encodeURIComponent(runId)}`),
+  confirmImageSkill: (id: string, runId: string, fields: SampleField[][]) => request<ImageSkillRun>(`${skillPath(id)}/runs/${encodeURIComponent(runId)}/confirm`, {
+    method: "POST", body: JSON.stringify({ fields }),
+  }),
+  retryImageSkill: (id: string, runId: string, index: number) => request<ImageSkillRun>(`${skillPath(id)}/runs/${encodeURIComponent(runId)}/items/${index}/retry`, { method: "POST" }),
   videoTaskReuse: (id: string, signal?: AbortSignal) => request<VideoTaskReuse>(`/api/generations/${encodeURIComponent(id)}/video-reuse`, { signal }),
   async videoTaskReuseFile(id: string, index: number, signal: AbortSignal) {
     const response = await fetch(apiUrl(`/api/generations/${encodeURIComponent(id)}/video-reuse/${index}`), { signal });
@@ -221,7 +267,7 @@ export const api = {
     body: JSON.stringify(input),
   }),
   cleanupDocuments: () => request<{ deleted: number }>("/api/settings/cleanup-documents", { method: "POST" }),
-  revealMedia: (kind: "assets" | "inputs" | "data" = "assets") => request<{ opened: string }>("/api/system/reveal-media", {
+  revealMedia: (kind: "assets" | "inputs" | "data" | "documents" = "assets") => request<{ opened: string }>("/api/system/reveal-media", {
     method: "POST",
     body: JSON.stringify({ kind }),
   }),
@@ -297,6 +343,11 @@ export const api = {
     const form = new FormData();
     for (const file of files) form.append("images", file, file.name);
     return request<ConversationView & { uploadedAssetIds?: string[] }>(`/api/conversations/${id}/uploads${keepCanvas ? "?keepCanvas=1" : ""}`, { method: "POST", body: form });
+  },
+  stageImageSkillFile: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("images", file, file.name);
+    return request<{ uploadedAssetIds: string[] }>(`/api/conversations/${encodeURIComponent(id)}/uploads?staged=1`, { method: "POST", body: form });
   },
   uploadConversationMedia: (id: string, files: File[]) => {
     const form = new FormData();

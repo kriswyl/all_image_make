@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated.js";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import pptxgen from "pptxgenjs";
@@ -169,7 +170,7 @@ export type AiPresentation = z.infer<typeof aiPresentationSchema>;
 export async function renderAiPresentation(plan: AiPresentation, images: Array<{ title: string; data: string }> = []): Promise<Buffer> {
   plan = aiPresentationSchema.parse(plan);
   const ppt = new (pptxgen as unknown as { new(): InstanceType<typeof import("pptxgenjs").default> })();
-  ppt.layout = "LAYOUT_WIDE"; ppt.author = "ChatCanvas"; ppt.subject = plan.title;
+  ppt.layout = "LAYOUT_WIDE"; ppt.author = BRAND.author; ppt.subject = plan.title;
   const dark = plan.theme === "blue" ? "142A43" : "1C232B";
   const accent = plan.design?.accent ?? (plan.theme === "blue" ? "286D9C" : "2A716B");
   const font = plan.design?.fontFace ?? "Microsoft YaHei";

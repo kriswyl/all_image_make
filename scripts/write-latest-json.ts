@@ -123,8 +123,20 @@ function runCli() {
   console.log(`Wrote ${outPath}`);
 }
 
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (invokedPath && invokedPath === path.resolve(fileURLToPath(import.meta.url))) {
+/**
+ * 项目目录可能是符号链接（Windows junction）：argv[1] 是调用路径，import.meta.url
+ * 是真实路径，直接比字符串会不相等，CLI 静默不执行、latest.json 永远不更新。
+ */
+function invokedDirectly(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   try {
     runCli();
   } catch (error) {

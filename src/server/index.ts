@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated.js";
 import path from "node:path";
 import { createApp } from "./app.js";
 import { loadEnvFiles } from "./security.js";
@@ -14,7 +15,7 @@ const { app, context } = createApp({ dataDir });
 const server = app.listen(port, "127.0.0.1", () => {
   const address = server.address();
   if (address && typeof address !== "string") getWpsPreviewJobs(context.db).setOrigin(`http://127.0.0.1:${address.port}`);
-  console.log(`ChatCanvas API: http://127.0.0.1:${port}`);
+  console.log(`${BRAND.productName} API: http://127.0.0.1:${port}`);
   // 已拿到上游 task id 的视频任务会在这里接着轮询，不阻塞启动
   void context.runner.resume();
   // 上一进程留下的 running 会话已经不存在了，收回 idle，否则界面永远转圈

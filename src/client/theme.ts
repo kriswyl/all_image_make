@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { isTauriRuntime } from "./api";
+import { BRAND } from "../shared/brand.generated";
 
 /**
  * 外观主题。
@@ -72,7 +73,7 @@ function systemPrefersDark(): boolean {
 /** 地址栏 / 任务栏缩略图用的主题色，跟着页面底色走 */
 function syncThemeColor(resolved: ResolvedTheme) {
   document.querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", resolved === "dark" ? "#111111" : "#f7f7f8");
+    ?.setAttribute("content", resolved === "dark" ? BRAND.web.darkThemeColor : BRAND.web.lightThemeColor);
 }
 
 /**

@@ -13,11 +13,12 @@
  */
 import { LoadingIndicator } from "./ui/LoadingIndicator";
 import {
-  Brain, Copy, Film, Globe, Images, ListTree, MessageSquarePlus, PenLine, Plus, Wand2, X,
+  Brain, Copy, Film, FolderMinus, FolderOpen, Globe, Images, ListTree, MessageSquarePlus, PenLine, Plus, Sparkles, SquarePen, Trash2, Wand2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ConversationSidebar } from "./chat/ConversationSidebar";
+import { useWorkspaceActive } from "./WorkspaceSurface";
 import { clearCompletionBadge, notifyCompletion } from "./notifications";
 import { AssetLightbox } from "./chat/AssetLightbox";
 import { MAX_CANVAS_IMAGES, MAX_REFERENCE_IMAGE_BYTES, isChatAdapter } from "../shared/types";
@@ -29,6 +30,8 @@ import {
 } from "../shared/agent-types";
 import { api, ApiError, isTauriRuntime } from "./api";
 import { Composer, isImageFile, isScriptDocument } from "./chat/Composer";
+import { ImageSkillCard } from "./chat/ImageSkillCard";
+import type { LocalWorkspace, WorkspaceSkillInfo } from "../shared/local-workspace";
 import { chatMediaMime, MAX_CHAT_MEDIA_BYTES, MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../shared/chat-media";
 import { MAX_SCRIPT_CHARS, MAX_SCRIPT_TOTAL_CHARS } from "../shared/storyboard";
 import { ConfirmCard } from "./chat/ConfirmCard";
@@ -82,9 +85,11 @@ const CANVAS_PATCH_DEBOUNCE_MS = 250;
 export function ChatView({
   channels,
   sidebarHost,
+  sidebarVisible = true,
   sidebarFilter = "",
-  newChatSignal = 0,
-  onNewChatHandled,
+  sidebarSearchOpen,
+  onToggleSidebarSearch,
+  onSidebarSelect,
   onConfigureChannel,
   onDiagnostics,
   onToast,
@@ -92,18 +97,19 @@ export function ChatView({
   channels: Channel[];
   /** 全局侧栏里挂会话列表的节点（还没挂载完时为 null，此时不渲染列表） */
   sidebarHost: HTMLElement | null;
+  sidebarVisible?: boolean;
   /** 侧栏搜索框里的词：按标题和最后一条消息过滤会话列表，空串表示不过滤 */
   sidebarFilter?: string;
-  /** 大于 0 表示侧栏刚点了「新对话」，值本身不重要，只看它变没变 */
-  newChatSignal?: number;
-  /** 处理完就把它归零，免得下次挂载又建一条（挂载时信号还留着的话会重复触发） */
-  onNewChatHandled?: () => void;
+  sidebarSearchOpen?: boolean;
+  onToggleSidebarSearch?: () => void;
+  onSidebarSelect?: () => void;
   /** 模型面板里的「调整」：直接把那个渠道的编辑弹窗打开 */
   onConfigureChannel?: (channel: Channel) => void;
   /** 工具卡片里的「诊断」：打开应用内诊断弹窗（Tauri 里 window.open 会被拦掉） */
   onDiagnostics?: (taskId: string) => void;
   onToast: (kind: "ok" | "error", text: string, action?: Toast["action"]) => void;
 }) {
+  const active = useWorkspaceActive();
   const brains = useMemo(() => channels.filter((channel) => isChatAdapter(channel.adapterType) && channel.enabled), [channels]);
 
   const [list, setList] = useState<Array<ConversationSummary & { running: boolean }>>([]);
@@ -133,13 +139,33 @@ export function ChatView({
   }, []);
   const [libraryPreview, setLibraryPreview] = useState<Asset | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [workspaces, setWorkspaces] = useState<LocalWorkspace[]>([]);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [loadedSkills, setLoadedSkills] = useState<{ id: string; items: WorkspaceSkillInfo[] } | null>(null);
+  const [workspaceSkillsVersion, setWorkspaceSkillsVersion] = useState(0);
   const [boardAsset, setBoardAsset] = useState<BridgeAssetItem | null>(null);
   const [chatAssetIds, setChatAssetIds] = useState<string[]>([]);
   const [libraryAttachments, setLibraryAttachments] = useState<Asset[] | null>(null);
   const [chatVideoFrames, setChatVideoFrames] = useState<ChatVideoFrames | null>(null);
   useEffect(() => {
+    let current = true;
+    void api.localWorkspaces().then((list) => { if (current) setWorkspaces(list); }).catch(() => {});
+    return () => { current = false; };
+  }, []);
+  useEffect(() => {
     setChatAssetIds([]); setLibraryAttachments(null); setChatVideoFrames(null); setLibraryOpen(false); setBoardAsset(null); setLibraryPreview(null); setPreview(null);
   }, [activeId]);
+  const currentWorkspaceId = view?.id === activeId ? view?.workspaceId : undefined;
+  const activeWorkspace = workspaces.find(({ id }) => id === currentWorkspaceId);
+  const workspaceSkills = view?.toolScope !== "conversation" && loadedSkills?.id === currentWorkspaceId ? loadedSkills?.items : undefined;
+  useEffect(() => {
+    if (!currentWorkspaceId) return;
+    let current = true;
+    void api.workspaceSkills(currentWorkspaceId).then((items) => {
+      if (current) setLoadedSkills({ id: currentWorkspaceId, items });
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [currentWorkspaceId, workspaceSkillsVersion]);
   const [templateImport, setTemplateImport] = useState<{
     id: string; name: string; description?: string;
   } | null>(null);
@@ -147,7 +173,8 @@ export function ChatView({
   /** 正在上传自己带的图（需求.md 问题 4）：传的时候不让再点一次 */
   const [uploading, setUploading] = useState(false);
   /** 会话列表的右键菜单：位置固定在视口里，避免被侧栏滚动裁掉 */
-  const [convMenu, setConvMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [convMenu, setConvMenu] = useState<{ target: "conversation" | "workspace"; id: string; x: number; y: number; trigger: HTMLElement | null } | null>(null);
+  const menuWorkspace = convMenu?.target === "workspace" ? workspaces.find(({ id }) => id === convMenu.id) : undefined;
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -246,23 +273,6 @@ export function ChatView({
   }, []);
   const toast = useCallback((kind: "ok" | "error", text: string, action?: Toast["action"]) => onToastRef.current(kind, text, action), []);
 
-  /**
-   * 侧栏的「新对话」：点一下要真的开一条新会话，而不是切回上次那条。
-   *
-   * 处理完立刻把信号归零。不归零的话，切到别的视图再切回来、组件重新挂载时，
-   * 那个还留着的信号会让它又建一条——用户会看见侧栏自己多出一条空会话。
-   * `createConversation` 是组件内的函数声明（会被提升），故意不进依赖数组：
-   * 它每次渲染都是新身份，放进去等于信号一来就重跑。
-   */
-  const onNewChatHandledRef = useRef(onNewChatHandled);
-  onNewChatHandledRef.current = onNewChatHandled;
-  useEffect(() => {
-    if (newChatSignal <= 0) return;
-    onNewChatHandledRef.current?.();
-    void createConversation();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newChatSignal]);
-
   // ── 数据加载 ───────────────────────────────────────────────────────────────
 
   const toastError = useCallback((error: unknown) => {
@@ -348,22 +358,30 @@ export function ChatView({
   // 右键菜单：点外面、按 Esc、滚动或窗口尺寸变化都收起
   useEffect(() => {
     if (!convMenu) return;
+    convMenuRef.current?.querySelector("button")?.focus({ preventScroll: true });
     const onPointerDown = (event: PointerEvent) => {
-      if (!convMenuRef.current?.contains(event.target as Node)) setConvMenu(null);
+      if (!(event.target instanceof Node)) return;
+      if (!convMenuRef.current?.contains(event.target) && !convMenu.trigger?.contains(event.target)) setConvMenu(null);
     };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setConvMenu(null); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      convMenu.trigger?.focus({ preventScroll: true });
+      setConvMenu(null);
+    };
     const close = () => setConvMenu(null);
     document.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown);
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", close);
     };
   }, [convMenu]);
+  useEffect(() => { if (!active || !sidebarVisible) setConvMenu(null); }, [active, sidebarVisible]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -384,16 +402,18 @@ export function ChatView({
    * 同一会话里的新消息仍然只在贴近底部时跟随，用户正翻历史时不打扰。
    */
   const forcedScrollConversation = useRef<string | null>(null);
+  const previousThreadScrollTop = useRef(0);
   useEffect(() => { forcedScrollConversation.current = activeId; }, [activeId]);
 
   useEffect(() => {
+    if (!active) return;
     const node = threadRef.current;
     if (!node) return;
     const forced = Boolean(activeId) && forcedScrollConversation.current === activeId;
     const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 160;
     if (forced || nearBottom) node.scrollTop = node.scrollHeight;
     // 依赖里带 view.id：切会话时旧视图还在，等新视图真正挂上要再滚一次
-  }, [activeId, view?.id, view?.messages.length, draft, reasoning, status]);
+  }, [active, activeId, view?.id, view?.messages.length, draft, reasoning, status]);
 
   /**
    * 图片 / 缩略图加载完会让内容变高，但消息数组没变。
@@ -401,6 +421,7 @@ export function ChatView({
    * 图出来之后人又会被留在半空。
    */
   useEffect(() => {
+    if (!active) return;
     const node = threadRef.current;
     const inner = threadInnerRef.current;
     if (!node || !inner) return;
@@ -411,10 +432,18 @@ export function ChatView({
     return () => observer.disconnect();
     // view.id 要进依赖：首次进来时 view 还是 null，内层节点根本不存在；
     // 只盯 activeId 的话观察器永远挂不上去
-  }, [activeId, view?.id]);
+  }, [active, activeId, view?.id]);
 
   /** 用户主动往回翻 = 不再跟着最新消息走（往下滚不解除，只有向上才解除） */
   const touchY = useRef(0);
+  function onThreadScroll(event: React.UIEvent<HTMLDivElement>) {
+    if (!active) return;
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    if (scrollTop < previousThreadScrollTop.current && scrollHeight - scrollTop - clientHeight >= 160) {
+      forcedScrollConversation.current = null;
+    }
+    previousThreadScrollTop.current = scrollTop;
+  }
   function onThreadWheel(event: React.WheelEvent<HTMLDivElement>) {
     if (event.deltaY < 0) forcedScrollConversation.current = null;
   }
@@ -429,15 +458,40 @@ export function ChatView({
 
   // ── 操作 ───────────────────────────────────────────────────────────────────
 
-  async function createConversation() {
+  async function createConversation(workspaceId?: string) {
     if (!brains.length) { onToast("error", "先在「模型配置」里加一个对话模型，助手才有大脑"); return; }
     try {
-      const created = await api.createConversation({ toolScope: "all" });
+      const created = await api.createConversation({ toolScope: "all", ...(workspaceId ? { workspaceId } : {}) });
       await reloadList();
       setActiveId(created.id);
     } catch (error) {
       toastError(error);
     }
+  }
+
+  async function addWorkspace() {
+    if (addingWorkspace) return;
+    setAddingWorkspace(true);
+    try {
+      const directory = await api.pickDirectory("选择本地工作区");
+      if (!directory) return;
+      const workspace = await api.addLocalWorkspace(directory);
+      setWorkspaces(current => [workspace, ...current.filter(({ id }) => id !== workspace.id)]);
+      const existing = list.find(({ workspaceId }) => workspaceId === workspace.id);
+      if (existing) setActiveId(existing.id);
+      else if (brains.length) await createConversation(workspace.id);
+    } catch (error) { toastError(error); }
+    finally { setAddingWorkspace(false); }
+  }
+
+  async function removeWorkspace(workspace: LocalWorkspace) {
+    if (!window.confirm(`移除工作区「${workspace.name}」？相关对话会移回「最近」，本地文件会保留。`)) return;
+    try {
+      await api.removeLocalWorkspace(workspace.id);
+      setWorkspaces(current => current.filter(({ id }) => id !== workspace.id));
+      await reloadList();
+      if (activeIdRef.current) await reloadView(activeIdRef.current);
+    } catch (error) { toastError(error); }
   }
 
   async function send(text: string, assetRefs: string[] = [], videoFrames?: ChatVideoFrames, staged: Asset[] | null = null) {
@@ -875,16 +929,23 @@ export function ChatView({
     toast("ok", "已恢复会话");
   }
 
-  /** 右键会话行：显示应用内菜单，而不是 WebView 自带的「返回 / 刷新 / 检查」 */
-  function openConversationMenu(event: React.MouseEvent, id: string) {
+  function openSidebarMenu(event: React.MouseEvent<HTMLElement>, id: string, target: "conversation" | "workspace") {
     event.preventDefault();
     event.stopPropagation();
-    const width = 160;
-    const height = 82;
+    const width = 170;
+    const height = target === "workspace" ? 108 : 76;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const atButton = event.type === "click";
+    const trigger = atButton ? event.currentTarget : event.currentTarget.querySelector<HTMLElement>("[data-sidebar-menu-trigger]");
+    if (atButton && convMenu?.id === id && convMenu.target === target) {
+      setConvMenu(null);
+      return;
+    }
+    const below = window.innerHeight - rect.bottom >= height + 10;
     setConvMenu({
-      id,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+      id, target, trigger,
+      x: Math.max(8, Math.min(atButton ? rect.right - width : event.clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(atButton ? (below ? rect.bottom + 4 : rect.top - height - 4) : event.clientY, window.innerHeight - height - 8)),
     });
   }
 
@@ -1023,62 +1084,90 @@ export function ChatView({
     const copyable = Boolean(formatMessageForClipboard(messages, (id) => assetsById.get(id)));
     return <div key={row.message.id} className={`chat-copyable-row${row.kind === "user" ? " is-user" : ""}`}>
       {content}
-      <div className="chat-message-actions">
-        {copyable ? <button type="button" className="chat-message-copy" aria-label="复制" data-tooltip="复制这条消息"
-          onClick={() => void copyMessages(messages)}><Copy size={12} /></button> : null}
-      </div>
+      {copyable ? <div className="chat-message-actions">
+        <button type="button" className="chat-message-copy" aria-label="复制" data-tooltip="复制这条消息"
+          onClick={() => void copyMessages(messages)}><Copy size={13} /></button>
+      </div> : null}
     </div>;
   }
 
   return (
     <div className="chat-view">
-      {/*
-        会话列表搬进全局侧栏（portal 到 App 的 .sidebar-recent）。
-        列表数据和 SSE 都长在这个组件里，把状态整个往上提的代价远大于挂一个 portal 节点；
-        换来的是导航只剩侧栏一层——原来是「顶栏 + 页内侧栏」叠两层，Codex 只有一层。
-      */}
       <ConversationSidebar
+        active={active && sidebarVisible}
         host={sidebarHost}
         conversations={filteredList}
+        workspaces={workspaces}
+        addingWorkspace={addingWorkspace}
         activeId={activeId}
         renamingId={renamingId}
         renameDraft={renameDraft}
         filter={sidebarFilter}
-        onSelect={setActiveId}
-        onCreate={() => void createConversation()}
+        searchOpen={sidebarSearchOpen}
+        onToggleSearch={onToggleSidebarSearch}
+        onSelect={(id) => { setActiveId(id); onSidebarSelect?.(); }}
+        onCreate={() => { void createConversation(); onSidebarSelect?.(); }}
+        onAddWorkspace={() => void addWorkspace()}
+        onWorkspaceMenu={(event, id) => openSidebarMenu(event, id, "workspace")}
+        workspaceMenuId={convMenu?.target === "workspace" ? convMenu.id : undefined}
         onOpenTrash={() => setTrashOpen(true)}
-        onDelete={requestConversationDeletion}
-        onContextMenu={openConversationMenu}
+        onContextMenu={(event, id) => openSidebarMenu(event, id, "conversation")}
+        menuId={convMenu?.target === "conversation" ? convMenu.id : undefined}
         onRenameChange={setRenameDraft}
         onRenameCommit={(id) => void commitRenameConversation(id)}
         onRenameCancel={() => { renameCancelRef.current = true; setRenamingId(null); }}
       />
 
-      {convMenu ? createPortal(
+      {active && sidebarVisible && convMenu && (convMenu.target === "conversation" || menuWorkspace) ? createPortal(
         <div
           ref={convMenuRef}
           className="sidebar-conv-menu"
           role="menu"
-          aria-label="会话操作"
+          aria-label={menuWorkspace ? "工作区操作" : "会话操作"}
           style={{ left: convMenu.x, top: convMenu.y }}
           onContextMenu={(event) => event.preventDefault()}
+          onKeyDown={event => {
+            const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+            if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const index = items.indexOf(document.activeElement as HTMLButtonElement);
+            const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+              : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+            items[next]?.focus({ preventScroll: true });
+          }}
+          onBlur={event => {
+            if (!event.currentTarget.contains(event.relatedTarget) && event.relatedTarget !== convMenu.trigger) setConvMenu(null);
+          }}
         >
-          <button type="button" role="menuitem" onClick={() => beginRenameConversation(convMenu.id)}>重命名</button>
-          <button
-            type="button"
-            role="menuitem"
-            className="danger"
-            onClick={() => requestConversationDeletion(convMenu.id)}
-          >
-            删除会话
-          </button>
+          {menuWorkspace ? <>
+            <button type="button" role="menuitem" onClick={() => {
+              setConvMenu(null);
+              void createConversation(menuWorkspace.id);
+              onSidebarSelect?.();
+            }}><SquarePen size={14} />新建对话</button>
+            <button type="button" role="menuitem" onClick={() => {
+              setConvMenu(null);
+              convMenu.trigger?.focus({ preventScroll: true });
+              void api.revealLocalWorkspace(menuWorkspace.id).catch(toastError);
+            }}><FolderOpen size={14} />打开工作区文件夹</button>
+            <button type="button" role="menuitem" className="danger" onClick={() => {
+              setConvMenu(null);
+              convMenu.trigger?.focus({ preventScroll: true });
+              void removeWorkspace(menuWorkspace);
+            }}><FolderMinus size={14} />移除工作区</button>
+          </> : <>
+            <button type="button" role="menuitem" onClick={() => beginRenameConversation(convMenu.id)}><PenLine size={14} />重命名</button>
+            <button type="button" role="menuitem" className="danger" onClick={() => requestConversationDeletion(convMenu.id)}>
+              <Trash2 size={14} />删除会话
+            </button>
+          </>}
         </div>,
         document.body,
       ) : null}
 
-      {deleteTarget ? <DeleteConversationDialog title={deleteTarget.title}
+      {active && deleteTarget ? <DeleteConversationDialog title={deleteTarget.title}
         onClose={() => setDeleteTarget(null)} onConfirm={() => removeConversation(deleteTarget.id)} /> : null}
-      {trashOpen ? <ConversationTrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreConversation} /> : null}
+      {active && trashOpen ? <ConversationTrashDialog onClose={() => setTrashOpen(false)} onRestore={restoreConversation} /> : null}
 
       <section className="chat-main">
         {!view ? (
@@ -1108,6 +1197,7 @@ export function ChatView({
         ) : (
           <>
             <header className="chat-header">
+              {activeWorkspace ? <span className="chat-workspace-label" title={activeWorkspace.directory}><FolderOpen size={14} />{activeWorkspace.name}</span> : null}
               <input
                 className="chat-title"
                 value={view.title}
@@ -1145,6 +1235,7 @@ export function ChatView({
             <div
               className="chat-thread"
               ref={threadRef}
+              onScroll={onThreadScroll}
               onWheel={onThreadWheel}
               onTouchStart={onThreadTouchStart}
               onTouchMove={onThreadTouchMove}
@@ -1160,19 +1251,26 @@ export function ChatView({
                 if (row.kind === "user") return withMessageCopy(row, <UserBubble message={row.message}
                   asset={row.message.assetId ? assetsById.get(row.message.assetId) : undefined}
                   lookupAsset={(id) => assetsById.get(id)} onPreview={setPreview} />);
-                if (row.kind === "note") return withMessageCopy(row, <SystemNote message={row.message} />);
+                if (row.kind === "note") return <SystemNote key={row.message.id} message={row.message} />;
                 if (row.kind === "assistant") {
                   // 「还没被回答的那一条」才给按钮：翻回去看老记录时，那些选项早就失效了
                   const options = row.message.id === lastAnswerableId ? readAskOptions(row.message) : [];
                   if (!row.message.content?.trim() && !options.length) return null;
+                  const imageSkillRunId = row.message.toolArgs?.imageSkillRunId;
                   return withMessageCopy(row,
-                    <AssistantBubble
+                    <><AssistantBubble
                       message={row.message}
                       options={options}
                       disabled={running}
                       onPick={(text) => void send(text)}
                       onToast={toast}
                     />
+                    {typeof imageSkillRunId === "string" ? <ImageSkillCard
+                      conversationId={view.id} runId={imageSkillRunId}
+                      canConfirm={false}
+                      onCompleted={() => void reloadView(view.id)}
+                      onPreview={(asset) => { setLibraryPreview(asset); setPreview(asset.id); }}
+                    /> : null}</>
                   );
                 }
                 if (row.kind === "confirm") {
@@ -1201,6 +1299,7 @@ export function ChatView({
                       setPreviewId(assetId);
                     }}
                     onDiagnostics={onDiagnostics}
+                    onWorkspaceSkillSaved={() => setWorkspaceSkillsVersion((value) => value + 1)}
                     onToast={toast}
                     presentationActionsEnabled={!running && view.toolScope !== "conversation"}
                     onResumePresentation={!running && plainChat && view.toolScope !== "conversation" && row.result?.id === latestPresentationResult?.id ? () => { void send("继续 PPT"); } : undefined}
@@ -1220,16 +1319,18 @@ export function ChatView({
             </div>
 
             <Composer
+              key={view.id}
               conversationId={view.id}
               running={running || compressing}
               uploading={uploading || changingScope || changingWeb}
               imageVisionWarning={!view.visionEnabled ? "本会话已关闭看图，可在「对话设置」开启。"
                 : view.visionBlocked ? "当前模型不接受图片输入，可切换到支持看图的模型。" : undefined}
-              placeholder={plainChat ? "聊聊你的想法，或提出问题…" : canvasImages.length
+              placeholder={activeWorkspace ? "在这个工作区开始任务，输入 $ 可以调用 Skill…" : plainChat ? "聊聊你的想法，或提出问题…" : canvasImages.length
                 ? canvasImages.length > 1
                   ? `画布 ${canvasImages.length} 张（① 首帧 ${assetRef(canvasImages[0]!.id)} / ② 尾帧${canvasImages[1] ? ` ${assetRef(canvasImages[1].id)}` : ""}${canvasImages.length > 2 ? " / 其余参考" : ""}），直接说怎么改…`
                   : `画布 1 张（① 首帧 / 主图 ${assetRef(canvasImages[0]!.id)}），直接说怎么改…`
                 : "说你想画什么，或者要改哪张图…"}
+              workspaceSkills={workspaceSkills}
               leftSlot={(
                 <>
                   {view.toolScope === "conversation" ? <span className="chat-control">工具已关闭</span> : null}
@@ -1300,7 +1401,7 @@ export function ChatView({
                   累计 输入 {formatTokenCount(view.usage.promptTokens)} / 输出 {formatTokenCount(view.usage.completionTokens)}
                 </span>
               ) : null}</>}
-              onSend={(text, files, assetIds) => void sendWithFiles(text, files, assetIds)}
+              onSend={(...args) => void sendWithFiles(...args)}
               onInterrupt={() => void interrupt()}
               onAssetAttached={(assetId) => plainChat || libraryAttachments ? toggleChatAsset(assetId) : addCanvasBatch([assetId])}
               plainAttachments={plainChat}
@@ -1320,7 +1421,7 @@ export function ChatView({
         )}
       </section>
 
-      {templateImport ? (
+      {active && templateImport ? (
         <TemplateImportDialog
           templateId={templateImport.id}
           templateName={templateImport.name}
@@ -1330,7 +1431,7 @@ export function ChatView({
         />
       ) : null}
 
-      {libraryOpen && view && <AssetLibrary
+      {active && libraryOpen && view && <AssetLibrary
         assets={mediaAssets}
         selection={composerAssets}
         limit={plainChat ? attachmentLimit : MAX_CANVAS_IMAGES}
@@ -1349,10 +1450,10 @@ export function ChatView({
         onDeleteAsset={deleteSessionAsset}
       />}
 
-      {boardAsset ? <CrossModeBridgeDialog mode="to-board" items={[boardAsset]}
+      {active && boardAsset ? <CrossModeBridgeDialog mode="to-board" items={[boardAsset]}
         onClose={() => setBoardAsset(null)} onToast={(kind, message) => toast(kind === "success" ? "ok" : "error", message)} /> : null}
 
-      {preview ? (
+      {active && preview ? (
         <AssetLightbox
           key={`${preview}:${previewStartMs ?? ""}`}
           assetId={preview}

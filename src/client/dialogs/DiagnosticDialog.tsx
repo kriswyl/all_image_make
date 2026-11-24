@@ -6,7 +6,7 @@ import { LoadingScreen, StatusBadge, formatTime, terminalStatuses } from "../tas
 import type { Diagnostic, Task } from "../../shared/types";
 import { diagnosticOutcome, formatDiagnosticCopy, phaseLabels, type DiagnosticCopyOptions } from "./diagnostic-copy";
 
-const defaultCopyOptions: DiagnosticCopyOptions = { prompt: false, mediaLinks: false, response: false };
+const defaultCopyOptions: DiagnosticCopyOptions = { prompt: true, mediaLinks: true, response: true, errorDetail: true };
 
 function time(value: string) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -116,16 +116,16 @@ export function DiagnosticDialog({ task, onClose, onVideoRecovered }: { task: Ta
             <summary>复制选项</summary>
             <div className="diagnostic-copy-options">
               {([
-                ["prompt", "包含提示词"], ["mediaLinks", "包含素材地址"], ["response", "包含上游响应"],
+                ["prompt", "包含提示词"], ["mediaLinks", "包含素材地址"], ["response", "包含上游响应"], ["errorDetail", "包含错误详情"],
               ] as const).map(([key, label]) => <label key={key}>
-                <input type="checkbox" checked={copyOptions[key]} onChange={(event) => {
+                <input type="checkbox" checked={Boolean(copyOptions[key])} onChange={(event) => {
                   const checked = event.currentTarget.checked;
                   setCopyOptions((current) => ({ ...current, [key]: checked }));
                   setCopyStatus("idle");
                 }} />{label}
               </label>)}
             </div>
-            <p>默认只复制任务状态和各阶段诊断信息。上游响应可能包含业务内容，分享前请核对。</p>
+            <p>默认包含全部四项。分享前请核对提示词、素材地址和上游响应中的业务内容，可按需取消勾选。</p>
           </details>
         </div>
         {currentTask.canRecoverVideo ? <form className="diagnostic-recovery" onSubmit={recoverVideo}>

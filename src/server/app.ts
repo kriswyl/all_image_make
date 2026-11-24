@@ -8,6 +8,7 @@ import multer from "multer";
 import { getWpsPreviewJobs } from "./wps-preview.js";
 import { z } from "zod";
 import { APP_VERSION } from "../shared/app-config.js";
+import { brandedWpsFiles, renderWpsBrand } from "../shared/brand-markup.js";
 import { MAX_IMAGE_GENERATION_REFERENCES } from "../shared/image-reference-limits.js";
 import { AppDatabase } from "./db.js";
 import { KeyStore } from "./key-store.js";
@@ -19,6 +20,8 @@ import { ok, fail, routeParam } from "./routes/http.js";
 import { registerCanvasRoutes } from "./routes/canvas.js";
 import { registerChannelRoutes } from "./routes/channels.js";
 import { registerGenerationRoutes } from "./routes/generations.js";
+import { registerSkillRoutes } from "./routes/skills.js";
+import { registerLocalWorkspaceRoutes } from "./routes/local-workspaces.js";
 import { registerConversationRoutes, registerConversationEvents } from "./routes/conversations.js";
 import { MAX_CHAT_MEDIA_FILES, MAX_CHAT_MEDIA_MB } from "../shared/chat-media.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
@@ -110,6 +113,12 @@ export function createApp(options: { dataDir?: string } = {}) {
   // WPS loads its add-in over loopback even in a packaged Tauri build, where the UI is embedded.
   const bundledWpsAddon = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../wps-addon");
   const wpsAddonDir = fs.existsSync(bundledWpsAddon) ? bundledWpsAddon : path.resolve("src/client/public/wps-addon");
+  for (const file of brandedWpsFiles) {
+    app.get(`/wps-addon/${file}`, async (_req, res) => {
+      const template = await fs.promises.readFile(path.join(wpsAddonDir, file), "utf8");
+      res.type(path.extname(file)).send(renderWpsBrand(template, file));
+    });
+  }
   app.get("/wps-addon/wpsjsrpcsdk.js", (_req, res) => {
     const bundled = path.join(wpsAddonDir, "wpsjsrpcsdk.js");
     const sdk = fs.existsSync(bundled) ? bundled : createRequire(import.meta.url).resolve("wpsjs-rpc-sdk-new");
@@ -166,6 +175,8 @@ export function createApp(options: { dataDir?: string } = {}) {
   registerChannelRoutes(app, db, sessionKeys);
 
   registerGenerationRoutes(app, db, runner, sessionKeys);
+  registerSkillRoutes(app, db, runner, sessionKeys);
+  registerLocalWorkspaceRoutes(app, db, (id) => agent.isRunning(id));
 
   registerConversationRoutes(app, db, agent, sessionKeys, chatThreadOnly);
 

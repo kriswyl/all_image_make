@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { readBrand, tauriBuildOptions } from "./brand.mjs";
 
 /**
  * `tauri build` 的本地入口。
@@ -15,17 +15,18 @@ import { fileURLToPath } from "node:url";
  */
 const args = process.argv.slice(2);
 const noBundle = args.includes("--no-bundle");
-const env = { ...process.env };
+const brand = readBrand();
+const { env, cwd, cli, configPath } = tauriBuildOptions(brand);
 
 if (!noBundle && !env.TAURI_SIGNING_PRIVATE_KEY && !env.TAURI_SIGNING_PRIVATE_KEY_PATH) {
-  const keyPath = env.TAURI_UPDATER_KEY_PATH || path.join(os.homedir(), ".tauri", "chatcanvas-updater.key");
+  const keyPath = env.TAURI_UPDATER_KEY_PATH || path.join(os.homedir(), ".tauri", brand.desktop.updater.signingKeyFile);
   if (!fs.existsSync(keyPath)) {
     throw new Error(
       [
         `找不到更新签名私钥：${keyPath}`,
         "",
         "首次生成（私钥只生成一次，丢了就再也无法给已安装用户推送更新）：",
-        '  npx tauri signer generate -w "%USERPROFILE%\\.tauri\\chatcanvas-updater.key"',
+        `  npx tauri signer generate -w "${keyPath}"`,
         "",
         "已有私钥放在别处时，用 TAURI_UPDATER_KEY_PATH 指向它。",
         "只打便携版（不需要更新包）请用 npm run tauri:build:exe。",
@@ -44,13 +45,10 @@ if (!noBundle && !env.TAURI_SIGNING_PRIVATE_KEY && !env.TAURI_SIGNING_PRIVATE_KE
   console.log(`使用更新签名私钥：${keyPath}`);
 }
 
-const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tauriCli = path.join(projectDir, "node_modules", "@tauri-apps", "cli", "tauri.js");
-
-const child = spawn(process.execPath, [tauriCli, "build", ...args], {
+const child = spawn(process.execPath, [cli, "build", "--config", configPath, ...args], {
   stdio: "inherit",
   env,
-  cwd: projectDir,
+  cwd,
 });
 child.on("error", (error) => {
   console.error(`启动 Tauri CLI 失败：${error.message}`);

@@ -13,6 +13,7 @@ export type CreateConversationInput = {
   /** 缺省是普通对话；无限画布线程由 board 服务显式传 board */
   kind?: ConversationKind;
   boardId?: string | null;
+  workspaceId?: string;
   toolScope?: ChatToolScope;
 };
 
@@ -31,12 +32,12 @@ export class ConversationRepository {
     const at = now();
     this.db.prepare(`
       INSERT INTO conversations
-      (id, title, kind, board_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
+      (id, title, kind, board_id, workspace_id, brain_channel_id, brain_model, current_asset_id, canvas_asset_ids, status,
        video_confirm_policy, vision_enabled, verbatim_prompt, image_confirm_policy, context_budget, chat_auto_continue_limit,
        board_max_rounds, board_auto_continue_limit, auto_continue_count, tool_scope, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', 'idle', ?, ?, ?, ?, 350000, 20, 10, 3, 0, ?, ?, ?)
     `).run(
-      id, input.title, input.kind ?? "chat", input.boardId ?? null, input.brainChannelId, input.brainModel,
+      id, input.title, input.kind ?? "chat", input.boardId ?? null, input.workspaceId ?? null, input.brainChannelId, input.brainModel,
       input.videoConfirmPolicy, input.visionEnabled ? 1 : 0, input.verbatimPrompt ? 1 : 0, input.imageConfirmPolicy ?? "batch_only", input.toolScope ?? null, at, at,
     );
     return this.getConversation(id)!;
@@ -90,14 +91,15 @@ export class ConversationRepository {
    * 新建会话时用它清掉上一条没动过的空壳——点几下「新对话」就堆几条，
    * 侧栏会被一串「新对话」刷屏。空会话没有消息，也就没有产物和上传图，删掉不丢东西。
    */
-  emptyConversationIds(): string[] {
+  emptyConversationIds(workspaceId?: string): string[] {
     // 只清普通对话。无限画布线程刚建出来时也没有消息，但它不是空壳——
     // 放进这个清理里，用户新建一块板再点「新对话」就会把板的线程删掉。
     const rows = this.db.prepare(
       `SELECT conversations.id AS id FROM conversations
        WHERE conversations.kind = 'chat' AND conversations.deleted_at IS NULL
+         AND conversations.workspace_id IS ?
          AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id)`,
-    ).all() as DbRow[];
+    ).all(workspaceId ?? null) as DbRow[];
     return rows.map((row) => String(row.id));
   }
 
@@ -222,6 +224,7 @@ export class ConversationRepository {
       id: String(row.id), title: String(row.title),
       kind: (row.kind == null ? "chat" : String(row.kind)) as ConversationKind,
       boardId: row.board_id == null ? null : String(row.board_id),
+      ...(row.workspace_id == null ? {} : { workspaceId: String(row.workspace_id) }),
       brainChannelId: String(row.brain_channel_id), brainModel: String(row.brain_model),
       // JSON 坏了或者还是 NULL（没迁移到的老行）都当成空画布，别让一行坏数据炸掉整个会话列表
       canvasAssetIds: canvasIdsFromRow(row.canvas_asset_ids),

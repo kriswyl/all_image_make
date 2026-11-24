@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated.js";
 import { PresentationPaused } from "../presentation-execution.js";
 import path from "node:path";
 import JSZip from "jszip";
@@ -116,7 +117,7 @@ export async function executeChatDocumentTool(
       const lineage = parentDocument ? { familyId: parentDocument.familyId, parentId: parentDocument.id } : undefined;
       const file = documentSource(db, conversationId, fileId);
       if (!file.bytes) throw new Error("文件原文不可用");
-      if (!/\.(md|markdown|txt|csv|json|pptx|docx|xlsx)$/i.test(file.name)) throw new Error("当前仅支持修改文本、Word、Excel 及 ChatCanvas 生成的 PPT");
+      if (!/\.(md|markdown|txt|csv|json|pptx|docx|xlsx)$/i.test(file.name)) throw new Error(`当前仅支持修改文本、Word、Excel 及 ${BRAND.productName} 生成的 PPT`);
       const currentSha256 = createHash("sha256").update(file.bytes).digest("hex");
       if (currentSha256 !== expectedSha256.toLowerCase()) throw new Error(`文件版本已变化，请重新读取后再修改（当前 SHA-256：${currentSha256}）`);
       const office = /\.(docx|xlsx)$/i.exec(file.name)?.[1]?.toLowerCase();
@@ -142,7 +143,7 @@ export async function executeChatDocumentTool(
           args: editArgs, resolvedFileId, lineage, operationId, visualReview,
         });
       }
-      if (!/\.(md|markdown|txt|csv|json)$/i.test(file.name)) throw new Error("当前仅支持修改文本类文件及 ChatCanvas 生成的 PPT");
+      if (!/\.(md|markdown|txt|csv|json)$/i.test(file.name)) throw new Error(`当前仅支持修改文本类文件及 ${BRAND.productName} 生成的 PPT`);
       if (!edits || pages || appendSlides || imageAssetIds || order || design) throw new Error("文本文件请提供 edits 精确替换列表");
       const ext = path.extname(file.name).slice(1).toLowerCase();
       const bytes = editTextDocument(file.bytes, edits, ext);
@@ -154,7 +155,7 @@ export async function executeChatDocumentTool(
       const a = args as z.infer<typeof schemas.doc_create>; let bytes: Buffer;
       if (a.kind === "xmind") {
         if (!a.nodes) throw new Error("生成 XMind 需要 nodes 主题树");
-        const zip = new JSZip(); zip.file("content.json", JSON.stringify([{ id: randomUUID(), class: "sheet", title: a.nodes.title, rootTopic: xmindTopic(a.nodes) }])); zip.file("metadata.json", JSON.stringify({ creator: { name: "ChatCanvas" } })); zip.file("manifest.json", JSON.stringify({ "file-entries": { "content.json": {}, "metadata.json": {} } })); bytes = await zip.generateAsync({ type: "nodebuffer" }); await parseXmind(bytes);
+        const zip = new JSZip(); zip.file("content.json", JSON.stringify([{ id: randomUUID(), class: "sheet", title: a.nodes.title, rootTopic: xmindTopic(a.nodes) }])); zip.file("metadata.json", JSON.stringify({ creator: { name: BRAND.author } })); zip.file("manifest.json", JSON.stringify({ "file-entries": { "content.json": {}, "metadata.json": {} } })); bytes = await zip.generateAsync({ type: "nodebuffer" }); await parseXmind(bytes);
       } else if (a.kind === "docx") {
         if (a.content === undefined) throw new Error("生成 Word 需要 content（Markdown 正文）");
         bytes = await markdownToDocx(a.content, a.name);

@@ -3,8 +3,25 @@ import type { Asset } from "../../shared/types";
 
 const roleLabels: Record<ChatMessage["role"], string> = { user: "用户", assistant: "助手", tool: "工具结果", system: "系统" };
 
-/** 「上传了图片 xxx」这类消息是系统生成的记账文本，不是用户真正写的内容 */
-const uploadRecord = /^上传了(?:图片|视频|音频|脚本文档|文件附件)\s/;
+function isUploadRecord(message: ChatMessage, content: string, lookupAsset?: (id: string) => Asset | undefined): boolean {
+  if (message.role !== "user" || message.assetRefs?.length) return false;
+
+  const documents = message.documents ?? [];
+  if (message.assetId && !documents.length) {
+    const asset = lookupAsset?.(message.assetId);
+    if (!asset) return false;
+    const kind = asset.mimeType.split("/")[0];
+    // 旧的图片上传记录只在消息正文里存了原始文件名。
+    if (kind === "image") return /^上传了图片 [^\r\n]+$/.test(content);
+    const label = kind === "video" ? "视频" : kind === "audio" ? "音频" : null;
+    return Boolean(label && content === `上传了${label} ${asset.title || asset.fileName}`);
+  }
+
+  if (!documents.length || message.assetId) return false;
+  if (documents.length === 1 && content === `上传了文件附件 《${documents[0]!.name}》`) return true;
+  const scriptPrefix = `上传了脚本文档 ${documents.map(({ name }) => `《${name}》`).join("")}（共 `;
+  return content.startsWith(scriptPrefix) && /^[\p{Nd}.,'’\s]+ 字）$/u.test(content.slice(scriptPrefix.length));
+}
 
 function messageIds(message: ChatMessage): string[] {
   return [...new Set([
@@ -24,9 +41,9 @@ function attachmentNames(message: ChatMessage, lookupAsset?: (id: string) => Ass
 }
 
 /** 只取用户能读的正文；工具卡没有正文时退回结果摘要，不把参数、ID、内部 JSON 带出去 */
-function messageText(message: ChatMessage): string {
+function messageText(message: ChatMessage, lookupAsset?: (id: string) => Asset | undefined): string {
   const content = message.content?.trim() ?? "";
-  if (content && !uploadRecord.test(content)) return content;
+  if (content && !isUploadRecord(message, content, lookupAsset)) return content;
   if (message.role === "tool") return message.toolResult?.summary?.trim() ?? "";
   return "";
 }
@@ -43,7 +60,7 @@ function referenceName(name: string): string {
 }
 
 export function formatMessageForClipboard(messages: ChatMessage[], lookupAsset?: (id: string) => Asset | undefined): string {
-  const text = messages.map(messageText).filter(Boolean).join("\n\n");
+  const text = messages.map((message) => messageText(message, lookupAsset)).filter(Boolean).join("\n\n");
   const references: string[] = [];
   for (const message of messages) {
     for (const id of messageIds(message)) {
@@ -65,7 +82,7 @@ export function formatChatForClipboard(messages: ChatMessage[], lookupAsset?: (i
   conversation?: Pick<Conversation, "title">): string {
   const blocks = messages.flatMap((message) => {
     if (message.role === "system") return [];
-    const text = messageText(message);
+    const text = messageText(message, lookupAsset);
     const attachments = attachmentNames(message, lookupAsset);
     if (!text && !attachments.length) return [];
     return [`**${roleLabels[message.role]}**`, text, ...(attachments.length ? [`附件：${attachments.join("、")}`] : [])]

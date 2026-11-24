@@ -76,33 +76,6 @@ select,
   transition-timing-function: var(--ease-in-out);
 }
 
-/* 按压反馈：按钮缩得比卡片多一点，卡片只做「按下去」的暗示 */
-button:active:not(:disabled):not(.titlebar-control),
-[role="button"]:active:not([aria-disabled="true"]),
-.nav-button:active,
-.sidebar-conv:active,
-.sidebar-menu-item:active,
-.chat-option:active:not(:disabled),
-.mode-chip:active {
-  transform: scale(.97);
-}
-.primary-button:active:not(:disabled),
-.secondary-button:active:not(:disabled),
-.asset-library-thumb:active,
-.composer-canvas-thumb:active,
-.canvas-bar-thumb:active,
-.tool-card-thumb:active,
-.stage-thumb:active,
-.recent-thumb:active,
-.history-thumb:active {
-  transform: scale(.985);
-}
-.preset-card:active,
-.unit-card:active,
-.chat-caps-card:active:not(.is-default) {
-  transform: scale(.993);
-}
-
 /* 键盘焦点：浅灰底上的深色细环，比浏览器默认蓝框更符合黑白骨架 */
 button:focus-visible,
 a:focus-visible,
@@ -646,18 +619,6 @@ input[type="checkbox"]:checked { animation: ui-check-pop var(--dur-2) var(--ease
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
     scroll-behavior: auto !important;
-  }
-  button:active:not(:disabled),
-  [role="button"]:active,
-  .primary-button:active:not(:disabled),
-  .secondary-button:active:not(:disabled),
-  .asset-library-thumb:active,
-  .composer-canvas-thumb:active,
-  .canvas-bar-thumb:active,
-  .preset-card:active,
-  .unit-card:active,
-  .chat-caps-card:active:not(.is-default) {
-    transform: none;
   }
 }
 

@@ -210,7 +210,7 @@ export function AssistantBubble({
   );
 }
 
-/** 系统消息居中显示：状态变化、「已取消」这类不该被当成助手说的话 */
+/** 显示续跑、取消等会话状态，由消息列表安排位置。 */
 export function SystemNote({ message }: { message: ChatMessage }) {
   const isError = message.status === "error";
   return (

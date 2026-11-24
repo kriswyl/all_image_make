@@ -33,6 +33,7 @@ import { AppError } from "./app-error.js";
 import { uploadReferenceMedia, type ReferenceMediaUpload, type ReferenceVideoUpload } from "./reference-video.js";
 import { TaskInputFiles, type MaskImageUpload, type ReferenceImageUpload, type StoredGenerationInput } from "./task-input-files.js";
 import { TaskOutputFiles } from "./task-output-files.js";
+import { archiveConversationAssets } from "./workspace-assets.js";
 import { isVideoBodySizeRejection, prepareVideoReferenceImages } from "./video-reference-images.js";
 
 export type { MaskImageUpload, ReferenceImageUpload } from "./task-input-files.js";
@@ -95,6 +96,7 @@ type TaskRunnerStore = Pick<AppDatabase,
   | "assetsDir" | "inputsDir" | "thumbsDir" | "getChannel" | "getSetting"
   | "createTask" | "getTaskRow" | "getTaskView" | "updateTask" | "listPendingTasks"
   | "taskHasConversationReferences" | "insertAsset" | "insertDiagnostic" | "updateDiagnostic"
+  | "getConversation" | "localWorkspaces" | "appendMessage" | "listAssets"
 >;
 
 export class TaskRunner {
@@ -113,6 +115,11 @@ export class TaskRunner {
   constructor(private readonly db: TaskRunnerStore, private readonly sessionKeys: KeyStore) {
     this.inputFiles = new TaskInputFiles(db.inputsDir);
     this.outputFiles = new TaskOutputFiles(db, sessionKeys);
+  }
+
+  private async archiveOutputs(taskId: string) {
+    const conversationId = this.db.getTaskRow(taskId)?.ownerConversationId;
+    if (conversationId) await archiveConversationAssets(this.db, conversationId, "生成", this.db.listAssets(taskId));
   }
 
   onTaskEvent(listener: TaskListener): () => void {
@@ -369,7 +376,9 @@ export class TaskRunner {
         const references = input.referenceImages?.length ?? (input.referenceImage ? 1 : 0);
         this.updateTask(taskId, { remoteMeta: JSON.stringify({ seedream: seedreamResultMeta(result.payload, references) }) });
       }
-      await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt);
+      await this.outputFiles.saveSynchronous(taskId, result.payload, channel, input.prompt)
+        .finally(() => this.archiveOutputs(taskId));
+      if (this.db.getTaskRow(taskId)?.status !== "submitting") return;
       this.updateTask(taskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
     } catch (error) {
       /**
@@ -718,7 +727,8 @@ export class TaskRunner {
             );
           }
           // 下载失败时会把产物链接带进报错，方便手动打开核对
-          await this.outputFiles.saveResults(localTaskId, chosen, channel);
+          await this.outputFiles.saveResults(localTaskId, chosen, channel)
+            .finally(() => this.archiveOutputs(localTaskId));
           if (this.db.getTaskRow(localTaskId)?.status !== "running") return;
           this.updateTask(localTaskId, { status: "succeeded", progress: 100, finishedAt: new Date().toISOString() });
           return;
@@ -831,6 +841,7 @@ export class TaskRunner {
         saved += 1;
       } catch (error) { downloadError = error; }
     }
+    if (saved) await this.archiveOutputs(taskId);
     if (!running()) return;
     const timedOut = Date.now() >= deadline && finished.size < ids.length && candidates.size < expected;
     const warning = saved > 0 && saved < expected

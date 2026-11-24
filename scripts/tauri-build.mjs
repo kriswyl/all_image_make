@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { desktopApiEnv } from "./brand.mjs";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const env = { ...process.env, VITE_API_BASE_URL: "http://127.0.0.1:17892" };
+const env = desktopApiEnv();
 
 function run(command, args) {
   return new Promise((resolve, reject) => {

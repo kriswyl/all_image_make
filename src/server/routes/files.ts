@@ -7,9 +7,14 @@ import type { StoredFileRef } from "../db.js";
 export function revealFolder(dir: string) {
   const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
   // 用 spawn + 参数数组而不是拼命令字符串：目录名里的引号、空格不会变成命令注入
-  const child = spawn(command, [dir], { detached: true, stdio: "ignore" });
-  child.on("error", () => undefined);
-  child.unref();
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [dir], { detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
 /** 产物按记录自带的目录清理，参考图固定在 inputs/ */

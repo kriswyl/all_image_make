@@ -1,0 +1,47 @@
+{
+  "apiVersion": 1,
+  "id": "chatcanvas",
+  "productName": "ChatCanvas",
+  "displayName": "语布",
+  "subtitle": "语布",
+  "assistantName": "语布",
+  "slogan": "马中赤兔，创中语布",
+  "author": "ChatCanvas",
+  "web": {
+    "favicon": "/app-icon.png",
+    "mark": "/brand-mark.png",
+    "monochromeMark": true,
+    "themeColor": "#202521",
+    "lightThemeColor": "#f7f7f8",
+    "darkThemeColor": "#111111",
+    "lightGradient": "linear-gradient(135deg, #9bc9f7 0%, #a8ddd4 26%, #f6d6a6 52%, #f5bdd1 76%, #c9b8f2 100%)",
+    "darkGradient": "linear-gradient(135deg, #7fb3e6 0%, #8cc9c0 26%, #d9b87f 52%, #d99cb4 76%, #b0a0e0 100%)",
+    "accent": null
+  },
+  "desktop": {
+    "identifier": "com.imagerelay.studio",
+    "backendPort": 17892,
+    "icons": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4MjlBNEZDQjNEQkRGODMKUldTRDM5dXovS1FwT01ndG9NUm5ISmZxOGJMZnZLYnNYVkNFQUVXcWZIOXVmdDA5NGQ5TWFUakkK",
+      "endpoints": ["https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json"],
+      "releasesUrl": "https://gitee.com/cqgsdx_0/chatcanvas-releases/releases",
+      "signingKeyFile": "chatcanvas-updater.key",
+      "changelog": "CHANGELOG.md"
+    }
+  },
+  "provider": {
+    "name": "词元流墟",
+    "baseUrl": "https://api.tiantoken.com",
+    "logo": "/logo-tiantoken.svg",
+    "loginUrl": "https://api.tiantoken.com/login",
+    "keyUrl": null,
+    "supportQr": "/tiantoken-wechat.png",
+    "uploadEndpoint": "https://imageproxy.zhongzhuan.chat/api/upload",
+    "referenceImageUploadOrigins": ["https://api.tiantoken.com"]
+  },
+  "support": {
+    "authorEmail": "1413803765@qq.com"
+  },
+  "wpsAddonId": "ChatCanvasPreview"
+}

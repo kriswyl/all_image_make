@@ -1,3 +1,4 @@
+import { BRAND } from "./brand.generated.js";
 import { defaultEndpointFor } from "./adapter-endpoints.js";
 import type { AdapterType } from "./types.js";
 
@@ -22,7 +23,7 @@ export function supportsVideoReferenceImageUpload(channel: {
   if (!channel.uploadEndpoint?.trim() || !verifiedAdapter) return false;
   try {
     const base = new URL(channel.baseUrl);
-    return base.origin === "https://api.tiantoken.com" && !base.search && !base.hash && !base.username && !base.password && /^\/*$/.test(base.pathname) &&
+    return BRAND.provider.referenceImageUploadOrigins.includes(base.origin) && !base.search && !base.hash && !base.username && !base.password && /^\/*$/.test(base.pathname) &&
       (channel.endpoint || defaultEndpointFor(channel.adapterType)).replace(/\/$/, "") === defaultEndpointFor(channel.adapterType);
   } catch {
     return false;

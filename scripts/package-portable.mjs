@@ -1,13 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createZip } from "./zip-archive.mjs";
+import { readBrand } from "./brand.mjs";
 
 const projectDir = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
 const version = String(packageJson.version);
 const releaseDir = path.join(projectDir, "src-tauri", "target", "release");
 const artifactDir = path.join(projectDir, "artifacts");
-const artifactName = `chatcanvas-v${version}-portable-win-x64`;
+const brand = readBrand();
+const artifactName = `${brand.id}-v${version}-portable-win-x64`;
 const portableDir = path.join(artifactDir, artifactName);
 const zipPath = path.join(artifactDir, `${artifactName}.zip`);
 
@@ -77,12 +79,12 @@ fs.writeFileSync(path.join(portableDir, ".portable"), "", "utf8");
 fs.writeFileSync(
   path.join(portableDir, "README-PORTABLE.txt"),
   [
-    `ChatCanvas v${version} portable Windows build`,
+    `${brand.productName} v${version} portable Windows build`,
     "",
     "Run image_relay_studio.exe. Keep node.exe and resources\\ next to it.",
     "First launch: use the add-channel wizard to create channels, then fill in each model group's API key.",
-    "Keys entered in the app are stored in %APPDATA%\\com.imagerelay.studio\\data\\channel-keys.json and reload on the next start.",
-    "User data: %APPDATA%\\com.imagerelay.studio\\data",
+    `Keys entered in the app are stored in %APPDATA%\\${brand.desktop.identifier}\\data\\channel-keys.json and reload on the next start.`,
+    `User data: %APPDATA%\\${brand.desktop.identifier}\\data`,
     "",
   ].join("\r\n"),
   "utf8",

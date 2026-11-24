@@ -17,6 +17,8 @@ import type { PresentationCoordinator } from "./presentation-coordinator.js";
 import type { KeyStore } from "./key-store.js";
 import { readChatWebSettings, TAVILY_KEY_ID } from "./web-settings.js";
 import { createWebTools } from "./chat-tools/web.js";
+import { workspaceTools } from "./chat-tools/local-workspace.js";
+import { createWorkspaceImageReviewTool } from "./chat-tools/workspace-image-review.js";
 
 interface NativeToolsHost {
   db: AppDatabase;
@@ -33,6 +35,7 @@ type NativeToolsTurn = Parameters<PresentationCoordinator["registerDocumentTools
   turnVideoIds: string[];
   readVideoOverviewFrames(assetId: string): Promise<VideoOverviewFrames>;
   canReviewWithModel: () => boolean;
+  canReviewWorkspaceWithModel: () => boolean;
   turnVideoFrames?: ChatVideoFrames;
 };
 
@@ -53,6 +56,15 @@ export function createNativeToolRegistry(
   presentations.registerDocumentTools(registry, turn);
   registry.register(createPlanTool());
   registry.register(createCapabilitySearchTool(registry));
+  const workspace = nativeCreative && turnConversation.workspaceId ? db.localWorkspaces.get(turnConversation.workspaceId) : undefined;
+  if (workspace) {
+    for (const tool of workspaceTools(db, conversationId, workspace, turn.signal)) registry.register(tool);
+    registry.register(createWorkspaceImageReviewTool({
+      db, conversation: turnConversation, workspace, signal: turn.signal,
+      call: messages => turn.callWithBudget(messages, { plain: true, silent: true, visionRequired: true, maxTokens: 2600 }),
+      canCall: turn.canReviewWorkspaceWithModel,
+    }));
+  }
   if (turnConversation.kind === "chat" && turnConversation.toolScope === "all" && turnConversation.webEnabled && !turnConversation.toolsUnsupported) {
     for (const tool of createWebTools(readChatWebSettings(db, sessionKeys), sessionKeys.get(TAVILY_KEY_ID), turn.signal, turn.priorWebCalls)) {
       registry.register(tool);

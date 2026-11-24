@@ -1,3 +1,4 @@
+import { BRAND } from "../shared/brand.generated.js";
 import { randomUUID } from "node:crypto";
 import type { AppDatabase } from "./db.js";
 import { getWpsPreviewJobs, isWpsServiceRunning } from "./wps-preview.js";
@@ -12,7 +13,7 @@ export async function renderWithLocalWps(db: AppDatabase, bytes: Buffer, signal?
     const job = await manager.createBytes(bytes, "review.pptx", first); total = Math.min(job.total, pageLimit);
     const abort = new AbortController(); const stop = () => abort.abort(); signal?.addEventListener("abort", stop, { once: true });
     try {
-      const info = { name: "ChatCanvasPreview", function: "RenderPreview", info: { id: job.id, secret: job.secret, ...(manager.origin ? { origin: manager.origin } : {}) }, showToFront: false, jsPluginsXml: "" };
+      const info = { name: BRAND.wpsAddonId, function: "RenderPreview", info: { id: job.id, secret: job.secret, ...(manager.origin ? { origin: manager.origin } : {}) }, showToFront: false, jsPluginsXml: "" };
       let dispatchError: Error | undefined;
       const request = fetch("http://127.0.0.1:58890/transferEx/runParams", { method: "POST", body: JSON.stringify({ id: "", app: "wpp", data: Buffer.from(JSON.stringify(info)).toString("base64"), mode: "false", timeout: 90000 }), signal: abort.signal }).then(async (response) => {
         if (!response.ok) throw new Error(`WPS 调用失败：HTTP ${response.status}`);

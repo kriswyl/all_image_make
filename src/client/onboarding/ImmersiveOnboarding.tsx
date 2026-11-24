@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated";
 /**
  * 无印冷白 / 水墨新手引导。
  *
@@ -46,7 +47,6 @@ const NEED_OPTIONS: Array<{ kind: ChapterKind; label: string; hint: string; char
   { kind: "chat", label: "对话创作", hint: "和 AI 一起规划与生成", char: "对" },
 ];
 
-const TIANTOKEN_LOGIN_URL = "https://api.tiantoken.com/login";
 
 interface KeyState { secretEnv: string; apiKey: string; }
 interface RowResult { status: "saving" | "done" | "error" | "skipped"; message?: string; }
@@ -545,8 +545,8 @@ export function ImmersiveOnboarding({
       {stage !== "welcome" && stage !== "needs" && stage !== "onekey" && stage !== "finish" ? (
         <header className="ink-chrome">
           <div className="ink-brand">
-            <span className="ink-mark">C</span>
-            <span>ChatCanvas</span>
+            <span className="ink-mark">{BRAND.productName.slice(0, 1)}</span>
+            <span>{BRAND.productName}</span>
             <em>初次探索</em>
           </div>
           <div className="ink-progress" aria-label="引导进度">
@@ -564,8 +564,8 @@ export function ImmersiveOnboarding({
               <path className="ink-draw" d="M 262 54 C 376 40 466 132 456 250 C 447 360 344 452 226 440 C 118 429 52 338 74 230 C 93 136 178 58 284 68" fill="none" stroke="#242724" strokeWidth="1.5" strokeLinecap="round" opacity=".18" />
             </svg>
             <span className="ink-kicker">CHAT CANVAS</span>
-            <h1>欢迎使用 ChatCanvas</h1>
-            <p className="ink-slogan">马中赤兔，创中语布</p>
+            <h1>欢迎使用 {BRAND.productName}</h1>
+            <p className="ink-slogan">{BRAND.slogan}</p>
             <p className="ink-lede">先选几颗你喜欢的模型，剩下的交给纸与墨。</p>
             <button
               type="button"
@@ -603,7 +603,7 @@ export function ImmersiveOnboarding({
               <span className="ink-kicker">ONE KEY MODE</span>
               <h1>一 Key，全部点亮</h1>
               <p className="ink-onekey-lede">
-                词元流墟的密钥全模型通用。
+                {BRAND.provider.name}的密钥全模型通用。
                 填一次，下面每一类模型各建一个渠道——
                 生图、视频、音乐、语音、对话都能直接用。
               </p>
@@ -618,8 +618,8 @@ export function ImmersiveOnboarding({
                   placeholder={ONE_KEY_PRESET.keyHint ?? "粘贴你的 API Key"}
                 />
               </label>
-              <button type="button" className="ink-key-link" onClick={() => void openExternal(TIANTOKEN_LOGIN_URL)}>
-                <KeyRound size={14} /><span>还没有 Key？</span><strong>去词元流墟获取</strong><ArrowRight size={13} />
+              <button type="button" className="ink-key-link" onClick={() => void openExternal(BRAND.provider.keyUrl ?? BRAND.provider.loginUrl)}>
+                <KeyRound size={14} /><span>还没有 Key？</span><strong>去{BRAND.provider.name}获取</strong><ArrowRight size={13} />
               </button>
               <p className="ink-onekey-note">
                 密钥只保存在本机数据目录；也可以只配环境变量 <code>{ONE_KEY_SECRET_ENV}</code>，这里留空。
@@ -867,7 +867,7 @@ export function ImmersiveOnboarding({
               <header className="ink-config-head">
                 <div>
                   <span className="ink-kicker">LAST CHAPTER · CONFIGURE</span>
-                  <h1>把钥匙交给语布</h1>
+                  <h1>把钥匙交给{BRAND.displayName}</h1>
                   <p>
                     {rows.length
                       ? missingKeyRows.length
@@ -876,10 +876,10 @@ export function ImmersiveOnboarding({
                       : "还没有选择任何模型。可以先回去选一颗，或者跳过引导去渠道页手动配置。"}
                   </p>
                   <p className="ink-provider-link">
-                    <button type="button" className="ink-key-link" onClick={() => void openExternal(TIANTOKEN_LOGIN_URL)}>
+                    <button type="button" className="ink-key-link" onClick={() => void openExternal(BRAND.provider.keyUrl ?? BRAND.provider.loginUrl)}>
                       <KeyRound size={15} />
                       <span>还没有 Key？</span>
-                      <strong>去词元流墟登录获取</strong>
+                      <strong>去{BRAND.provider.name}登录获取</strong>
                       <ArrowRight size={14} />
                     </button>
                   </p>

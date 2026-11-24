@@ -1,3 +1,4 @@
+import { BRAND } from "../../shared/brand.generated.js";
 /**
  * Markdown ⇄ 其它格式的转换。
  *
@@ -131,7 +132,7 @@ export async function markdownToDocx(markdown: string, title = "文档"): Promis
   }
 
   const doc = new Document({
-    creator: "ChatCanvas",
+    creator: BRAND.author,
     title,
     styles: { default: { document: { run: { font: "Microsoft YaHei", size: 22 } } } },
     sections: [{ children }],

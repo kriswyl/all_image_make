@@ -63,9 +63,17 @@ Tauri 的原始安装包同时保留在 `src-tauri/target/release/bundle/nsis/`�
 
 ## 自动更新与发布
 
+### 品牌构建配置
+
+- 品牌配置位于 `brands/<id>/brand.json`。命令默认选择 `chatcanvas`，设置 `CHATCANVAS_BRAND` 可选择其他品牌。配置的 `apiVersion` 必须符合构建脚本要求。
+- `npm run brand:prepare` 生成前端和 Node 共用的品牌配置及 Tauri 覆盖文件。常规安装依赖、开发、测试和打包命令会自动生成。不同品牌请在各自的 Git 工作树构建，以隔离生成文件和打包产物。
+- 独立品牌必须使用另一个 Tauri identifier 和后端端口。Tauri 使用 identifier 选择应用数据目录，前端回环地址、Rust 启动端口、CSP 和 CI 冒烟测试都读取品牌配置。
+- 品牌自己的 Web 图片可放入 `brands/<id>/public/`，用 `/branding/<文件名>` 引用。Tauri 图标路径相对 `src-tauri`。可在品牌配置指定发行日志路径，签名私钥由本机或 CI 注入。
+- ChatCanvas 的 GitHub 发布流程继续使用主版标识和既有更新公钥。发布前应验证旧安装能识别新包、历史数据可读；独立品牌需用两个相邻版本验证其专属更新源。
+
 ### 签名密钥（只有一对，丢了不可恢复）
 
-Tauri 的更新包用 minisign 签名，公钥钉死在 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 里。**私钥一旦丢失，已经装出去的用户就再也收不到更新**——不是重新生成一对能解决的。
+Tauri 的更新包用 minisign 签名。主版公钥记录在 `brands/chatcanvas/brand.json` 和原有的 Tauri 默认配置里，必须与已分发的安装包一致。请妥善保管对应私钥，旧客户端依赖它签发的更新包。
 
 - 私钥位置：`%USERPROFILE%\.tauri\chatcanvas-updater.key`（无密码，2026-10-17 生成）
 - 公钥备份：同目录的 `.key.pub`
@@ -76,6 +84,11 @@ Tauri 的更新包用 minisign 签名，公钥钉死在 `src-tauri/tauri.conf.js
 `npm run tauri:build`（安装包）会自动从上面的固定位置读取私钥；找不到会直接报错并给出生成命令。`npm run tauri:build:exe`（便携版，`--no-bundle`）不需要私钥。
 
 ### 发版流程
+
+**发版前检查清单**：
+
+- [ ] `CHANGELOG.md` 已按 [编写约定](CHANGELOG.md) 写好本版本段落：按「新增 / 改进 / 修复 / 移除」分类，一条一事，只写用户能感知的变化；不写内部接口路径、脚本路径、事务实现、测试数量与验证过程。历史版本保留原始记录，不再改写。
+- [ ] 该段落会被原样提取为 Release 正文并显示在软件「软件更新」弹窗中，措辞代表产品对外形象，发布前通读一遍。
 
 推送 `vX.Y.Z` tag 会触发 `.github/workflows/release.yml`：
 
@@ -92,7 +105,8 @@ https://github.com/kriswyl/all_image_make/releases/download/updater/latest.json
 不要改成 `releases/latest/download/`：只要最新那个 Release 恰好缺 Windows 资产，全体用户的检查更新就会一起 404。
 
 ```powershell
-npm run version:set -- 2.4.7
+# 先按上面的清单写好 CHANGELOG.md 的本版本段落
+npm run version:set -- 2.4.8
 npm test
 git add -A
 git commit -m "Release 2.4.0: ..."
