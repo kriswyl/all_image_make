@@ -31,6 +31,9 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    # 主版的签名私钥放在 `image_key` 环境里，仓库级反而没有。声明同一个 environment
+    # 才能读到环境级 secret；同时仓库级的同名 secret 仍然可用，两种放法都兼容。
+    environment: image_key
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,9 +62,13 @@ jobs:
         shell: bash
         env:
           KEY: ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY }}
+          TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
+          # 只打印长度，不打印内容，便于区分「没配」和「配了但名字不对」
+          echo "私钥长度: ${#KEY}（预期 348）"
+          echo "Gitee 令牌长度: ${#TOKEN}（预期 32）"
           if [ -z "$KEY" ]; then
-            echo "::error::缺少 HANGTIANAI_SIGNING_PRIVATE_KEY。请把 ~/.tauri/hangtianai-updater.key 的内容添加到仓库 Secrets。"
+            echo "::error::缺少 HANGTIANAI_SIGNING_PRIVATE_KEY。请把 ~/.tauri/hangtianai-updater.key 的内容添加到仓库 Secrets 或 image_key 环境的 Secrets。"
             exit 1
           fi
 
@@ -95,6 +102,8 @@ jobs:
     needs: build-windows
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
     runs-on: ubuntu-latest
+    # Gitee 令牌和签名私钥放在同一处，读法保持一致
+    environment: image_key
     steps:
       - uses: actions/checkout@v4
         with:
