@@ -105,13 +105,14 @@ jobs:
       # 私钥一旦丢失就再也无法给已安装用户推送更新，所以它只存在两处：
       # 本机 %USERPROFILE%\.tauri\hangtianai-updater.key 与仓库 Secret。
       #
-      # `secrets || vars` 是为了容忍「配到了 Variables 标签页」这种常见误操作：
-      # GitHub 的 Secrets 和 Variables 在同一个页面下相邻，很容易点错。
+      # 只从 Secrets 读，**不用** `secrets || vars` 回退：
+      # GitHub 只会遮盖 Secrets 的值，Variables 在日志和设置页都是明文，
+      # 私钥放进去等于公开。配到 Variables 标签页是会失败，但这是刻意的。
       - name: Check signing secret
         shell: bash
         env:
-          KEY: ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY || vars.HANGTIANAI_SIGNING_PRIVATE_KEY }}
-          TOKEN: ${{ secrets.GITEE_TOKEN || vars.GITEE_TOKEN }}
+          KEY: ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY }}
+          TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           # 只打印长度，不打印内容，便于区分「没配」和「配错名字」
           echo "私钥长度: ${#KEY}（预期 348）"
@@ -129,7 +130,7 @@ jobs:
         shell: bash
         env:
           CHATCANVAS_BRAND: ${{ env.BRAND }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY || vars.HANGTIANAI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY }}
           # 密钥生成时用的是 --ci（无密码）。这里必须显式给空串：
           # 变量缺失时 Tauri CLI 会尝试交互式读密码，在没有 TTY 的 runner 上直接卡死。
           # 将来若给密钥加了密码，改成 ${{ secrets.HANGTIANAI_SIGNING_PRIVATE_KEY_PASSWORD }}。
@@ -167,7 +168,12 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: hangtianai-${{ env.RELEASE_TAG }}
+          # 归档标签必须钉在本次构建的源码上。不传这个字段时，新标签会指向
+          # 仓库默认分支的最新提交——补发旧版本时就和实际构建的代码对不上。
+          target_commitish: ${{ github.event.inputs.release_tag || github.ref_name }}
           name: 航天AI ${{ env.RELEASE_TAG }}（macOS）
+          # 不能抢主版的 Latest：否则用户打开仓库首页，置顶的是只含 Mac 包的归档
+          make_latest: false
           body: |
             航天AI macOS 安装包（Apple Silicon / arm64）。
 
@@ -223,7 +229,7 @@ jobs:
       - name: Publish to Gitee
         shell: bash
         env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN || vars.GITEE_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           CHATCANVAS_BRAND: ${{ env.BRAND }}
         run: |
           set -euo pipefail

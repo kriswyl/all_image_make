@@ -11,11 +11,20 @@ import {
 } from "./updater";
 import type { UpdateInfo } from "./updater";
 
-type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error";
+type Phase = "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error" | "mac-manual";
 type CopyState = "idle" | "copied" | "error";
 
+/**
+ * macOS 版不参与自动更新，这里也就不用去问更新源。
+ *
+ * 更新清单只声明 windows-x86_64 一个平台，Mac 上 check() 会拿到「无更新」，
+ * 面板却显示「已是最新」——而 macOS 的包根本不在那个仓库里。直接给下载页。
+ */
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
+
 /** 发布页始终指向版本列表，避免未来版本仍跳到旧版本。 */
-const GITEE_RELEASES_URL = BRAND.releasesUrl;
+const RELEASES_URL = IS_MAC ? (BRAND.macReleasesUrl ?? BRAND.releasesUrl) : BRAND.releasesUrl;
+const RELEASES_LABEL = IS_MAC ? "前往 GitHub 下载" : "前往 Gitee 下载";
 
 /** 作者联系方式 */
 const AUTHOR_EMAIL = BRAND.support.authorEmail;
@@ -60,6 +69,11 @@ export function UpdateStatus() {
 
   const check = async (announce: boolean) => {
     if (!desktop) return;
+    // macOS 走手动下载，不去碰只有 Windows 平台的更新清单
+    if (IS_MAC) {
+      setPhase("mac-manual");
+      return;
+    }
     setPhase("checking");
     setError("");
     try {
@@ -76,6 +90,10 @@ export function UpdateStatus() {
   useEffect(() => {
     if (!desktop) return;
     void isPortableBuild().then(setPortable).catch(() => {});
+    if (IS_MAC) {
+      setPhase("mac-manual");
+      return;
+    }
     // 延迟几秒再查：别和启动时的后端启动、首屏渲染抢资源
     const timer = window.setTimeout(() => { void check(false); }, 5_000);
     return () => window.clearTimeout(timer);
@@ -147,6 +165,20 @@ export function UpdateStatus() {
 
           {!desktop ? (
             <p className="update-note">网页版不支持自动更新，请使用桌面版。</p>
+          ) : phase === "mac-manual" ? (
+            <>
+              <p className="update-note">macOS 版不参与自动更新，请到发布页下载新版本手动安装。</p>
+              <div className="update-actions">
+                <button type="button" className="update-primary" onClick={() => {
+                  setLinkError(false);
+                  void openExternal(RELEASES_URL).catch(() => setLinkError(true));
+                }}>
+                  <ExternalLink size={14} />{RELEASES_LABEL}
+                </button>
+                <button type="button" className="update-secondary" onClick={() => setOpen(false)}>稍后</button>
+              </div>
+              {linkError ? <p className="update-note update-error">打开失败，请在浏览器访问：{RELEASES_URL}</p> : null}
+            </>
           ) : phase === "checking" ? (
             <p className="update-note update-inline"><LoadingIndicator variant="dots" size={24} />正在检查新版本…</p>
           ) : phase === "downloading" ? (
@@ -222,10 +254,10 @@ export function UpdateStatus() {
             <div className="update-manual-download">
               <button type="button" className="update-secondary" onClick={() => {
                 setLinkError(false);
-                void openExternal(GITEE_RELEASES_URL).catch(() => setLinkError(true));
-              }}><ExternalLink size={14} />前往 Gitee 下载</button>
+                void openExternal(RELEASES_URL).catch(() => setLinkError(true));
+              }}><ExternalLink size={14} />{RELEASES_LABEL}</button>
               <p className="update-note">在发布页选择适合系统的安装包，下载后手动安装。</p>
-              {linkError ? <p className="update-note update-error">打开失败，请在浏览器访问：{GITEE_RELEASES_URL}</p> : null}
+              {linkError ? <p className="update-note update-error">打开失败，请在浏览器访问：{RELEASES_URL}</p> : null}
             </div>
           ) : null}
         </div>

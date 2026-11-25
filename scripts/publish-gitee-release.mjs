@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { openAsBlob } from "node:fs";
 import { readBrand } from "./brand.mjs";
@@ -95,6 +96,16 @@ async function removeAsset(release, name) {
   return true;
 }
 
+/** 线上附件的实际字节数。Gitee 的 asset 对象不一定带 size，只能 HEAD 一下。 */
+async function remoteSize(asset) {
+  try {
+    const head = await fetch(asset.browser_download_url, { method: "HEAD", redirect: "follow" });
+    return Number(head.headers.get("content-length")) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function attach(release, file, { replace = false } = {}) {
   const name = path.basename(file);
   const size = fs.statSync(file).size;
@@ -104,9 +115,23 @@ async function attach(release, file, { replace = false } = {}) {
         "请改用便携版外链下载，不要把安装包塞进发行版。",
     );
   }
-  if (release.assets?.some((asset) => asset.name === name)) {
+  const existing = release.assets?.find((asset) => asset.name === name);
+  if (existing) {
     if (!replace) {
-      console.log(`已有附件 ${name}，跳过`);
+      // 跳过同名附件看起来无害，但如果本地这份是「重新构建」出来的，
+      // 清单里的签名就会指向线上那份旧包，客户端下载后验签必然失败。
+      // 大小不同就是最直接的证据，宁可报错让人显式决定。
+      const online = await remoteSize(existing);
+      if (online && online !== size) {
+        throw new Error(
+          [
+            `线上已有同名附件 ${name}，但大小不一致：线上 ${online} B，本地 ${size} B。`,
+            "这说明它是上一次构建的产物。直接跳过会让更新清单里的签名与线上安装包对不上，客户端会验签失败。",
+            "确认要用本次构建覆盖，请加 --replace 重新上传安装包和签名。",
+          ].join("\n"),
+        );
+      }
+      console.log(`已有附件 ${name}（大小一致），跳过`);
       return;
     }
     await removeAsset(release, name);
@@ -119,12 +144,90 @@ async function attach(release, file, { replace = false } = {}) {
   console.log(`上传完成 ${name}`);
 }
 
+/** 语义化比较，只处理 X.Y.Z（更新清单里就是这个格式）。 */
+function compareVersions(left, right) {
+  const parse = (value) => String(value).split(".").map((part) => Number(part) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/** 读线上的最新清单；没有就返回 null。 */
+async function readOnlineManifest() {
+  const lookup = await api(`/releases/tags/${UPDATER_TAG}`);
+  const info = lookup.ok ? await lookup.json().catch(() => null) : null;
+  const asset = info?.assets?.find((item) => item.name === "latest.json");
+  if (!asset) return null;
+  const response = await fetch(asset.browser_download_url, { redirect: "follow" });
+  if (!response.ok) return null;
+  return response.json().catch(() => null);
+}
+
+/**
+ * 替换自动更新清单。
+ *
+ * 不能简单地「删旧 → 传新」：中间任何一步失败，线上就没有清单了，
+ * 所有已安装用户的检查更新会直接中断。这里的做法是先把旧内容读进内存，
+ * 上传失败时用同一份内容补回去。
+ */
+async function replaceManifest(release, file, { allowDowngrade = false } = {}) {
+  const next = JSON.parse(fs.readFileSync(file, "utf8"));
+  const current = await readOnlineManifest();
+  if (current?.version && compareVersions(next.version, current.version) < 0 && !allowDowngrade) {
+    throw new Error(
+      `更新清单版本会倒退：线上 ${current.version} → 本次 ${next.version}。\n` +
+        "客户端不会把降级当成更新，还会让已经升到新版的用户看不到后续版本。确认要回退请加 --allow-downgrade。",
+    );
+  }
+
+  const existing = release.assets?.find((asset) => asset.name === "latest.json");
+  let backup = null;
+  if (existing) {
+    const response = await fetch(existing.browser_download_url, { redirect: "follow" });
+    if (response.ok) backup = await response.text();
+    await removeAsset(release, "latest.json");
+  }
+
+  try {
+    await attach(release, file);
+  } catch (error) {
+    if (backup) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gitee-manifest-"));
+      const restorePath = path.join(dir, "latest.json");
+      fs.writeFileSync(restorePath, backup, "utf8");
+      try {
+        await attach(release, restorePath);
+        console.log("新清单上传失败，已恢复上一份可用清单");
+      } catch (restoreError) {
+        console.error(`恢复旧清单也失败：${restoreError instanceof Error ? restoreError.message : restoreError}`);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    throw error;
+  }
+}
+
 function parseArgs(argv) {
   const files = [];
   let tag = "";
   let updater = "";
+  let replace = false;
+  let allowDowngrade = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === "--replace") {
+      replace = true;
+      continue;
+    }
+    if (arg === "--allow-downgrade") {
+      allowDowngrade = true;
+      continue;
+    }
     if (arg === "--updater") {
       updater = argv[index + 1] ?? "";
       if (!updater) throw new Error("--updater 缺少文件路径");
@@ -134,13 +237,15 @@ function parseArgs(argv) {
     if (!tag) tag = arg;
     else files.push(arg);
   }
-  return { tag, files, updater };
+  return { tag, files, updater, replace, allowDowngrade };
 }
 
 async function main() {
-  const { tag, files, updater } = parseArgs(process.argv.slice(2));
+  const { tag, files, updater, replace, allowDowngrade } = parseArgs(process.argv.slice(2));
   if (!tag || (!files.length && !updater)) {
-    throw new Error("用法：GITEE_TOKEN=... node scripts/publish-gitee-release.mjs <tag> <文件...> [--updater latest.json]");
+    throw new Error(
+      "用法：GITEE_TOKEN=... node scripts/publish-gitee-release.mjs <tag> <文件...> [--updater latest.json] [--replace] [--allow-downgrade]",
+    );
   }
 
   const notes = changelogSection(tag) || `${brand.productName} ${tag}`;
@@ -151,13 +256,13 @@ async function main() {
       `${brand.productName} ${tag}`,
       `## 更新内容\n\n${notes}\n\n提供 Windows x64 安装包。`,
     );
-    for (const file of files) await attach(release, file);
+    for (const file of files) await attach(release, file, { replace });
   }
 
   // 清单永远最后传：先保证不可变附件都在，再切版本指向。
   if (updater) {
     const release = await ensureRelease(UPDATER_TAG, UPDATER_TAG, "自动更新清单（latest.json），由发布流程维护，请勿手动修改。");
-    await attach(release, updater, { replace: true });
+    await replaceManifest(release, updater, { allowDowngrade });
   }
 
   console.log("全部完成");
