@@ -19,10 +19,17 @@ on:
         description: "要发布的 tag（如 v2.4.7）；留空则用当前 ref"
         required: false
         type: string
+      mac_only:
+        description: "只补发 Apple Silicon DMG"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  # 建 GitHub Release 需要写权限；Gitee 那边用的是自己的令牌
-  contents: write
+  # 默认最小权限；需要写 Release 的 job 在自己的 permissions 里提权。
+  # 只读 artifact 要 actions: read，少了它 download-artifact 会 403。
+  contents: read
+  actions: read
 
 env:
   BRAND: hangtianai
@@ -39,10 +46,16 @@ jobs:
   #      因此产物只发 GitHub Release，Gitee 那边不参与。
   build-macos:
     runs-on: macos-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          ref: ${{ github.event.inputs.release_tag && format('refs/tags/{0}', github.event.inputs.release_tag) || github.ref }}
+
+      - name: Record the build commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -76,6 +89,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
+    if: github.event.inputs.mac_only != 'true'
     runs-on: windows-latest
     # 主版的签名私钥放在 `image_key` 环境里，仓库级反而没有。声明同一个 environment
     # 才能读到环境级 secret；同时仓库级的同名 secret 仍然可用，两种放法都兼容。
@@ -83,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          ref: ${{ github.event.inputs.release_tag && format('refs/tags/{0}', github.event.inputs.release_tag) || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -159,10 +173,16 @@ jobs:
     needs: build-macos
     if: always() && needs.build-macos.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != '')
     runs-on: ubuntu-latest
+    # 在 job 级显式提权：workflow 级只给只读，建 Release 和打标签要 contents: write。
+    # 放在这里比放顶层可靠——顶层声明一旦被仓库的默认权限策略覆盖，
+    # 表现就是「Resource not accessible by integration」，很难从日志看出来。
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          ref: ${{ needs.build-macos.outputs.sha }}
           # 需要看到所有标签，才能核对归档标签是否已存在、指向哪里
           fetch-depth: 0
 
@@ -213,14 +233,25 @@ jobs:
 
   publish-gitee:
     needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+    if: github.event.inputs.mac_only != 'true' && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != '')
     runs-on: ubuntu-latest
     # Gitee 令牌和签名私钥放在同一处，读法保持一致
     environment: image_key
+    concurrency:
+      group: hangtianai-gitee-publish
+      cancel-in-progress: false
     steps:
+      # 补发旧版时只从旧标签取发行说明。发布脚本和依赖跟随运行本工作流的提交。
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          path: release-source
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -248,12 +279,11 @@ jobs:
             --file-name "$(basename "$EXE")" \
             --base-url "https://gitee.com/${GITEE_REPO}/releases/download/${RELEASE_TAG}" \
             --signature "${EXE}.sig" \
-            --changelog "CHANGELOG-hangtianai.md" \
+            --changelog "release-source/CHANGELOG-hangtianai.md" \
             --out latest.json
           cat latest.json
 
-      # 顺序不能反：先传不可变附件，再切 updater 指向。
-      # 中间失败时用户仍会看到旧清单，不会拿到 404 的地址。
+      # 校验公开安装包及签名后，先上传并确认新清单，再删除旧清单。
       - name: Publish to Gitee
         shell: bash
         env:
@@ -265,4 +295,5 @@ jobs:
           node scripts/publish-gitee-release.mjs "${RELEASE_TAG}" \
             "dist/hangtianai-v${VERSION}-win-x64-setup.exe" \
             "dist/hangtianai-v${VERSION}-win-x64-setup.exe.sig" \
-            --updater latest.json
+            --updater latest.json \
+            --changelog release-source/CHANGELOG-hangtianai.md
