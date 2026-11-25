@@ -60,24 +60,28 @@ function changelogSection(tag) {
 }
 
 async function ensureRelease(tag, title, body) {
-  let response = await api(`/releases/tags/${encodeURIComponent(tag)}`);
-  if (response.ok) {
-    const release = await response.json();
-    console.log(`使用已有 Gitee 发行版 ${tag} (id=${release.id})`);
-    return release;
+  const lookup = await api(`/releases/tags/${encodeURIComponent(tag)}`);
+  // Gitee 在 tag 不存在时可能返回 200 + 空 body（而不是 404），
+  // 直接按 `response.ok` 判断会把 null 当成发行版往下用。
+  const existing = lookup.ok ? await lookup.json().catch(() => null) : null;
+  if (existing?.id) {
+    console.log(`使用已有 Gitee 发行版 ${tag} (id=${existing.id})`);
+    return existing;
   }
-  if (response.status !== 404) throw new Error(`读取 ${tag} 发行版失败 HTTP ${response.status}: ${await response.text()}`);
+  if (!lookup.ok && lookup.status !== 404) {
+    throw new Error(`读取 ${tag} 发行版失败 HTTP ${lookup.status}: ${await lookup.text()}`);
+  }
 
   const repoResponse = await api("");
   const repoInfo = repoResponse.ok ? await repoResponse.json() : null;
   const targetCommitish = repoInfo?.default_branch || "master";
-  response = await api("/releases", {
+  const created = await api("/releases", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tag_name: tag, name: title, body, target_commitish: targetCommitish, prerelease: false }),
   });
-  if (!response.ok) throw new Error(`创建 ${tag} 发行版失败 HTTP ${response.status}: ${await response.text()}`);
-  const release = await response.json();
+  if (!created.ok) throw new Error(`创建 ${tag} 发行版失败 HTTP ${created.status}: ${await created.text()}`);
+  const release = await created.json();
   console.log(`已创建 Gitee 发行版 ${tag} (id=${release.id}, 分支 ${targetCommitish})`);
   return release;
 }
