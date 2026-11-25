@@ -24,7 +24,9 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAge
 
 /** 发布页始终指向版本列表，避免未来版本仍跳到旧版本。 */
 const RELEASES_URL = IS_MAC ? (BRAND.macReleasesUrl ?? BRAND.releasesUrl) : BRAND.releasesUrl;
-const RELEASES_LABEL = IS_MAC ? "前往 GitHub 下载" : "前往 Gitee 下载";
+// 文案跟着实际落地页走，而不是跟着平台走：主版的 macReleasesUrl 是空的，
+// 回落之后打开的是 Gitee，按钮再写「前往 GitHub」就成了骗人。
+const RELEASES_LABEL = RELEASES_URL.includes("github.com") ? "前往 GitHub 下载" : "前往 Gitee 下载";
 
 /** 作者联系方式 */
 const AUTHOR_EMAIL = BRAND.support.authorEmail;
@@ -250,7 +252,8 @@ export function UpdateStatus() {
               </button>
             </div>
           )}
-          {desktop ? (
+          {/* mac-manual 分支里已经有一个下载按钮了，这里再放一个会出现两个同名入口 */}
+          {desktop && phase !== "mac-manual" ? (
             <div className="update-manual-download">
               <button type="button" className="update-secondary" onClick={() => {
                 setLinkError(false);
